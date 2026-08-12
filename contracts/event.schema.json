@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sciaide.local/schemas/event.schema.json",
+  "title": "SciAide Event Envelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "eventId",
+    "aggregateId",
+    "aggregateType",
+    "sequence",
+    "type",
+    "timestamp",
+    "payload"
+  ],
+  "properties": {
+    "version": { "const": 1 },
+    "eventId": { "type": "string", "minLength": 1 },
+    "aggregateId": { "type": "string", "minLength": 1 },
+    "aggregateType": { "type": "string", "minLength": 1 },
+    "sequence": { "type": "integer", "minimum": 1 },
+    "type": { "type": "string", "minLength": 1 },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "payload": {}
+  }
+}

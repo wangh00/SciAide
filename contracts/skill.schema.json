@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sciaide.local/schemas/skill.schema.json",
+  "title": "SciAide Skill Manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "name", "version", "description", "entry"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{1,63}$" },
+    "name": { "type": "string", "minLength": 1, "maxLength": 100 },
+    "version": { "type": "string", "minLength": 1, "maxLength": 32 },
+    "description": { "type": "string", "minLength": 1, "maxLength": 500 },
+    "entry": { "const": "SKILL.md" },
+    "activation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": { "enum": ["explicit", "suggest"] },
+        "triggers": {
+          "type": "array",
+          "maxItems": 50,
+          "items": { "type": "string", "minLength": 1, "maxLength": 100 }
+        }
+      }
+    },
+    "requires": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "tools": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+        "optional_tools": { "type": "array", "items": { "type": "string" }, "uniqueItems": true }
+      }
+    },
+    "permissions": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "workspace.read",
+          "workspace.write",
+          "filesystem.external",
+          "network.domain",
+          "process.execute",
+          "destructive",
+          "secret.use"
+        ]
+      }
+    },
+    "compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": { "sciaide": { "type": "string", "minLength": 1 } }
+    }
+  }
+}

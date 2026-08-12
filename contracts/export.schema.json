@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sciaide.local/schemas/export.schema.json",
+  "title": "SciAide Project Export",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "exportedAt", "project"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "exportedAt": { "type": "string", "format": "date-time" },
+    "project": { "type": "object" },
+    "checksums": {
+      "type": "object",
+      "additionalProperties": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+    }
+  }
+}

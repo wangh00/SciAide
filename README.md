@@ -1,4 +1,4 @@
-# SciBuddy
+# SciAide
 
 面向科研工作者的本地优先桌面 AI Agent，支持自定义模型、工具调用、MCP、Skill、科研知识库和可信引用。
 
@@ -17,4 +17,3 @@
 ## 开发
 
 依赖安装和命令见 [`docs/development.md`](docs/development.md)。完整架构与阶段门禁见 [`start.md`](start.md)。
-
