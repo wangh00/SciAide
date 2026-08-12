@@ -1,5 +1,5 @@
 import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { EventsOn } from "../wailsjs/runtime/runtime";
+import { eventsOn } from "./lib/wailsRuntime";
 
 type Project = { id: string; name: string; description: string };
 type Conversation = { id: string; projectId: string; title: string };
@@ -84,7 +84,7 @@ export default function App() {
   useEffect(() => { loadMessages(conversationId).catch((error: unknown) => setNotice(errorText(error))); }, [conversationId, loadMessages]);
   useEffect(() => { chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: "smooth" }); }, [messages]);
 
-  useEffect(() => EventsOn("sciaide:run-event", (event: Envelope) => {
+  useEffect(() => eventsOn<Envelope>("sciaide:run-event", (event) => {
     const run = activeRunRef.current;
     if (!run || event.aggregateId !== run.id) return;
     if (event.type === "content.delta") {

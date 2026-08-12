@@ -29,6 +29,13 @@ if (-not (Test-Path -LiteralPath "frontend/node_modules")) {
     throw "缺少 frontend/node_modules。请在 frontend 执行 npm ci。"
 }
 
+$generatedBindingImports = Get-ChildItem -Path frontend/src -Recurse -File -Include "*.ts", "*.tsx" |
+    Select-String -Pattern 'from\s+["''][^"'']*wailsjs/'
+if ($generatedBindingImports) {
+    $generatedBindingImports | ForEach-Object { Write-Host $_ }
+    throw "Frontend source must not import generated frontend/wailsjs files. Use a committed bridge under frontend/src/lib."
+}
+
 Write-Host "== Go format =="
 $goFiles = Get-ChildItem -Path . -Recurse -Filter "*.go" -File |
     Where-Object { $_.FullName -notmatch "[\\/](artifacts|frontend[\\/]node_modules)[\\/]" }

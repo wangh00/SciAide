@@ -16,12 +16,12 @@ jobs:
       CGO_ENABLED: 0
       GOTOOLCHAIN: local
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -29,6 +29,12 @@ jobs:
       - name: Install frontend dependencies
         working-directory: frontend
         run: npm ci
+      - name: Check generated-binding boundary
+        shell: pwsh
+        run: |
+          $imports = Get-ChildItem -Path frontend/src -Recurse -File -Include "*.ts", "*.tsx" |
+            Select-String -Pattern 'from\s+["''][^"'']*wailsjs/'
+          if ($imports) { $imports; throw "Frontend source imports ignored Wails generated files." }
       - name: Check formatting
         shell: pwsh
         run: |
