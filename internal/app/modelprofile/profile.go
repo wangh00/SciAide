@@ -63,6 +63,19 @@ type SecretStore interface {
 
 type ConnectionTester interface {
 	Test(ctx context.Context, profile Profile, secret []byte) error
+	Discover(ctx context.Context, profile Profile, secret []byte) ([]AvailableModel, error)
+}
+
+type DiscoveryCommand struct {
+	ProfileID     string            `json:"profileId"`
+	BaseURL       string            `json:"baseUrl"`
+	APIKey        string            `json:"apiKey"`
+	CustomHeaders map[string]string `json:"customHeaders"`
+}
+
+type AvailableModel struct {
+	ID      string `json:"id"`
+	OwnedBy string `json:"ownedBy,omitempty"`
 }
 
 type Service struct {
@@ -111,9 +124,6 @@ func (s *Service) Save(ctx context.Context, cmd SaveCommand) (Profile, error) {
 	value.UpdatedAt = now
 
 	key := strings.TrimSpace(cmd.APIKey)
-	if existing.ID == "" && key == "" {
-		return Profile{}, fmt.Errorf("API Key is required for a new model profile")
-	}
 	storedNewKey := false
 	if key != "" {
 		if err := s.secrets.Put(ctx, value.SecretRef, []byte(key)); err != nil {
@@ -201,6 +211,30 @@ func (s *Service) Test(ctx context.Context, profileID string) error {
 	return s.tester.Test(ctx, profile, secret)
 }
 
+func (s *Service) Discover(ctx context.Context, cmd DiscoveryCommand) ([]AvailableModel, error) {
+	profile := Profile{BaseURL: strings.TrimRight(strings.TrimSpace(cmd.BaseURL), "/"), TimeoutSeconds: 30, CustomHeaders: cloneHeaders(cmd.CustomHeaders)}
+	if profile.BaseURL == "" {
+		return nil, fmt.Errorf("base URL is required")
+	}
+	if err := validateBaseURL(profile.BaseURL); err != nil {
+		return nil, err
+	}
+	for name, value := range profile.CustomHeaders {
+		if strings.ContainsAny(name, "\r\n") || strings.ContainsAny(value, "\r\n") || sensitiveHeader(name) {
+			return nil, fmt.Errorf("invalid or sensitive custom header %q", name)
+		}
+	}
+	secret := []byte(strings.TrimSpace(cmd.APIKey))
+	if strings.TrimSpace(cmd.ProfileID) != "" && len(secret) == 0 {
+		_, storedSecret, err := s.Secret(ctx, strings.TrimSpace(cmd.ProfileID))
+		if err != nil {
+			return nil, err
+		}
+		secret = storedSecret
+	}
+	return s.tester.Discover(ctx, profile, secret)
+}
+
 func (s *Service) decorate(ctx context.Context, value Profile) (Profile, error) {
 	configured, masked, err := s.secrets.Configured(ctx, value.SecretRef)
 	if err != nil {
@@ -215,9 +249,8 @@ func validateCommand(cmd SaveCommand) error {
 	if strings.TrimSpace(cmd.Name) == "" || strings.TrimSpace(cmd.ModelID) == "" {
 		return fmt.Errorf("profile name and model id are required")
 	}
-	u, err := url.Parse(strings.TrimSpace(cmd.BaseURL))
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return fmt.Errorf("base URL must be an absolute HTTP(S) URL")
+	if err := validateBaseURL(cmd.BaseURL); err != nil {
+		return err
 	}
 	if cmd.TimeoutSeconds < 5 || cmd.TimeoutSeconds > 600 {
 		return fmt.Errorf("timeout seconds must be between 5 and 600")
@@ -236,6 +269,17 @@ func validateCommand(cmd SaveCommand) error {
 		if sensitiveHeader(canonical) {
 			return fmt.Errorf("sensitive header %q must use SecretStore", canonical)
 		}
+	}
+	return nil
+}
+
+func validateBaseURL(value string) error {
+	u, err := url.Parse(strings.TrimSpace(value))
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("base URL must be an absolute HTTP(S) URL")
+	}
+	if u.User != nil {
+		return fmt.Errorf("base URL must not contain credentials")
 	}
 	return nil
 }

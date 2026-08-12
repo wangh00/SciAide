@@ -13,6 +13,7 @@
 - 统一错误、事件 Envelope 和日志脱敏/轮转
 - Windows Credential Manager 密钥隔离，前端只显示状态和掩码
 - OpenAI-compatible 流式 Provider、连接测试、错误分类和安全重试
+- 通过 `/v1/models` 自动发现、搜索和选择模型，并保留手动 Model ID 兜底
 - 多轮聊天、停止生成、Usage、RunEvent 与 Snapshot 恢复
 - 可脚本化 `FakeChatModel`、Provider Fixture 测试、威胁模型、ADR 和 CI
 

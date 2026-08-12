@@ -37,3 +37,15 @@ func (f *ModelFacade) TestModelConnection(profileID string) error {
 	}
 	return nil
 }
+
+func (f *ModelFacade) DiscoverModels(request modelprofile.DiscoveryCommand) ([]modelprofile.AvailableModel, error) {
+	values, err := f.service.Discover(f.lifecycle.Context(), request)
+	if err != nil {
+		public := apperr.Public(err)
+		if public.Code == "INTERNAL_ERROR" {
+			return nil, fmt.Errorf("无法获取模型列表，请检查 Base URL、API Key 或改为手动填写 Model ID")
+		}
+		return nil, fmt.Errorf("%s: %s", public.Code, public.Message)
+	}
+	return values, nil
+}

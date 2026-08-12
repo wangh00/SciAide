@@ -113,3 +113,49 @@ func TestStreamAcceptsFinishReasonWithoutDoneSentinel(t *testing.T) {
 		t.Fatalf("second Recv() = %#v, %v", event, err)
 	}
 }
+
+func TestDiscoverModelsSortsAndDeduplicates(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		if r.Header.Get("Authorization") != "Bearer discovery-key" {
+			t.Fatalf("missing discovery authorization")
+		}
+		io.WriteString(w, `{"object":"list","data":[{"id":"z-model","owned_by":"lab"},{"id":"a-model","owned_by":"openai"},{"id":"a-model"},{"id":""}]}`)
+	}))
+	defer server.Close()
+	client := New(modelprofile.Profile{TimeoutSeconds: 5}, nil)
+	values, err := client.Discover(context.Background(), modelprofile.Profile{BaseURL: server.URL + "/v1", TimeoutSeconds: 5}, []byte("discovery-key"))
+	if err != nil {
+		t.Fatalf("Discover() error = %v", err)
+	}
+	if len(values) != 2 || values[0].ID != "a-model" || values[1].ID != "z-model" || values[1].OwnedBy != "lab" {
+		t.Fatalf("models = %#v", values)
+	}
+}
+
+func TestDiscoverModelsRejectsOversizedOrMalformedPayload(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { io.WriteString(w, `not-json`) }))
+	defer server.Close()
+	client := New(modelprofile.Profile{TimeoutSeconds: 5}, nil)
+	_, err := client.Discover(context.Background(), modelprofile.Profile{BaseURL: server.URL, TimeoutSeconds: 5}, nil)
+	var appErr *apperr.Error
+	if !errors.As(err, &appErr) || appErr.Code != "MODEL_LIST_INVALID" {
+		t.Fatalf("error = %#v", err)
+	}
+}
+
+func TestEndpointURLAcceptsBaseAndFullEndpoint(t *testing.T) {
+	tests := []struct{ base, suffix, want string }{
+		{"https://example.test/v1", "models", "https://example.test/v1/models"},
+		{"https://example.test/v1/models", "models", "https://example.test/v1/models"},
+		{"https://example.test/v1/models", "chat/completions", "https://example.test/v1/chat/completions"},
+		{"https://example.test/v1/chat/completions", "models", "https://example.test/v1/models"},
+	}
+	for _, test := range tests {
+		if got := endpointURL(test.base, test.suffix); got != test.want {
+			t.Errorf("endpointURL(%q,%q)=%q, want %q", test.base, test.suffix, got, test.want)
+		}
+	}
+}

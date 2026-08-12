@@ -11,6 +11,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -49,22 +50,49 @@ func (c *Client) Stream(ctx context.Context, request model.ChatRequest) (model.S
 }
 
 func (c *Client) Test(ctx context.Context, profile modelprofile.Profile, secret []byte) error {
+	_, err := c.Discover(ctx, profile, secret)
+	return err
+}
+
+func (c *Client) Discover(ctx context.Context, profile modelprofile.Profile, secret []byte) ([]modelprofile.AvailableModel, error) {
 	tester := NewWithHTTPClient(profile, secret, c.http)
 	endpoint := endpointURL(profile.BaseURL, "models")
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	tester.applyHeaders(req)
 	response, err := tester.http.Do(req)
 	if err != nil {
-		return classifyNetwork(err)
+		return nil, classifyNetwork(err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return classifyStatus(response.StatusCode, response.Header)
+		io.CopyN(io.Discard, response.Body, 4096)
+		return nil, classifyStatus(response.StatusCode, response.Header)
 	}
-	return nil
+	decoder := json.NewDecoder(io.LimitReader(response.Body, 4<<20))
+	var payload modelsResponse
+	if err := decoder.Decode(&payload); err != nil {
+		return nil, modelError("MODEL_LIST_INVALID", "服务返回的模型列表无法解析，仍可手动填写 Model ID。", false, err)
+	}
+	models := make([]modelprofile.AvailableModel, 0, len(payload.Data))
+	seen := make(map[string]struct{}, len(payload.Data))
+	for _, item := range payload.Data {
+		identifier := strings.TrimSpace(item.ID)
+		if identifier == "" {
+			continue
+		}
+		if _, exists := seen[identifier]; exists {
+			continue
+		}
+		seen[identifier] = struct{}{}
+		models = append(models, modelprofile.AvailableModel{ID: identifier, OwnedBy: strings.TrimSpace(item.OwnedBy)})
+	}
+	slices.SortFunc(models, func(a, b modelprofile.AvailableModel) int {
+		return strings.Compare(strings.ToLower(a.ID), strings.ToLower(b.ID))
+	})
+	return models, nil
 }
 
 func (c *Client) openWithRetry(ctx context.Context, request model.ChatRequest) (model.Stream, error) {
@@ -230,13 +258,20 @@ type responseChunk struct {
 	} `json:"usage"`
 }
 
+type modelsResponse struct {
+	Data []struct {
+		ID      string `json:"id"`
+		OwnedBy string `json:"owned_by"`
+	} `json:"data"`
+}
+
 func endpointURL(baseURL, suffix string) string {
 	base := strings.TrimRight(baseURL, "/")
-	if strings.HasSuffix(base, "/chat/completions") && suffix == "chat/completions" {
+	if strings.HasSuffix(base, "/"+suffix) {
 		return base
 	}
-	if strings.HasSuffix(base, "/chat/completions") {
-		base = strings.TrimSuffix(base, "/chat/completions")
+	for _, endpoint := range []string{"/chat/completions", "/models"} {
+		base = strings.TrimSuffix(base, endpoint)
 	}
 	return base + "/" + suffix
 }

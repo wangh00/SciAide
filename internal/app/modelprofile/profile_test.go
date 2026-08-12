@@ -17,3 +17,9 @@ func TestHeaderNewlinesRejected(t *testing.T) {
 		t.Fatal("validateCommand() accepted CRLF")
 	}
 }
+
+func TestBaseURLRejectsEmbeddedCredentials(t *testing.T) {
+	if err := validateBaseURL("https://user:password@example.test/v1"); err == nil {
+		t.Fatal("validateBaseURL accepted credentials")
+	}
+}
