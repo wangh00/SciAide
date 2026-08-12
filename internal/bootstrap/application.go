@@ -7,26 +7,37 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
+	"github.com/wangh00/SciAide/internal/app/chat"
+	"github.com/wangh00/SciAide/internal/app/conversation"
+	"github.com/wangh00/SciAide/internal/app/modelprofile"
 	"github.com/wangh00/SciAide/internal/app/project"
+	"github.com/wangh00/SciAide/internal/model/gateway"
+	"github.com/wangh00/SciAide/internal/model/openai"
 	"github.com/wangh00/SciAide/internal/observability"
 	"github.com/wangh00/SciAide/internal/platform/appdirs"
+	"github.com/wangh00/SciAide/internal/platform/secretstore"
 	"github.com/wangh00/SciAide/internal/storage/sqlite"
 	wailstransport "github.com/wangh00/SciAide/internal/transport/wails"
 )
 
-const Version = "0.1.0-dev"
+const Version = "0.2.0-dev"
 
 type Options struct {
 	RootDir string
 }
 
 type Application struct {
-	Logger        *observability.Logger
-	SystemFacade  *wailstransport.SystemFacade
-	ProjectFacade *wailstransport.ProjectFacade
+	Logger             *observability.Logger
+	SystemFacade       *wailstransport.SystemFacade
+	ProjectFacade      *wailstransport.ProjectFacade
+	ConversationFacade *wailstransport.ConversationFacade
+	ModelFacade        *wailstransport.ModelFacade
+	ChatFacade         *wailstransport.ChatFacade
 
 	lifecycle *wailstransport.LifecycleContext
+	chat      *chat.Service
 	store     *sqlite.Store
 	closeOnce sync.Once
 	closeErr  error
@@ -56,12 +67,31 @@ func New(options Options) (*Application, error) {
 	}
 	lifecycle := wailstransport.NewLifecycleContext()
 	projectService := project.NewService(sqlite.NewProjectRepository(store.DB()))
+	conversationRepository := sqlite.NewConversationRepository(store.DB())
+	conversationService := conversation.NewService(conversationRepository)
+	profileRepository := sqlite.NewModelProfileRepository(store.DB())
+	secrets := secretstore.NewNative("SciAide")
+	connectionTester := openai.New(modelprofile.Profile{TimeoutSeconds: 30}, nil)
+	profileService := modelprofile.NewService(profileRepository, secrets, connectionTester)
+	runRepository := sqlite.NewRunRepository(store.DB())
+	publisher := wailstransport.NewEventPublisher(lifecycle)
+	chatService := chat.NewService(runRepository, conversationRepository, runRepository, publisher, gateway.NewResolver(profileService))
+	if interrupted, err := chatService.Recover(context.Background()); err != nil {
+		_ = store.Close()
+		return fail(fmt.Errorf("recover chat runs: %w", err))
+	} else if interrupted > 0 {
+		logger.Warn("interrupted unfinished chat runs", "count", interrupted)
+	}
 	return &Application{
-		Logger:        logger,
-		SystemFacade:  wailstransport.NewSystemFacade(Version),
-		ProjectFacade: wailstransport.NewProjectFacade(lifecycle, projectService),
-		lifecycle:     lifecycle,
-		store:         store,
+		Logger:             logger,
+		SystemFacade:       wailstransport.NewSystemFacade(Version),
+		ProjectFacade:      wailstransport.NewProjectFacade(lifecycle, projectService),
+		ConversationFacade: wailstransport.NewConversationFacade(lifecycle, conversationService),
+		ModelFacade:        wailstransport.NewModelFacade(lifecycle, profileService),
+		ChatFacade:         wailstransport.NewChatFacade(lifecycle, chatService),
+		lifecycle:          lifecycle,
+		chat:               chatService,
+		store:              store,
 	}, nil
 }
 
@@ -79,8 +109,14 @@ func (a *Application) Shutdown(ctx context.Context) {
 
 func (a *Application) Close() error {
 	a.closeOnce.Do(func() {
+		a.chat.Close()
+		if _, err := sqlite.NewRunRepository(a.store.DB()).InterruptActive(context.Background(), time.Now().UTC()); err != nil {
+			a.closeErr = fmt.Errorf("interrupt chat runs: %w", err)
+		}
 		if err := a.store.Close(); err != nil {
-			a.closeErr = fmt.Errorf("close storage: %w", err)
+			if a.closeErr == nil {
+				a.closeErr = fmt.Errorf("close storage: %w", err)
+			}
 		}
 		if err := a.Logger.Close(); err != nil && a.closeErr == nil {
 			a.closeErr = fmt.Errorf("close logger: %w", err)

@@ -47,6 +47,13 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 		switch {
 		case err == nil:
 			if existingChecksum != item.checksum {
+				// P0 shipped migration 000001 with one or two trailing LF bytes
+				// depending on the Windows checkout that built the binary. The SQL
+				// is byte-for-byte equivalent after trimming trailing newlines.
+				// Accept only these recorded legacy hashes; all other mutations fail.
+				if item.version == 1 && legacyBaselineChecksum(existingChecksum) && legacyBaselineChecksum(item.checksum) {
+					continue
+				}
 				return fmt.Errorf("migration %d checksum changed", item.version)
 			}
 			continue
@@ -74,6 +81,16 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 		}
 	}
 	return nil
+}
+
+func legacyBaselineChecksum(value string) bool {
+	switch value {
+	case "e9a66fd9fe954e369fb43f68be6a764ed35cbdbbc142bb6c5ec490954e69f3db",
+		"ef8938a8fc66c530015ada08c0db37f3300abc1bdcd4166e8142021345287c7f":
+		return true
+	default:
+		return false
+	}
 }
 
 func loadMigrations() ([]migration, error) {

@@ -1,6 +1,7 @@
 $ErrorActionPreference = "Stop"
 $env:GOARCH = "amd64"
 $env:CGO_ENABLED = "0"
+$env:GOTOOLCHAIN = "local"
 
 $wails = Get-Command wails -ErrorAction SilentlyContinue
 if (-not $wails) {

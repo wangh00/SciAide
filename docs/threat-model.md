@@ -1,4 +1,13 @@
-# SciAide 初始威胁模型（P0）
+# SciAide 威胁模型（P1）
+
+## P1 已落实的控制
+
+- Windows API Key 只写入 Credential Manager；SQLite 仅保存 `secret_ref`，Wails 不提供明文读取接口。
+- 模型自定义 Header 拒绝 Authorization、API-Key、Cookie、Token 等敏感名称及 CRLF 注入。
+- Provider 错误正文不会直接展示，避免服务端响应泄露密钥或内部信息。
+- 流式内容先周期性落库；Run 终态先保存再发布最终事件。启动时遗留 Run 被标记为 interrupted，不会自动重放。
+- 同一 Conversation 由数据库部分唯一索引限制为一个 queued/running Run。
+- 前端不使用浏览器存储保存模型配置或密钥。
 
 ## 1. 保护资产
 

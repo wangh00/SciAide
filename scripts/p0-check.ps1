@@ -65,4 +65,4 @@ Get-ChildItem -Path contracts -Filter "*.json" -File | ForEach-Object {
     $null = Get-Content -LiteralPath $_.FullName -Raw | ConvertFrom-Json
 }
 
-Write-Host "P0 checks passed."
+Write-Host "P0/P1 checks passed."

@@ -34,6 +34,9 @@ func main() {
 		Bind: []interface{}{
 			application.SystemFacade,
 			application.ProjectFacade,
+			application.ConversationFacade,
+			application.ModelFacade,
+			application.ChatFacade,
 		},
 	})
 	if err != nil {

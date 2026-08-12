@@ -56,11 +56,12 @@ const (
 )
 
 type Event struct {
-	Type     EventType       `json:"type"`
-	Text     string          `json:"text,omitempty"`
-	ToolCall *ToolCall       `json:"toolCall,omitempty"`
-	Usage    *Usage          `json:"usage,omitempty"`
-	Payload  json.RawMessage `json:"payload,omitempty"`
+	Type         EventType       `json:"type"`
+	Text         string          `json:"text,omitempty"`
+	FinishReason string          `json:"finishReason,omitempty"`
+	ToolCall     *ToolCall       `json:"toolCall,omitempty"`
+	Usage        *Usage          `json:"usage,omitempty"`
+	Payload      json.RawMessage `json:"payload,omitempty"`
 }
 
 type ToolCall struct {

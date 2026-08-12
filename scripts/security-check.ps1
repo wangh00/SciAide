@@ -1,4 +1,7 @@
 $ErrorActionPreference = "Stop"
+$env:GOARCH = "amd64"
+$env:CGO_ENABLED = "0"
+$env:GOTOOLCHAIN = "local"
 
 function Invoke-Native {
     param(
