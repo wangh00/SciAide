@@ -286,20 +286,17 @@ const toolStatusText: Record<string, string> = {
 };
 
 function RunActivity({ toolCalls, approvals, resolvingApprovalId, resolveApproval }: { toolCalls: ToolCall[]; approvals: Approval[]; resolvingApprovalId: string; resolveApproval: (approval: Approval, allow: boolean) => Promise<void> }) {
-  const [expanded, setExpanded] = useState(false);
-  const runId = toolCalls[0]?.runId ?? approvals[0]?.runId ?? "";
-  useEffect(() => setExpanded(false), [runId]);
   if (!toolCalls.length && !approvals.length) return null;
-  const urgentStatuses = new Set(["pending", "awaiting_approval", "running", "failed"]);
-  const urgentCalls = toolCalls.filter((call) => urgentStatuses.has(call.status) || approvals.some((approval) => approval.toolCallId === call.id));
-  const shownCalls = expanded || toolCalls.length <= 2 ? toolCalls : urgentCalls;
-  const hiddenCount = toolCalls.length - shownCalls.length;
-  const completed = toolCalls.filter((call) => call.status === "completed").length;
-  const running = toolCalls.filter((call) => call.status === "pending" || call.status === "running").length;
-  const waiting = toolCalls.filter((call) => call.status === "awaiting_approval").length;
-  const abnormal = toolCalls.length - completed - running - waiting;
+  // The database keeps the complete tool timeline for replay and audit, but
+  // the chat surface only needs the newest activity. Pending approvals are
+  // additionally retained so an approval action can never disappear.
+  const newestCall = toolCalls.reduce<ToolCall | undefined>((latest, call) => {
+    if (!latest) return call;
+    return call.createdAt >= latest.createdAt ? call : latest;
+  }, undefined);
+  const approvalCallIds = new Set(approvals.map((approval) => approval.toolCallId));
+  const shownCalls = toolCalls.filter((call) => call.id === newestCall?.id || approvalCallIds.has(call.id));
   return <section className="run-activity" aria-label="工具调用时间线">
-    {toolCalls.length > 2 && <div className="tool-activity-summary"><span className="tool-summary-icon"><Icon name="tool" size={14}/></span><div><b>工具活动 <i>{toolCalls.length}</i></b><small>{completed > 0 && `完成 ${completed}`}{running > 0 && ` · 执行 ${running}`}{waiting > 0 && ` · 待确认 ${waiting}`}{abnormal > 0 && ` · 异常 ${abnormal}`}</small></div>{(expanded || hiddenCount > 0) && <button type="button" onClick={() => setExpanded((value) => !value)} aria-expanded={expanded}>{expanded ? "收起详情" : `展开全部（另 ${hiddenCount} 项）`}</button>}</div>}
     {shownCalls.map((call) => {
       const approval = approvals.find((item) => item.toolCallId === call.id);
       const argumentText = JSON.stringify(call.arguments ?? {}, null, 2);
@@ -311,7 +308,6 @@ function RunActivity({ toolCalls, approvals, resolvingApprovalId, resolveApprova
         {!call.result && call.errorMessage && <div className="tool-result error">{call.errorMessage}</div>}
       </article>;
     })}
-    {!expanded && toolCalls.length > 2 && shownCalls.length === 0 && <button type="button" className="tool-history-collapsed" onClick={() => setExpanded(true)}>已折叠 {toolCalls.length} 条完成的工具记录，点击查看</button>}
   </section>;
 }
 
