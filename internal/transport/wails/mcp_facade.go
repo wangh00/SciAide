@@ -16,6 +16,14 @@ func (f *MCPFacade) SaveMCPServer(request mcpserver.SaveCommand) (mcpserver.Serv
 	return publicMCPServer(value), err
 }
 
+func (f *MCPFacade) ImportMCPServers(request mcpserver.ImportCommand) (mcpserver.ImportResult, error) {
+	result, err := f.service.Import(f.lifecycle.Context(), request)
+	for i := range result.Imported {
+		result.Imported[i] = publicMCPServer(result.Imported[i])
+	}
+	return result, err
+}
+
 func (f *MCPFacade) ListMCPServers() ([]mcpserver.Server, error) {
 	values, err := f.service.List(f.lifecycle.Context())
 	for i := range values {

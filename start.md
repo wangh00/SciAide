@@ -1154,7 +1154,7 @@ P2.5 范围：`Plan` / `Full Access` 两档会话权限、审批卡片、ToolCal
 
 ### P3：MCP 接入（2 周）
 
-> 实施状态（2026-08-13）：P3 核心纵向闭环已实现，包括配置/状态 UI、stdio 与 Streamable HTTP、initialize 与能力发现、MCP Tool 动态注册、统一权限管道、SecretEnv 原生凭据隔离、能力列表变更刷新、异常断开/重启状态恢复。P3 不默认自动启动或无限重连；远程重连由 SDK 进行有界重试。Windows Job Object 进程树托管与统一 NetworkClient 的 DNS rebinding 防护列入发布加固，不能将当前实现表述为强沙箱。
+> 实施状态（2026-08-13）：P3 核心纵向闭环已实现，包括配置/状态 UI、兼容主流 `mcpServers` JSON 的批量导入、stdio 与 Streamable HTTP、initialize 与能力发现、MCP Tool 动态注册、统一权限管道、SecretEnv 原生凭据隔离、能力列表变更刷新、异常断开/重启状态恢复。导入配置默认不受信任且不自动连接；P3 不默认自动启动或无限重连，远程重连由 SDK 进行有界重试。Windows Job Object 进程树托管与统一 NetworkClient 的 DNS rebinding 防护列入发布加固，不能将当前实现表述为强沙箱。
 
 **目标：** 用户能添加和可靠使用 MCP Server。
 

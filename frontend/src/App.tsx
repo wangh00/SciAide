@@ -17,6 +17,7 @@ type Approval = { id: string; runId: string; toolCallId: string; toolName: strin
 type RunSnapshot = { run: Run; messages: Message[]; toolCalls: ToolCall[]; pendingApprovals: Approval[] };
 type MCPTransport = "stdio" | "streamable_http";
 type MCPServer = { id: string; name: string; namespace: string; transport: MCPTransport; command: string; args: string[]; workingDir: string; url: string; headers: Record<string,string>; env: Record<string,string>; secretConfigured: Record<string,boolean>; enabled: boolean; autoStart: boolean; trust: "untrusted" | "user_trusted"; timeoutSeconds: number; status: string; protocolVersion?: string; serverVersion?: string; toolCount: number; resourceCount: number; promptCount: number; lastError?: string };
+type MCPImportResult = { imported: MCPServer[]; errors: { name: string; message: string }[] };
 type MCPCapabilities = { protocolVersion?: string; serverVersion?: string; tools: { originalName: string; qualifiedName: string; description: string; version: string }[]; resources: string[]; prompts: string[] };
 type Envelope = { aggregateId: string; type: string; payload: Record<string, unknown> };
 type CreateDialog = { kind: "project" | "conversation"; title: string; description: string; workspacePath: string } | null;
@@ -273,6 +274,9 @@ function CreateModal({ value, setValue, close, submit }: { value: Exclude<Create
 function MCPSettings({ close }: { close: () => void }) {
   const [servers, setServers] = useState<MCPServer[]>([]);
   const [id, setId] = useState("");
+  const [importOpen, setImportOpen] = useState(false);
+  const [importJSON, setImportJSON] = useState("");
+  const [importResult, setImportResult] = useState<MCPImportResult | null>(null);
   const current = servers.find((server) => server.id === id);
   const [name, setName] = useState("");
   const [namespace, setNamespace] = useState("");
@@ -367,6 +371,24 @@ function MCPSettings({ close }: { close: () => void }) {
     }
   }
 
+  async function importServers(event: FormEvent) {
+    event.preventDefault();
+    if (!importJSON.trim()) return;
+    setBusy(true);
+    setImportResult(null);
+    setFeedback("");
+    try {
+      const result = await backend<MCPImportResult>("MCPFacade", "ImportMCPServers", { json: importJSON });
+      setImportJSON("");
+      setImportResult(result);
+      await refresh();
+    } catch (error) {
+      setFeedback(errorText(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function connect() {
     if (!id) return;
     setBusy(true);
@@ -423,15 +445,30 @@ function MCPSettings({ close }: { close: () => void }) {
       </header>
       <div className="settings-grid">
         <aside>
-          <button className={`add-profile ${!id ? "selected" : ""}`} onClick={() => setId("")}><Icon name="plus"/> 添加 MCP Server</button>
+          <button className={`add-profile ${!importOpen && !id ? "selected" : ""}`} onClick={() => { setImportOpen(false); setId(""); }}><Icon name="plus"/> 添加 MCP Server</button>
+          <button className={`add-profile import-profile ${importOpen ? "selected" : ""}`} onClick={() => { setImportOpen(true); setFeedback(""); setImportResult(null); }}><Icon name="tool"/> 从 JSON 导入</button>
           <div className="profile-caption">已配置</div>
-          {servers.map((server) => <button className={`profile-item ${server.id === id ? "selected" : ""}`} onClick={() => setId(server.id)} key={server.id}>
+          {servers.map((server) => <button className={`profile-item ${!importOpen && server.id === id ? "selected" : ""}`} onClick={() => { setImportOpen(false); setId(server.id); }} key={server.id}>
             <span className="provider-logo"><Icon name="server" size={15}/></span>
             <span><b>{server.name}</b><small>{server.transport} · {server.toolCount} tools</small></span>
             <i className={`status-dot ${server.status === "ready" ? "ready" : server.status === "failed" ? "failed" : ""}`}/>
           </button>)}
         </aside>
-        <form onSubmit={(event) => void save(event)}>
+        <form onSubmit={(event) => importOpen ? void importServers(event) : void save(event)}>
+          {importOpen ? <>
+          <section className="form-section mcp-import-section">
+            <div className="form-heading"><span>JSON</span><div><h3>导入 MCP 配置</h3><p>兼容 Claude Desktop、Cursor、Codex 等常见的 mcpServers 结构</p></div></div>
+            <div className="mcp-import-note"><Icon name="shield" size={17}/><div><b>导入不等于执行</b><span>配置会保存为“不受信任”且不会自动连接。请检查命令后，再手动确认信任并连接。</span></div></div>
+            <label>mcpServers JSON<textarea className="mcp-import-editor" autoFocus spellCheck={false} value={importJSON} onChange={(event) => setImportJSON(event.target.value)} placeholder={'{\n  "mcpServers": {\n    "chrome-devtools": {\n      "command": "npx",\n      "args": ["-y", "chrome-devtools-mcp@latest"]\n    }\n  }\n}'} required disabled={busy}/><small>支持一次导入多个 Server；args 保持数组并直接传给进程，不经过 Shell 拼接。</small></label>
+            <div className="mcp-import-security"><b>敏感信息如何保存？</b><p><code>env</code> 中名称包含 TOKEN、SECRET、PASSWORD、API_KEY、AUTH、CREDENTIAL 或 COOKIE 的值，会自动写入 Windows Credential Manager，不进入 SQLite。</p></div>
+          </section>
+          {importResult && <section className="mcp-import-result">
+            {importResult.imported.length > 0 && <div className="imported"><b><Icon name="check" size={15}/> 已导入 {importResult.imported.length} 个 Server</b>{importResult.imported.map((server) => <button type="button" key={server.id} onClick={() => { setImportOpen(false); setId(server.id); }}><span><strong>{server.name}</strong><small>{server.transport} · {server.namespace}</small></span><i>检查配置 →</i></button>)}</div>}
+            {importResult.errors.length > 0 && <div className="import-errors"><b>有 {importResult.errors.length} 项未导入</b>{importResult.errors.map((error, index) => <p key={`${error.name}-${index}`}><strong>{error.name || "未命名 Server"}</strong><span>{error.message}</span></p>)}</div>}
+          </section>}
+          {feedback && <div className="feedback error">{feedback}</div>}
+          <footer className="modal-actions mcp-import-actions"><span/><span/><button type="button" onClick={() => { setImportJSON(""); setImportResult(null); }} disabled={busy || (!importJSON && !importResult)}>清空</button><button className="primary" disabled={busy || !importJSON.trim()}>{busy ? "导入中…" : "解析并导入"}</button></footer>
+          </> : <>
           <section className="form-section">
             <div className="form-heading"><span>01</span><div><h3>连接配置</h3><p>stdio 直接启动程序；HTTP 使用 MCP Streamable HTTP 协议</p></div></div>
             <div className="form-row two">
@@ -466,6 +503,7 @@ function MCPSettings({ close }: { close: () => void }) {
             {id && active ? <button type="button" onClick={() => void disconnect()} disabled={busy}>断开</button> : id && <button type="button" onClick={() => void connect()} disabled={busy || !trusted || !enabled}>连接测试</button>}
             <button className="primary" disabled={busy || active}>{busy ? "处理中…" : "保存配置"}</button>
           </footer>
+          </>}
         </form>
       </div>
     </section>
