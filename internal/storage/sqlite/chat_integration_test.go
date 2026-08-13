@@ -85,7 +85,7 @@ func TestRunRepositoryPersistsAndAggregatesCacheUsage(t *testing.T) {
 	if err := NewModelProfileRepository(store.DB()).Save(ctx, profile); err != nil {
 		t.Fatal(err)
 	}
-	run := chat.Run{ID: "cache-run", ConversationID: createdConversation.ID, UserMessageID: "cache-user", AssistantMessageID: "cache-assistant", ModelProfileID: profile.ID, ModelID: "fixture", Status: chat.RunRunning, InputTokens: 100, OutputTokens: 20, CachedInputTokens: 64, CacheWriteTokens: 12, CacheReportedTurns: 2, CacheHitTurns: 1, ModelTurns: 2, CreatedAt: now, StartedAt: &now, UpdatedAt: now}
+	run := chat.Run{ID: "cache-run", ConversationID: createdConversation.ID, UserMessageID: "cache-user", AssistantMessageID: "cache-assistant", ModelProfileID: profile.ID, ModelID: "fixture", Status: chat.RunRunning, InputTokens: 100, FreshInputTokens: 24, OutputTokens: 20, CachedInputTokens: 64, CacheWriteTokens: 12, CacheReportedTurns: 2, CacheReportedFreshInputTokens: 24, CacheHitTurns: 1, ModelTurns: 2, CreatedAt: now, StartedAt: &now, UpdatedAt: now}
 	user := conversation.Message{ID: run.UserMessageID, ConversationID: createdConversation.ID, RunID: run.ID, Role: conversation.RoleUser, Status: conversation.MessageComplete, CreatedAt: now, UpdatedAt: now, Parts: []conversation.MessagePart{{ID: "cache-user-part", MessageID: run.UserMessageID, Type: "text", Text: "q", CreatedAt: now}}}
 	assistant := conversation.Message{ID: run.AssistantMessageID, ConversationID: createdConversation.ID, RunID: run.ID, Role: conversation.RoleAssistant, Status: conversation.MessageStreaming, CreatedAt: now.Add(time.Nanosecond), UpdatedAt: now, Parts: []conversation.MessagePart{{ID: "cache-assistant-part", MessageID: run.AssistantMessageID, Type: "text", CreatedAt: now}}}
 	repository := NewRunRepository(store.DB())
@@ -96,9 +96,65 @@ func TestRunRepositoryPersistsAndAggregatesCacheUsage(t *testing.T) {
 	if err != nil || loaded.CachedInputTokens != 64 || loaded.CacheReportedTurns != 2 || loaded.CacheHitTurns != 1 {
 		t.Fatalf("loaded run = %#v, err=%v", loaded, err)
 	}
-	statistics, err := repository.UsageStatistics(ctx, profile.ID)
-	if err != nil || statistics.RunCount != 1 || statistics.InputTokens != 100 || statistics.CachedInputTokens != 64 || statistics.CacheWriteTokens != 12 || statistics.CacheHitTurns != 1 {
+	statistics, err := repository.UsageDashboard(ctx, chat.UsageQuery{ModelProfileID: profile.ID})
+	if err != nil || statistics.Summary.RunCount != 1 || statistics.Summary.FreshInputTokens != 24 || statistics.Summary.CacheReadTokens != 64 || statistics.Summary.CacheCreationTokens != 12 || statistics.Summary.CacheHitTurns != 1 || statistics.Summary.RealTotalTokens != 120 || statistics.Summary.CacheHitRate != 0.64 {
 		t.Fatalf("statistics = %#v, err=%v", statistics, err)
+	}
+}
+
+func TestUsageDashboardAggregatesGloballyAndFiltersByLocalDateAndModel(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "usage-dashboard.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	root := t.TempDir()
+	createdProject, err := project.NewService(NewProjectRepository(store.DB()), filepath.Join(root, "workspaces"), filepath.Join(root, "trash")).Create(ctx, "Usage", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	profiles := []modelprofile.Profile{
+		{ID: "profile-a", Name: "Gateway A", ProviderType: modelprofile.ProviderOpenAICompatible, BaseURL: "https://a.test/v1", ModelID: "model-a", Models: []modelprofile.ProfileModel{{ID: "model-a", Enabled: true, IsDefault: true}}, SecretRef: "secret-a", TimeoutSeconds: 60, CustomHeaders: map[string]string{}, Enabled: true, IsDefault: true},
+		{ID: "profile-b", Name: "Gateway B", ProviderType: modelprofile.ProviderOpenAICompatible, BaseURL: "https://b.test/v1", ModelID: "model-b", Models: []modelprofile.ProfileModel{{ID: "model-b", Enabled: true, IsDefault: true}}, SecretRef: "secret-b", TimeoutSeconds: 60, CustomHeaders: map[string]string{}, Enabled: true},
+	}
+	base := time.Date(2026, 8, 12, 2, 0, 0, 0, time.UTC)
+	for index := range profiles {
+		profiles[index].CreatedAt, profiles[index].UpdatedAt = base, base
+		if err := NewModelProfileRepository(store.DB()).Save(ctx, profiles[index]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runs := NewRunRepository(store.DB())
+	fixtures := []chat.Run{
+		{ID: "usage-a", ModelProfileID: "profile-a", ModelID: "model-a", FreshInputTokens: 100, OutputTokens: 50, CachedInputTokens: 600, CacheWriteTokens: 300, CacheReportedTurns: 1, CacheReportedFreshInputTokens: 100, CacheHitTurns: 1, ModelTurns: 1, CreatedAt: base},
+		{ID: "usage-b", ModelProfileID: "profile-b", ModelID: "model-b", FreshInputTokens: 200, OutputTokens: 40, CachedInputTokens: 0, CacheWriteTokens: 0, CacheReportedTurns: 0, ModelTurns: 1, CreatedAt: base.Add(24 * time.Hour)},
+	}
+	for _, fixture := range fixtures {
+		createdConversation, err := conversation.NewService(NewConversationRepository(store.DB())).Create(ctx, createdProject.ID, fixture.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fixture.ConversationID, fixture.UserMessageID, fixture.AssistantMessageID = createdConversation.ID, fixture.ID+"-user", fixture.ID+"-assistant"
+		fixture.Status, fixture.UpdatedAt = chat.RunRunning, fixture.CreatedAt
+		user := conversation.Message{ID: fixture.UserMessageID, ConversationID: createdConversation.ID, RunID: fixture.ID, Role: conversation.RoleUser, Status: conversation.MessageComplete, CreatedAt: fixture.CreatedAt, UpdatedAt: fixture.CreatedAt, Parts: []conversation.MessagePart{{ID: fixture.ID + "-user-part", MessageID: fixture.UserMessageID, Type: "text", CreatedAt: fixture.CreatedAt}}}
+		assistant := conversation.Message{ID: fixture.AssistantMessageID, ConversationID: createdConversation.ID, RunID: fixture.ID, Role: conversation.RoleAssistant, Status: conversation.MessageStreaming, CreatedAt: fixture.CreatedAt, UpdatedAt: fixture.CreatedAt, Parts: []conversation.MessagePart{{ID: fixture.ID + "-assistant-part", MessageID: fixture.AssistantMessageID, Type: "text", CreatedAt: fixture.CreatedAt}}}
+		if err := runs.CreateWithMessages(ctx, fixture, user, assistant); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dashboard, err := runs.UsageDashboard(ctx, chat.UsageQuery{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Never average per-model percentages: aggregate reported buckets first.
+	// The unreported model-b fresh input is intentionally outside the hit-rate denominator.
+	if dashboard.Summary.RealTotalTokens != 1290 || dashboard.Summary.CacheHitRate != 0.6 || len(dashboard.Models) != 2 || len(dashboard.Daily) != 2 {
+		t.Fatalf("global dashboard = %#v", dashboard)
+	}
+	filtered, err := runs.UsageDashboard(ctx, chat.UsageQuery{StartDate: "2026-08-13", EndDate: "2026-08-13", ModelID: "model-b"})
+	if err != nil || filtered.Summary.RunCount != 1 || filtered.Summary.FreshInputTokens != 200 || filtered.Summary.CacheDataAvailable {
+		t.Fatalf("filtered dashboard = %#v, %v", filtered, err)
 	}
 }
 

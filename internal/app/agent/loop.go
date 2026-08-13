@@ -359,11 +359,13 @@ func (l *Loop) receiveTurn(ctx context.Context, run *chat.Run, stream model.Stre
 		}
 		if event.Type == model.EventUsage && event.Usage != nil {
 			run.InputTokens += event.Usage.InputTokens
+			run.FreshInputTokens += event.Usage.FreshInputTokens
 			run.OutputTokens += event.Usage.OutputTokens
 			run.CachedInputTokens += event.Usage.CachedInputTokens
 			run.CacheWriteTokens += event.Usage.CacheWriteTokens
 			if event.Usage.CacheDetailsReported {
 				run.CacheReportedTurns++
+				run.CacheReportedFreshInputTokens += event.Usage.FreshInputTokens
 				if event.Usage.CachedInputTokens > 0 {
 					run.CacheHitTurns++
 				}

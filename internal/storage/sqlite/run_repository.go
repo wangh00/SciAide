@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/wangh00/SciAide/internal/app/chat"
@@ -31,8 +32,8 @@ func (r *RunRepository) CreateWithMessages(ctx context.Context, value chat.Run, 
 	if err := insertMessage(ctx, tx, assistantMessage); err != nil {
 		return err
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO runs(id, conversation_id, user_message_id, assistant_message_id, model_profile_id, model_id, permission_mode, status, error_code, error_message, input_tokens, output_tokens, cached_input_tokens, cache_write_tokens, cache_reported_turns, cache_hit_turns, model_turns, finish_reason, created_at, started_at, completed_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		value.ID, value.ConversationID, value.UserMessageID, nullableString(value.AssistantMessageID), value.ModelProfileID, value.ModelID, value.PermissionMode, value.Status, value.ErrorCode, value.ErrorMessage, value.InputTokens, value.OutputTokens, value.CachedInputTokens, value.CacheWriteTokens, value.CacheReportedTurns, value.CacheHitTurns, value.ModelTurns, value.FinishReason, formatTime(value.CreatedAt), nullableTime(value.StartedAt), nullableTime(value.CompletedAt), formatTime(value.UpdatedAt))
+	_, err = tx.ExecContext(ctx, `INSERT INTO runs(id, conversation_id, user_message_id, assistant_message_id, model_profile_id, model_id, permission_mode, status, error_code, error_message, input_tokens, fresh_input_tokens, output_tokens, cached_input_tokens, cache_write_tokens, cache_reported_turns, cache_reported_fresh_input_tokens, cache_hit_turns, model_turns, finish_reason, created_at, started_at, completed_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		value.ID, value.ConversationID, value.UserMessageID, nullableString(value.AssistantMessageID), value.ModelProfileID, value.ModelID, value.PermissionMode, value.Status, value.ErrorCode, value.ErrorMessage, value.InputTokens, value.FreshInputTokens, value.OutputTokens, value.CachedInputTokens, value.CacheWriteTokens, value.CacheReportedTurns, value.CacheReportedFreshInputTokens, value.CacheHitTurns, value.ModelTurns, value.FinishReason, formatTime(value.CreatedAt), nullableTime(value.StartedAt), nullableTime(value.CompletedAt), formatTime(value.UpdatedAt))
 	if err != nil {
 		return fmt.Errorf("insert run: %w", err)
 	}
@@ -87,8 +88,8 @@ func (r *RunRepository) IncrementModelTurns(ctx context.Context, runID string, m
 }
 
 func (r *RunRepository) Update(ctx context.Context, value chat.Run) error {
-	result, err := r.db.ExecContext(ctx, `UPDATE runs SET assistant_message_id=?, status=?, error_code=?, error_message=?, input_tokens=?, output_tokens=?, cached_input_tokens=?, cache_write_tokens=?, cache_reported_turns=?, cache_hit_turns=?, finish_reason=?, started_at=?, completed_at=?, updated_at=? WHERE id=? AND status NOT IN ('completed','failed','cancelled','interrupted')`,
-		nullableString(value.AssistantMessageID), value.Status, value.ErrorCode, value.ErrorMessage, value.InputTokens, value.OutputTokens, value.CachedInputTokens, value.CacheWriteTokens, value.CacheReportedTurns, value.CacheHitTurns, value.FinishReason, nullableTime(value.StartedAt), nullableTime(value.CompletedAt), formatTime(value.UpdatedAt), value.ID)
+	result, err := r.db.ExecContext(ctx, `UPDATE runs SET assistant_message_id=?, status=?, error_code=?, error_message=?, input_tokens=?, fresh_input_tokens=?, output_tokens=?, cached_input_tokens=?, cache_write_tokens=?, cache_reported_turns=?, cache_reported_fresh_input_tokens=?, cache_hit_turns=?, finish_reason=?, started_at=?, completed_at=?, updated_at=? WHERE id=? AND status NOT IN ('completed','failed','cancelled','interrupted')`,
+		nullableString(value.AssistantMessageID), value.Status, value.ErrorCode, value.ErrorMessage, value.InputTokens, value.FreshInputTokens, value.OutputTokens, value.CachedInputTokens, value.CacheWriteTokens, value.CacheReportedTurns, value.CacheReportedFreshInputTokens, value.CacheHitTurns, value.FinishReason, nullableTime(value.StartedAt), nullableTime(value.CompletedAt), formatTime(value.UpdatedAt), value.ID)
 	if err != nil {
 		return fmt.Errorf("update run: %w", err)
 	}
@@ -303,21 +304,113 @@ func (r *RunRepository) AppendNext(ctx context.Context, event events.Envelope) (
 	return event, nil
 }
 
-func (r *RunRepository) UsageStatistics(ctx context.Context, modelProfileID string) (chat.UsageStatistics, error) {
-	result := chat.UsageStatistics{ModelProfileID: modelProfileID}
-	err := r.db.QueryRowContext(ctx, `
-		SELECT COUNT(*), COALESCE(SUM(model_turns),0), COALESCE(SUM(input_tokens),0),
-		       COALESCE(SUM(output_tokens),0), COALESCE(SUM(cached_input_tokens),0),
-		       COALESCE(SUM(cache_write_tokens),0), COALESCE(SUM(cache_reported_turns),0),
-		       COALESCE(SUM(cache_hit_turns),0)
-		FROM runs WHERE model_profile_id=?`, modelProfileID).Scan(
-		&result.RunCount, &result.ModelTurns, &result.InputTokens, &result.OutputTokens,
-		&result.CachedInputTokens, &result.CacheWriteTokens, &result.CacheReportedTurns,
-		&result.CacheHitTurns)
-	if err != nil {
-		return chat.UsageStatistics{}, fmt.Errorf("read model usage statistics: %w", err)
+func (r *RunRepository) UsageDashboard(ctx context.Context, query chat.UsageQuery) (chat.UsageDashboard, error) {
+	result := chat.UsageDashboard{Query: query, Daily: []chat.DailyUsage{}, Models: []chat.ModelUsage{}}
+	where, args := usageWhere(query, "r")
+
+	summaryQuery := `SELECT COUNT(*), COALESCE(SUM(r.model_turns),0),
+		COALESCE(SUM(r.fresh_input_tokens),0), COALESCE(SUM(r.output_tokens),0),
+		COALESCE(SUM(r.cached_input_tokens),0), COALESCE(SUM(r.cache_write_tokens),0),
+		COALESCE(SUM(r.cache_reported_turns),0), COALESCE(SUM(r.cache_hit_turns),0),
+		COALESCE(SUM(r.cache_reported_fresh_input_tokens),0)
+		FROM runs r` + where
+	if err := scanUsageSummary(r.db.QueryRowContext(ctx, summaryQuery, args...), &result.Summary); err != nil {
+		return result, fmt.Errorf("read global usage summary: %w", err)
 	}
-	return result, nil
+
+	dailyRows, err := r.db.QueryContext(ctx, `SELECT substr(datetime(r.created_at, 'localtime'),1,10), COUNT(*),
+		COALESCE(SUM(r.model_turns),0), COALESCE(SUM(r.fresh_input_tokens),0),
+		COALESCE(SUM(r.output_tokens),0), COALESCE(SUM(r.cached_input_tokens),0),
+		COALESCE(SUM(r.cache_write_tokens),0), COALESCE(SUM(r.cache_reported_turns),0),
+		COALESCE(SUM(r.cache_hit_turns),0), COALESCE(SUM(r.cache_reported_fresh_input_tokens),0)
+		FROM runs r`+where+` GROUP BY 1 ORDER BY 1`, args...)
+	if err != nil {
+		return result, fmt.Errorf("read daily usage: %w", err)
+	}
+	defer dailyRows.Close()
+	for dailyRows.Next() {
+		var item chat.DailyUsage
+		var reportedFresh int
+		if err := dailyRows.Scan(&item.Date, &item.RunCount, &item.ModelTurns, &item.FreshInputTokens,
+			&item.OutputTokens, &item.CacheReadTokens, &item.CacheCreationTokens,
+			&item.CacheReportedTurns, &item.CacheHitTurns, &reportedFresh); err != nil {
+			return result, err
+		}
+		deriveUsageSummary(&item.UsageSummary, reportedFresh)
+		result.Daily = append(result.Daily, item)
+	}
+	if err := dailyRows.Err(); err != nil {
+		return result, err
+	}
+
+	modelRows, err := r.db.QueryContext(ctx, `SELECT r.model_profile_id, COALESCE(p.name,''), r.model_id,
+		COUNT(*), COALESCE(SUM(r.model_turns),0), COALESCE(SUM(r.fresh_input_tokens),0),
+		COALESCE(SUM(r.output_tokens),0), COALESCE(SUM(r.cached_input_tokens),0),
+		COALESCE(SUM(r.cache_write_tokens),0), COALESCE(SUM(r.cache_reported_turns),0),
+		COALESCE(SUM(r.cache_hit_turns),0), COALESCE(SUM(r.cache_reported_fresh_input_tokens),0)
+		FROM runs r LEFT JOIN model_profiles p ON p.id=r.model_profile_id`+where+`
+		GROUP BY r.model_profile_id, p.name, r.model_id
+		ORDER BY (COALESCE(SUM(r.fresh_input_tokens),0)+COALESCE(SUM(r.output_tokens),0)+COALESCE(SUM(r.cached_input_tokens),0)+COALESCE(SUM(r.cache_write_tokens),0)) DESC, r.model_id`, args...)
+	if err != nil {
+		return result, fmt.Errorf("read model usage: %w", err)
+	}
+	defer modelRows.Close()
+	for modelRows.Next() {
+		var item chat.ModelUsage
+		var reportedFresh int
+		if err := modelRows.Scan(&item.ModelProfileID, &item.ProfileName, &item.ModelID,
+			&item.RunCount, &item.ModelTurns, &item.FreshInputTokens, &item.OutputTokens,
+			&item.CacheReadTokens, &item.CacheCreationTokens, &item.CacheReportedTurns,
+			&item.CacheHitTurns, &reportedFresh); err != nil {
+			return result, err
+		}
+		deriveUsageSummary(&item.UsageSummary, reportedFresh)
+		result.Models = append(result.Models, item)
+	}
+	return result, modelRows.Err()
+}
+
+func usageWhere(query chat.UsageQuery, alias string) (string, []any) {
+	prefix := alias + "."
+	conditions := []string{"1=1"}
+	args := []any{}
+	if query.StartDate != "" {
+		conditions = append(conditions, "date("+prefix+"created_at, 'localtime') >= date(?)")
+		args = append(args, query.StartDate)
+	}
+	if query.EndDate != "" {
+		conditions = append(conditions, "date("+prefix+"created_at, 'localtime') <= date(?)")
+		args = append(args, query.EndDate)
+	}
+	if query.ModelProfileID != "" {
+		conditions = append(conditions, prefix+"model_profile_id = ?")
+		args = append(args, query.ModelProfileID)
+	}
+	if query.ModelID != "" {
+		conditions = append(conditions, prefix+"model_id = ?")
+		args = append(args, query.ModelID)
+	}
+	return " WHERE " + strings.Join(conditions, " AND "), args
+}
+
+func scanUsageSummary(row rowScanner, target *chat.UsageSummary) error {
+	var reportedFresh int
+	if err := row.Scan(&target.RunCount, &target.ModelTurns, &target.FreshInputTokens,
+		&target.OutputTokens, &target.CacheReadTokens, &target.CacheCreationTokens,
+		&target.CacheReportedTurns, &target.CacheHitTurns, &reportedFresh); err != nil {
+		return err
+	}
+	deriveUsageSummary(target, reportedFresh)
+	return nil
+}
+
+func deriveUsageSummary(target *chat.UsageSummary, reportedFresh int) {
+	target.RealTotalTokens = target.FreshInputTokens + target.OutputTokens + target.CacheReadTokens + target.CacheCreationTokens
+	target.CacheDataAvailable = target.CacheReportedTurns > 0
+	cacheableInput := reportedFresh + target.CacheReadTokens + target.CacheCreationTokens
+	if target.CacheDataAvailable && cacheableInput > 0 {
+		target.CacheHitRate = float64(target.CacheReadTokens) / float64(cacheableInput)
+	}
 }
 
 func appendNextEventTx(ctx context.Context, tx *sql.Tx, event *events.Envelope) error {
@@ -358,7 +451,7 @@ func scanRun(row rowScanner) (chat.Run, error) {
 	var createdAt, updatedAt string
 	var startedAt, completedAt sql.NullString
 	if err := row.Scan(&value.ID, &value.ConversationID, &value.UserMessageID, &value.AssistantMessageID, &value.ModelProfileID, &value.ModelID, &value.PermissionMode, &value.Status,
-		&value.ErrorCode, &value.ErrorMessage, &value.InputTokens, &value.OutputTokens, &value.CachedInputTokens, &value.CacheWriteTokens, &value.CacheReportedTurns, &value.CacheHitTurns, &value.ModelTurns, &value.FinishReason, &createdAt, &startedAt, &completedAt, &updatedAt); err != nil {
+		&value.ErrorCode, &value.ErrorMessage, &value.InputTokens, &value.FreshInputTokens, &value.OutputTokens, &value.CachedInputTokens, &value.CacheWriteTokens, &value.CacheReportedTurns, &value.CacheReportedFreshInputTokens, &value.CacheHitTurns, &value.ModelTurns, &value.FinishReason, &createdAt, &startedAt, &completedAt, &updatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return chat.Run{}, fmt.Errorf("run not found: %w", sql.ErrNoRows)
 		}
@@ -390,7 +483,7 @@ func scanRun(row rowScanner) (chat.Run, error) {
 	return value, nil
 }
 
-const runSelect = `SELECT id, conversation_id, user_message_id, COALESCE(assistant_message_id, ''), model_profile_id, model_id, permission_mode, status, error_code, error_message, input_tokens, output_tokens, cached_input_tokens, cache_write_tokens, cache_reported_turns, cache_hit_turns, model_turns, finish_reason, created_at, started_at, completed_at, updated_at FROM runs`
+const runSelect = `SELECT id, conversation_id, user_message_id, COALESCE(assistant_message_id, ''), model_profile_id, model_id, permission_mode, status, error_code, error_message, input_tokens, fresh_input_tokens, output_tokens, cached_input_tokens, cache_write_tokens, cache_reported_turns, cache_reported_fresh_input_tokens, cache_hit_turns, model_turns, finish_reason, created_at, started_at, completed_at, updated_at FROM runs`
 
 func nullableString(value string) any {
 	if value == "" {

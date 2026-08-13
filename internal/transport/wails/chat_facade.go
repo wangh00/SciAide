@@ -52,6 +52,6 @@ func (f *ChatFacade) GetLatestRunSnapshot(conversationID string) (*RunSnapshot, 
 	return result, err
 }
 
-func (f *ChatFacade) GetModelUsageStatistics(modelProfileID string) (chat.UsageStatistics, error) {
-	return f.service.UsageStatistics(f.lifecycle.Context(), modelProfileID)
+func (f *ChatFacade) GetUsageDashboard(query chat.UsageQuery) (chat.UsageDashboard, error) {
+	return f.service.UsageDashboard(f.lifecycle.Context(), query)
 }

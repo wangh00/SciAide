@@ -4,6 +4,8 @@
 
 ### Added
 
+- 增加客户端全局用量统计页，支持全部 API/模型汇总、按配置/模型筛选、今天/近 7 天/近 30 天/自定义日期范围以及本地日期趋势。
+- 将 OpenAI-compatible 用量归一化为实际输入、输出、缓存读取、缓存创建四个互斥 Token 桶，并按缓存读取占可缓存输入的比例计算命中率。
 - 增加 MCP Server 配置与状态 UI，支持 stdio 和 Streamable HTTP。
 - 增加兼容 `mcpServers` 结构的 JSON 批量导入；导入项默认不受信任且不自动连接，敏感 `env` 自动进入系统凭据库。
 - Windows 桌面版以隐藏控制台方式运行 stdio MCP 子进程，避免 `npx.cmd` 等命令弹出可关闭的 CMD 宿主窗口。

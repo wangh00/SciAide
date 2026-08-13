@@ -55,8 +55,8 @@ func (m *memoryRepo) IncrementModelTurns(_ context.Context, _ string, maximum in
 	return m.run, nil
 }
 func (m *memoryRepo) InterruptActive(context.Context, time.Time) (int64, error) { return 0, nil }
-func (m *memoryRepo) UsageStatistics(context.Context, string) (UsageStatistics, error) {
-	return UsageStatistics{}, nil
+func (m *memoryRepo) UsageDashboard(context.Context, UsageQuery) (UsageDashboard, error) {
+	return UsageDashboard{}, nil
 }
 func (m *memoryRepo) CancelRun(_ context.Context, runID, code, message string, at time.Time, event events.Envelope) (Run, bool, error) {
 	m.mu.Lock()

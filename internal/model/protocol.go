@@ -74,6 +74,7 @@ type ToolCall struct {
 
 type Usage struct {
 	InputTokens          int  `json:"inputTokens"`
+	FreshInputTokens     int  `json:"freshInputTokens"`
 	OutputTokens         int  `json:"outputTokens"`
 	CachedInputTokens    int  `json:"cachedInputTokens"`
 	CacheWriteTokens     int  `json:"cacheWriteTokens"`

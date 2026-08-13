@@ -339,12 +339,25 @@ func (s *Service) LatestSnapshot(ctx context.Context, conversationID string) (*S
 	return &snapshot, nil
 }
 
-func (s *Service) UsageStatistics(ctx context.Context, modelProfileID string) (UsageStatistics, error) {
-	modelProfileID = strings.TrimSpace(modelProfileID)
-	if modelProfileID == "" {
-		return UsageStatistics{}, fmt.Errorf("model profile id is required")
+func (s *Service) UsageDashboard(ctx context.Context, query UsageQuery) (UsageDashboard, error) {
+	query.StartDate = strings.TrimSpace(query.StartDate)
+	query.EndDate = strings.TrimSpace(query.EndDate)
+	query.ModelProfileID = strings.TrimSpace(query.ModelProfileID)
+	query.ModelID = strings.TrimSpace(query.ModelID)
+	if query.StartDate != "" {
+		if _, err := time.Parse("2006-01-02", query.StartDate); err != nil {
+			return UsageDashboard{}, fmt.Errorf("invalid usage start date")
+		}
 	}
-	return s.runs.UsageStatistics(ctx, modelProfileID)
+	if query.EndDate != "" {
+		if _, err := time.Parse("2006-01-02", query.EndDate); err != nil {
+			return UsageDashboard{}, fmt.Errorf("invalid usage end date")
+		}
+	}
+	if query.StartDate != "" && query.EndDate != "" && query.StartDate > query.EndDate {
+		return UsageDashboard{}, fmt.Errorf("usage start date must not be after end date")
+	}
+	return s.runs.UsageDashboard(ctx, query)
 }
 
 func (s *Service) Close() {

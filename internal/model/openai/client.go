@@ -536,6 +536,10 @@ func (u responseUsage) normalized() model.Usage {
 		result.CacheDetailsReported = true
 		result.CacheWriteTokens = *u.CacheCreationInputTokens
 	}
+	// OpenAI-compatible APIs report prompt_tokens as a cache-inclusive total.
+	// Keep the raw value for diagnostics, but normalize the durable statistics
+	// into mutually exclusive fresh/read/create token buckets.
+	result.FreshInputTokens = max(result.InputTokens-result.CachedInputTokens-result.CacheWriteTokens, 0)
 	return result
 }
 

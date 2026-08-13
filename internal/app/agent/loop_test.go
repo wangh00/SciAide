@@ -264,7 +264,7 @@ func TestAgentLoopCompletesFakeModelToolRoundTrip(t *testing.T) {
 }
 
 func TestAgentLoopPersistsReportedCacheUsage(t *testing.T) {
-	usage := model.Usage{InputTokens: 120, OutputTokens: 18, CachedInputTokens: 80, CacheWriteTokens: 12, CacheDetailsReported: true}
+	usage := model.Usage{InputTokens: 120, FreshInputTokens: 28, OutputTokens: 18, CachedInputTokens: 80, CacheWriteTokens: 12, CacheDetailsReported: true}
 	script := []fake.Step{{Event: model.Event{Type: model.EventUsage, Usage: &usage}}, {Event: model.Event{Type: model.EventDone, FinishReason: "stop"}}}
 	loop, state, _ := newLoopFixture(t, nil, script)
 	if outcome := loop.Run(context.Background(), "run"); outcome != OutcomeCompleted {
@@ -272,7 +272,7 @@ func TestAgentLoopPersistsReportedCacheUsage(t *testing.T) {
 	}
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	if state.run.InputTokens != 120 || state.run.OutputTokens != 18 || state.run.CachedInputTokens != 80 || state.run.CacheWriteTokens != 12 || state.run.CacheReportedTurns != 1 || state.run.CacheHitTurns != 1 {
+	if state.run.InputTokens != 120 || state.run.FreshInputTokens != 28 || state.run.OutputTokens != 18 || state.run.CachedInputTokens != 80 || state.run.CacheWriteTokens != 12 || state.run.CacheReportedTurns != 1 || state.run.CacheReportedFreshInputTokens != 28 || state.run.CacheHitTurns != 1 {
 		t.Fatalf("cache usage run = %#v", state.run)
 	}
 }

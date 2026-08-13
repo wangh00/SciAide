@@ -63,7 +63,7 @@ func TestResponseUsageNormalizesCompatibleCacheFields(t *testing.T) {
 	read, created, hit, miss := 13, 5, 11, 7
 	usage := responseUsage{PromptTokens: 30, CompletionTokens: 9, CacheReadInputTokens: &read, CacheCreationInputTokens: &created, PromptCacheHitTokens: &hit, PromptCacheMissTokens: &miss}
 	got := usage.normalized()
-	if got.InputTokens != 30 || got.OutputTokens != 9 || got.CachedInputTokens != 13 || got.CacheWriteTokens != 5 || !got.CacheDetailsReported {
+	if got.InputTokens != 30 || got.FreshInputTokens != 12 || got.OutputTokens != 9 || got.CachedInputTokens != 13 || got.CacheWriteTokens != 5 || !got.CacheDetailsReported {
 		t.Fatalf("normalized usage = %#v", got)
 	}
 }
