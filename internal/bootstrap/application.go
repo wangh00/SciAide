@@ -83,6 +83,7 @@ func New(options Options) (*Application, error) {
 	connectionTester := openai.New(modelprofile.Profile{TimeoutSeconds: 30}, nil)
 	profileService := modelprofile.NewService(profileRepository, secrets, connectionTester)
 	runRepository := sqlite.NewRunRepository(store.DB())
+	toolRepository := sqlite.NewToolRepository(store.DB())
 	publisher := wailstransport.NewEventPublisher(lifecycle)
 	chatService := chat.NewService(runRepository, conversationRepository, runRepository, publisher, gateway.NewResolver(profileService))
 	if interrupted, err := chatService.Recover(context.Background()); err != nil {
@@ -90,6 +91,12 @@ func New(options Options) (*Application, error) {
 		return fail(fmt.Errorf("recover chat runs: %w", err))
 	} else if interrupted > 0 {
 		logger.Warn("interrupted unfinished chat runs", "count", interrupted)
+	}
+	if interrupted, err := toolRepository.InterruptActive(context.Background(), time.Now().UTC()); err != nil {
+		_ = store.Close()
+		return fail(fmt.Errorf("recover tool calls: %w", err))
+	} else if interrupted > 0 {
+		logger.Warn("interrupted unfinished tool calls", "count", interrupted)
 	}
 	return &Application{
 		Logger:             logger,

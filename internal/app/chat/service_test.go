@@ -57,11 +57,12 @@ func (m *memoryRepo) ListMessages(context.Context, string, int) ([]conversation.
 	copy(result, m.messages)
 	return result, nil
 }
-func (m *memoryRepo) Append(_ context.Context, event events.Envelope) error {
+func (m *memoryRepo) AppendNext(_ context.Context, event events.Envelope) (events.Envelope, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	event.Sequence = int64(len(m.envelopes) + 1)
 	m.envelopes = append(m.envelopes, event)
-	return nil
+	return event, nil
 }
 
 type resolver struct{ model model.ChatModel }

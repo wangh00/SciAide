@@ -84,7 +84,7 @@ func (r *ProjectRepository) Delete(ctx context.Context, projectID string) error 
 	}
 	defer tx.Rollback()
 	var active int
-	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM runs WHERE conversation_id IN (SELECT id FROM conversations WHERE project_id = ?) AND status IN ('queued', 'running')`, projectID).Scan(&active); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM runs WHERE conversation_id IN (SELECT id FROM conversations WHERE project_id = ?) AND status IN ('queued', 'running', 'waiting_approval')`, projectID).Scan(&active); err != nil {
 		return fmt.Errorf("check active project runs: %w", err)
 	}
 	if active > 0 {

@@ -1,6 +1,6 @@
 # SciAide 开发环境
 
-> 当前阶段：P1 稳定聊天纵向闭环。开发/验证仍使用 P0 建立的统一门禁脚本。
+> 当前阶段：P2 Agent Loop、内置工具与权限系统。开发/验证仍使用 P0 建立的统一门禁脚本。
 
 前端不得直接导入被忽略的 `frontend/wailsjs`。Wails 运行时调用通过已提交的 `frontend/src/lib/wailsRuntime.ts` Bridge，后端 Facade 通过 `window.go` 动态边界访问，从而保证 GitHub Actions 的干净检出也能独立完成 TypeScript/Vite 构建。
 

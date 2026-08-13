@@ -2,7 +2,7 @@
 
 面向科研工作者的本地优先桌面 AI Agent，支持自定义模型、工具调用、MCP、Skill、科研知识库和可信引用。
 
-当前阶段：**P1 模型配置与流式聊天闭环（首个可用纵向版本）**。
+当前阶段：**P2 Agent Loop、内置工具与权限系统**。
 
 ## 当前能力
 
@@ -16,6 +16,7 @@
 - OpenAI-compatible 流式 Provider、连接测试、错误分类和安全重试
 - 一个 API 配置（Base URL + Key）可保存多个模型；支持 `/v1/models` 多选、手动添加和聊天时切换
 - 多轮聊天、停止生成、Usage、RunEvent 与 Snapshot 恢复
+- P2 工具协议基线：ToolCall/ToolResult 状态机、参数 Schema 校验、审计事件与持久化
 - 可脚本化 `FakeChatModel`、Provider Fixture 测试、威胁模型、ADR 和 CI
 
 ## 开发

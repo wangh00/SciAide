@@ -61,10 +61,10 @@ func (r *RunRepository) InterruptActive(ctx context.Context, at time.Time) (int6
 		return 0, fmt.Errorf("begin interrupt active runs: %w", err)
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `UPDATE messages SET status='incomplete', updated_at=? WHERE id IN (SELECT assistant_message_id FROM runs WHERE status IN ('queued', 'running'))`, formatTime(at)); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE messages SET status='incomplete', updated_at=? WHERE id IN (SELECT assistant_message_id FROM runs WHERE status IN ('queued', 'running', 'waiting_approval'))`, formatTime(at)); err != nil {
 		return 0, fmt.Errorf("interrupt assistant messages: %w", err)
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE runs SET status='interrupted', error_code='APP_RESTARTED', error_message='应用退出时运行尚未完成', completed_at=?, updated_at=? WHERE status IN ('queued', 'running')`, formatTime(at), formatTime(at))
+	result, err := tx.ExecContext(ctx, `UPDATE runs SET status='interrupted', error_code='APP_RESTARTED', error_message='应用退出时运行尚未完成', completed_at=?, updated_at=? WHERE status IN ('queued', 'running', 'waiting_approval')`, formatTime(at), formatTime(at))
 	if err != nil {
 		return 0, fmt.Errorf("interrupt active runs: %w", err)
 	}
@@ -83,6 +83,32 @@ func (r *RunRepository) Append(ctx context.Context, event events.Envelope) error
 	_, err := r.db.ExecContext(ctx, `INSERT INTO run_events(event_id, version, aggregate_id, aggregate_type, sequence, event_type, timestamp, payload_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		event.EventID, event.Version, event.AggregateID, event.AggregateType, event.Sequence, event.Type, formatTime(event.Timestamp), payload)
 	if err != nil {
+		return fmt.Errorf("append run event: %w", err)
+	}
+	return nil
+}
+
+func (r *RunRepository) AppendNext(ctx context.Context, event events.Envelope) (events.Envelope, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return event, fmt.Errorf("begin run event append: %w", err)
+	}
+	defer tx.Rollback()
+	if err := appendNextEventTx(ctx, tx, &event); err != nil {
+		return event, err
+	}
+	if err := tx.Commit(); err != nil {
+		return event, err
+	}
+	return event, nil
+}
+
+func appendNextEventTx(ctx context.Context, tx *sql.Tx, event *events.Envelope) error {
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(sequence), 0) + 1 FROM run_events WHERE aggregate_id = ?`, event.AggregateID).Scan(&event.Sequence); err != nil {
+		return fmt.Errorf("read next run event sequence: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO run_events(event_id, version, aggregate_id, aggregate_type, sequence, event_type, timestamp, payload_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		event.EventID, event.Version, event.AggregateID, event.AggregateType, event.Sequence, event.Type, formatTime(event.Timestamp), string(event.Payload)); err != nil {
 		return fmt.Errorf("append run event: %w", err)
 	}
 	return nil

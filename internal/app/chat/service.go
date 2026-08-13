@@ -286,7 +286,8 @@ func (s *Service) emit(ctx context.Context, runID string, sequence int64, eventT
 		return
 	}
 	envelope := events.New(eventID, runID, "run", eventType, sequence, data)
-	if err := s.events.Append(ctx, envelope); err != nil {
+	envelope, err = s.events.AppendNext(ctx, envelope)
+	if err != nil {
 		return
 	}
 	if s.publisher != nil {

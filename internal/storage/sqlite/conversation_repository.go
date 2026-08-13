@@ -53,7 +53,7 @@ func (r *ConversationRepository) DeleteConversation(ctx context.Context, convers
 	}
 	defer tx.Rollback()
 	var active int
-	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM runs WHERE conversation_id = ? AND status IN ('queued', 'running')`, conversationID).Scan(&active); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM runs WHERE conversation_id = ? AND status IN ('queued', 'running', 'waiting_approval')`, conversationID).Scan(&active); err != nil {
 		return fmt.Errorf("check active conversation runs: %w", err)
 	}
 	if active > 0 {

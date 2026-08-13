@@ -1,4 +1,4 @@
-# SciAide 威胁模型（P1）
+# SciAide 威胁模型（P1/P2）
 
 ## P1 已落实的控制
 
@@ -56,6 +56,14 @@ React WebView
 | 风险 | 阶段 | 必要控制 |
 |---|---|---|
 | API Key 明文或跨 Provider 泄露 | P1 | OS SecretStore、SecretRef、出站客户端隔离 |
+
+## P2 工具协议已落实的控制
+
+- 模型只提交工具名和参数，风险、权限、版本及幂等属性只能来自受信任的 ToolRegistry 定义。
+- 工具参数在任何持久化或执行前通过失败关闭的 JSON Schema 子集校验；未知断言关键字不被静默忽略。
+- ToolCall 状态使用允许列表和期望旧状态更新，终态不可重放；Provider Call ID 与 Run 内幂等键防止重复提交。
+- ToolCall、ToolResult 与审计事件在同一事务中提交；启动时未完成调用只标记为 interrupted，不自动执行。
+- Result 使用结构化错误和有界元数据，后续 ToolExecutor 不得向模型暴露 panic、堆栈或内部路径。
 | Prompt 注入诱导工具执行 | P2 | JSON Schema、PolicyEngine、Approval、预算 |
 | 路径穿越和 junction/symlink | P2 | PathGuard、Workspace 根、逐资源授权 |
 | SSRF 和 DNS rebinding | P2/P3 | NetworkClient、地址复查、域名/端口权限 |

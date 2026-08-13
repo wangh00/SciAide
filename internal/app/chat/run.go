@@ -11,12 +11,13 @@ import (
 type RunStatus string
 
 const (
-	RunQueued      RunStatus = "queued"
-	RunRunning     RunStatus = "running"
-	RunCompleted   RunStatus = "completed"
-	RunFailed      RunStatus = "failed"
-	RunCancelled   RunStatus = "cancelled"
-	RunInterrupted RunStatus = "interrupted"
+	RunQueued          RunStatus = "queued"
+	RunRunning         RunStatus = "running"
+	RunWaitingApproval RunStatus = "waiting_approval"
+	RunCompleted       RunStatus = "completed"
+	RunFailed          RunStatus = "failed"
+	RunCancelled       RunStatus = "cancelled"
+	RunInterrupted     RunStatus = "interrupted"
 )
 
 type Run struct {
@@ -51,7 +52,7 @@ type ConversationRepository interface {
 }
 
 type EventRepository interface {
-	Append(ctx context.Context, event events.Envelope) error
+	AppendNext(ctx context.Context, event events.Envelope) (events.Envelope, error)
 }
 
 type Publisher interface {
