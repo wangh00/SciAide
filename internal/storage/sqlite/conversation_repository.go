@@ -46,6 +46,35 @@ func (r *ConversationRepository) ListConversations(ctx context.Context, projectI
 	return values, rows.Err()
 }
 
+func (r *ConversationRepository) DeleteConversation(ctx context.Context, conversationID string) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin conversation delete: %w", err)
+	}
+	defer tx.Rollback()
+	var active int
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM runs WHERE conversation_id = ? AND status IN ('queued', 'running')`, conversationID).Scan(&active); err != nil {
+		return fmt.Errorf("check active conversation runs: %w", err)
+	}
+	if active > 0 {
+		return fmt.Errorf("conversation has an active chat run; stop it before removing the conversation")
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM run_events WHERE aggregate_id IN (SELECT id FROM runs WHERE conversation_id = ?)`, conversationID); err != nil {
+		return fmt.Errorf("delete conversation run events: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM runs WHERE conversation_id = ?`, conversationID); err != nil {
+		return fmt.Errorf("delete conversation runs: %w", err)
+	}
+	result, err := tx.ExecContext(ctx, `DELETE FROM conversations WHERE id = ?`, conversationID)
+	if err != nil {
+		return fmt.Errorf("delete conversation: %w", err)
+	}
+	if affected, _ := result.RowsAffected(); affected == 0 {
+		return fmt.Errorf("conversation not found")
+	}
+	return tx.Commit()
+}
+
 func (r *ConversationRepository) CreateMessage(ctx context.Context, value conversation.Message) error {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {

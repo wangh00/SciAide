@@ -18,12 +18,13 @@ import (
 )
 
 type ModelResolver interface {
-	Resolve(ctx context.Context, profileID string) (model.ChatModel, error)
+	Resolve(ctx context.Context, profileID, modelID string) (model.ChatModel, error)
 }
 
 type StartCommand struct {
 	ConversationID string `json:"conversationId"`
 	ModelProfileID string `json:"modelProfileId"`
+	ModelID        string `json:"modelId"`
 	Text           string `json:"text"`
 }
 
@@ -61,9 +62,10 @@ func (s *Service) Recover(ctx context.Context) (int64, error) {
 func (s *Service) Start(ctx context.Context, cmd StartCommand) (Run, error) {
 	cmd.ConversationID = strings.TrimSpace(cmd.ConversationID)
 	cmd.ModelProfileID = strings.TrimSpace(cmd.ModelProfileID)
+	cmd.ModelID = strings.TrimSpace(cmd.ModelID)
 	cmd.Text = strings.TrimSpace(cmd.Text)
-	if cmd.ConversationID == "" || cmd.ModelProfileID == "" || cmd.Text == "" {
-		return Run{}, fmt.Errorf("conversation, model profile and message text are required")
+	if cmd.ConversationID == "" || cmd.ModelProfileID == "" || cmd.ModelID == "" || cmd.Text == "" {
+		return Run{}, fmt.Errorf("conversation, model profile, model and message text are required")
 	}
 	if len([]rune(cmd.Text)) > maxUserMessageChars {
 		return Run{}, fmt.Errorf("message is too long")
@@ -93,7 +95,7 @@ func (s *Service) Start(ctx context.Context, cmd StartCommand) (Run, error) {
 		Parts: []conversation.MessagePart{{ID: userPartID, MessageID: userID, Ordinal: 0, Type: "text", Text: cmd.Text, CreatedAt: now}}}
 	assistant := conversation.Message{ID: assistantID, ConversationID: cmd.ConversationID, RunID: runID, Role: conversation.RoleAssistant, Status: conversation.MessageStreaming, CreatedAt: now.Add(time.Nanosecond), UpdatedAt: now,
 		Parts: []conversation.MessagePart{{ID: assistantPartID, MessageID: assistantID, Ordinal: 0, Type: "text", CreatedAt: now.Add(time.Nanosecond)}}}
-	run := Run{ID: runID, ConversationID: cmd.ConversationID, UserMessageID: userID, AssistantMessageID: assistantID, ModelProfileID: cmd.ModelProfileID, Status: RunQueued, CreatedAt: now, UpdatedAt: now}
+	run := Run{ID: runID, ConversationID: cmd.ConversationID, UserMessageID: userID, AssistantMessageID: assistantID, ModelProfileID: cmd.ModelProfileID, ModelID: cmd.ModelID, Status: RunQueued, CreatedAt: now, UpdatedAt: now}
 	if err := s.runs.CreateWithMessages(ctx, run, user, assistant); err != nil {
 		return Run{}, fmt.Errorf("create chat run: %w", err)
 	}
@@ -167,7 +169,7 @@ func (s *Service) execute(ctx context.Context, run Run) {
 		return
 	}
 	request := buildRequest(messages, run.AssistantMessageID, maxContextChars)
-	chatModel, err := s.models.Resolve(ctx, run.ModelProfileID)
+	chatModel, err := s.models.Resolve(ctx, run.ModelProfileID, run.ModelID)
 	if err != nil {
 		s.finishError(run, err, "", emit)
 		return

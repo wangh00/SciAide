@@ -64,6 +64,18 @@ type Repository interface {
 	CreateMessage(ctx context.Context, value Message) error
 	UpdateMessageText(ctx context.Context, messageID string, status MessageStatus, text string, updatedAt time.Time) error
 	ListMessages(ctx context.Context, conversationID string, limit int) ([]Message, error)
+	DeleteConversation(ctx context.Context, id string) error
+}
+
+func (s *Service) Remove(ctx context.Context, conversationID string) error {
+	conversationID = strings.TrimSpace(conversationID)
+	if conversationID == "" {
+		return fmt.Errorf("conversation id is required")
+	}
+	if err := s.repository.DeleteConversation(ctx, conversationID); err != nil {
+		return fmt.Errorf("remove conversation: %w", err)
+	}
+	return nil
 }
 
 type Service struct {

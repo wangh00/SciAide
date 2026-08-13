@@ -25,6 +25,7 @@ type Run struct {
 	UserMessageID      string     `json:"userMessageId"`
 	AssistantMessageID string     `json:"assistantMessageId,omitempty"`
 	ModelProfileID     string     `json:"modelProfileId"`
+	ModelID            string     `json:"modelId"`
 	Status             RunStatus  `json:"status"`
 	ErrorCode          string     `json:"errorCode,omitempty"`
 	ErrorMessage       string     `json:"errorMessage,omitempty"`

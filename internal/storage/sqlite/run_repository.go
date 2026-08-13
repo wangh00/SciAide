@@ -28,8 +28,8 @@ func (r *RunRepository) CreateWithMessages(ctx context.Context, value chat.Run, 
 	if err := insertMessage(ctx, tx, assistantMessage); err != nil {
 		return err
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO runs(id, conversation_id, user_message_id, assistant_message_id, model_profile_id, status, error_code, error_message, input_tokens, output_tokens, finish_reason, created_at, started_at, completed_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		value.ID, value.ConversationID, value.UserMessageID, nullableString(value.AssistantMessageID), value.ModelProfileID, value.Status, value.ErrorCode, value.ErrorMessage, value.InputTokens, value.OutputTokens, value.FinishReason, formatTime(value.CreatedAt), nullableTime(value.StartedAt), nullableTime(value.CompletedAt), formatTime(value.UpdatedAt))
+	_, err = tx.ExecContext(ctx, `INSERT INTO runs(id, conversation_id, user_message_id, assistant_message_id, model_profile_id, model_id, status, error_code, error_message, input_tokens, output_tokens, finish_reason, created_at, started_at, completed_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		value.ID, value.ConversationID, value.UserMessageID, nullableString(value.AssistantMessageID), value.ModelProfileID, value.ModelID, value.Status, value.ErrorCode, value.ErrorMessage, value.InputTokens, value.OutputTokens, value.FinishReason, formatTime(value.CreatedAt), nullableTime(value.StartedAt), nullableTime(value.CompletedAt), formatTime(value.UpdatedAt))
 	if err != nil {
 		return fmt.Errorf("insert run: %w", err)
 	}
@@ -40,7 +40,7 @@ func (r *RunRepository) CreateWithMessages(ctx context.Context, value chat.Run, 
 }
 
 func (r *RunRepository) Get(ctx context.Context, id string) (chat.Run, error) {
-	return scanRun(r.db.QueryRowContext(ctx, `SELECT id, conversation_id, user_message_id, COALESCE(assistant_message_id, ''), model_profile_id, status, error_code, error_message, input_tokens, output_tokens, finish_reason, created_at, started_at, completed_at, updated_at FROM runs WHERE id = ?`, id))
+	return scanRun(r.db.QueryRowContext(ctx, `SELECT id, conversation_id, user_message_id, COALESCE(assistant_message_id, ''), model_profile_id, model_id, status, error_code, error_message, input_tokens, output_tokens, finish_reason, created_at, started_at, completed_at, updated_at FROM runs WHERE id = ?`, id))
 }
 
 func (r *RunRepository) Update(ctx context.Context, value chat.Run) error {
@@ -114,7 +114,7 @@ func scanRun(row rowScanner) (chat.Run, error) {
 	var value chat.Run
 	var createdAt, updatedAt string
 	var startedAt, completedAt sql.NullString
-	if err := row.Scan(&value.ID, &value.ConversationID, &value.UserMessageID, &value.AssistantMessageID, &value.ModelProfileID, &value.Status,
+	if err := row.Scan(&value.ID, &value.ConversationID, &value.UserMessageID, &value.AssistantMessageID, &value.ModelProfileID, &value.ModelID, &value.Status,
 		&value.ErrorCode, &value.ErrorMessage, &value.InputTokens, &value.OutputTokens, &value.FinishReason, &createdAt, &startedAt, &completedAt, &updatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return chat.Run{}, fmt.Errorf("run not found")

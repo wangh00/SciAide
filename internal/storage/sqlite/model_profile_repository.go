@@ -42,11 +42,25 @@ func (r *ModelProfileRepository) Save(ctx context.Context, value modelprofile.Pr
 	if err != nil {
 		return fmt.Errorf("upsert model profile: %w", err)
 	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM model_profile_models WHERE profile_id = ?`, value.ID); err != nil {
+		return fmt.Errorf("replace profile models: %w", err)
+	}
+	for _, item := range value.Models {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO model_profile_models(profile_id, model_id, owned_by, enabled, is_default, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			value.ID, item.ID, item.OwnedBy, item.Enabled, item.IsDefault, formatTime(value.CreatedAt), formatTime(value.UpdatedAt)); err != nil {
+			return fmt.Errorf("insert profile model: %w", err)
+		}
+	}
 	return tx.Commit()
 }
 
 func (r *ModelProfileRepository) Get(ctx context.Context, id string) (modelprofile.Profile, error) {
-	return scanModelProfile(r.db.QueryRowContext(ctx, `SELECT id, name, provider_type, base_url, model_id, secret_ref, timeout_seconds, temperature, max_output_tokens, custom_headers_json, enabled, is_default, created_at, updated_at FROM model_profiles WHERE id = ?`, id))
+	value, err := scanModelProfile(r.db.QueryRowContext(ctx, `SELECT id, name, provider_type, base_url, model_id, secret_ref, timeout_seconds, temperature, max_output_tokens, custom_headers_json, enabled, is_default, created_at, updated_at FROM model_profiles WHERE id = ?`, id))
+	if err != nil {
+		return value, err
+	}
+	value.Models, err = r.listModels(ctx, value.ID, value.ModelID)
+	return value, err
 }
 
 func (r *ModelProfileRepository) List(ctx context.Context) ([]modelprofile.Profile, error) {
@@ -54,7 +68,6 @@ func (r *ModelProfileRepository) List(ctx context.Context) ([]modelprofile.Profi
 	if err != nil {
 		return nil, fmt.Errorf("list model profiles: %w", err)
 	}
-	defer rows.Close()
 	values := make([]modelprofile.Profile, 0)
 	for rows.Next() {
 		value, err := scanModelProfile(rows)
@@ -63,12 +76,62 @@ func (r *ModelProfileRepository) List(ctx context.Context) ([]modelprofile.Profi
 		}
 		values = append(values, value)
 	}
-	return values, rows.Err()
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	// Store uses one SQLite connection, so the profile cursor must be closed
+	// before loading child rows.
+	for index := range values {
+		values[index].Models, err = r.listModels(ctx, values[index].ID, values[index].ModelID)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return values, nil
 }
 
 func (r *ModelProfileRepository) Delete(ctx context.Context, id string) error {
-	_, err := r.db.ExecContext(ctx, `DELETE FROM model_profiles WHERE id = ?`, id)
+	var referenced int
+	if err := r.db.QueryRowContext(ctx, `SELECT count(*) FROM runs WHERE model_profile_id = ?`, id).Scan(&referenced); err != nil {
+		return fmt.Errorf("check model profile references: %w", err)
+	}
+	if referenced > 0 {
+		return fmt.Errorf("model profile is referenced by chat history; disable it instead of deleting it")
+	}
+	result, err := r.db.ExecContext(ctx, `DELETE FROM model_profiles WHERE id = ?`, id)
+	if err == nil {
+		if affected, _ := result.RowsAffected(); affected == 0 {
+			return fmt.Errorf("model profile not found")
+		}
+	}
 	return err
+}
+
+func (r *ModelProfileRepository) listModels(ctx context.Context, profileID, legacyDefault string) ([]modelprofile.ProfileModel, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT model_id, owned_by, enabled, is_default FROM model_profile_models WHERE profile_id = ? ORDER BY is_default DESC, model_id`, profileID)
+	if err != nil {
+		return nil, fmt.Errorf("list profile models: %w", err)
+	}
+	defer rows.Close()
+	values := make([]modelprofile.ProfileModel, 0)
+	for rows.Next() {
+		var value modelprofile.ProfileModel
+		if err := rows.Scan(&value.ID, &value.OwnedBy, &value.Enabled, &value.IsDefault); err != nil {
+			return nil, err
+		}
+		values = append(values, value)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(values) == 0 && legacyDefault != "" {
+		values = append(values, modelprofile.ProfileModel{ID: legacyDefault, Enabled: true, IsDefault: true})
+	}
+	return values, nil
 }
 
 func scanModelProfile(row rowScanner) (modelprofile.Profile, error) {

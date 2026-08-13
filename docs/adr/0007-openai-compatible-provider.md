@@ -11,4 +11,4 @@ Adapter 解析 SSE，规范化文本、Usage、FinishReason 和完成事件。�
 
 连接测试调用 `{base_url}/models`。自定义 Header 仅允许非敏感值；Authorization、API-Key、Cookie、Token 及 CRLF 注入会在应用层被拒绝。
 
-模型配置页可在保存前使用当前 Base URL 和临时输入的 Key 请求模型列表，也可对已保存 Profile 使用 SecretStore 中的 Key。模型列表只在当前界面内存中展示，不写入数据库；服务未实现 `/models`、返回空列表或协议不兼容时，用户仍可手动填写 Model ID。
+模型配置页可在保存前使用当前 Base URL 和临时输入的 Key 请求模型列表，也可对已保存 Profile 使用 SecretStore 中的 Key。发现结果先在当前界面内存中展示，用户勾选的多个模型保存到 `model_profile_models`；所有模型共用该 Profile 的 Base URL 与 SecretStore Key。服务未实现 `/models`、返回空列表或协议不兼容时，用户仍可手动添加多个 Model ID。每次 Run 保存实际选择的 `model_id` 快照。

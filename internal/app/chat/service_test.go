@@ -66,16 +66,21 @@ func (m *memoryRepo) Append(_ context.Context, event events.Envelope) error {
 
 type resolver struct{ model model.ChatModel }
 
-func (r resolver) Resolve(context.Context, string) (model.ChatModel, error) { return r.model, nil }
+func (r resolver) Resolve(context.Context, string, string) (model.ChatModel, error) {
+	return r.model, nil
+}
 
 func TestServiceCompletesAndPersistsBeforeTerminalEvent(t *testing.T) {
 	repo := &memoryRepo{}
 	provider := fake.New([]fake.Step{{Event: model.Event{Type: model.EventTextDelta, Text: "科研"}}, {Event: model.Event{Type: model.EventTextDelta, Text: "助手"}}, {Event: model.Event{Type: model.EventDone, FinishReason: "stop"}}})
 	service := NewService(repo, repo, repo, nil, resolver{model: provider})
 	defer service.Close()
-	run, err := service.Start(context.Background(), StartCommand{ConversationID: "conversation", ModelProfileID: "profile", Text: "你好"})
+	run, err := service.Start(context.Background(), StartCommand{ConversationID: "conversation", ModelProfileID: "profile", ModelID: "fixture", Text: "你好"})
 	if err != nil {
 		t.Fatalf("Start() error=%v", err)
+	}
+	if run.ModelID != "fixture" {
+		t.Fatalf("run model snapshot=%q", run.ModelID)
 	}
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {

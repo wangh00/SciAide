@@ -48,6 +48,11 @@ func New(options Options) (*Application, error) {
 	if err != nil {
 		return nil, err
 	}
+	if options.RootDir == "" && os.Getenv("SCIAIDE_HOME") == "" {
+		if _, err := appdirs.MigrateLegacy("SciAide", dirs); err != nil {
+			return nil, fmt.Errorf("migrate legacy application data: %w", err)
+		}
+	}
 	if err := dirs.Ensure(); err != nil {
 		return nil, err
 	}
@@ -66,7 +71,11 @@ func New(options Options) (*Application, error) {
 		return fail(fmt.Errorf("open storage: %w", err))
 	}
 	lifecycle := wailstransport.NewLifecycleContext()
-	projectService := project.NewService(sqlite.NewProjectRepository(store.DB()))
+	projectService := project.NewService(sqlite.NewProjectRepository(store.DB()), dirs.Workspaces, dirs.Trash)
+	if err := projectService.ReconcileWorkspacePaths(context.Background()); err != nil {
+		_ = store.Close()
+		return fail(fmt.Errorf("reconcile project workspaces: %w", err))
+	}
 	conversationRepository := sqlite.NewConversationRepository(store.DB())
 	conversationService := conversation.NewService(conversationRepository)
 	profileRepository := sqlite.NewModelProfileRepository(store.DB())

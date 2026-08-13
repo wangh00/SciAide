@@ -15,11 +15,15 @@ import (
 const ProviderOpenAICompatible = "openai_compatible"
 
 type Profile struct {
-	ID               string            `json:"id"`
-	Name             string            `json:"name"`
-	ProviderType     string            `json:"providerType"`
-	BaseURL          string            `json:"baseUrl"`
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	ProviderType string `json:"providerType"`
+	BaseURL      string `json:"baseUrl"`
+	// ModelID is the default model kept for backwards compatibility with P1
+	// clients and the original model_profiles schema. Models is the source of
+	// truth for all selectable models on this connection.
 	ModelID          string            `json:"modelId"`
+	Models           []ProfileModel    `json:"models"`
 	SecretRef        string            `json:"-"`
 	SecretConfigured bool              `json:"secretConfigured"`
 	SecretMasked     string            `json:"secretMasked,omitempty"`
@@ -33,11 +37,19 @@ type Profile struct {
 	UpdatedAt        time.Time         `json:"updatedAt"`
 }
 
+type ProfileModel struct {
+	ID        string `json:"id"`
+	OwnedBy   string `json:"ownedBy,omitempty"`
+	Enabled   bool   `json:"enabled"`
+	IsDefault bool   `json:"isDefault"`
+}
+
 type SaveCommand struct {
 	ID              string            `json:"id"`
 	Name            string            `json:"name"`
 	BaseURL         string            `json:"baseUrl"`
 	ModelID         string            `json:"modelId"`
+	Models          []ProfileModel    `json:"models"`
 	APIKey          string            `json:"apiKey"`
 	TimeoutSeconds  int               `json:"timeoutSeconds"`
 	Temperature     *float64          `json:"temperature,omitempty"`
@@ -114,7 +126,7 @@ func (s *Service) Save(ctx context.Context, cmd SaveCommand) (Profile, error) {
 	value.Name = strings.TrimSpace(cmd.Name)
 	value.ProviderType = ProviderOpenAICompatible
 	value.BaseURL = strings.TrimRight(strings.TrimSpace(cmd.BaseURL), "/")
-	value.ModelID = strings.TrimSpace(cmd.ModelID)
+	value.Models, value.ModelID = normalizeModels(cmd.Models, cmd.ModelID)
 	value.TimeoutSeconds = cmd.TimeoutSeconds
 	value.Temperature = cmd.Temperature
 	value.MaxOutputTokens = cmd.MaxOutputTokens
@@ -246,8 +258,9 @@ func (s *Service) decorate(ctx context.Context, value Profile) (Profile, error) 
 }
 
 func validateCommand(cmd SaveCommand) error {
-	if strings.TrimSpace(cmd.Name) == "" || strings.TrimSpace(cmd.ModelID) == "" {
-		return fmt.Errorf("profile name and model id are required")
+	models, _ := normalizeModels(cmd.Models, cmd.ModelID)
+	if strings.TrimSpace(cmd.Name) == "" || len(models) == 0 {
+		return fmt.Errorf("profile name and at least one model id are required")
 	}
 	if err := validateBaseURL(cmd.BaseURL); err != nil {
 		return err
@@ -271,6 +284,60 @@ func validateCommand(cmd SaveCommand) error {
 		}
 	}
 	return nil
+}
+
+func normalizeModels(input []ProfileModel, legacyDefault string) ([]ProfileModel, string) {
+	legacyDefault = strings.TrimSpace(legacyDefault)
+	if len(input) == 0 && legacyDefault != "" {
+		input = []ProfileModel{{ID: legacyDefault, Enabled: true, IsDefault: true}}
+	}
+	models := make([]ProfileModel, 0, len(input))
+	indexes := make(map[string]int, len(input))
+	for _, item := range input {
+		item.ID = strings.TrimSpace(item.ID)
+		item.OwnedBy = strings.TrimSpace(item.OwnedBy)
+		if item.ID == "" {
+			continue
+		}
+		if index, exists := indexes[item.ID]; exists {
+			models[index].OwnedBy = item.OwnedBy
+			models[index].Enabled = models[index].Enabled || item.Enabled
+			models[index].IsDefault = models[index].IsDefault || item.IsDefault
+			continue
+		}
+		indexes[item.ID] = len(models)
+		models = append(models, item)
+	}
+	defaultID := ""
+	if index, exists := indexes[legacyDefault]; exists && models[index].Enabled {
+		defaultID = legacyDefault
+	}
+	if defaultID == "" {
+		for _, item := range models {
+			if item.Enabled && item.IsDefault {
+				defaultID = item.ID
+				break
+			}
+		}
+	}
+	if defaultID == "" {
+		for _, item := range models {
+			if item.Enabled {
+				defaultID = item.ID
+				break
+			}
+		}
+	}
+	if defaultID == "" && len(models) > 0 {
+		// A profile with no enabled models cannot be used. Enabling the first
+		// model makes imports from early P1 clients deterministic.
+		models[0].Enabled = true
+		defaultID = models[0].ID
+	}
+	for index := range models {
+		models[index].IsDefault = models[index].ID == defaultID
+	}
+	return models, defaultID
 }
 
 func validateBaseURL(value string) error {

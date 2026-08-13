@@ -733,6 +733,7 @@ approvals
 permission_grants
 
 model_profiles
+model_profile_models
 mcp_servers
 installed_skills
 project_skills
@@ -768,19 +769,21 @@ PRAGMA busy_timeout = 5000;
 运行数据不能写入安装目录或源码中的 `data/`：
 
 ```text
-OS AppData/SciAide/
+~/.sciaide/
 ├── config/        # 非敏感配置
-├── data/          # SQLite
+├── data/          # SQLite 与默认托管 Workspace
+│   └── workspaces/<project-id>/
 ├── cache/         # 可重建缓存和模型临时数据
 ├── logs/          # 脱敏日志
 ├── skills/        # 已安装 Skill
 ├── mcp/           # MCP 运行元数据，不存明文密钥
 └── backups/
+    └── trash/     # 被移除的托管 Workspace
 
 用户选择的 Workspace/
 ├── sources/
 ├── artifacts/
-└── project.sciaide.json
+└── .sciaide-workspace.json
 ```
 
 配置目录、数据目录、缓存目录和 Workspace 必须分开，以支持清缓存而不丢数据。
@@ -1098,16 +1101,17 @@ sciaide/
 
 ### P1：模型配置与流式聊天闭环（2 周）
 
-> 实施状态（2026-08-12）：首个纵向版本已完成；进入真实兼容服务联调与退出标准验收。
+> 实施状态（2026-08-13）：P1 收尾完成；进入真实兼容服务联调与退出标准验收。
 
-交互补充：OpenAI-compatible Profile 优先通过 `{base_url}/models` 获取模型列表并支持搜索选择；若服务未实现该端点，必须允许用户手动填写 Model ID，不能阻塞配置。
+交互补充：OpenAI-compatible Profile 优先通过 `{base_url}/models` 获取模型列表并支持搜索、多选；若服务未实现该端点，必须允许用户手动添加多个 Model ID，不能阻塞配置。同一 Profile 的模型共用 Base URL 与 Key，聊天时选择具体模型，Run 保存实际 `model_id` 快照。
 
 **目标：** 用户能安全配置自定义模型并完成稳定多轮对话。
 
 交付物：
 
 - Project、Conversation、Message/MessagePart。
-- Model Profile CRUD、连接测试和能力显示。
+- Model Profile CRUD、多模型关联、连接测试和能力显示。
+- 默认/外部 Workspace，以及项目与会话的安全移除。
 - OS SecretStore，前端仅显示密钥状态。
 - 至少一个 OpenAI-compatible Adapter；其他 Provider 后续按契约增加。
 - 流式回答、停止生成、Usage、FinishReason。

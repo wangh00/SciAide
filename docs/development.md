@@ -69,7 +69,7 @@ npm --version
 
 ## 运行数据
 
-生产默认使用操作系统应用数据目录。开发时可隔离到仓库：
+生产默认使用 `C:\Users\<用户名>\.sciaide`，其中数据库位于 `data/sciaide.db`，默认项目目录位于 `data/workspaces/<project-id>`。开发时可隔离到仓库：
 
 ```powershell
 $env:SCIAIDE_HOME = Join-Path $PWD ".sciaide-dev"
