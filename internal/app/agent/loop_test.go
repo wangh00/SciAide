@@ -263,6 +263,20 @@ func TestAgentLoopCompletesFakeModelToolRoundTrip(t *testing.T) {
 	}
 }
 
+func TestAgentLoopPersistsReportedCacheUsage(t *testing.T) {
+	usage := model.Usage{InputTokens: 120, OutputTokens: 18, CachedInputTokens: 80, CacheWriteTokens: 12, CacheDetailsReported: true}
+	script := []fake.Step{{Event: model.Event{Type: model.EventUsage, Usage: &usage}}, {Event: model.Event{Type: model.EventDone, FinishReason: "stop"}}}
+	loop, state, _ := newLoopFixture(t, nil, script)
+	if outcome := loop.Run(context.Background(), "run"); outcome != OutcomeCompleted {
+		t.Fatalf("outcome = %s", outcome)
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.run.InputTokens != 120 || state.run.OutputTokens != 18 || state.run.CachedInputTokens != 80 || state.run.CacheWriteTokens != 12 || state.run.CacheReportedTurns != 1 || state.run.CacheHitTurns != 1 {
+		t.Fatalf("cache usage run = %#v", state.run)
+	}
+}
+
 func TestAgentLoopPausesBeforeExecutingApprovalTool(t *testing.T) {
 	first := []fake.Step{{Event: model.Event{Type: model.EventToolCall, ToolCall: &model.ToolCall{ID: "provider-call", Name: "builtin.fixture", Arguments: json.RawMessage(`{"query":"paper"}`)}}}, {Event: model.Event{Type: model.EventDone, FinishReason: "tool_calls"}}}
 	loop, state, _ := newLoopFixture(t, nil, first)

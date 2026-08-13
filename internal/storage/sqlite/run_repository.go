@@ -31,8 +31,8 @@ func (r *RunRepository) CreateWithMessages(ctx context.Context, value chat.Run, 
 	if err := insertMessage(ctx, tx, assistantMessage); err != nil {
 		return err
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO runs(id, conversation_id, user_message_id, assistant_message_id, model_profile_id, model_id, permission_mode, status, error_code, error_message, input_tokens, output_tokens, model_turns, finish_reason, created_at, started_at, completed_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		value.ID, value.ConversationID, value.UserMessageID, nullableString(value.AssistantMessageID), value.ModelProfileID, value.ModelID, value.PermissionMode, value.Status, value.ErrorCode, value.ErrorMessage, value.InputTokens, value.OutputTokens, value.ModelTurns, value.FinishReason, formatTime(value.CreatedAt), nullableTime(value.StartedAt), nullableTime(value.CompletedAt), formatTime(value.UpdatedAt))
+	_, err = tx.ExecContext(ctx, `INSERT INTO runs(id, conversation_id, user_message_id, assistant_message_id, model_profile_id, model_id, permission_mode, status, error_code, error_message, input_tokens, output_tokens, cached_input_tokens, cache_write_tokens, cache_reported_turns, cache_hit_turns, model_turns, finish_reason, created_at, started_at, completed_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		value.ID, value.ConversationID, value.UserMessageID, nullableString(value.AssistantMessageID), value.ModelProfileID, value.ModelID, value.PermissionMode, value.Status, value.ErrorCode, value.ErrorMessage, value.InputTokens, value.OutputTokens, value.CachedInputTokens, value.CacheWriteTokens, value.CacheReportedTurns, value.CacheHitTurns, value.ModelTurns, value.FinishReason, formatTime(value.CreatedAt), nullableTime(value.StartedAt), nullableTime(value.CompletedAt), formatTime(value.UpdatedAt))
 	if err != nil {
 		return fmt.Errorf("insert run: %w", err)
 	}
@@ -87,8 +87,8 @@ func (r *RunRepository) IncrementModelTurns(ctx context.Context, runID string, m
 }
 
 func (r *RunRepository) Update(ctx context.Context, value chat.Run) error {
-	result, err := r.db.ExecContext(ctx, `UPDATE runs SET assistant_message_id=?, status=?, error_code=?, error_message=?, input_tokens=?, output_tokens=?, finish_reason=?, started_at=?, completed_at=?, updated_at=? WHERE id=? AND status NOT IN ('completed','failed','cancelled','interrupted')`,
-		nullableString(value.AssistantMessageID), value.Status, value.ErrorCode, value.ErrorMessage, value.InputTokens, value.OutputTokens, value.FinishReason, nullableTime(value.StartedAt), nullableTime(value.CompletedAt), formatTime(value.UpdatedAt), value.ID)
+	result, err := r.db.ExecContext(ctx, `UPDATE runs SET assistant_message_id=?, status=?, error_code=?, error_message=?, input_tokens=?, output_tokens=?, cached_input_tokens=?, cache_write_tokens=?, cache_reported_turns=?, cache_hit_turns=?, finish_reason=?, started_at=?, completed_at=?, updated_at=? WHERE id=? AND status NOT IN ('completed','failed','cancelled','interrupted')`,
+		nullableString(value.AssistantMessageID), value.Status, value.ErrorCode, value.ErrorMessage, value.InputTokens, value.OutputTokens, value.CachedInputTokens, value.CacheWriteTokens, value.CacheReportedTurns, value.CacheHitTurns, value.FinishReason, nullableTime(value.StartedAt), nullableTime(value.CompletedAt), formatTime(value.UpdatedAt), value.ID)
 	if err != nil {
 		return fmt.Errorf("update run: %w", err)
 	}
@@ -303,6 +303,23 @@ func (r *RunRepository) AppendNext(ctx context.Context, event events.Envelope) (
 	return event, nil
 }
 
+func (r *RunRepository) UsageStatistics(ctx context.Context, modelProfileID string) (chat.UsageStatistics, error) {
+	result := chat.UsageStatistics{ModelProfileID: modelProfileID}
+	err := r.db.QueryRowContext(ctx, `
+		SELECT COUNT(*), COALESCE(SUM(model_turns),0), COALESCE(SUM(input_tokens),0),
+		       COALESCE(SUM(output_tokens),0), COALESCE(SUM(cached_input_tokens),0),
+		       COALESCE(SUM(cache_write_tokens),0), COALESCE(SUM(cache_reported_turns),0),
+		       COALESCE(SUM(cache_hit_turns),0)
+		FROM runs WHERE model_profile_id=?`, modelProfileID).Scan(
+		&result.RunCount, &result.ModelTurns, &result.InputTokens, &result.OutputTokens,
+		&result.CachedInputTokens, &result.CacheWriteTokens, &result.CacheReportedTurns,
+		&result.CacheHitTurns)
+	if err != nil {
+		return chat.UsageStatistics{}, fmt.Errorf("read model usage statistics: %w", err)
+	}
+	return result, nil
+}
+
 func appendNextEventTx(ctx context.Context, tx *sql.Tx, event *events.Envelope) error {
 	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(sequence), 0) + 1 FROM run_events WHERE aggregate_id = ?`, event.AggregateID).Scan(&event.Sequence); err != nil {
 		return fmt.Errorf("read next run event sequence: %w", err)
@@ -341,7 +358,7 @@ func scanRun(row rowScanner) (chat.Run, error) {
 	var createdAt, updatedAt string
 	var startedAt, completedAt sql.NullString
 	if err := row.Scan(&value.ID, &value.ConversationID, &value.UserMessageID, &value.AssistantMessageID, &value.ModelProfileID, &value.ModelID, &value.PermissionMode, &value.Status,
-		&value.ErrorCode, &value.ErrorMessage, &value.InputTokens, &value.OutputTokens, &value.ModelTurns, &value.FinishReason, &createdAt, &startedAt, &completedAt, &updatedAt); err != nil {
+		&value.ErrorCode, &value.ErrorMessage, &value.InputTokens, &value.OutputTokens, &value.CachedInputTokens, &value.CacheWriteTokens, &value.CacheReportedTurns, &value.CacheHitTurns, &value.ModelTurns, &value.FinishReason, &createdAt, &startedAt, &completedAt, &updatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return chat.Run{}, fmt.Errorf("run not found: %w", sql.ErrNoRows)
 		}
@@ -373,7 +390,7 @@ func scanRun(row rowScanner) (chat.Run, error) {
 	return value, nil
 }
 
-const runSelect = `SELECT id, conversation_id, user_message_id, COALESCE(assistant_message_id, ''), model_profile_id, model_id, permission_mode, status, error_code, error_message, input_tokens, output_tokens, model_turns, finish_reason, created_at, started_at, completed_at, updated_at FROM runs`
+const runSelect = `SELECT id, conversation_id, user_message_id, COALESCE(assistant_message_id, ''), model_profile_id, model_id, permission_mode, status, error_code, error_message, input_tokens, output_tokens, cached_input_tokens, cache_write_tokens, cache_reported_turns, cache_hit_turns, model_turns, finish_reason, created_at, started_at, completed_at, updated_at FROM runs`
 
 func nullableString(value string) any {
 	if value == "" {

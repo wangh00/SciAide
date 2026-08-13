@@ -360,6 +360,18 @@ func (l *Loop) receiveTurn(ctx context.Context, run *chat.Run, stream model.Stre
 		if event.Type == model.EventUsage && event.Usage != nil {
 			run.InputTokens += event.Usage.InputTokens
 			run.OutputTokens += event.Usage.OutputTokens
+			run.CachedInputTokens += event.Usage.CachedInputTokens
+			run.CacheWriteTokens += event.Usage.CacheWriteTokens
+			if event.Usage.CacheDetailsReported {
+				run.CacheReportedTurns++
+				if event.Usage.CachedInputTokens > 0 {
+					run.CacheHitTurns++
+				}
+			}
+			run.UpdatedAt = l.now()
+			if err := l.runs.Update(context.Background(), *run); err != nil {
+				return turn, err
+			}
 			l.observer.UsageUpdated(*run, *event.Usage)
 		}
 		if event.FinishReason != "" {

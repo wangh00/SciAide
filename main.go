@@ -7,6 +7,7 @@ import (
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
+	"github.com/wailsapp/wails/v2/pkg/options/windows"
 	"github.com/wangh00/SciAide/internal/bootstrap"
 )
 
@@ -26,6 +27,11 @@ func main() {
 		Height:    800,
 		MinWidth:  960,
 		MinHeight: 640,
+		Frameless: true,
+		Windows: &windows.Options{
+			Theme:                             windows.Light,
+			DisableFramelessWindowDecorations: false,
+		},
 		AssetServer: &assetserver.Options{
 			Assets: assets,
 		},

@@ -339,6 +339,14 @@ func (s *Service) LatestSnapshot(ctx context.Context, conversationID string) (*S
 	return &snapshot, nil
 }
 
+func (s *Service) UsageStatistics(ctx context.Context, modelProfileID string) (UsageStatistics, error) {
+	modelProfileID = strings.TrimSpace(modelProfileID)
+	if modelProfileID == "" {
+		return UsageStatistics{}, fmt.Errorf("model profile id is required")
+	}
+	return s.runs.UsageStatistics(ctx, modelProfileID)
+}
+
 func (s *Service) Close() {
 	s.mu.Lock()
 	s.closing = true

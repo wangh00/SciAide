@@ -388,7 +388,8 @@ func (s *stream) Recv() (model.Event, error) {
 			}
 		}
 		if chunk.Usage != nil {
-			s.queue = append(s.queue, model.Event{Type: model.EventUsage, Usage: &model.Usage{InputTokens: chunk.Usage.PromptTokens, OutputTokens: chunk.Usage.CompletionTokens}})
+			usage := chunk.Usage.normalized()
+			s.queue = append(s.queue, model.Event{Type: model.EventUsage, Usage: &usage})
 		}
 		if len(s.queue) > 0 {
 			return s.pop(), nil
@@ -499,10 +500,43 @@ type responseChunk struct {
 		} `json:"delta"`
 		FinishReason *string `json:"finish_reason"`
 	} `json:"choices"`
-	Usage *struct {
-		PromptTokens     int `json:"prompt_tokens"`
-		CompletionTokens int `json:"completion_tokens"`
-	} `json:"usage"`
+	Usage *responseUsage `json:"usage"`
+}
+
+type responseUsage struct {
+	PromptTokens             int  `json:"prompt_tokens"`
+	CompletionTokens         int  `json:"completion_tokens"`
+	PromptCacheHitTokens     *int `json:"prompt_cache_hit_tokens"`
+	PromptCacheMissTokens    *int `json:"prompt_cache_miss_tokens"`
+	CacheReadInputTokens     *int `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens *int `json:"cache_creation_input_tokens"`
+	PromptTokensDetails      *struct {
+		CachedTokens int `json:"cached_tokens"`
+	} `json:"prompt_tokens_details"`
+}
+
+func (u responseUsage) normalized() model.Usage {
+	result := model.Usage{InputTokens: u.PromptTokens, OutputTokens: u.CompletionTokens}
+	if u.PromptTokensDetails != nil {
+		result.CacheDetailsReported = true
+		result.CachedInputTokens = u.PromptTokensDetails.CachedTokens
+	}
+	if u.PromptCacheHitTokens != nil {
+		result.CacheDetailsReported = true
+		result.CachedInputTokens = max(result.CachedInputTokens, *u.PromptCacheHitTokens)
+	}
+	if u.PromptCacheMissTokens != nil {
+		result.CacheDetailsReported = true
+	}
+	if u.CacheReadInputTokens != nil {
+		result.CacheDetailsReported = true
+		result.CachedInputTokens = max(result.CachedInputTokens, *u.CacheReadInputTokens)
+	}
+	if u.CacheCreationInputTokens != nil {
+		result.CacheDetailsReported = true
+		result.CacheWriteTokens = *u.CacheCreationInputTokens
+	}
+	return result
 }
 
 type responseToolCall struct {

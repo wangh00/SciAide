@@ -73,8 +73,11 @@ type ToolCall struct {
 }
 
 type Usage struct {
-	InputTokens  int `json:"inputTokens"`
-	OutputTokens int `json:"outputTokens"`
+	InputTokens          int  `json:"inputTokens"`
+	OutputTokens         int  `json:"outputTokens"`
+	CachedInputTokens    int  `json:"cachedInputTokens"`
+	CacheWriteTokens     int  `json:"cacheWriteTokens"`
+	CacheDetailsReported bool `json:"cacheDetailsReported"`
 }
 
 type Stream interface {

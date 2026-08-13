@@ -8,9 +8,16 @@ declare global {
         callback: RuntimeEventCallback,
         maxCallbacks: number,
       ) => () => void;
+	  WindowMinimise?: () => void;
+	  WindowToggleMaximise?: () => void;
+	  Quit?: () => void;
     };
   }
 }
+
+export function minimiseWindow(): void { window.runtime?.WindowMinimise?.(); }
+export function toggleMaximiseWindow(): void { window.runtime?.WindowToggleMaximise?.(); }
+export function quitApplication(): void { window.runtime?.Quit?.(); }
 
 // Wails injects window.runtime before the React application starts. Keeping
 // this tiny bridge in source control means TypeScript and Vite do not depend on
@@ -27,4 +34,3 @@ export function eventsOn<T>(
   }
   return subscribe(eventName, (payload: unknown) => callback(payload as T), -1);
 }
-

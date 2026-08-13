@@ -64,6 +64,44 @@ func TestChatSchemaPersistsAndRecoversActiveRun(t *testing.T) {
 	}
 }
 
+func TestRunRepositoryPersistsAndAggregatesCacheUsage(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "cache-usage.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	root := t.TempDir()
+	createdProject, err := project.NewService(NewProjectRepository(store.DB()), filepath.Join(root, "workspaces"), filepath.Join(root, "trash")).Create(ctx, "Cache", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	createdConversation, err := conversation.NewService(NewConversationRepository(store.DB())).Create(ctx, createdProject.ID, "usage")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	profile := modelprofile.Profile{ID: "cache-profile", Name: "fixture", ProviderType: modelprofile.ProviderOpenAICompatible, BaseURL: "https://example.test/v1", ModelID: "fixture", Models: []modelprofile.ProfileModel{{ID: "fixture", Enabled: true, IsDefault: true}}, SecretRef: "cache-secret", TimeoutSeconds: 60, CustomHeaders: map[string]string{}, Enabled: true, IsDefault: true, CreatedAt: now, UpdatedAt: now}
+	if err := NewModelProfileRepository(store.DB()).Save(ctx, profile); err != nil {
+		t.Fatal(err)
+	}
+	run := chat.Run{ID: "cache-run", ConversationID: createdConversation.ID, UserMessageID: "cache-user", AssistantMessageID: "cache-assistant", ModelProfileID: profile.ID, ModelID: "fixture", Status: chat.RunRunning, InputTokens: 100, OutputTokens: 20, CachedInputTokens: 64, CacheWriteTokens: 12, CacheReportedTurns: 2, CacheHitTurns: 1, ModelTurns: 2, CreatedAt: now, StartedAt: &now, UpdatedAt: now}
+	user := conversation.Message{ID: run.UserMessageID, ConversationID: createdConversation.ID, RunID: run.ID, Role: conversation.RoleUser, Status: conversation.MessageComplete, CreatedAt: now, UpdatedAt: now, Parts: []conversation.MessagePart{{ID: "cache-user-part", MessageID: run.UserMessageID, Type: "text", Text: "q", CreatedAt: now}}}
+	assistant := conversation.Message{ID: run.AssistantMessageID, ConversationID: createdConversation.ID, RunID: run.ID, Role: conversation.RoleAssistant, Status: conversation.MessageStreaming, CreatedAt: now.Add(time.Nanosecond), UpdatedAt: now, Parts: []conversation.MessagePart{{ID: "cache-assistant-part", MessageID: run.AssistantMessageID, Type: "text", CreatedAt: now}}}
+	repository := NewRunRepository(store.DB())
+	if err := repository.CreateWithMessages(ctx, run, user, assistant); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := repository.Get(ctx, run.ID)
+	if err != nil || loaded.CachedInputTokens != 64 || loaded.CacheReportedTurns != 2 || loaded.CacheHitTurns != 1 {
+		t.Fatalf("loaded run = %#v, err=%v", loaded, err)
+	}
+	statistics, err := repository.UsageStatistics(ctx, profile.ID)
+	if err != nil || statistics.RunCount != 1 || statistics.InputTokens != 100 || statistics.CachedInputTokens != 64 || statistics.CacheWriteTokens != 12 || statistics.CacheHitTurns != 1 {
+		t.Fatalf("statistics = %#v, err=%v", statistics, err)
+	}
+}
+
 func TestConversationMessagesKeepUserBeforeAssistantAtSameTimestamp(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(ctx, filepath.Join(t.TempDir(), "message-order.db"))

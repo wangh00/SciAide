@@ -36,6 +36,10 @@ type Run struct {
 	ErrorMessage       string                      `json:"errorMessage,omitempty"`
 	InputTokens        int                         `json:"inputTokens"`
 	OutputTokens       int                         `json:"outputTokens"`
+	CachedInputTokens  int                         `json:"cachedInputTokens"`
+	CacheWriteTokens   int                         `json:"cacheWriteTokens"`
+	CacheReportedTurns int                         `json:"cacheReportedTurns"`
+	CacheHitTurns      int                         `json:"cacheHitTurns"`
 	ModelTurns         int                         `json:"modelTurns"`
 	FinishReason       string                      `json:"finishReason,omitempty"`
 	CreatedAt          time.Time                   `json:"createdAt"`
@@ -52,6 +56,22 @@ type Repository interface {
 	IncrementModelTurns(ctx context.Context, runID string, maximum int, at time.Time) (Run, error)
 	CancelRun(ctx context.Context, runID, errorCode, errorMessage string, at time.Time, event events.Envelope) (Run, bool, error)
 	InterruptActive(ctx context.Context, at time.Time) (int64, error)
+	UsageStatistics(ctx context.Context, modelProfileID string) (UsageStatistics, error)
+}
+
+// UsageStatistics is derived from durable runs. A zero CacheReportedTurns
+// means the configured provider did not expose cache details, not necessarily
+// that its upstream prompt cache missed.
+type UsageStatistics struct {
+	ModelProfileID     string `json:"modelProfileId"`
+	RunCount           int    `json:"runCount"`
+	ModelTurns         int    `json:"modelTurns"`
+	InputTokens        int    `json:"inputTokens"`
+	OutputTokens       int    `json:"outputTokens"`
+	CachedInputTokens  int    `json:"cachedInputTokens"`
+	CacheWriteTokens   int    `json:"cacheWriteTokens"`
+	CacheReportedTurns int    `json:"cacheReportedTurns"`
+	CacheHitTurns      int    `json:"cacheHitTurns"`
 }
 
 type ConversationRepository interface {

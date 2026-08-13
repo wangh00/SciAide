@@ -35,7 +35,7 @@ func TestStreamNormalizesSSE(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"你好\"},\"finish_reason\":null}]}\n\n")
-		io.WriteString(w, "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2}}\n\n")
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2,\"prompt_tokens_details\":{\"cached_tokens\":2}}}\n\n")
 		io.WriteString(w, "data: [DONE]\n\n")
 	}))
 	defer server.Close()
@@ -50,12 +50,21 @@ func TestStreamNormalizesSSE(t *testing.T) {
 		t.Fatalf("text event = %#v, err=%v", textEvent, err)
 	}
 	usageEvent, err := stream.Recv()
-	if err != nil || usageEvent.Usage == nil || usageEvent.Usage.InputTokens != 3 {
+	if err != nil || usageEvent.Usage == nil || usageEvent.Usage.InputTokens != 3 || usageEvent.Usage.CachedInputTokens != 2 || !usageEvent.Usage.CacheDetailsReported {
 		t.Fatalf("usage event = %#v, err=%v", usageEvent, err)
 	}
 	doneEvent, err := stream.Recv()
 	if err != nil || doneEvent.Type != model.EventDone || doneEvent.FinishReason != "stop" {
 		t.Fatalf("done event = %#v, err=%v", doneEvent, err)
+	}
+}
+
+func TestResponseUsageNormalizesCompatibleCacheFields(t *testing.T) {
+	read, created, hit, miss := 13, 5, 11, 7
+	usage := responseUsage{PromptTokens: 30, CompletionTokens: 9, CacheReadInputTokens: &read, CacheCreationInputTokens: &created, PromptCacheHitTokens: &hit, PromptCacheMissTokens: &miss}
+	got := usage.normalized()
+	if got.InputTokens != 30 || got.OutputTokens != 9 || got.CachedInputTokens != 13 || got.CacheWriteTokens != 5 || !got.CacheDetailsReported {
+		t.Fatalf("normalized usage = %#v", got)
 	}
 }
 
