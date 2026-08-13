@@ -2,7 +2,7 @@
 
 面向科研工作者的本地优先桌面 AI Agent，支持自定义模型、工具调用、MCP、Skill、科研知识库和可信引用。
 
-当前阶段：**P2 Agent Loop、内置工具与权限系统**。
+当前阶段：**P3 MCP 接入**。
 
 ## 当前能力
 
@@ -19,6 +19,9 @@
 - P2 工具协议基线：ToolCall/ToolResult 状态机、参数 Schema 校验、审计事件与持久化
 - P2 权限基线：统一 ToolRegistry、精确资源 PolicyEngine、逐项 Approval、作用域 Grant 与重启恢复
 - P2 执行基线：有界 ToolExecutor、取消/超时/panic 隔离、Workspace PathGuard、列目录与 UTF-8 文本读取工具
+- P3 MCP：stdio / Streamable HTTP 配置、显式信任、initialize 与 Tools/Resources/Prompts 能力发现
+- MCP Tool 使用稳定的 `mcp.<namespace>.<tool>` 名称进入统一 ToolRegistry、Plan/Full Access 审批和 ToolExecutor
+- MCP stdio 仅继承最小环境；SecretEnv 明文保存在 Windows Credential Manager；Resource/Prompt 不自动注入上下文
 - 可脚本化 `FakeChatModel`、Provider Fixture 测试、威胁模型、ADR 和 CI
 
 ## 开发

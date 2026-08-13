@@ -4,12 +4,19 @@
 
 ### Added
 
+- 增加 MCP Server 配置与状态 UI，支持 stdio 和 Streamable HTTP。
+- 使用官方 Go MCP SDK 完成 initialize、协议/版本协商及 Tools、Resources、Prompts 分页发现。
+- MCP Tool 以稳定命名空间动态注册到统一 ToolRegistry，并复用现有 Schema、Plan/Full Access、ToolExecutor 和审计链路。
+- 支持 MCP SecretEnv 设置/清除，明文仅存 Windows Credential Manager，SQLite 只保存引用。
+- 增加能力列表变更刷新、异常断开状态恢复和启动时陈旧运行状态修复。
 - 完成 P2.5 会话级 `Plan` / `Full Access` 权限模式，并将模式快照持久化到每个 Run。
 - 增加审批卡片、ToolCall 时间线、最近 Run Snapshot 恢复与工具结果状态展示。
 - 支持停止当前 Run，以及通过 cancel-then-start 在同一会话中中断后继续。
 
 ### Changed
 
+- stdio 参数不经过 Shell，子进程仅继承最小 allowlist 环境；远程 MCP 默认要求 HTTPS，HTTP 仅允许回环地址。
+- MCP Resource/Prompt 只发现和展示，不自动注入模型上下文。
 - `Plan` 对每个 ToolCall 只审批一次；`Full Access` 自动放行已注册且通过工程边界校验的工具。
 - 风险等级仅用于提示和审计，不再限制用户选择；历史 PermissionGrant 不参与运行时决策。
 - 拒绝审批后将普通 denied ToolResult 回填模型，不由程序补写或改写模型回答。

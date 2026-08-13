@@ -15,6 +15,9 @@ type ToolResult = { status: string; text: string; truncated: boolean; meta: { du
 type ToolCall = { id: string; runId: string; toolName: string; toolVersion: string; arguments: unknown; status: string; risk: string; permissions: PermissionRequirement[]; errorMessage?: string; result?: ToolResult; createdAt: string; startedAt?: string; completedAt?: string };
 type Approval = { id: string; runId: string; toolCallId: string; toolName: string; toolVersion: string; permissionKind: string; resource: string; risk: string; status: string; reason: string };
 type RunSnapshot = { run: Run; messages: Message[]; toolCalls: ToolCall[]; pendingApprovals: Approval[] };
+type MCPTransport = "stdio" | "streamable_http";
+type MCPServer = { id: string; name: string; namespace: string; transport: MCPTransport; command: string; args: string[]; workingDir: string; url: string; headers: Record<string,string>; env: Record<string,string>; secretConfigured: Record<string,boolean>; enabled: boolean; autoStart: boolean; trust: "untrusted" | "user_trusted"; timeoutSeconds: number; status: string; protocolVersion?: string; serverVersion?: string; toolCount: number; resourceCount: number; promptCount: number; lastError?: string };
+type MCPCapabilities = { protocolVersion?: string; serverVersion?: string; tools: { originalName: string; qualifiedName: string; description: string; version: string }[]; resources: string[]; prompts: string[] };
 type Envelope = { aggregateId: string; type: string; payload: Record<string, unknown> };
 type CreateDialog = { kind: "project" | "conversation"; title: string; description: string; workspacePath: string } | null;
 
@@ -39,7 +42,7 @@ const first = <T,>(items: T[]) => items[0];
 const modelKey = (profileId: string, modelId: string) => `${profileId}\t${modelId}`;
 const splitModelKey = (value: string): [string, string] => { const index = value.indexOf("\t"); return index < 0 ? ["", ""] : [value.slice(0, index), value.slice(index + 1)]; };
 
-function Icon({ name, size = 18 }: { name: "spark" | "plus" | "chat" | "settings" | "shield" | "model" | "send" | "stop" | "search" | "refresh" | "folder" | "check" | "close" | "trash" | "tool"; size?: number }) {
+function Icon({ name, size = 18 }: { name: "spark" | "plus" | "chat" | "settings" | "shield" | "model" | "send" | "stop" | "search" | "refresh" | "folder" | "check" | "close" | "trash" | "tool" | "server"; size?: number }) {
   const paths: Record<typeof name, ReactNode> = {
     spark: <><path d="m12 2 1.35 4.15L17.5 7.5l-4.15 1.35L12 13l-1.35-4.15L6.5 7.5l4.15-1.35L12 2Z"/><path d="m5 14 .8 2.2L8 17l-2.2.8L5 20l-.8-2.2L2 17l2.2-.8L5 14Z"/></>,
     plus: <><path d="M12 5v14M5 12h14"/></>, chat: <path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4v8Z"/>,
@@ -47,7 +50,7 @@ function Icon({ name, size = 18 }: { name: "spark" | "plus" | "chat" | "settings
     shield: <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/>, model: <><rect x="3" y="3" width="18" height="18" rx="5"/><path d="M8 9h8M8 12h5M8 15h7"/></>,
     send: <><path d="m22 2-7 20-4-9-9-4 20-7Z"/><path d="M22 2 11 13"/></>, stop: <rect x="6" y="6" width="12" height="12" rx="2"/>, search: <><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></>,
     refresh: <><path d="M20 11a8 8 0 1 0-2.34 5.66"/><path d="M20 4v7h-7"/></>, folder: <path d="M3 6a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6Z"/>,
-    check: <path d="m5 12 4 4L19 6"/>, close: <><path d="m6 6 12 12M18 6 6 18"/></>, trash: <><path d="M3 6h18M8 6V4h8v2M19 6l-1 15H6L5 6M10 11v5M14 11v5"/></>, tool: <><path d="M14.7 6.3a4 4 0 0 0-5 5L3 18l3 3 6.7-6.7a4 4 0 0 0 5-5l-2.2 2.2-3-3 2.2-2.2Z"/></>,
+    check: <path d="m5 12 4 4L19 6"/>, close: <><path d="m6 6 12 12M18 6 6 18"/></>, trash: <><path d="M3 6h18M8 6V4h8v2M19 6l-1 15H6L5 6M10 11v5M14 11v5"/></>, tool: <><path d="M14.7 6.3a4 4 0 0 0-5 5L3 18l3 3 6.7-6.7a4 4 0 0 0 5-5l-2.2 2.2-3-3 2.2-2.2Z"/></>, server: <><rect x="4" y="3" width="16" height="7" rx="2"/><rect x="4" y="14" width="16" height="7" rx="2"/><path d="M8 6.5h.01M8 17.5h.01M12 6.5h5M12 17.5h5"/></>,
   };
   return <svg aria-hidden="true" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">{paths[name]}</svg>;
 }
@@ -68,6 +71,7 @@ export default function App() {
   const [input, setInput] = useState("");
   const [notice, setNotice] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [mcpOpen, setMcpOpen] = useState(false);
   const [createDialog, setCreateDialog] = useState<CreateDialog>(null);
   const [busy, setBusy] = useState(false);
   const activeRunRef = useRef<Run | null>(null);
@@ -185,7 +189,7 @@ export default function App() {
       <div className="project-block"><label className="field-label" htmlFor="project">WORKSPACE</label><div className="project-actions"><div className="select-shell"><Icon name="folder" size={16}/><select id="project" value={projectId} onChange={(event) => setProjectId(event.target.value)}><option value="">选择项目</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></div>{selectedProject && <button className="icon-danger" title="从 SciAide 移除项目" onClick={() => void removeProject(selectedProject)}><Icon name="trash" size={15}/></button>}</div>{selectedProject && <small className="workspace-path" title={selectedProject.workspacePath}>{selectedProject.workspaceKind === "external" ? "外部目录" : "SciAide 托管"} · {selectedProject.workspacePath}</small>}</div>
       <div className="section-title"><span>研究会话</span><button aria-label="新建会话" onClick={() => setCreateDialog({ kind: "conversation", title: "", description: "", workspacePath: "" })} disabled={!projectId}><Icon name="plus" size={17}/></button></div>
       <nav className="conversation-list">{conversations.length ? conversations.map((conversation) => <div className={`conversation-row ${conversation.id === conversationId ? "active" : ""}`} key={conversation.id}><button onClick={() => setConversationId(conversation.id)}><Icon name="chat" size={16}/><span>{conversation.title}</span></button><button className="conversation-remove" title="移除会话" onClick={() => void removeConversation(conversation)}><Icon name="close" size={13}/></button></div>) : <p className="sidebar-empty">{projectId ? "还没有会话，点击右上角 ＋ 创建" : "选择项目后显示会话"}</p>}</nav>
-      <div className="sidebar-footer"><button onClick={() => setSettingsOpen(true)}><span className="nav-icon"><Icon name="settings" size={17}/></span><span><b>模型与 API</b><small>{profiles.length ? `${profiles.length} 个配置可用` : "配置你的第一个模型"}</small></span><span className={selectedProfile?.secretConfigured ? "status-dot ready" : "status-dot"}/></button><div className="local-note"><Icon name="shield" size={13}/> 密钥由系统凭据库保护</div></div>
+      <div className="sidebar-footer"><button onClick={() => setMcpOpen(true)}><span className="nav-icon"><Icon name="server" size={17}/></span><span><b>MCP Servers</b><small>连接科研工具与数据服务</small></span></button><button onClick={() => setSettingsOpen(true)}><span className="nav-icon"><Icon name="settings" size={17}/></span><span><b>模型与 API</b><small>{profiles.length ? `${profiles.length} 个配置可用` : "配置你的第一个模型"}</small></span><span className={selectedProfile?.secretConfigured ? "status-dot ready" : "status-dot"}/></button><div className="local-note"><Icon name="shield" size={13}/> 密钥由系统凭据库保护</div></div>
     </aside>
 
     <main className="workspace">
@@ -196,6 +200,7 @@ export default function App() {
       <footer className="composer-wrap">{notice && <div className="notice"><Icon name="shield" size={15}/>{notice}<button onClick={() => setNotice("")}><Icon name="close" size={14}/></button></div>}{activeRun?.errorMessage && <div className="notice error">{activeRun.errorMessage}</div>}<form className="composer" onSubmit={(event) => void send(event)}><textarea value={input} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder={!conversationId ? "请先创建或选择研究会话" : busy ? "输入新指令可中断当前生成并继续…" : "向 SciAide 描述你的研究问题…"} disabled={!conversationId || !profileId || !modelId}/><div className="composer-actions"><span>{busy ? "发送新消息将中断当前生成并立即继续" : usage || <><kbd>Enter</kbd> 发送 · <kbd>Shift Enter</kbd> 换行</>}</span><div className="composer-buttons">{busy && <button type="button" className="stop" onClick={() => activeRun && void backend<void>("ChatFacade", "CancelRun", activeRun.id).catch((error: unknown) => setNotice(errorText(error)))}><Icon name="stop" size={15}/> 停止</button>}<button className="send" aria-label={busy ? "中断并发送" : "发送"} disabled={!input.trim() || !conversationId || !profileId || !modelId}><Icon name="send" size={17}/></button></div></div></form><p className="composer-hint">AI 可能会出错，重要科研结论请核验原始来源。</p></footer>
     </main>
     {settingsOpen && <ModelSettings profiles={profiles} close={() => setSettingsOpen(false)} refresh={loadProfiles} select={setProfileId}/>}
+    {mcpOpen && <MCPSettings close={() => setMcpOpen(false)}/>}
     {createDialog && <CreateModal value={createDialog} setValue={setCreateDialog} close={() => setCreateDialog(null)} submit={submitCreate}/>}
   </div>;
 
@@ -263,6 +268,208 @@ function CreateModal({ value, setValue, close, submit }: { value: Exclude<Create
   const project = value.kind === "project";
   async function chooseWorkspace() { try { const path = await backend<string>("ProjectFacade", "ChooseWorkspaceDirectory"); if (path) setValue({ ...value, workspacePath: path }); } catch { /* cancelled dialogs are harmless */ } }
   return <div className="modal-backdrop compact"><form className="create-modal" onSubmit={submit}><header><span className="dialog-icon"><Icon name={project ? "folder" : "chat"}/></span><div><h2>{project ? "新建科研项目" : "新建研究会话"}</h2><p>{project ? "集中管理一个研究方向下的会话与产物" : "围绕一个明确问题开始连续探索"}</p></div><button type="button" className="close" onClick={close}><Icon name="close"/></button></header><label>{project ? "项目名称" : "会话标题"}<input autoFocus value={value.title} onChange={(event) => setValue({ ...value, title: event.target.value })} placeholder={project ? "例如：单细胞转录组研究" : "例如：梳理实验假设"} maxLength={120} required/></label>{project && <><label>简要说明 <span>可选</span><textarea value={value.description} onChange={(event) => setValue({ ...value, description: event.target.value })} placeholder="记录研究目标或背景…" maxLength={500}/></label><label>Workspace 目录 <span>留空则保存到 ~/.sciaide/data/workspaces</span><div className="path-picker"><input value={value.workspacePath} onChange={(event) => setValue({ ...value, workspacePath: event.target.value })} placeholder="使用 SciAide 默认托管目录"/><button type="button" onClick={() => void chooseWorkspace()}><Icon name="folder" size={15}/> 选择文件夹</button></div></label></>}<footer><button type="button" onClick={close}>取消</button><button className="primary">创建</button></footer></form></div>;
+}
+
+function MCPSettings({ close }: { close: () => void }) {
+  const [servers, setServers] = useState<MCPServer[]>([]);
+  const [id, setId] = useState("");
+  const current = servers.find((server) => server.id === id);
+  const [name, setName] = useState("");
+  const [namespace, setNamespace] = useState("");
+  const [transport, setTransport] = useState<MCPTransport>("stdio");
+  const [command, setCommand] = useState("");
+  const [args, setArgs] = useState("");
+  const [workingDir, setWorkingDir] = useState("");
+  const [url, setUrl] = useState("");
+  const [env, setEnv] = useState("");
+  const [headers, setHeaders] = useState("");
+  const [secretValues, setSecretValues] = useState("");
+  const [clearSecrets, setClearSecrets] = useState<string[]>([]);
+  const [trusted, setTrusted] = useState(false);
+  const [enabled, setEnabled] = useState(true);
+  const [feedback, setFeedback] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [capabilities, setCapabilities] = useState<MCPCapabilities | null>(null);
+
+  const refresh = useCallback(async () => {
+    setServers(await backend<MCPServer[]>("MCPFacade", "ListMCPServers"));
+  }, []);
+
+  useEffect(() => {
+    refresh().catch((error: unknown) => setFeedback(errorText(error)));
+  }, [refresh]);
+
+  useEffect(() => {
+    setName(current?.name ?? "");
+    setNamespace(current?.namespace ?? "");
+    setTransport(current?.transport ?? "stdio");
+    setCommand(current?.command ?? "");
+    setArgs(current?.args?.join("\n") ?? "");
+    setWorkingDir(current?.workingDir ?? "");
+    setUrl(current?.url ?? "");
+    setEnv(current && Object.keys(current.env).length ? JSON.stringify(current.env, null, 2) : "");
+    setHeaders(current && Object.keys(current.headers).length ? JSON.stringify(current.headers, null, 2) : "");
+    setSecretValues("");
+    setClearSecrets([]);
+    setTrusted(current?.trust === "user_trusted");
+    setEnabled(current?.enabled ?? true);
+    setFeedback("");
+    setCapabilities(null);
+    if (current?.status === "ready") {
+      backend<MCPCapabilities>("MCPFacade", "GetMCPCapabilities", current.id)
+        .then(setCapabilities)
+        .catch(() => undefined);
+    }
+  }, [current]);
+
+  function object(value: string, field: string) {
+    const parsed = value.trim() ? JSON.parse(value) as unknown : {};
+    if (!parsed || Array.isArray(parsed) || typeof parsed !== "object" || Object.values(parsed).some((item) => typeof item !== "string")) {
+      throw new Error(`${field} 必须是字符串键值对 JSON 对象。`);
+    }
+    return parsed as Record<string, string>;
+  }
+
+  const configuredSecrets = Object.keys(current?.secretConfigured ?? {});
+
+  async function save(event: FormEvent) {
+    event.preventDefault();
+    setBusy(true);
+    setFeedback("");
+    try {
+      const saved = await backend<MCPServer>("MCPFacade", "SaveMCPServer", {
+        id,
+        name,
+        namespace,
+        transport,
+        command: transport === "stdio" ? command : "",
+        args: transport === "stdio" ? args.split(/\r?\n/).filter(Boolean) : [],
+        workingDir: transport === "stdio" ? workingDir : "",
+        url: transport === "streamable_http" ? url : "",
+        headers: transport === "streamable_http" ? object(headers, "Headers") : {},
+        env: transport === "stdio" ? object(env, "环境变量") : {},
+        secretValues: transport === "stdio" ? object(secretValues, "SecretEnv") : {},
+        clearSecrets: transport === "stdio" ? clearSecrets : [],
+        enabled,
+        autoStart: false,
+        trust: trusted ? "user_trusted" : "untrusted",
+        timeoutSeconds: current?.timeoutSeconds ?? 30,
+      });
+      await refresh();
+      setId(saved.id);
+      setSecretValues("");
+      setClearSecrets([]);
+      setFeedback("MCP 配置已保存。连接前会再次检查信任状态与协议能力。");
+    } catch (error) {
+      setFeedback(errorText(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function connect() {
+    if (!id) return;
+    setBusy(true);
+    setFeedback("正在初始化并发现 MCP 能力…");
+    try {
+      await backend<MCPServer>("MCPFacade", "ConnectMCPServer", id);
+      await refresh();
+      setCapabilities(await backend<MCPCapabilities>("MCPFacade", "GetMCPCapabilities", id));
+      setFeedback("MCP Server 已连接，发现的工具已进入统一审批管道。");
+    } catch (error) {
+      setFeedback(errorText(error));
+      await refresh();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function disconnect() {
+    if (!id) return;
+    setBusy(true);
+    try {
+      await backend("MCPFacade", "DisconnectMCPServer", id);
+      await refresh();
+      setCapabilities(null);
+      setFeedback("MCP Server 已断开，相关工具已从模型可用列表移除。");
+    } catch (error) {
+      setFeedback(errorText(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function remove() {
+    if (!id || !window.confirm("移除该 MCP Server 配置？系统凭据库中的关联 Secret 也会删除。")) return;
+    setBusy(true);
+    try {
+      await backend("MCPFacade", "RemoveMCPServer", id);
+      setId("");
+      await refresh();
+    } catch (error) {
+      setFeedback(errorText(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const active = current?.status === "ready" || current?.status === "starting" || current?.status === "initializing";
+
+  return <div className="modal-backdrop">
+    <section className="model-modal mcp-modal" role="dialog" aria-modal="true">
+      <header>
+        <div><span className="dialog-icon gradient"><Icon name="server"/></span><div><p>MODEL CONTEXT PROTOCOL</p><h2>MCP Servers</h2></div></div>
+        <button className="close" onClick={close} aria-label="关闭"><Icon name="close"/></button>
+      </header>
+      <div className="settings-grid">
+        <aside>
+          <button className={`add-profile ${!id ? "selected" : ""}`} onClick={() => setId("")}><Icon name="plus"/> 添加 MCP Server</button>
+          <div className="profile-caption">已配置</div>
+          {servers.map((server) => <button className={`profile-item ${server.id === id ? "selected" : ""}`} onClick={() => setId(server.id)} key={server.id}>
+            <span className="provider-logo"><Icon name="server" size={15}/></span>
+            <span><b>{server.name}</b><small>{server.transport} · {server.toolCount} tools</small></span>
+            <i className={`status-dot ${server.status === "ready" ? "ready" : server.status === "failed" ? "failed" : ""}`}/>
+          </button>)}
+        </aside>
+        <form onSubmit={(event) => void save(event)}>
+          <section className="form-section">
+            <div className="form-heading"><span>01</span><div><h3>连接配置</h3><p>stdio 直接启动程序；HTTP 使用 MCP Streamable HTTP 协议</p></div></div>
+            <div className="form-row two">
+              <label>名称<input value={name} onChange={(event) => setName(event.target.value)} required maxLength={100}/></label>
+              <label>稳定命名空间<input value={namespace} onChange={(event) => setNamespace(event.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, ""))} placeholder="zotero" required maxLength={32} disabled={active}/></label>
+            </div>
+            <label>Transport<select value={transport} onChange={(event) => setTransport(event.target.value as MCPTransport)} disabled={active}><option value="stdio">Local · stdio</option><option value="streamable_http">Remote · Streamable HTTP</option></select></label>
+            {transport === "stdio" ? <>
+              <label>Command<input value={command} onChange={(event) => setCommand(event.target.value)} placeholder={'node 或 C:\\tools\\mcp-server.exe'} required disabled={active}/></label>
+              <label>Args <small>每行一个参数，不经过 Shell 拼接</small><textarea value={args} onChange={(event) => setArgs(event.target.value)} placeholder={'server.js\n--stdio'} disabled={active}/></label>
+              <label>Working Directory <small>可选，必须是绝对路径</small><input value={workingDir} onChange={(event) => setWorkingDir(event.target.value)} disabled={active}/></label>
+              <label>非敏感环境变量（JSON）<textarea value={env} onChange={(event) => setEnv(event.target.value)} placeholder={'{"LANG":"zh_CN.UTF-8"}'} disabled={active}/></label>
+              <label>敏感环境变量（仅设置/替换）<textarea value={secretValues} onChange={(event) => setSecretValues(event.target.value)} placeholder={'{"ZOTERO_API_KEY":"secret"}'} disabled={active}/><small>明文只提交到后端并写入 Windows Credential Manager，不进入 SQLite。</small></label>
+              {configuredSecrets.length > 0 && <div className="secret-chips"><b>已保护 SecretEnv</b>{configuredSecrets.map((key) => <button type="button" className={clearSecrets.includes(key) ? "clearing" : ""} onClick={() => setClearSecrets((values) => values.includes(key) ? values.filter((item) => item !== key) : [...values, key])} disabled={active} key={key}><code>{key}</code>{clearSecrets.includes(key) ? "将清除" : "已配置"}</button>)}</div>}
+            </> : <>
+              <label>MCP Endpoint<input value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://example.org/mcp" required disabled={active}/></label>
+              <label>非敏感 Headers（JSON）<textarea value={headers} onChange={(event) => setHeaders(event.target.value)} placeholder={'{"X-Tenant":"lab"}'} disabled={active}/><small>Authorization、Cookie、Token、Secret、API-Key 等敏感 Header 会被拒绝持久化。</small></label>
+              {url.startsWith("http://") && <div className="local-http-warning"><Icon name="shield" size={15}/> 明文 HTTP 仅允许 localhost/回环地址，请勿承载敏感研究数据。</div>}
+            </>}
+          </section>
+          <section className="form-section">
+            <div className="form-heading"><span>02</span><div><h3>信任与能力</h3><p>服务器描述、ToolResult、Resource 和 Prompt 均视为不可信数据</p></div></div>
+            <label className="trust-row"><input type="checkbox" checked={trusted} onChange={(event) => setTrusted(event.target.checked)} disabled={active}/><span>我确认信任此 Server 配置及其进程/远程端点</span></label>
+            <label className="trust-row"><input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} disabled={active}/><span>启用此 Server</span></label>
+            {current && <div className="mcp-status"><b className={current.status}>{current.status}</b><span>{current.toolCount} Tools · {current.resourceCount} Resources · {current.promptCount} Prompts</span>{(current.protocolVersion || current.serverVersion) && <code>MCP {current.protocolVersion || "?"} · Server {current.serverVersion || "?"}</code>}{current.lastError && <small>{current.lastError}</small>}</div>}
+            {capabilities && <div className="mcp-capabilities"><b>已注册工具</b>{capabilities.tools.map((item) => <span key={item.qualifiedName}><code>{item.qualifiedName}</code><small>{item.originalName}</small></span>)}{!capabilities.tools.length && <p>该 Server 未提供工具。</p>}<p>Resources / Prompts 仅发现与展示，不会自动注入对话上下文。</p></div>}
+          </section>
+          {feedback && <div className="feedback info">{feedback}</div>}
+          <footer className="modal-actions">
+            {id && <button type="button" className="danger" onClick={() => void remove()} disabled={busy || active}>删除</button>}
+            <span/>
+            {id && active ? <button type="button" onClick={() => void disconnect()} disabled={busy}>断开</button> : id && <button type="button" onClick={() => void connect()} disabled={busy || !trusted || !enabled}>连接测试</button>}
+            <button className="primary" disabled={busy || active}>{busy ? "处理中…" : "保存配置"}</button>
+          </footer>
+        </form>
+      </div>
+    </section>
+  </div>;
 }
 
 function ModelSettings({ profiles, close, refresh, select }: { profiles: Profile[]; close: () => void; refresh: () => Promise<void>; select: (id: string) => void }) {

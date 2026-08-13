@@ -82,10 +82,24 @@ React WebView
 - Workspace 路径拒绝绝对路径、卷标、`..` 越界和兄弟目录前缀；使用 `os.Root` 防止打开时通过符号链接逃逸。
 - 内置目录工具不递归且限制条目数；文本工具限制读取字节、拒绝 NUL/非 UTF-8/非常规文件。
 
+## P3 MCP 已落实的控制
+
+- MCP Server 必须由用户显式保存、启用和信任；模型、Skill 与 MCP 内容不能静默修改 Server 配置。
+- stdio 使用参数数组启动而不经过 Shell，只继承 `PATH`、系统目录、临时目录和用户目录等最小环境 allowlist。
+- SecretEnv 明文只写入 Windows Credential Manager，SQLite 与前端只保存/显示引用状态；删除 Server 时清理关联凭据。
+- Streamable HTTP 默认要求 HTTPS；明文 HTTP 仅允许 `localhost` 或回环 IP，拒绝 URL userinfo、fragment 和敏感持久化 Header。
+- Tools/Resources/Prompts 和 ToolResult 均视为不可信；Tool 描述与 Schema 有大小边界，结果继续由 ToolExecutor 截断。
+- MCP Tool 只能以 `mcp.<namespace>.<sanitized_name>` 注册进入 ToolRegistry，命名冲突原子失败，不能覆盖 builtin 或其他 Server。
+- MCP Tool 固定为非幂等、中风险并声明精确 `tool.invoke`；仍经过会话 Plan/Full Access、参数 Schema、超时、取消与审计。
+- Resource 和 Prompt 当前只发现与展示，不会未经用户选择自动进入模型上下文。
+- Server 异常断开会移除其动态工具并把运行状态标为 failed；应用重启会将陈旧 ready/starting 状态恢复为 disconnected。
+
+当前残余边界：远程 MCP 是用户显式配置的服务端点，尚未复用未来统一 NetworkClient 的逐次 DNS 地址复查；因此 P3 仅允许 HTTPS 远端与精确回环 HTTP，发布前仍需补充 DNS rebinding/代理场景审计。Windows stdio 使用 SDK 的优雅关闭、超时终止与直接子进程 Kill，完整 Job Object 进程树约束仍作为发布加固项。
+
 | Prompt 注入诱导工具执行 | P2 | JSON Schema、PolicyEngine、Approval、预算 |
 | 路径穿越和 junction/symlink | P2 | 已实现 PathGuard、`os.Root`、Workspace 根和安全回归测试；写路径仍在 P2.6 |
 | SSRF 和 DNS rebinding | P2/P3 | NetworkClient、地址复查、域名/端口权限 |
-| 恶意 MCP 子进程或远端服务 | P3 | 首次信任提示、最小环境、生命周期和权限管道 |
+| 恶意 MCP 子进程或远端服务 | P3 | 已实现首次信任、SecretEnv 隔离、最小环境、生命周期恢复和统一权限管道；Job Object/DNS rebinding 仍需发布加固 |
 | Skill 供应链和自动脚本执行 | P4 | 包校验、哈希、显式启用、脚本只注册 Tool |
 | 恶意论文中的指令 | P5 | 数据边界、来源标记、系统规则优先级 |
 | Python 逃逸和资源耗尽 | P7 | 明确非沙箱、进程树/资源限制、强授权 |

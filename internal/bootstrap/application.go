@@ -12,10 +12,12 @@ import (
 	"github.com/wangh00/SciAide/internal/app/agent"
 	"github.com/wangh00/SciAide/internal/app/chat"
 	"github.com/wangh00/SciAide/internal/app/conversation"
+	"github.com/wangh00/SciAide/internal/app/mcpserver"
 	"github.com/wangh00/SciAide/internal/app/modelprofile"
 	"github.com/wangh00/SciAide/internal/app/permission"
 	"github.com/wangh00/SciAide/internal/app/project"
 	"github.com/wangh00/SciAide/internal/app/tool"
+	mcpadapter "github.com/wangh00/SciAide/internal/mcp"
 	"github.com/wangh00/SciAide/internal/model/gateway"
 	"github.com/wangh00/SciAide/internal/model/openai"
 	"github.com/wangh00/SciAide/internal/observability"
@@ -26,7 +28,7 @@ import (
 	wailstransport "github.com/wangh00/SciAide/internal/transport/wails"
 )
 
-const Version = "0.2.0-dev"
+const Version = "0.3.0-dev"
 
 type Options struct {
 	RootDir string
@@ -41,10 +43,12 @@ type Application struct {
 	ChatFacade         *wailstransport.ChatFacade
 	PermissionFacade   *wailstransport.PermissionFacade
 	ToolFacade         *wailstransport.ToolFacade
+	MCPFacade          *wailstransport.MCPFacade
 
 	lifecycle *wailstransport.LifecycleContext
 	chat      *chat.Service
 	tools     *tool.Executor
+	mcp       *mcpadapter.Manager
 	store     *sqlite.Store
 	closeOnce sync.Once
 	closeErr  error
@@ -101,6 +105,16 @@ func New(options Options) (*Application, error) {
 			return fail(fmt.Errorf("register builtin tool: %w", err))
 		}
 	}
+	mcpManager := mcpadapter.NewManager(toolRegistry, logger.Logger)
+	mcpService := mcpserver.NewService(sqlite.NewMCPServerRepository(store.DB()), mcpManager, secrets)
+	mcpManager.SetRuntimeObserver(mcpService)
+	mcpManager.SetSecretResolver(mcpService)
+	if recovered, err := mcpService.RecoverRuntime(context.Background()); err != nil {
+		_ = store.Close()
+		return fail(fmt.Errorf("recover MCP runtime: %w", err))
+	} else if recovered > 0 {
+		logger.Warn("recovered stale MCP runtime states", "count", recovered)
+	}
 	toolExecutor := tool.NewExecutor(toolRegistry, toolService, runRepository, tool.ExecutorOptions{})
 	approvalCoordinator := permission.NewCoordinator(permissionEngine, toolService, runRepository)
 	publisher := wailstransport.NewEventPublisher(lifecycle)
@@ -147,9 +161,11 @@ func New(options Options) (*Application, error) {
 		ChatFacade:         wailstransport.NewChatFacade(lifecycle, chatService, permissionEngine),
 		PermissionFacade:   wailstransport.NewPermissionFacade(lifecycle, permissionEngine, approvalCoordinator, chatService),
 		ToolFacade:         wailstransport.NewToolFacade(lifecycle, toolExecutor, toolRegistry),
+		MCPFacade:          wailstransport.NewMCPFacade(lifecycle, mcpService),
 		lifecycle:          lifecycle,
 		chat:               chatService,
 		tools:              toolExecutor,
+		mcp:                mcpManager,
 		store:              store,
 	}, nil
 }
@@ -169,6 +185,9 @@ func (a *Application) Shutdown(ctx context.Context) {
 func (a *Application) Close() error {
 	a.closeOnce.Do(func() {
 		a.chat.Close()
+		if err := a.mcp.Close(); err != nil {
+			a.closeErr = fmt.Errorf("close MCP connections: %w", err)
+		}
 		if _, err := sqlite.NewRunRepository(a.store.DB()).InterruptActive(context.Background(), time.Now().UTC()); err != nil {
 			a.closeErr = fmt.Errorf("interrupt chat runs: %w", err)
 		}

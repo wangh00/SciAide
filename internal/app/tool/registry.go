@@ -46,6 +46,48 @@ func (r *MemoryRegistry) Register(ctx context.Context, value Tool) error {
 	return nil
 }
 
+// ReplaceNamespace atomically replaces one dynamic namespace. Builtin and
+// other server namespaces are left untouched, and a validation failure keeps
+// the previous entries intact.
+func (r *MemoryRegistry) ReplaceNamespace(ctx context.Context, prefix string, values []Tool) error {
+	prefix = strings.TrimSpace(prefix)
+	if prefix == "" || !strings.HasSuffix(prefix, ".") {
+		return fmt.Errorf("tool namespace prefix must end with a dot")
+	}
+	replacements := make(map[string]registryEntry, len(values))
+	for _, value := range values {
+		if value == nil {
+			return fmt.Errorf("tool is required")
+		}
+		definition, err := value.Definition(ctx)
+		if err != nil {
+			return fmt.Errorf("load tool definition: %w", err)
+		}
+		if err := ValidateDefinition(definition); err != nil {
+			return fmt.Errorf("validate tool definition: %w", err)
+		}
+		definition = SnapshotDefinition(definition)
+		if !strings.HasPrefix(definition.QualifiedName, prefix) {
+			return fmt.Errorf("tool %q is outside namespace %q", definition.QualifiedName, prefix)
+		}
+		if _, exists := replacements[definition.QualifiedName]; exists {
+			return fmt.Errorf("duplicate replacement tool %q", definition.QualifiedName)
+		}
+		replacements[definition.QualifiedName] = registryEntry{tool: value, definition: definition}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for name := range r.entries {
+		if strings.HasPrefix(name, prefix) {
+			delete(r.entries, name)
+		}
+	}
+	for name, entry := range replacements {
+		r.entries[name] = entry
+	}
+	return nil
+}
+
 func (r *MemoryRegistry) Resolve(_ context.Context, qualifiedName string) (Tool, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

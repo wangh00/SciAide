@@ -68,6 +68,12 @@ type Registry interface {
 	Resolve(ctx context.Context, qualifiedName string) (Tool, error)
 }
 
+type MutableRegistry interface {
+	Registry
+	Register(ctx context.Context, value Tool) error
+	ReplaceNamespace(ctx context.Context, prefix string, values []Tool) error
+}
+
 type CallStatus string
 
 const (

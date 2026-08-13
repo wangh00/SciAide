@@ -39,6 +39,7 @@ func main() {
 			application.ChatFacade,
 			application.PermissionFacade,
 			application.ToolFacade,
+			application.MCPFacade,
 		},
 	})
 	if err != nil {
