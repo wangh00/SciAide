@@ -12,7 +12,9 @@ import (
 	"github.com/wangh00/SciAide/internal/app/chat"
 	"github.com/wangh00/SciAide/internal/app/conversation"
 	"github.com/wangh00/SciAide/internal/app/modelprofile"
+	"github.com/wangh00/SciAide/internal/app/permission"
 	"github.com/wangh00/SciAide/internal/app/project"
+	"github.com/wangh00/SciAide/internal/app/tool"
 	"github.com/wangh00/SciAide/internal/model/gateway"
 	"github.com/wangh00/SciAide/internal/model/openai"
 	"github.com/wangh00/SciAide/internal/observability"
@@ -35,6 +37,7 @@ type Application struct {
 	ConversationFacade *wailstransport.ConversationFacade
 	ModelFacade        *wailstransport.ModelFacade
 	ChatFacade         *wailstransport.ChatFacade
+	PermissionFacade   *wailstransport.PermissionFacade
 
 	lifecycle *wailstransport.LifecycleContext
 	chat      *chat.Service
@@ -84,19 +87,29 @@ func New(options Options) (*Application, error) {
 	profileService := modelprofile.NewService(profileRepository, secrets, connectionTester)
 	runRepository := sqlite.NewRunRepository(store.DB())
 	toolRepository := sqlite.NewToolRepository(store.DB())
+	permissionRepository := sqlite.NewPermissionRepository(store.DB())
+	permissionEngine := permission.NewEngine(permissionRepository)
+	toolService := tool.NewService(toolRepository, tool.JSONSchemaValidator{})
+	approvalCoordinator := permission.NewCoordinator(permissionEngine, toolService, runRepository)
 	publisher := wailstransport.NewEventPublisher(lifecycle)
 	chatService := chat.NewService(runRepository, conversationRepository, runRepository, publisher, gateway.NewResolver(profileService))
-	if interrupted, err := chatService.Recover(context.Background()); err != nil {
+	if expired, err := permissionEngine.Recover(context.Background()); err != nil {
 		_ = store.Close()
-		return fail(fmt.Errorf("recover chat runs: %w", err))
-	} else if interrupted > 0 {
-		logger.Warn("interrupted unfinished chat runs", "count", interrupted)
+		return fail(fmt.Errorf("recover pending approvals: %w", err))
+	} else if expired > 0 {
+		logger.Warn("expired pending approvals", "count", expired)
 	}
 	if interrupted, err := toolRepository.InterruptActive(context.Background(), time.Now().UTC()); err != nil {
 		_ = store.Close()
 		return fail(fmt.Errorf("recover tool calls: %w", err))
 	} else if interrupted > 0 {
 		logger.Warn("interrupted unfinished tool calls", "count", interrupted)
+	}
+	if interrupted, err := chatService.Recover(context.Background()); err != nil {
+		_ = store.Close()
+		return fail(fmt.Errorf("recover chat runs: %w", err))
+	} else if interrupted > 0 {
+		logger.Warn("interrupted unfinished chat runs", "count", interrupted)
 	}
 	return &Application{
 		Logger:             logger,
@@ -105,6 +118,7 @@ func New(options Options) (*Application, error) {
 		ConversationFacade: wailstransport.NewConversationFacade(lifecycle, conversationService),
 		ModelFacade:        wailstransport.NewModelFacade(lifecycle, profileService),
 		ChatFacade:         wailstransport.NewChatFacade(lifecycle, chatService),
+		PermissionFacade:   wailstransport.NewPermissionFacade(lifecycle, permissionEngine, approvalCoordinator),
 		lifecycle:          lifecycle,
 		chat:               chatService,
 		store:              store,

@@ -37,6 +37,7 @@ func (s *Service) Propose(ctx context.Context, definition Definition, cmd Create
 	if err := ValidateDefinition(definition); err != nil {
 		return Call{}, err
 	}
+	definition = SnapshotDefinition(definition)
 	if err := ValidateArguments(cmd.Arguments); err != nil {
 		return Call{}, err
 	}
@@ -61,6 +62,25 @@ func (s *Service) Propose(ctx context.Context, definition Definition, cmd Create
 		return Call{}, fmt.Errorf("create tool call: %w", err)
 	}
 	return value, nil
+}
+
+func (s *Service) ProposeRegistered(ctx context.Context, registry Registry, toolName string, cmd CreateCommand) (Call, error) {
+	if registry == nil {
+		return Call{}, fmt.Errorf("tool registry is not configured")
+	}
+	definition, err := registry.Definition(ctx, strings.TrimSpace(toolName))
+	if err != nil {
+		return Call{}, err
+	}
+	return s.Propose(ctx, definition, cmd)
+}
+
+func (s *Service) Get(ctx context.Context, callID string) (Call, error) {
+	callID = strings.TrimSpace(callID)
+	if callID == "" {
+		return Call{}, fmt.Errorf("tool call id is required")
+	}
+	return s.repository.Get(ctx, callID)
 }
 
 func (s *Service) AwaitApproval(ctx context.Context, callID string) (Call, error) {

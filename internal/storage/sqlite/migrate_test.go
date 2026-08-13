@@ -38,7 +38,7 @@ func TestP2MigrationPreservesExistingRuns(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, item := range migrations {
-		if item.version > 3 {
+		if item.version > 4 {
 			break
 		}
 		if _, err := db.ExecContext(ctx, item.sql); err != nil {
@@ -55,6 +55,8 @@ func TestP2MigrationPreservesExistingRuns(t *testing.T) {
 		`INSERT INTO messages(id,conversation_id,run_id,role,status,created_at,updated_at) VALUES ('user','conversation','run','user','complete','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`,
 		`INSERT INTO messages(id,conversation_id,run_id,role,status,created_at,updated_at) VALUES ('assistant','conversation','run','assistant','streaming','2026-01-01T00:00:01Z','2026-01-01T00:00:01Z')`,
 		`INSERT INTO runs(id,conversation_id,user_message_id,assistant_message_id,model_profile_id,status,created_at,updated_at,model_id) VALUES ('run','conversation','user','assistant','profile','running','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z','model')`,
+		`INSERT INTO tool_calls(id,run_id,provider_call_id,tool_name,tool_version,arguments_json,status,risk,permissions_json,idempotent,created_at,updated_at) VALUES ('call','run','provider','builtin.workspace.read','1','{}','awaiting_approval','low','[{"kind":"workspace.read","resource":"paper.md"}]',1,'2026-01-01T00:00:02Z','2026-01-01T00:00:02Z')`,
+		`INSERT INTO tool_results(tool_call_id,status,text_content,artifacts_json,citations_json,truncated,meta_json,created_at) VALUES ('call','success','preserved','[]','[]',0,'{}','2026-01-01T00:00:03Z')`,
 	} {
 		if _, err := db.ExecContext(ctx, statement); err != nil {
 			t.Fatalf("insert upgrade fixture: %v", err)
@@ -76,5 +78,9 @@ func TestP2MigrationPreservesExistingRuns(t *testing.T) {
 	var tables int
 	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('tool_calls','tool_results')`).Scan(&tables); err != nil || tables != 2 {
 		t.Fatalf("tool tables = %d, %v", tables, err)
+	}
+	var resultText string
+	if err := db.QueryRowContext(ctx, `SELECT text_content FROM tool_results WHERE tool_call_id='call'`).Scan(&resultText); err != nil || resultText != "preserved" {
+		t.Fatalf("P2.1 tool result = %q, %v", resultText, err)
 	}
 }

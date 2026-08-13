@@ -17,6 +17,7 @@
 - 一个 API 配置（Base URL + Key）可保存多个模型；支持 `/v1/models` 多选、手动添加和聊天时切换
 - 多轮聊天、停止生成、Usage、RunEvent 与 Snapshot 恢复
 - P2 工具协议基线：ToolCall/ToolResult 状态机、参数 Schema 校验、审计事件与持久化
+- P2 权限基线：统一 ToolRegistry、精确资源 PolicyEngine、逐项 Approval、作用域 Grant 与重启恢复
 - 可脚本化 `FakeChatModel`、Provider Fixture 测试、威胁模型、ADR 和 CI
 
 ## 开发

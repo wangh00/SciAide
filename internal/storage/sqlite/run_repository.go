@@ -55,6 +55,35 @@ func (r *RunRepository) Update(ctx context.Context, value chat.Run) error {
 	return nil
 }
 
+func (r *RunRepository) ProjectIDForRun(ctx context.Context, runID string) (string, error) {
+	var projectID string
+	if err := r.db.QueryRowContext(ctx, `SELECT c.project_id FROM runs r JOIN conversations c ON c.id=r.conversation_id WHERE r.id=?`, runID).Scan(&projectID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", fmt.Errorf("run not found")
+		}
+		return "", fmt.Errorf("resolve run project: %w", err)
+	}
+	return projectID, nil
+}
+
+func (r *RunRepository) TransitionStatus(ctx context.Context, runID string, expected, next chat.RunStatus, at time.Time) error {
+	if !canTransitionRunForApproval(expected, next) {
+		return fmt.Errorf("invalid approval run transition: %s to %s", expected, next)
+	}
+	result, err := r.db.ExecContext(ctx, `UPDATE runs SET status=?, updated_at=? WHERE id=? AND status=?`, next, formatTime(at), runID, expected)
+	if err != nil {
+		return fmt.Errorf("transition run status: %w", err)
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return fmt.Errorf("run status transition conflict")
+	}
+	return nil
+}
+
+func canTransitionRunForApproval(from, to chat.RunStatus) bool {
+	return (from == chat.RunRunning && to == chat.RunWaitingApproval) || (from == chat.RunWaitingApproval && to == chat.RunRunning)
+}
+
 func (r *RunRepository) InterruptActive(ctx context.Context, at time.Time) (int64, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {

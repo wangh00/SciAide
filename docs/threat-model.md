@@ -64,6 +64,16 @@ React WebView
 - ToolCall 状态使用允许列表和期望旧状态更新，终态不可重放；Provider Call ID 与 Run 内幂等键防止重复提交。
 - ToolCall、ToolResult 与审计事件在同一事务中提交；启动时未完成调用只标记为 interrupted，不自动执行。
 - Result 使用结构化错误和有界元数据，后续 ToolExecutor 不得向模型暴露 panic、堆栈或内部路径。
+
+## P2 权限与审批已落实的控制
+
+- ToolRegistry 注册时验证并深拷贝受信任定义，重名失败；模型、MCP 描述和 Skill 内容不能覆盖安全定义。
+- PolicyEngine 只读取 ToolCall 中的受信任权限快照，中风险及以上工具增加 `tool.invoke` 确认，不能由模型自行降级风险。
+- 长期 Grant 精确绑定 Project、Tool、PermissionKind 和 Resource；Run Grant 不跨 Run，不进行目录前缀或域名模糊匹配。
+- `filesystem.external`、`process.execute`、`destructive`、`secret.use` 以及 high/destructive 风险只允许本次调用，应用层与 SQLite 双重阻止长期授权。
+- Approval、Grant 与审计事件同事务持久化；同一 ToolCall 只存在一个 pending Approval，处理过的审批不能重复解析。
+- 启动时 pending Approval 先过期并审计，再中断 ToolCall 和 Run，不自动重放工具。
+
 | Prompt 注入诱导工具执行 | P2 | JSON Schema、PolicyEngine、Approval、预算 |
 | 路径穿越和 junction/symlink | P2 | PathGuard、Workspace 根、逐资源授权 |
 | SSRF 和 DNS rebinding | P2/P3 | NetworkClient、地址复查、域名/端口权限 |

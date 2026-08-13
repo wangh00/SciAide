@@ -2,8 +2,16 @@ package bootstrap
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
+	"time"
 
+	"github.com/wangh00/SciAide/internal/app/chat"
+	"github.com/wangh00/SciAide/internal/app/conversation"
+	"github.com/wangh00/SciAide/internal/app/modelprofile"
+	"github.com/wangh00/SciAide/internal/app/permission"
+	"github.com/wangh00/SciAide/internal/app/tool"
+	"github.com/wangh00/SciAide/internal/storage/sqlite"
 	wailstransport "github.com/wangh00/SciAide/internal/transport/wails"
 )
 
@@ -35,5 +43,78 @@ func TestApplicationCanRestartOnSameData(t *testing.T) {
 	}
 	if len(projects) != 1 || projects[0].ID != created.ID {
 		t.Fatalf("projects = %#v, want created project", projects)
+	}
+}
+
+func TestApplicationRecoveryExpiresApprovalBeforeInterruptingCallAndRun(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	application, err := New(Options{RootDir: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectValue, err := application.ProjectFacade.CreateProject(wailstransport.CreateProjectRequest{Name: "恢复测试"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversationValue, err := application.ConversationFacade.CreateConversation(wailstransport.CreateConversationRequest{ProjectID: projectValue.ID, Title: "P2.2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
+	profile := modelprofile.Profile{ID: "recovery-profile", Name: "fixture", ProviderType: modelprofile.ProviderOpenAICompatible, BaseURL: "https://example.test/v1", ModelID: "fixture", Models: []modelprofile.ProfileModel{{ID: "fixture", Enabled: true, IsDefault: true}}, SecretRef: "recovery-secret", TimeoutSeconds: 60, CustomHeaders: map[string]string{}, Enabled: true, CreatedAt: now, UpdatedAt: now}
+	if err := sqlite.NewModelProfileRepository(application.store.DB()).Save(ctx, profile); err != nil {
+		t.Fatal(err)
+	}
+	user := conversation.Message{ID: "recovery-user", ConversationID: conversationValue.ID, RunID: "recovery-run", Role: conversation.RoleUser, Status: conversation.MessageComplete, CreatedAt: now, UpdatedAt: now, Parts: []conversation.MessagePart{{ID: "recovery-user-part", MessageID: "recovery-user", Type: "text", CreatedAt: now}}}
+	assistant := conversation.Message{ID: "recovery-assistant", ConversationID: conversationValue.ID, RunID: "recovery-run", Role: conversation.RoleAssistant, Status: conversation.MessageStreaming, CreatedAt: now, UpdatedAt: now, Parts: []conversation.MessagePart{{ID: "recovery-assistant-part", MessageID: "recovery-assistant", Type: "text", CreatedAt: now}}}
+	run := chat.Run{ID: "recovery-run", ConversationID: conversationValue.ID, UserMessageID: user.ID, AssistantMessageID: assistant.ID, ModelProfileID: profile.ID, ModelID: "fixture", Status: chat.RunWaitingApproval, CreatedAt: now, UpdatedAt: now}
+	if err := sqlite.NewRunRepository(application.store.DB()).CreateWithMessages(ctx, run, user, assistant); err != nil {
+		t.Fatal(err)
+	}
+	call := tool.Call{ID: "recovery-call", RunID: run.ID, ProviderCallID: "recovery-provider", ToolName: "builtin.workspace.read", ToolVersion: "1", Arguments: json.RawMessage(`{"path":"paper.md"}`), Status: tool.CallAwaitingApproval, Risk: tool.RiskModerate, Permissions: []tool.PermissionRequirement{{Kind: tool.PermissionWorkspaceRead, Resource: "paper.md"}}, CreatedAt: now, UpdatedAt: now}
+	if err := sqlite.NewToolRepository(application.store.DB()).Create(ctx, call); err != nil {
+		t.Fatal(err)
+	}
+	approval := permission.Approval{ID: "recovery-approval", RunID: run.ID, ToolCallID: call.ID, ProjectID: projectValue.ID, ToolName: call.ToolName, ToolVersion: call.ToolVersion, PermissionKind: tool.PermissionToolInvoke, Resource: call.ToolName, Risk: call.Risk, Status: permission.ApprovalPending, RequestedScope: permission.ScopeProject, CreatedAt: now}
+	if _, err := application.store.DB().ExecContext(ctx, `INSERT INTO approvals(id,run_id,tool_call_id,project_id,tool_name,tool_version,permission_kind,resource,risk,status,requested_scope,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`, approval.ID, approval.RunID, approval.ToolCallID, approval.ProjectID, approval.ToolName, approval.ToolVersion, approval.PermissionKind, approval.Resource, approval.Risk, approval.Status, permission.ScopeCall, now.Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted, err := New(Options{RootDir: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restarted.Close()
+	loadedApproval, err := sqlite.NewPermissionRepository(restarted.store.DB()).GetApproval(ctx, approval.ID)
+	if err != nil || loadedApproval.Status != permission.ApprovalExpired {
+		t.Fatalf("approval = %#v, %v", loadedApproval, err)
+	}
+	loadedCall, err := sqlite.NewToolRepository(restarted.store.DB()).Get(ctx, call.ID)
+	if err != nil || loadedCall.Status != tool.CallInterrupted {
+		t.Fatalf("call = %#v, %v", loadedCall, err)
+	}
+	loadedRun, err := sqlite.NewRunRepository(restarted.store.DB()).Get(ctx, run.ID)
+	if err != nil || loadedRun.Status != chat.RunInterrupted {
+		t.Fatalf("run = %#v, %v", loadedRun, err)
+	}
+	var sequences []string
+	rows, err := restarted.store.DB().QueryContext(ctx, `SELECT event_type FROM run_events WHERE aggregate_id=? ORDER BY sequence`, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var eventType string
+		if err := rows.Scan(&eventType); err != nil {
+			t.Fatal(err)
+		}
+		sequences = append(sequences, eventType)
+	}
+	if len(sequences) != 1 || sequences[0] != "approval.expired" {
+		t.Fatalf("recovery audit events = %v", sequences)
 	}
 }

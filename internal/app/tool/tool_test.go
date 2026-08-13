@@ -26,6 +26,20 @@ func TestCallStateMachineRejectsTerminalReplay(t *testing.T) {
 	}
 }
 
+func TestDefinitionRejectsDuplicateAndMismatchedSyntheticPermissions(t *testing.T) {
+	base := Definition{QualifiedName: "builtin.test", Description: "test", InputSchema: json.RawMessage(`{}`), Risk: RiskLow, Version: "1"}
+	duplicate := base
+	duplicate.Permissions = []PermissionRequirement{{Kind: PermissionWorkspaceRead, Resource: "paper.md"}, {Kind: PermissionWorkspaceRead, Resource: " paper.md "}}
+	if err := ValidateDefinition(duplicate); err == nil {
+		t.Fatal("duplicate normalized permission was accepted")
+	}
+	mismatch := base
+	mismatch.Permissions = []PermissionRequirement{{Kind: PermissionToolInvoke, Resource: "builtin.other"}}
+	if err := ValidateDefinition(mismatch); err == nil {
+		t.Fatal("mismatched tool.invoke resource was accepted")
+	}
+}
+
 func TestJSONSchemaValidatorRejectsUnknownAndInvalidArguments(t *testing.T) {
 	validator := JSONSchemaValidator{}
 	schema := []byte(`{"type":"object","additionalProperties":false,"required":["path","limit"],"properties":{"path":{"type":"string","minLength":1},"limit":{"type":"integer","minimum":1,"maximum":10}}}`)

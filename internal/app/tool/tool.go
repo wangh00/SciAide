@@ -24,6 +24,7 @@ const (
 type PermissionKind string
 
 const (
+	PermissionToolInvoke         PermissionKind = "tool.invoke"
 	PermissionWorkspaceRead      PermissionKind = "workspace.read"
 	PermissionWorkspaceWrite     PermissionKind = "workspace.write"
 	PermissionFilesystemExternal PermissionKind = "filesystem.external"
@@ -63,6 +64,7 @@ type Tool interface {
 
 type Registry interface {
 	Definitions(ctx context.Context) ([]Definition, error)
+	Definition(ctx context.Context, qualifiedName string) (Definition, error)
 	Resolve(ctx context.Context, qualifiedName string) (Tool, error)
 }
 
@@ -164,6 +166,7 @@ func ValidateDefinition(value Definition) error {
 	if err := validateQualifiedName(value.QualifiedName); err != nil {
 		return err
 	}
+	qualifiedName := strings.TrimSpace(value.QualifiedName)
 	if strings.TrimSpace(value.Description) == "" || strings.TrimSpace(value.Version) == "" {
 		return fmt.Errorf("tool description and version are required")
 	}
@@ -178,12 +181,50 @@ func ValidateDefinition(value Definition) error {
 			return err
 		}
 	}
+	seen := make(map[string]struct{}, len(value.Permissions))
 	for _, requirement := range value.Permissions {
 		if !validPermission(requirement.Kind) {
 			return fmt.Errorf("invalid permission requirement %q", requirement.Kind)
 		}
+		resource := strings.TrimSpace(requirement.Resource)
+		if requirement.Kind == PermissionToolInvoke && resource != "" && resource != qualifiedName {
+			return fmt.Errorf("tool.invoke resource must match the qualified tool name")
+		}
+		key := string(requirement.Kind) + "\x00" + resource
+		if _, exists := seen[key]; exists {
+			return fmt.Errorf("duplicate permission requirement %q", requirement.Kind)
+		}
+		seen[key] = struct{}{}
 	}
 	return nil
+}
+
+// SnapshotDefinition normalizes and deep-copies the trusted definition that is
+// persisted with a ToolCall. Model-provided data must never be used to fill
+// these security fields.
+func SnapshotDefinition(value Definition) Definition {
+	value.QualifiedName = strings.TrimSpace(value.QualifiedName)
+	value.Description = strings.TrimSpace(value.Description)
+	value.Version = strings.TrimSpace(value.Version)
+	value.InputSchema = append(json.RawMessage(nil), value.InputSchema...)
+	value.OutputSchema = append(json.RawMessage(nil), value.OutputSchema...)
+	value.Permissions = snapshotPermissions(value.QualifiedName, value.Permissions)
+	return value
+}
+
+func snapshotPermissions(toolName string, values []PermissionRequirement) []PermissionRequirement {
+	if len(values) == 0 {
+		return []PermissionRequirement{}
+	}
+	result := make([]PermissionRequirement, len(values))
+	for index, value := range values {
+		value.Resource = strings.TrimSpace(value.Resource)
+		if value.Kind == PermissionToolInvoke && value.Resource == "" {
+			value.Resource = toolName
+		}
+		result[index] = value
+	}
+	return result
 }
 
 func ValidateArguments(value json.RawMessage) error {
@@ -252,7 +293,7 @@ func validRisk(value RiskLevel) bool {
 
 func validPermission(value PermissionKind) bool {
 	switch value {
-	case PermissionWorkspaceRead, PermissionWorkspaceWrite, PermissionFilesystemExternal, PermissionNetworkDomain, PermissionProcessExecute, PermissionDestructive, PermissionSecretUse:
+	case PermissionToolInvoke, PermissionWorkspaceRead, PermissionWorkspaceWrite, PermissionFilesystemExternal, PermissionNetworkDomain, PermissionProcessExecute, PermissionDestructive, PermissionSecretUse:
 		return true
 	default:
 		return false

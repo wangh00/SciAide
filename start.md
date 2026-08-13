@@ -1127,7 +1127,7 @@ sciaide/
 
 ### P2：Agent Loop、内置工具与权限（2～3 周）
 
-> 实施状态（2026-08-13）：P2.1 工具协议、失败关闭参数校验、状态机、持久化与审计事件基线已完成；下一步进入 ToolRegistry、PolicyEngine 与 Approval。
+> 实施状态（2026-08-13）：P2.1 工具协议与持久化已完成；P2.2 ToolRegistry、PolicyEngine、逐项 Approval、精确作用域 PermissionGrant、Wails API 与重启恢复已完成。下一步进入 P2.3 ToolExecutor、受控 Workspace 只读工具与取消/超时。
 
 **目标：** 打通一条可审计的模型工具调用闭环。
 
