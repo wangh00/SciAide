@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,6 +28,8 @@ const (
 	maxToolCallIDBytes    = 1024
 	maxToolNameBytes      = 160
 	maxToolArgumentsBytes = 256 * 1024
+	maxProviderToolName   = 64
+	maxErrorBodyBytes     = 16 * 1024
 )
 
 type Client struct {
@@ -76,8 +79,8 @@ func (c *Client) Discover(ctx context.Context, profile modelprofile.Profile, sec
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		_, _ = io.CopyN(io.Discard, response.Body, 4096)
-		return nil, classifyStatus(response.StatusCode, response.Header)
+		body, _ := io.ReadAll(io.LimitReader(response.Body, maxErrorBodyBytes))
+		return nil, classifyStatus(response.StatusCode, response.Header, body)
 	}
 	decoder := json.NewDecoder(io.LimitReader(response.Body, 4<<20))
 	var payload modelsResponse
@@ -132,9 +135,22 @@ func (c *Client) openWithRetry(ctx context.Context, request model.ChatRequest) (
 
 func (c *Client) open(ctx context.Context, request model.ChatRequest) (model.Stream, time.Duration, error) {
 	payload := requestPayload{Model: c.profile.ModelID, Stream: true, StreamOptions: &streamOptions{IncludeUsage: true}, Temperature: c.profile.Temperature, MaxTokens: c.profile.MaxOutputTokens}
+	providerNames := make(map[string]string, len(request.Tools))
+	qualifiedNames := make(map[string]string, len(request.Tools))
+	for _, definition := range request.Tools {
+		if err := validateModelToolDefinition(definition); err != nil {
+			return nil, 0, err
+		}
+		providerName := providerToolName(definition.Name)
+		if existing, duplicate := providerNames[providerName]; duplicate && existing != definition.Name {
+			return nil, 0, fmt.Errorf("model tool name alias collision")
+		}
+		providerNames[providerName] = definition.Name
+		qualifiedNames[definition.Name] = providerName
+	}
 	payload.Messages = make([]requestMessage, 0, len(request.Messages))
 	for _, message := range request.Messages {
-		mapped, err := mapRequestMessage(message)
+		mapped, err := mapRequestMessage(message, qualifiedNames)
 		if err != nil {
 			return nil, 0, err
 		}
@@ -142,10 +158,7 @@ func (c *Client) open(ctx context.Context, request model.ChatRequest) (model.Str
 	}
 	payload.Tools = make([]requestTool, 0, len(request.Tools))
 	for _, definition := range request.Tools {
-		if err := validateModelToolDefinition(definition); err != nil {
-			return nil, 0, err
-		}
-		payload.Tools = append(payload.Tools, requestTool{Type: "function", Function: requestFunction{Name: definition.Name, Description: definition.Description, Parameters: append(json.RawMessage(nil), definition.InputSchema...)}})
+		payload.Tools = append(payload.Tools, requestTool{Type: "function", Function: requestFunction{Name: qualifiedNames[definition.Name], Description: definition.Description, Parameters: append(json.RawMessage(nil), definition.InputSchema...)}})
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -163,16 +176,16 @@ func (c *Client) open(ctx context.Context, request model.ChatRequest) (model.Str
 		return nil, 0, classifyNetwork(err)
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		_, _ = io.CopyN(io.Discard, response.Body, 4096)
+		responseBody, _ := io.ReadAll(io.LimitReader(response.Body, maxErrorBodyBytes))
 		response.Body.Close()
-		return nil, parseRetryAfter(response.Header.Get("Retry-After")), classifyStatus(response.StatusCode, response.Header)
+		return nil, parseRetryAfter(response.Header.Get("Retry-After")), classifyStatus(response.StatusCode, response.Header, responseBody)
 	}
 	scanner := bufio.NewScanner(response.Body)
 	scanner.Buffer(make([]byte, 64*1024), maxStreamLineBytes)
-	return &stream{body: response.Body, scanner: scanner, toolCalls: make(map[int]*toolCallAccumulator)}, 0, nil
+	return &stream{body: response.Body, scanner: scanner, toolCalls: make(map[int]*toolCallAccumulator), providerNames: providerNames}, 0, nil
 }
 
-func mapRequestMessage(message model.Message) (requestMessage, error) {
+func mapRequestMessage(message model.Message, qualifiedNames map[string]string) (requestMessage, error) {
 	content := message.Content
 	mapped := requestMessage{Role: string(message.Role), Content: &content}
 	switch message.Role {
@@ -188,7 +201,11 @@ func mapRequestMessage(message model.Message) (requestMessage, error) {
 			if err := validateCompleteToolCall(call); err != nil {
 				return requestMessage{}, err
 			}
-			mapped.ToolCalls = append(mapped.ToolCalls, requestToolCall{ID: call.ID, Type: "function", Function: requestToolCallFunction{Name: call.Name, Arguments: string(call.Arguments)}})
+			name := qualifiedNames[call.Name]
+			if name == "" {
+				name = providerToolName(call.Name)
+			}
+			mapped.ToolCalls = append(mapped.ToolCalls, requestToolCall{ID: call.ID, Type: "function", Function: requestToolCallFunction{Name: name, Arguments: string(call.Arguments)}})
 		}
 		if len(mapped.ToolCalls) > 0 && message.Content == "" {
 			mapped.Content = nil
@@ -203,6 +220,45 @@ func mapRequestMessage(message model.Message) (requestMessage, error) {
 		return requestMessage{}, fmt.Errorf("unsupported model message role %q", message.Role)
 	}
 	return mapped, nil
+}
+
+// providerToolName maps SciAide's qualified names (which intentionally use
+// dots for namespaces) to the conservative OpenAI-compatible function-name
+// alphabet. A hash suffix keeps aliases stable and prevents dot/underscore
+// replacements from silently colliding.
+func providerToolName(qualified string) string {
+	qualified = strings.TrimSpace(qualified)
+	providerSafe := qualified != "" && len(qualified) <= maxProviderToolName
+	for _, character := range qualified {
+		if (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
+			(character >= '0' && character <= '9') || character == '_' || character == '-' {
+			continue
+		}
+		providerSafe = false
+		break
+	}
+	if providerSafe {
+		return qualified
+	}
+	var prefix strings.Builder
+	for _, character := range qualified {
+		if (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
+			(character >= '0' && character <= '9') || character == '_' || character == '-' {
+			prefix.WriteRune(character)
+		} else {
+			prefix.WriteByte('_')
+		}
+	}
+	value := strings.Trim(prefix.String(), "_-")
+	if value == "" {
+		value = "tool"
+	}
+	digest := sha256.Sum256([]byte(qualified))
+	suffix := fmt.Sprintf("_%x", digest[:6])
+	if len(value) > maxProviderToolName-len(suffix) {
+		value = value[:maxProviderToolName-len(suffix)]
+	}
+	return value + suffix
 }
 
 func validateModelToolDefinition(definition model.ToolDefinition) error {
@@ -276,12 +332,13 @@ type toolCallAccumulator struct {
 }
 
 type stream struct {
-	body         io.ReadCloser
-	scanner      *bufio.Scanner
-	queue        []model.Event
-	done         bool
-	finishReason string
-	toolCalls    map[int]*toolCallAccumulator
+	body          io.ReadCloser
+	scanner       *bufio.Scanner
+	queue         []model.Event
+	done          bool
+	finishReason  string
+	toolCalls     map[int]*toolCallAccumulator
+	providerNames map[string]string
 }
 
 func (s *stream) Recv() (model.Event, error) {
@@ -397,7 +454,11 @@ func (s *stream) finalizeToolCalls() error {
 	slices.Sort(indexes)
 	for _, index := range indexes {
 		value := s.toolCalls[index]
-		call := model.ToolCall{ID: value.id.String(), Name: value.name.String(), Arguments: json.RawMessage(value.arguments.String())}
+		name := value.name.String()
+		if qualified := s.providerNames[name]; qualified != "" {
+			name = qualified
+		}
+		call := model.ToolCall{ID: value.id.String(), Name: name, Arguments: json.RawMessage(value.arguments.String())}
 		if err := validateCompleteToolCall(call); err != nil {
 			return modelError("MODEL_TOOL_CALL_INVALID", "模型返回了不完整或无效的工具调用。", false, err)
 		}
@@ -482,7 +543,7 @@ func classifyNetwork(err error) error {
 	return modelError("MODEL_UNAVAILABLE", "暂时无法连接模型服务。", true, err)
 }
 
-func classifyStatus(status int, _ http.Header) error {
+func classifyStatus(status int, _ http.Header, responseBody []byte) error {
 	switch status {
 	case http.StatusUnauthorized, http.StatusForbidden:
 		return modelError("MODEL_AUTH_FAILED", "模型服务拒绝了密钥，请重新设置 API Key。", false, nil)
@@ -494,8 +555,33 @@ func classifyStatus(status int, _ http.Header) error {
 		if status >= 500 {
 			return modelError("MODEL_UNAVAILABLE", "模型服务暂时不可用。", true, fmt.Errorf("HTTP %d", status))
 		}
-		return modelError("MODEL_REQUEST_REJECTED", "模型服务拒绝了请求，请检查模型配置。", false, fmt.Errorf("HTTP %d", status))
+		message := "模型服务拒绝了请求，请检查模型配置。"
+		if detail := providerErrorMessage(responseBody); detail != "" {
+			message = fmt.Sprintf("模型服务拒绝了请求（HTTP %d）：%s", status, detail)
+		}
+		return modelError("MODEL_REQUEST_REJECTED", message, false, fmt.Errorf("HTTP %d", status))
 	}
+}
+
+func providerErrorMessage(body []byte) string {
+	var payload struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+		Message string `json:"message"`
+	}
+	if len(body) == 0 || json.Unmarshal(body, &payload) != nil {
+		return ""
+	}
+	value := strings.TrimSpace(payload.Error.Message)
+	if value == "" {
+		value = strings.TrimSpace(payload.Message)
+	}
+	value = strings.Join(strings.Fields(value), " ")
+	if len([]rune(value)) > 300 {
+		value = string([]rune(value)[:300]) + "…"
+	}
+	return value
 }
 
 func modelError(code, message string, retryable bool, cause error) error {

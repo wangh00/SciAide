@@ -99,6 +99,7 @@ svg { flex: 0 0 auto; }
 .send { width: 35px; height: 35px; background: linear-gradient(135deg, #696af0, #4d4ed8); box-shadow: 0 5px 14px rgba(78,79,211,.25); }.send:not(:disabled):hover { transform: translateY(-1px); }.stop { padding: 8px 12px; background: #e75f64; font-size: 10px; font-weight: 650; }
 .composer-hint { margin-top: 8px; margin-bottom: 0; color: #b1b3ba; font-size: 9px; text-align: center; }
 .notice { display: grid; grid-template-columns: 16px minmax(0,1fr) 20px; align-items: center; gap: 7px; margin-bottom: 7px; padding: 8px 11px; border: 1px solid #e4e2f8; border-radius: 9px; color: #62639a; background: #f6f5ff; font-size: 10.5px; }.notice button { display: grid; place-items: center; padding: 0; border: 0; color: #999bad; background: transparent; }.notice.error { color: #9b4f54; border-color: #f2dada; background: #fff4f4; }
+.notice.run-error { grid-template-columns: 16px minmax(0,1fr); }.notice > span { min-width: 0; overflow-wrap: anywhere; }
 
 .modal-backdrop { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; padding: 22px; background: rgba(26,27,33,.46); backdrop-filter: blur(7px); animation: fade .16s ease-out; }
 @keyframes fade { from{opacity:0}to{opacity:1} }

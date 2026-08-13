@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -64,15 +65,15 @@ func TestStreamMapsToolsAndAccumulatesFragmentedToolCalls(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
 			t.Fatal(err)
 		}
-		if len(requestBody.Tools) != 1 || requestBody.Tools[0].Function.Name != "builtin.workspace.read_text" {
+		providerName := providerToolName("builtin.workspace.read_text")
+		if len(requestBody.Tools) != 1 || requestBody.Tools[0].Function.Name != providerName || strings.Contains(requestBody.Tools[0].Function.Name, ".") {
 			t.Fatalf("tools = %#v", requestBody.Tools)
 		}
-		if len(requestBody.Messages) != 3 || len(requestBody.Messages[1].ToolCalls) != 1 || requestBody.Messages[2].ToolCallID != "call-old" || requestBody.Messages[2].Content == nil || !strings.Contains(*requestBody.Messages[2].Content, "<untrusted_tool_result>") {
+		if len(requestBody.Messages) != 3 || len(requestBody.Messages[1].ToolCalls) != 1 || requestBody.Messages[1].ToolCalls[0].Function.Name != providerToolName("builtin.workspace.list") || requestBody.Messages[2].ToolCallID != "call-old" || requestBody.Messages[2].Content == nil || !strings.Contains(*requestBody.Messages[2].Content, "<untrusted_tool_result>") {
 			t.Fatalf("messages = %#v", requestBody.Messages)
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = io.WriteString(w, `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-","function":{"name":"builtin.workspace.","arguments":"{\"path\":"}}]},"finish_reason":null}]}`+"\n\n")
-		_, _ = io.WriteString(w, `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"new","function":{"name":"read_text","arguments":"\"paper.md\"}"}}]},"finish_reason":"tool_calls"}]}`+"\n\n")
+		_, _ = io.WriteString(w, fmt.Sprintf(`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-new","function":{"name":%q,"arguments":"{\"path\":\"paper.md\"}"}}]},"finish_reason":"tool_calls"}]}`, providerName)+"\n\n")
 		_, _ = io.WriteString(w, "data: [DONE]\n\n")
 	}))
 	defer server.Close()
@@ -95,6 +96,48 @@ func TestStreamMapsToolsAndAccumulatesFragmentedToolCalls(t *testing.T) {
 	}
 	if event, err = stream.Recv(); err != nil || event.Type != model.EventDone || event.FinishReason != "tool_calls" {
 		t.Fatalf("done event = %#v, %v", event, err)
+	}
+}
+
+func TestProviderToolNamesAreCompatibleStableAndDistinct(t *testing.T) {
+	values := []string{
+		"builtin.workspace.read_text",
+		"builtin_workspace_read_text",
+		"mcp.chrome-devtools.take_screenshot",
+		strings.Repeat("long.namespace.", 20),
+	}
+	seen := map[string]struct{}{}
+	for _, value := range values {
+		name := providerToolName(value)
+		if len(name) == 0 || len(name) > maxProviderToolName {
+			t.Fatalf("providerToolName(%q) = %q", value, name)
+		}
+		for _, character := range name {
+			if !((character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9') || character == '_' || character == '-') {
+				t.Fatalf("provider name %q contains incompatible character %q", name, character)
+			}
+		}
+		if _, duplicate := seen[name]; duplicate {
+			t.Fatalf("provider name collision for %q", name)
+		}
+		seen[name] = struct{}{}
+		if providerToolName(value) != name {
+			t.Fatalf("provider name for %q is not stable", value)
+		}
+	}
+}
+
+func TestRequestRejectionIncludesBoundedProviderDetail(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"error":{"message":"Invalid tools[0].function.name"}}`)
+	}))
+	defer server.Close()
+	client := New(modelprofile.Profile{BaseURL: server.URL, ModelID: "fixture", TimeoutSeconds: 5}, nil)
+	_, err := client.Stream(context.Background(), model.ChatRequest{})
+	var appErr *apperr.Error
+	if !errors.As(err, &appErr) || appErr.Code != "MODEL_REQUEST_REJECTED" || !strings.Contains(appErr.UserMessage, "HTTP 400") || !strings.Contains(appErr.UserMessage, "Invalid tools") {
+		t.Fatalf("error = %#v", err)
 	}
 }
 
