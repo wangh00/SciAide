@@ -3,6 +3,7 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -279,6 +280,14 @@ func (s *Service) Connect(ctx context.Context, id string) (Server, error) {
 	snapshot, err := s.connector.Connect(ctx, value)
 	if err != nil {
 		message := publicError(err)
+		if errors.Is(err, context.Canceled) {
+			status := StatusDisconnected
+			if !value.Enabled {
+				status = StatusDisabled
+			}
+			_ = s.repository.UpdateRuntime(context.Background(), value.ID, status, "", "", 0, 0, 0, "", value.LastConnectedAt, s.now())
+			return Server{}, fmt.Errorf("connect MCP server: %s", message)
+		}
 		_ = s.repository.UpdateRuntime(context.Background(), value.ID, StatusFailed, "", "", 0, 0, 0, message, nil, s.now())
 		return Server{}, fmt.Errorf("connect MCP server: %s", message)
 	}

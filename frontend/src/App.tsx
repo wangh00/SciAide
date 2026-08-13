@@ -18,6 +18,8 @@ type RunSnapshot = { run: Run; messages: Message[]; toolCalls: ToolCall[]; pendi
 type MCPTransport = "stdio" | "streamable_http";
 type MCPServer = { id: string; name: string; namespace: string; transport: MCPTransport; command: string; args: string[]; workingDir: string; url: string; headers: Record<string,string>; env: Record<string,string>; secretConfigured: Record<string,boolean>; enabled: boolean; autoStart: boolean; trust: "untrusted" | "user_trusted"; timeoutSeconds: number; status: string; protocolVersion?: string; serverVersion?: string; toolCount: number; resourceCount: number; promptCount: number; lastError?: string };
 type MCPImportResult = { imported: MCPServer[]; errors: { name: string; message: string }[] };
+type MCPBatchItem = { serverId: string; name?: string; status: "succeeded" | "skipped" | "failed"; message?: string; server: MCPServer };
+type MCPBatchResult = { succeeded: number; skipped: number; failed: number; items: MCPBatchItem[] };
 type MCPCapabilities = { protocolVersion?: string; serverVersion?: string; tools: { originalName: string; qualifiedName: string; description: string; version: string }[]; resources: string[]; prompts: string[] };
 type Envelope = { aggregateId: string; type: string; payload: Record<string, unknown> };
 type CreateDialog = { kind: "project" | "conversation"; title: string; description: string; workspacePath: string } | null;
@@ -274,7 +276,9 @@ function CreateModal({ value, setValue, close, submit }: { value: Exclude<Create
 function MCPSettings({ close }: { close: () => void }) {
   const [servers, setServers] = useState<MCPServer[]>([]);
   const [id, setId] = useState("");
-  const [toast, setToast] = useState<{ id: number; text: string } | null>(null);
+  const [toast, setToast] = useState<{ id: number; text: string; detail: string } | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
+  const [batchResult, setBatchResult] = useState<MCPBatchResult | null>(null);
   const [importOpen, setImportOpen] = useState(false);
   const [importJSON, setImportJSON] = useState("");
   const [importResult, setImportResult] = useState<MCPImportResult | null>(null);
@@ -297,7 +301,9 @@ function MCPSettings({ close }: { close: () => void }) {
   const [capabilities, setCapabilities] = useState<MCPCapabilities | null>(null);
 
   const refresh = useCallback(async () => {
-    setServers(await backend<MCPServer[]>("MCPFacade", "ListMCPServers"));
+    const values = await backend<MCPServer[]>("MCPFacade", "ListMCPServers");
+    setServers(values);
+    setSelectedIds((selected) => new Set([...selected].filter((serverId) => values.some((server) => server.id === serverId))));
   }, []);
 
   useEffect(() => {
@@ -370,7 +376,7 @@ function MCPSettings({ close }: { close: () => void }) {
       setId(saved.id);
       setSecretValues("");
       setClearSecrets([]);
-      setToast({ id: Date.now(), text: "MCP 配置已保存" });
+      setToast({ id: Date.now(), text: "MCP 配置已保存", detail: "配置已安全写入，连接状态不会被自动改变。" });
     } catch (error) {
       setFeedback(errorText(error));
     } finally {
@@ -433,6 +439,7 @@ function MCPSettings({ close }: { close: () => void }) {
     setBusy(true);
     try {
       await backend("MCPFacade", "RemoveMCPServer", id);
+      setSelectedIds((selected) => { const next = new Set(selected); next.delete(id); return next; });
       setId("");
       await refresh();
     } catch (error) {
@@ -442,11 +449,55 @@ function MCPSettings({ close }: { close: () => void }) {
     }
   }
 
-  const active = current?.status === "ready" || current?.status === "starting" || current?.status === "initializing";
+  const activeStatuses = new Set(["ready", "starting", "initializing", "degraded", "stopping"]);
+  const active = current ? activeStatuses.has(current.status) : false;
+  const connectable = servers.filter((server) => server.enabled && server.trust === "user_trusted" && !activeStatuses.has(server.status));
+  const selected = servers.filter((server) => selectedIds.has(server.id));
+  const selectedConnectable = selected.filter((server) => server.enabled && server.trust === "user_trusted" && !activeStatuses.has(server.status));
+  const selectedActive = selected.filter((server) => activeStatuses.has(server.status));
+  const allConnectableSelected = connectable.length > 0 && connectable.every((server) => selectedIds.has(server.id));
+
+  function toggleSelected(serverId: string) {
+    setSelectedIds((values) => {
+      const next = new Set(values);
+      if (next.has(serverId)) next.delete(serverId); else next.add(serverId);
+      return next;
+    });
+  }
+
+  function toggleConnectable() {
+    setSelectedIds((values) => {
+      const next = new Set(values);
+      if (allConnectableSelected) connectable.forEach((server) => next.delete(server.id));
+      else connectable.forEach((server) => next.add(server.id));
+      return next;
+    });
+  }
+
+  async function batch(method: "ConnectMCPServers" | "DisconnectMCPServers", serverIds: string[]) {
+    if (!serverIds.length) return;
+    setBusy(true);
+    setBatchResult(null);
+    setFeedback(method === "ConnectMCPServers" ? `正在连接 ${serverIds.length} 个 MCP Server…` : `正在断开 ${serverIds.length} 个 MCP Server…`);
+    try {
+      const result = await backend<MCPBatchResult>("MCPFacade", method, { serverIds });
+      setBatchResult(result);
+      await refresh();
+      if (id && method === "DisconnectMCPServers" && serverIds.includes(id)) setCapabilities(null);
+      const action = method === "ConnectMCPServers" ? "连接" : "断开";
+      setToast({ id: Date.now(), text: `批量${action}完成`, detail: `成功 ${result.succeeded} · 跳过 ${result.skipped} · 失败 ${result.failed}` });
+      setFeedback(result.failed ? `批量${action}有 ${result.failed} 项失败，请查看左侧结果。` : `批量${action}已完成。`);
+    } catch (error) {
+      setFeedback(errorText(error));
+      await refresh();
+    } finally {
+      setBusy(false);
+    }
+  }
 
   return <div className="modal-backdrop">
     <section className="model-modal mcp-modal" role="dialog" aria-modal="true">
-      {toast && <div className="mcp-toast" role="status"><span><Icon name="check" size={15}/></span><div><b>{toast.text}</b><small>配置已安全写入，连接状态不会被自动改变。</small></div></div>}
+      {toast && <div className="mcp-toast" role="status"><span><Icon name="check" size={15}/></span><div><b>{toast.text}</b><small>{toast.detail}</small></div></div>}
       <header>
         <div><span className="dialog-icon gradient"><Icon name="server"/></span><div><p>MODEL CONTEXT PROTOCOL</p><h2>MCP Servers</h2></div></div>
         <button className="close" onClick={close} aria-label="关闭"><Icon name="close"/></button>
@@ -455,12 +506,18 @@ function MCPSettings({ close }: { close: () => void }) {
         <aside>
           <button className={`add-profile ${!importOpen && !id ? "selected" : ""}`} onClick={() => { setImportOpen(false); setId(""); }}><Icon name="plus"/> 添加 MCP Server</button>
           <button className={`add-profile import-profile ${importOpen ? "selected" : ""}`} onClick={() => { setImportOpen(true); setFeedback(""); setImportResult(null); }}><Icon name="tool"/> 从 JSON 导入</button>
+          {servers.length > 0 && <div className="mcp-batch-panel">
+            <div><button type="button" className="mcp-select-all" onClick={toggleConnectable} disabled={busy || !connectable.length}><span className={`mcp-check ${allConnectableSelected ? "checked" : ""}`}>{allConnectableSelected && <Icon name="check" size={11}/>}</span>{allConnectableSelected ? "取消全选" : "全选可连接"}</button><small>已选 {selected.length}</small></div>
+            <button type="button" className="mcp-connect-all" onClick={() => void batch("ConnectMCPServers", connectable.map((server) => server.id))} disabled={busy || !connectable.length}><Icon name="server" size={14}/> 一键连接全部 <span>{connectable.length}</span></button>
+            <div className="mcp-selected-actions"><button type="button" onClick={() => void batch("ConnectMCPServers", selectedConnectable.map((server) => server.id))} disabled={busy || !selectedConnectable.length}>连接所选</button><button type="button" onClick={() => void batch("DisconnectMCPServers", selectedActive.map((server) => server.id))} disabled={busy || !selectedActive.length}>断开所选</button></div>
+          </div>}
+          {batchResult && <div className="mcp-batch-result"><b>最近批量操作</b><span>成功 {batchResult.succeeded} · 跳过 {batchResult.skipped} · 失败 {batchResult.failed}</span>{batchResult.items.filter((item) => item.status !== "succeeded").map((item) => <p className={item.status} key={`${item.serverId}-${item.status}`}><strong>{item.name || item.serverId || "未知 Server"}</strong><small>{item.message || item.status}</small></p>)}</div>}
           <div className="profile-caption">已配置</div>
-          {servers.map((server) => <button className={`profile-item ${!importOpen && server.id === id ? "selected" : ""}`} onClick={() => { setImportOpen(false); setId(server.id); }} key={server.id}>
+          {servers.map((server) => <div className={`mcp-profile-row ${selectedIds.has(server.id) ? "checked" : ""}`} key={server.id}><button type="button" className="mcp-row-check" aria-label={`选择 ${server.name}`} aria-pressed={selectedIds.has(server.id)} onClick={() => toggleSelected(server.id)} disabled={busy}><span className={`mcp-check ${selectedIds.has(server.id) ? "checked" : ""}`}>{selectedIds.has(server.id) && <Icon name="check" size={11}/>}</span></button><button className={`profile-item ${!importOpen && server.id === id ? "selected" : ""}`} onClick={() => { setImportOpen(false); setId(server.id); }} disabled={busy}>
             <span className="provider-logo"><Icon name="server" size={15}/></span>
             <span><b>{server.name}</b><small>{server.transport} · {server.toolCount} tools</small></span>
             <i className={`status-dot ${server.status === "ready" ? "ready" : server.status === "failed" ? "failed" : ""}`}/>
-          </button>)}
+          </button></div>)}
         </aside>
         <form onSubmit={(event) => importOpen ? void importServers(event) : void save(event)}>
           {importOpen ? <>

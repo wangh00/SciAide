@@ -147,7 +147,7 @@ func (m *Manager) Connect(ctx context.Context, server mcpserver.Server) (mcpserv
 	if m.pending[server.ID] != pending || connectCtx.Err() != nil {
 		m.mu.Unlock()
 		_ = m.registry.ReplaceNamespace(context.Background(), namespacePrefix(server.Namespace), nil)
-		return mcpserver.CapabilitySnapshot{}, fmt.Errorf("MCP connection was cancelled")
+		return mcpserver.CapabilitySnapshot{}, fmt.Errorf("MCP connection was cancelled: %w", context.Canceled)
 	}
 	delete(m.pending, server.ID)
 	m.sessions[server.ID] = &connection{server: server, session: session, capabilities: snapshot}

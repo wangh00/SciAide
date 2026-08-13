@@ -37,9 +37,26 @@ func (f *MCPFacade) ConnectMCPServer(serverID string) (mcpserver.Server, error) 
 	return publicMCPServer(value), err
 }
 
+func (f *MCPFacade) ConnectMCPServers(request mcpserver.BatchCommand) (mcpserver.BatchResult, error) {
+	result, err := f.service.ConnectBatch(f.lifecycle.Context(), request.ServerIDs)
+	return publicMCPBatchResult(result), err
+}
+
 func (f *MCPFacade) DisconnectMCPServer(serverID string) (mcpserver.Server, error) {
 	value, err := f.service.Disconnect(f.lifecycle.Context(), serverID)
 	return publicMCPServer(value), err
+}
+
+func (f *MCPFacade) DisconnectMCPServers(request mcpserver.BatchCommand) (mcpserver.BatchResult, error) {
+	result, err := f.service.DisconnectBatch(f.lifecycle.Context(), request.ServerIDs)
+	return publicMCPBatchResult(result), err
+}
+
+func publicMCPBatchResult(value mcpserver.BatchResult) mcpserver.BatchResult {
+	for i := range value.Items {
+		value.Items[i].Server = publicMCPServer(value.Items[i].Server)
+	}
+	return value
 }
 
 func publicMCPServer(value mcpserver.Server) mcpserver.Server {
