@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -153,6 +154,23 @@ type fakeResolver struct{ model model.ChatModel }
 func (r fakeResolver) Resolve(context.Context, string, string) (model.ChatModel, error) {
 	return r.model, nil
 }
+
+type blockingModel struct{}
+
+func (blockingModel) Capabilities(context.Context) (model.Capabilities, error) {
+	return model.Capabilities{Streaming: true}, nil
+}
+func (blockingModel) Stream(ctx context.Context, _ model.ChatRequest) (model.Stream, error) {
+	return blockingStream{ctx: ctx}, nil
+}
+
+type blockingStream struct{ ctx context.Context }
+
+func (s blockingStream) Recv() (model.Event, error) {
+	<-s.ctx.Done()
+	return model.Event{}, s.ctx.Err()
+}
+func (blockingStream) Close() error { return nil }
 
 type executionAdapter struct{ executor *tool.Executor }
 
@@ -305,6 +323,21 @@ func TestContextBuilderKeepsLatestMessageAndToolResults(t *testing.T) {
 	}
 }
 
+func TestContextBuilderBoundsCumulativeToolResults(t *testing.T) {
+	builder := NewContextBuilder(20)
+	calls := []tool.Call{
+		{ProviderCallID: "old", ToolName: "fixture", Arguments: json.RawMessage(`{}`), Result: &tool.Result{Status: tool.ResultSuccess, Text: strings.Repeat("o", 100)}},
+		{ProviderCallID: "new", ToolName: "fixture", Arguments: json.RawMessage(`{}`), Result: &tool.Result{Status: tool.ResultSuccess, Text: "newest"}},
+	}
+	request, err := builder.Build(context.Background(), nil, "", nil, calls)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(request.Messages) != 3 || request.Messages[1].ToolCalls[0].ID != "new" || len([]rune(request.Messages[2].Content)) > 20 {
+		t.Fatalf("bounded tool context = %#v", request.Messages)
+	}
+}
+
 func TestBudgetStopsUnboundedModelTurns(t *testing.T) {
 	counter := newBudgetCounter(RunBudget{MaxModelTurns: 1, MaxToolCalls: 1, MaxDuration: time.Minute}, time.Now(), 0)
 	if err := counter.beforeModelTurn(); err != nil {
@@ -315,9 +348,33 @@ func TestBudgetStopsUnboundedModelTurns(t *testing.T) {
 	}
 }
 
+func TestAgentLoopDurationBudgetCancelsBlockedModelStream(t *testing.T) {
+	loop, state, _ := newLoopFixture(t, nil, []fake.Step{{Event: model.Event{Type: model.EventDone}}})
+	loop.models = fakeResolver{blockingModel{}}
+	loop.budget = RunBudget{MaxModelTurns: 2, MaxToolCalls: 1, MaxDuration: 20 * time.Millisecond}
+	if outcome := loop.Run(context.Background(), "run"); outcome != OutcomeFailed {
+		t.Fatalf("outcome = %s", outcome)
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.run.ErrorCode != "RUN_DURATION_BUDGET_EXCEEDED" {
+		t.Fatalf("run = %#v", state.run)
+	}
+}
+
 func TestProviderToolCallValidationRejectsDuplicates(t *testing.T) {
 	calls := []model.ToolCall{{ID: "same", Name: "one", Arguments: json.RawMessage(`{}`)}, {ID: "same", Name: "two", Arguments: json.RawMessage(`{}`)}}
 	if err := ValidateProviderToolCalls(calls); err == nil {
 		t.Fatal("duplicate provider ids accepted")
+	}
+}
+
+func TestFirstUnresolvedToolCallFailsClosed(t *testing.T) {
+	calls := []tool.Call{{ID: "completed", Status: tool.CallCompleted}, {ID: "waiting", Status: tool.CallAwaitingApproval}}
+	if got := firstUnresolvedToolCall(calls); got == nil || got.ID != "waiting" {
+		t.Fatalf("unresolved = %#v", got)
+	}
+	if got := firstUnresolvedToolCall([]tool.Call{{Status: tool.CallDenied}, {Status: tool.CallFailed}}); got != nil {
+		t.Fatalf("terminal call reported unresolved: %#v", got)
 	}
 }

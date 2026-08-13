@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"fmt"
 	"time"
 )
@@ -24,6 +25,11 @@ type budgetCounter struct {
 	toolCalls  int
 	now        func() time.Time
 }
+
+type runDeadlineError struct{ cause error }
+
+func (e runDeadlineError) Error() string { return "RUN_DURATION_BUDGET_EXCEEDED" }
+func (e runDeadlineError) Unwrap() error { return e.cause }
 
 func normalizeBudget(value RunBudget) RunBudget {
 	if value.MaxModelTurns <= 0 {
@@ -66,7 +72,7 @@ func (b *budgetCounter) beforeToolCall() error {
 
 func (b *budgetCounter) checkDuration() error {
 	if b.now().Sub(b.startedAt) >= b.budget.MaxDuration {
-		return fmt.Errorf("RUN_DURATION_BUDGET_EXCEEDED")
+		return runDeadlineError{cause: context.DeadlineExceeded}
 	}
 	return nil
 }

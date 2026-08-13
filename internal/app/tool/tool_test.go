@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -40,6 +41,22 @@ func TestDefinitionRejectsDuplicateAndMismatchedSyntheticPermissions(t *testing.
 	}
 }
 
+func TestDefinitionRejectsUnboundedSecurityMetadata(t *testing.T) {
+	base := Definition{QualifiedName: "builtin.test", Description: "test", InputSchema: json.RawMessage(`{}`), Risk: RiskLow, Version: "1"}
+	oversized := base
+	oversized.InputSchema = json.RawMessage(`{"description":"` + strings.Repeat("x", 256*1024) + `"}`)
+	if err := ValidateDefinition(oversized); err == nil {
+		t.Fatal("oversized schema was accepted")
+	}
+	tooMany := base
+	for index := 0; index < 33; index++ {
+		tooMany.Permissions = append(tooMany.Permissions, PermissionRequirement{Kind: PermissionWorkspaceRead, Resource: fmt.Sprintf("path-%d", index)})
+	}
+	if err := ValidateDefinition(tooMany); err == nil {
+		t.Fatal("too many permission requirements were accepted")
+	}
+}
+
 func TestJSONSchemaValidatorRejectsUnknownAndInvalidArguments(t *testing.T) {
 	validator := JSONSchemaValidator{}
 	schema := []byte(`{"type":"object","additionalProperties":false,"required":["path","limit"],"properties":{"path":{"type":"string","minLength":1},"limit":{"type":"integer","minimum":1,"maximum":10}}}`)
@@ -56,6 +73,12 @@ func TestJSONSchemaValidatorRejectsUnknownAndInvalidArguments(t *testing.T) {
 	}
 	if err := validator.Validate([]byte(`{"type":"object","properties":{"optional":{"type":"string","format":"uri"}}}`), []byte(`{}`)); err == nil {
 		t.Fatal("unsupported nested keyword was ignored for an absent property")
+	}
+	if err := validator.Validate([]byte(`{"type":"object"} {}`), []byte(`{}`)); err == nil {
+		t.Fatal("trailing schema JSON was accepted")
+	}
+	if err := validator.Validate([]byte(`{"type":"object"}`), []byte(`{} {}`)); err == nil {
+		t.Fatal("trailing instance JSON was accepted")
 	}
 }
 

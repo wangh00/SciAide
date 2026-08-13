@@ -31,3 +31,7 @@ P2.1～P2.3 已建立 Tool 协议、持久化、权限审批和有界执行器�
 - OpenAI-compatible 服务必须正确支持 Chat Completions `tools/tool_calls`；不兼容实现会返回可理解的模型协议错误，而不会降级为无审计执行。
 - P2.5 需要在前端展示 `approval.required` 和 pending Approval，并调用已有 ResolveApproval；后端闭环与恢复入口已具备。
 - 当前预算计数是单次进程内执行的保守上限，已持久化 ToolCall 会计入恢复后的工具预算；若未来需要跨多次审批精确保留模型 Turn/持续时间，应增加独立 Run checkpoint 迁移。
+
+## 复核补充（2026-08-13）
+
+P2.1～P2.4 安全复核后进一步收紧：Wails 不再暴露直接 Policy 评估或 Executor 执行入口；运行时 Deadline 会主动取消卡住的模型流；累计 ToolResult 与 Tool Definition 数量纳入上下文上限；JSON Schema/Instance 拒绝尾随 JSON；Tool Schema、Arguments、Permission 数量和资源长度均有硬边界。上述约束属于同一决策的纵深防御，不改变持久化协议。

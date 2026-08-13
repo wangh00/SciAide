@@ -8,7 +8,8 @@ import (
 
 // PermissionFacade is the typed UI boundary for P2 approvals and scoped
 // grants. The frontend cannot create grants directly; every grant originates
-// from resolving a persisted Approval.
+// from resolving a persisted Approval. Initial policy evaluation is owned by
+// AgentLoop and is not exposed to arbitrary UI callers.
 type PermissionFacade struct {
 	lifecycle   *LifecycleContext
 	engine      *permission.Engine
@@ -18,10 +19,6 @@ type PermissionFacade struct {
 
 func NewPermissionFacade(lifecycle *LifecycleContext, engine *permission.Engine, coordinator *permission.Coordinator, chatService *chat.Service) *PermissionFacade {
 	return &PermissionFacade{lifecycle: lifecycle, engine: engine, coordinator: coordinator, chat: chatService}
-}
-
-func (f *PermissionFacade) EvaluateToolCall(projectID, toolCallID string) (permission.Coordination, error) {
-	return f.coordinator.EvaluateCall(f.lifecycle.Context(), projectID, toolCallID)
 }
 
 func (f *PermissionFacade) ResolveApproval(command permission.ResolveCommand) (permission.Coordination, error) {

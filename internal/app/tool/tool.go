@@ -182,6 +182,9 @@ func ValidateDefinition(value Definition) error {
 	if !validRisk(value.Risk) {
 		return fmt.Errorf("invalid tool risk level %q", value.Risk)
 	}
+	if len(value.InputSchema) > 256*1024 || len(value.OutputSchema) > 256*1024 {
+		return fmt.Errorf("tool schema exceeds size limit")
+	}
 	if err := validateJSONObject("input schema", value.InputSchema); err != nil {
 		return err
 	}
@@ -191,11 +194,17 @@ func ValidateDefinition(value Definition) error {
 		}
 	}
 	seen := make(map[string]struct{}, len(value.Permissions))
+	if len(value.Permissions) > 32 {
+		return fmt.Errorf("tool has too many permission requirements")
+	}
 	for _, requirement := range value.Permissions {
 		if !validPermission(requirement.Kind) {
 			return fmt.Errorf("invalid permission requirement %q", requirement.Kind)
 		}
 		resource := strings.TrimSpace(requirement.Resource)
+		if len(resource) > 4096 || strings.IndexByte(resource, 0) >= 0 {
+			return fmt.Errorf("permission resource is invalid")
+		}
 		if requirement.Kind == PermissionToolInvoke && resource != "" && resource != qualifiedName {
 			return fmt.Errorf("tool.invoke resource must match the qualified tool name")
 		}
@@ -237,6 +246,9 @@ func snapshotPermissions(toolName string, values []PermissionRequirement) []Perm
 }
 
 func ValidateArguments(value json.RawMessage) error {
+	if len(value) > 256*1024 {
+		return fmt.Errorf("tool arguments exceed size limit")
+	}
 	return validateJSONObject("tool arguments", value)
 }
 

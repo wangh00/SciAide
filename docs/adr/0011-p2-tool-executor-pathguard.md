@@ -9,7 +9,7 @@
 
 Workspace 文件能力通过 `internal/tools/pathguard` 和 Go `os.Root` 打开。传入路径必须为项目相对路径，先经 `Clean + Abs/Rel` 组件边界检查，再由 `os.Root` 在打开时约束符号链接不能逃逸根目录。P2.3 内置工具仅提供非递归目录列表和有界 UTF-8 文本读取；二进制文件、绝对路径、路径穿越和逃逸链接均拒绝。
 
-内置工具在 Bootstrap 注册到进程内 ToolRegistry。注册并不赋予执行权限；ToolCall 仍必须经过 Schema 校验、PolicyEngine 与 Approval。Executor 和取消能力通过最小 ToolFacade 暴露，P2.4 AgentLoop 将复用同一入口。
+内置工具在 Bootstrap 注册到进程内 ToolRegistry。注册并不赋予执行权限；ToolCall 仍必须经过 Schema 校验、PolicyEngine 与 Approval。P2.3 曾通过最小 ToolFacade 暴露执行与取消能力；P2.4 AgentLoop 落地后，执行入口收回 AgentLoop，ToolFacade 仅保留发现和取消，避免 UI 绕过循环编排。
 
 ## 影响
 

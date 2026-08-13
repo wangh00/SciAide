@@ -142,6 +142,10 @@ func (l *Loop) Run(ctx context.Context, runID string) Outcome {
 		l.cancel(&run)
 		return OutcomeCancelled
 	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		l.fail(&run, "RUN_DURATION_BUDGET_EXCEEDED", "Agent 运行已达到时间上限，已停止继续调用。")
+		return OutcomeFailed
+	}
 	public := apperr.Public(err)
 	l.fail(&run, public.Code, public.Message)
 	return OutcomeFailed
@@ -163,10 +167,6 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 	if err != nil {
 		return OutcomeFailed, err
 	}
-	chatModel, err := l.models.Resolve(ctx, run.ModelProfileID, run.ModelID)
-	if err != nil {
-		return OutcomeFailed, err
-	}
 	calls, err := l.tools.ListByRun(ctx, run.ID)
 	if err != nil {
 		return OutcomeFailed, err
@@ -176,6 +176,9 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 		startedAt = *run.StartedAt
 	}
 	budget := newBudgetCounter(l.budget, startedAt, len(calls))
+	runCtx, cancelRun := context.WithDeadline(ctx, startedAt.Add(budget.budget.MaxDuration))
+	defer cancelRun()
+	ctx = runCtx
 	text := assistantText(messages, run.AssistantMessageID)
 	waiting, err := l.processCalls(ctx, run, projectID, calls)
 	if err != nil {
@@ -184,6 +187,13 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 		return OutcomeWaitingApproval, nil
 	}
 	calls, err = l.tools.ListByRun(ctx, run.ID)
+	if err != nil {
+		return OutcomeFailed, err
+	}
+	if blocked := firstUnresolvedToolCall(calls); blocked != nil {
+		return OutcomeFailed, &apperr.Error{Code: "TOOL_STATE_INVALID", UserMessage: "仍有未完成的工具调用，无法继续请求模型。"}
+	}
+	chatModel, err := l.models.Resolve(ctx, run.ModelProfileID, run.ModelID)
 	if err != nil {
 		return OutcomeFailed, err
 	}
@@ -252,6 +262,15 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 	}
 }
 
+func firstUnresolvedToolCall(calls []tool.Call) *tool.Call {
+	for index := range calls {
+		if !calls[index].Status.Terminal() {
+			return &calls[index]
+		}
+	}
+	return nil
+}
+
 func (l *Loop) processCalls(ctx context.Context, run *chat.Run, projectID string, calls []tool.Call) (bool, error) {
 	for _, call := range calls {
 		if call.Status == tool.CallDenied {
@@ -274,14 +293,14 @@ func (l *Loop) processCalls(ctx context.Context, run *chat.Run, projectID string
 			}
 		case tool.CallAwaitingApproval:
 			return true, nil
+		case tool.CallCompleted, tool.CallFailed, tool.CallDenied, tool.CallCancelled, tool.CallInterrupted:
+			continue
 		}
-		if call.Status != tool.CallRunning && !call.Status.Terminal() {
+		if call.Status != tool.CallRunning {
 			return false, &apperr.Error{Code: "TOOL_STATE_INVALID", UserMessage: "工具调用没有进入可执行状态。"}
 		}
-		if call.Status == tool.CallRunning {
-			if _, err := l.executor.Execute(ctx, projectID, call.ID); err != nil {
-				return false, err
-			}
+		if _, err := l.executor.Execute(ctx, projectID, call.ID); err != nil {
+			return false, err
 		}
 	}
 	return false, nil

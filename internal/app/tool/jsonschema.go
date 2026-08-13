@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"reflect"
 	"regexp"
@@ -24,6 +25,9 @@ func (JSONSchemaValidator) Validate(schema, instance []byte) error {
 	if err := decoder.Decode(&schemaValue); err != nil {
 		return fmt.Errorf("invalid schema: %w", err)
 	}
+	if err := requireJSONEOF(decoder, "schema"); err != nil {
+		return err
+	}
 	if err := validateSchemaSyntax(schemaValue, "$schema"); err != nil {
 		return err
 	}
@@ -32,7 +36,20 @@ func (JSONSchemaValidator) Validate(schema, instance []byte) error {
 	if err := decoder.Decode(&instanceValue); err != nil {
 		return fmt.Errorf("invalid instance: %w", err)
 	}
+	if err := requireJSONEOF(decoder, "instance"); err != nil {
+		return err
+	}
 	return validateSchemaNode(schemaValue, instanceValue, "$")
+}
+
+func requireJSONEOF(decoder *json.Decoder, label string) error {
+	var trailing any
+	if err := decoder.Decode(&trailing); err == nil {
+		return fmt.Errorf("invalid %s: trailing JSON value", label)
+	} else if err != io.EOF {
+		return fmt.Errorf("invalid %s: %w", label, err)
+	}
+	return nil
 }
 
 func validateSchemaSyntax(rawSchema any, path string) error {
@@ -72,10 +89,16 @@ func validateSchemaSyntax(rawSchema any, path string) error {
 		if !ok {
 			return fmt.Errorf("%s: required must be an array", path)
 		}
+		seen := make(map[string]struct{}, len(required))
 		for _, item := range required {
-			if _, ok := item.(string); !ok {
+			name, ok := item.(string)
+			if !ok {
 				return fmt.Errorf("%s: required entries must be strings", path)
 			}
+			if _, exists := seen[name]; exists {
+				return fmt.Errorf("%s: required entries must be unique", path)
+			}
+			seen[name] = struct{}{}
 		}
 	}
 	if raw, exists := schema["additionalProperties"]; exists {
@@ -294,7 +317,7 @@ func validateStringSchema(schema map[string]any, value, path string) error {
 
 func validateNumberSchema(schema map[string]any, value json.Number, path string) error {
 	number, err := value.Float64()
-	if err != nil {
+	if err != nil || math.IsInf(number, 0) || math.IsNaN(number) {
 		return fmt.Errorf("%s: invalid number", path)
 	}
 	for _, constraint := range []struct {
@@ -310,7 +333,7 @@ func validateNumberSchema(schema map[string]any, value json.Number, path string)
 			return fmt.Errorf("%s: %s must be a number", path, constraint.name)
 		}
 		limit, err := limitNumber.Float64()
-		if err != nil {
+		if err != nil || math.IsInf(limit, 0) || math.IsNaN(limit) {
 			return fmt.Errorf("%s: invalid %s", path, constraint.name)
 		}
 		valid := number > limit
