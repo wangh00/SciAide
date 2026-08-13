@@ -3,6 +3,8 @@ package bootstrap
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -116,5 +118,51 @@ func TestApplicationRecoveryExpiresApprovalBeforeInterruptingCallAndRun(t *testi
 	}
 	if len(sequences) != 1 || sequences[0] != "approval.expired" {
 		t.Fatalf("recovery audit events = %v", sequences)
+	}
+}
+
+func TestApplicationRegistersAndExecutesBuiltinWorkspaceTool(t *testing.T) {
+	ctx := context.Background()
+	application, err := New(Options{RootDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer application.Close()
+	projectValue, err := application.ProjectFacade.CreateProject(wailstransport.CreateProjectRequest{Name: "内置工具"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectValue.WorkspacePath, "paper.md"), []byte("科研内容"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	conversationValue, err := application.ConversationFacade.CreateConversation(wailstransport.CreateConversationRequest{ProjectID: projectValue.ID, Title: "工具执行"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	profile := modelprofile.Profile{ID: "builtin-profile", Name: "fixture", ProviderType: modelprofile.ProviderOpenAICompatible, BaseURL: "https://example.test/v1", ModelID: "fixture", Models: []modelprofile.ProfileModel{{ID: "fixture", Enabled: true, IsDefault: true}}, SecretRef: "builtin-secret", TimeoutSeconds: 60, CustomHeaders: map[string]string{}, Enabled: true, CreatedAt: now, UpdatedAt: now}
+	if err := sqlite.NewModelProfileRepository(application.store.DB()).Save(ctx, profile); err != nil {
+		t.Fatal(err)
+	}
+	user := conversation.Message{ID: "builtin-user", ConversationID: conversationValue.ID, RunID: "builtin-run", Role: conversation.RoleUser, Status: conversation.MessageComplete, CreatedAt: now, UpdatedAt: now, Parts: []conversation.MessagePart{{ID: "builtin-user-part", MessageID: "builtin-user", Type: "text", CreatedAt: now}}}
+	assistant := conversation.Message{ID: "builtin-assistant", ConversationID: conversationValue.ID, RunID: "builtin-run", Role: conversation.RoleAssistant, Status: conversation.MessageStreaming, CreatedAt: now, UpdatedAt: now, Parts: []conversation.MessagePart{{ID: "builtin-assistant-part", MessageID: "builtin-assistant", Type: "text", CreatedAt: now}}}
+	run := chat.Run{ID: "builtin-run", ConversationID: conversationValue.ID, UserMessageID: user.ID, AssistantMessageID: assistant.ID, ModelProfileID: profile.ID, ModelID: "fixture", Status: chat.RunRunning, CreatedAt: now, UpdatedAt: now}
+	runRepository := sqlite.NewRunRepository(application.store.DB())
+	if err := runRepository.CreateWithMessages(ctx, run, user, assistant); err != nil {
+		t.Fatal(err)
+	}
+	definition := tool.Definition{QualifiedName: "builtin.workspace.read_text", Description: "读取当前科研项目 Workspace 中一个 UTF-8 文本文件的有界内容。", InputSchema: json.RawMessage(`{"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"type":"string","minLength":1,"maxLength":4096},"maxBytes":{"type":"integer","minimum":1,"maximum":262144}}}`), OutputSchema: json.RawMessage(`{"type":"object","additionalProperties":false,"required":["path","content","bytesRead","originalBytes","truncated"],"properties":{"path":{"type":"string"},"content":{"type":"string"},"bytesRead":{"type":"integer","minimum":0},"originalBytes":{"type":"integer","minimum":0},"truncated":{"type":"boolean"}}}`), Risk: tool.RiskLow, Permissions: []tool.PermissionRequirement{{Kind: tool.PermissionWorkspaceRead, Resource: "."}}, Idempotent: true, Version: "1"}
+	service := tool.NewService(sqlite.NewToolRepository(application.store.DB()), tool.JSONSchemaValidator{})
+	call, err := service.Propose(ctx, definition, tool.CreateCommand{RunID: run.ID, ProviderCallID: "builtin-provider", Arguments: json.RawMessage(`{"path":"paper.md"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	call, err = service.Start(ctx, call.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	execution, err := application.tools.Execute(ctx, projectValue.ID, call.ID)
+	if err != nil || execution.Result.Status != tool.ResultSuccess || execution.Result.Text != "科研内容" {
+		t.Fatalf("Execute() = %#v, %v", execution, err)
 	}
 }

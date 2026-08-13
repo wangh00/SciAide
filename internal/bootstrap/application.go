@@ -21,6 +21,7 @@ import (
 	"github.com/wangh00/SciAide/internal/platform/appdirs"
 	"github.com/wangh00/SciAide/internal/platform/secretstore"
 	"github.com/wangh00/SciAide/internal/storage/sqlite"
+	"github.com/wangh00/SciAide/internal/tools/builtin"
 	wailstransport "github.com/wangh00/SciAide/internal/transport/wails"
 )
 
@@ -38,9 +39,11 @@ type Application struct {
 	ModelFacade        *wailstransport.ModelFacade
 	ChatFacade         *wailstransport.ChatFacade
 	PermissionFacade   *wailstransport.PermissionFacade
+	ToolFacade         *wailstransport.ToolFacade
 
 	lifecycle *wailstransport.LifecycleContext
 	chat      *chat.Service
+	tools     *tool.Executor
 	store     *sqlite.Store
 	closeOnce sync.Once
 	closeErr  error
@@ -90,6 +93,14 @@ func New(options Options) (*Application, error) {
 	permissionRepository := sqlite.NewPermissionRepository(store.DB())
 	permissionEngine := permission.NewEngine(permissionRepository)
 	toolService := tool.NewService(toolRepository, tool.JSONSchemaValidator{})
+	toolRegistry := tool.NewRegistry()
+	for _, builtinTool := range []tool.Tool{builtin.NewListWorkspace(projectService), builtin.NewReadText(projectService)} {
+		if err := toolRegistry.Register(context.Background(), builtinTool); err != nil {
+			_ = store.Close()
+			return fail(fmt.Errorf("register builtin tool: %w", err))
+		}
+	}
+	toolExecutor := tool.NewExecutor(toolRegistry, toolService, runRepository, tool.ExecutorOptions{})
 	approvalCoordinator := permission.NewCoordinator(permissionEngine, toolService, runRepository)
 	publisher := wailstransport.NewEventPublisher(lifecycle)
 	chatService := chat.NewService(runRepository, conversationRepository, runRepository, publisher, gateway.NewResolver(profileService))
@@ -119,8 +130,10 @@ func New(options Options) (*Application, error) {
 		ModelFacade:        wailstransport.NewModelFacade(lifecycle, profileService),
 		ChatFacade:         wailstransport.NewChatFacade(lifecycle, chatService),
 		PermissionFacade:   wailstransport.NewPermissionFacade(lifecycle, permissionEngine, approvalCoordinator),
+		ToolFacade:         wailstransport.NewToolFacade(lifecycle, toolExecutor, toolRegistry),
 		lifecycle:          lifecycle,
 		chat:               chatService,
+		tools:              toolExecutor,
 		store:              store,
 	}, nil
 }

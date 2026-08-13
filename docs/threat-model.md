@@ -74,8 +74,16 @@ React WebView
 - Approval、Grant 与审计事件同事务持久化；同一 ToolCall 只存在一个 pending Approval，处理过的审批不能重复解析。
 - 启动时 pending Approval 先过期并审计，再中断 ToolCall 和 Run，不自动重放工具。
 
+## P2 ToolExecutor 与 Workspace 只读工具已落实的控制
+
+- Executor 只执行已进入 `running` 的 ToolCall；调用前复查 Run/Project 归属以及 Registry Definition 与安全快照。
+- 所有调用具有默认超时、context 取消、同 Call 并发保护和 panic 隔离，内部错误与 panic 内容不返回模型。
+- 文本与结构化 Result 有独立大小上限；文本按 UTF-8 边界截断，超大结构化结果失败关闭。
+- Workspace 路径拒绝绝对路径、卷标、`..` 越界和兄弟目录前缀；使用 `os.Root` 防止打开时通过符号链接逃逸。
+- 内置目录工具不递归且限制条目数；文本工具限制读取字节、拒绝 NUL/非 UTF-8/非常规文件。
+
 | Prompt 注入诱导工具执行 | P2 | JSON Schema、PolicyEngine、Approval、预算 |
-| 路径穿越和 junction/symlink | P2 | PathGuard、Workspace 根、逐资源授权 |
+| 路径穿越和 junction/symlink | P2 | 已实现 PathGuard、`os.Root`、Workspace 根和安全回归测试；写路径仍在 P2.6 |
 | SSRF 和 DNS rebinding | P2/P3 | NetworkClient、地址复查、域名/端口权限 |
 | 恶意 MCP 子进程或远端服务 | P3 | 首次信任提示、最小环境、生命周期和权限管道 |
 | Skill 供应链和自动脚本执行 | P4 | 包校验、哈希、显式启用、脚本只注册 Tool |

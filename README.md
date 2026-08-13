@@ -18,6 +18,7 @@
 - 多轮聊天、停止生成、Usage、RunEvent 与 Snapshot 恢复
 - P2 工具协议基线：ToolCall/ToolResult 状态机、参数 Schema 校验、审计事件与持久化
 - P2 权限基线：统一 ToolRegistry、精确资源 PolicyEngine、逐项 Approval、作用域 Grant 与重启恢复
+- P2 执行基线：有界 ToolExecutor、取消/超时/panic 隔离、Workspace PathGuard、列目录与 UTF-8 文本读取工具
 - 可脚本化 `FakeChatModel`、Provider Fixture 测试、威胁模型、ADR 和 CI
 
 ## 开发

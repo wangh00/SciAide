@@ -127,6 +127,15 @@ type ResultMeta struct {
 	OriginalBytes  int64 `json:"originalBytes,omitempty"`
 }
 
+const (
+	ErrorCodeInvocationFailed = "TOOL_INVOCATION_FAILED"
+	ErrorCodePanic            = "TOOL_PANIC"
+	ErrorCodeTimeout          = "TOOL_TIMEOUT"
+	ErrorCodeCancelled        = "TOOL_CANCELLED"
+	ErrorCodeResultInvalid    = "TOOL_RESULT_INVALID"
+	ErrorCodeResultTooLarge   = "TOOL_RESULT_TOO_LARGE"
+)
+
 type Result struct {
 	Status     ResultStatus    `json:"status"`
 	Text       string          `json:"text,omitempty"`

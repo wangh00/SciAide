@@ -38,6 +38,7 @@ func main() {
 			application.ModelFacade,
 			application.ChatFacade,
 			application.PermissionFacade,
+			application.ToolFacade,
 		},
 	})
 	if err != nil {
