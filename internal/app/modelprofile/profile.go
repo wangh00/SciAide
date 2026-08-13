@@ -139,12 +139,9 @@ func (s *Service) Save(ctx context.Context, cmd SaveCommand) (Profile, error) {
 	}
 	value.Name = strings.TrimSpace(cmd.Name)
 	value.ProviderType = ProviderOpenAICompatible
-	value.APIProtocol = cmd.APIProtocol
-	if !value.APIProtocol.Valid() {
-		value.APIProtocol = ProtocolOpenAIChat
-	}
+	value.APIProtocol = normalizedProtocol(cmd.APIProtocol)
 	value.BaseURL = strings.TrimRight(strings.TrimSpace(cmd.BaseURL), "/")
-	value.Models, value.ModelID = normalizeModels(cmd.Models, cmd.ModelID)
+	value.Models, value.ModelID = normalizeModels(cmd.Models, cmd.ModelID, value.APIProtocol)
 	value.TimeoutSeconds = cmd.TimeoutSeconds
 	value.Temperature = cmd.Temperature
 	value.MaxOutputTokens = cmd.MaxOutputTokens
@@ -275,11 +272,13 @@ func (s *Service) decorate(ctx context.Context, value Profile) (Profile, error) 
 	}
 	value.SecretConfigured, value.SecretMasked = configured, masked
 	value.SecretRef = ""
+	value.APIProtocol = normalizedProtocol(value.APIProtocol)
+	value.Models, value.ModelID = normalizeModels(value.Models, value.ModelID, value.APIProtocol)
 	return value, nil
 }
 
 func validateCommand(cmd SaveCommand) error {
-	models, _ := normalizeModels(cmd.Models, cmd.ModelID)
+	models, _ := normalizeModels(cmd.Models, cmd.ModelID, normalizedProtocol(cmd.APIProtocol))
 	if strings.TrimSpace(cmd.Name) == "" || len(models) == 0 {
 		return fmt.Errorf("profile name and at least one model id are required")
 	}
@@ -310,7 +309,14 @@ func validateCommand(cmd SaveCommand) error {
 	return nil
 }
 
-func normalizeModels(input []ProfileModel, legacyDefault string) ([]ProfileModel, string) {
+func normalizedProtocol(protocol APIProtocol) APIProtocol {
+	if protocol.Valid() {
+		return protocol
+	}
+	return ProtocolOpenAIChat
+}
+
+func normalizeModels(input []ProfileModel, legacyDefault string, protocol APIProtocol) ([]ProfileModel, string) {
 	legacyDefault = strings.TrimSpace(legacyDefault)
 	if len(input) == 0 && legacyDefault != "" {
 		input = []ProfileModel{{ID: legacyDefault, Enabled: true, IsDefault: true}}
@@ -320,18 +326,11 @@ func normalizeModels(input []ProfileModel, legacyDefault string) ([]ProfileModel
 	for _, item := range input {
 		item.ID = strings.TrimSpace(item.ID)
 		item.OwnedBy = strings.TrimSpace(item.OwnedBy)
-		item.ReasoningLevels = modelcap.NormalizeReasoningLevels(item.ReasoningLevels)
-		item.ReasoningCapabilitySource = strings.TrimSpace(item.ReasoningCapabilitySource)
-		if len(item.ReasoningLevels) == 0 && item.ReasoningCapabilitySource == "" {
-			item.ReasoningLevels = modelcap.InferredReasoningLevels(item.ID)
-			if len(item.ReasoningLevels) > 0 {
-				item.ReasoningCapabilitySource = "inferred"
-			}
-		}
+		item.ReasoningLevels = modelcap.InferredReasoningLevelsForProtocol(protocol, item.ID)
 		if len(item.ReasoningLevels) == 0 {
-			item.ReasoningCapabilitySource = "unsupported"
-		} else if item.ReasoningCapabilitySource == "" {
-			item.ReasoningCapabilitySource = "manual"
+			item.ReasoningCapabilitySource = "provider_default"
+		} else {
+			item.ReasoningCapabilitySource = "automatic"
 		}
 		if item.ID == "" {
 			continue
@@ -340,10 +339,8 @@ func normalizeModels(input []ProfileModel, legacyDefault string) ([]ProfileModel
 			models[index].OwnedBy = item.OwnedBy
 			models[index].Enabled = models[index].Enabled || item.Enabled
 			models[index].IsDefault = models[index].IsDefault || item.IsDefault
-			if len(item.ReasoningLevels) > 0 {
-				models[index].ReasoningLevels = item.ReasoningLevels
-				models[index].ReasoningCapabilitySource = item.ReasoningCapabilitySource
-			}
+			models[index].ReasoningLevels = item.ReasoningLevels
+			models[index].ReasoningCapabilitySource = item.ReasoningCapabilitySource
 			continue
 		}
 		indexes[item.ID] = len(models)

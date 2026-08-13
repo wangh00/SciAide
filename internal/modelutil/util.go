@@ -179,6 +179,29 @@ func ReadErrorBody(body io.Reader) []byte {
 	return value
 }
 
+// ReasoningControlRejected reports whether a client error is specifically
+// about an optional reasoning/thinking control. OpenAI-compatible gateways
+// often accept a reasoning model but reject an unknown effort field. In that
+// case adapters may safely retry once without the optional control and let the
+// model use its native default. Other 4xx errors (invalid tools, auth, model,
+// context, and so on) must remain visible to the user.
+func ReasoningControlRejected(status int, body []byte) bool {
+	if status != http.StatusBadRequest && status != http.StatusUnprocessableEntity {
+		return false
+	}
+	detail := strings.ToLower(ProviderErrorMessage(body))
+	if detail == "" {
+		detail = strings.ToLower(string(body))
+	}
+	controls := []string{"reasoning_effort", "reasoning effort", "reasoning.effort", "thinking", "budget_tokens", "budgettokens"}
+	for _, control := range controls {
+		if strings.Contains(detail, control) {
+			return true
+		}
+	}
+	return false
+}
+
 type SliceStream struct {
 	Events    []model.Event
 	Index     int

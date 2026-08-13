@@ -147,6 +147,10 @@ func (c *Client) Stream(ctx context.Context, request model.ChatRequest) (model.S
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		body := modelutil.ReadErrorBody(response.Body)
 		response.Body.Close()
+		if request.ResolvedReasoningLevel.Valid() && modelutil.ReasoningControlRejected(response.StatusCode, body) {
+			request.ResolvedReasoningLevel = ""
+			return c.Stream(ctx, request)
+		}
 		return nil, modelutil.ClassifyStatus(response.StatusCode, body)
 	}
 	scanner := bufio.NewScanner(response.Body)

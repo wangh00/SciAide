@@ -15,17 +15,17 @@ func TestSensitiveCustomHeadersRejected(t *testing.T) {
 	}
 }
 
-func TestNormalizeModelsPreservesManualReasoningCapabilities(t *testing.T) {
-	models, _ := normalizeModels([]ProfileModel{{ID: "custom", Enabled: true, ReasoningLevels: []modelcap.ReasoningLevel{modelcap.ReasoningMax, modelcap.ReasoningHigh}, ReasoningCapabilitySource: "manual"}}, "custom")
-	if len(models) != 1 || len(models[0].ReasoningLevels) != 2 || models[0].ReasoningLevels[0] != modelcap.ReasoningHigh || models[0].ReasoningCapabilitySource != "manual" {
+func TestNormalizeModelsAutomaticallyMapsReasoningCapabilities(t *testing.T) {
+	models, _ := normalizeModels([]ProfileModel{{ID: "custom", Enabled: true, ReasoningLevels: []modelcap.ReasoningLevel{modelcap.ReasoningMax}, ReasoningCapabilitySource: "manual"}}, "custom", ProtocolOpenAIChat)
+	if len(models) != 1 || len(models[0].ReasoningLevels) != 3 || models[0].ReasoningLevels[1] != modelcap.ReasoningMedium || models[0].ReasoningCapabilitySource != "automatic" {
 		t.Fatalf("models = %#v", models)
 	}
 }
 
-func TestNormalizeModelsDoesNotEnableReasoningForUnknownModel(t *testing.T) {
-	models, _ := normalizeModels([]ProfileModel{{ID: "private-model", Enabled: true}}, "private-model")
-	if len(models[0].ReasoningLevels) != 0 || models[0].ReasoningCapabilitySource != "unsupported" {
-		t.Fatalf("unknown model capabilities = %#v", models[0])
+func TestNormalizeModelsUsesProviderDefaultForFixedReasoningModel(t *testing.T) {
+	models, _ := normalizeModels([]ProfileModel{{ID: "deepseek-reasoner", Enabled: true}}, "deepseek-reasoner", ProtocolOpenAIChat)
+	if len(models[0].ReasoningLevels) != 0 || models[0].ReasoningCapabilitySource != "provider_default" {
+		t.Fatalf("fixed model capabilities = %#v", models[0])
 	}
 }
 

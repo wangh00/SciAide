@@ -40,6 +40,42 @@ func TestStreamSendsResolvedReasoningEffort(t *testing.T) {
 	defer stream.Close()
 }
 
+func TestStreamRetriesWithoutRejectedReasoningControl(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		var body requestPayload
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if requests == 1 {
+			if body.ReasoningEffort != "high" {
+				t.Fatalf("first reasoning effort = %q", body.ReasoningEffort)
+			}
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `{"error":{"message":"Unsupported parameter: reasoning_effort"}}`)
+			return
+		}
+		if body.ReasoningEffort != "" {
+			t.Fatalf("fallback reasoning effort = %q", body.ReasoningEffort)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+	stream, err := New(modelprofile.Profile{BaseURL: server.URL, ModelID: "custom", TimeoutSeconds: 5}, nil).Stream(context.Background(), model.ChatRequest{ResolvedReasoningLevel: modelcap.ReasoningHigh})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	if _, err := stream.Recv(); err != nil {
+		t.Fatal(err)
+	}
+	if requests != 2 {
+		t.Fatalf("requests = %d", requests)
+	}
+}
+
 func TestStreamNormalizesSSE(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/chat/completions" {

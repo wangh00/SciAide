@@ -93,6 +93,42 @@ func TestStreamIncompleteIsTerminal(t *testing.T) {
 	}
 }
 
+func TestStreamRetriesWithoutRejectedReasoningControl(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		var body payload
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if requests == 1 {
+			if body.Reasoning == nil {
+				t.Fatal("first request omitted reasoning")
+			}
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `{"error":{"message":"reasoning.effort is unsupported"}}`)
+			return
+		}
+		if body.Reasoning != nil {
+			t.Fatalf("fallback reasoning = %#v", body.Reasoning)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"type\":\"response.completed\",\"response\":{}}\n\n")
+	}))
+	defer server.Close()
+	stream, err := New(modelprofile.Profile{BaseURL: server.URL, ModelID: "custom", TimeoutSeconds: 5}, nil).Stream(context.Background(), model.ChatRequest{ResolvedReasoningLevel: modelcap.ReasoningMedium})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	if _, err := stream.Recv(); err != nil {
+		t.Fatal(err)
+	}
+	if requests != 2 {
+		t.Fatalf("requests = %d", requests)
+	}
+}
+
 func TestStreamHonorsContextCancellation(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")

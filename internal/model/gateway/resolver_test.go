@@ -39,13 +39,13 @@ func TestResolverRoutesAllSupportedProtocols(t *testing.T) {
 	}
 }
 
-func TestResolverReturnsSelectedModelReasoningCapabilities(t *testing.T) {
+func TestResolverReturnsAutomaticModelReasoningCapabilities(t *testing.T) {
 	resolver := NewResolver(loader{profile: modelprofile.Profile{Enabled: true, Models: []modelprofile.ProfileModel{{ID: "reasoning", Enabled: true, ReasoningLevels: []modelcap.ReasoningLevel{modelcap.ReasoningHigh, modelcap.ReasoningXHigh}}}}})
 	resolved, err := resolver.Resolve(context.Background(), "profile", "reasoning")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(resolved.SupportedReasoningLevels) != 2 || resolved.SupportedReasoningLevels[1] != modelcap.ReasoningXHigh {
+	if len(resolved.SupportedReasoningLevels) != 3 || resolved.SupportedReasoningLevels[1] != modelcap.ReasoningMedium {
 		t.Fatalf("reasoning levels = %#v", resolved.SupportedReasoningLevels)
 	}
 }

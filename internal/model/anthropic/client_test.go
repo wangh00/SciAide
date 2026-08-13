@@ -83,6 +83,42 @@ func TestThinkingBudgetStaysBelowMaxTokens(t *testing.T) {
 	}
 }
 
+func TestStreamRetriesWithoutRejectedThinkingControl(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		var body payload
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if requests == 1 {
+			if body.Thinking == nil {
+				t.Fatal("first request omitted thinking")
+			}
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `{"error":{"message":"thinking is not supported by this model"}}`)
+			return
+		}
+		if body.Thinking != nil {
+			t.Fatalf("fallback thinking = %#v", body.Thinking)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"type\":\"message_stop\"}\n\n")
+	}))
+	defer server.Close()
+	stream, err := New(modelprofile.Profile{BaseURL: server.URL, ModelID: "custom", TimeoutSeconds: 5}, nil).Stream(context.Background(), model.ChatRequest{ResolvedReasoningLevel: modelcap.ReasoningMedium})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	if _, err := stream.Recv(); err != nil {
+		t.Fatal(err)
+	}
+	if requests != 2 {
+		t.Fatalf("requests = %d", requests)
+	}
+}
+
 func TestStreamHonorsContextCancellation(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")

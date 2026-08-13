@@ -20,6 +20,7 @@ import (
 	"github.com/wangh00/SciAide/internal/app/modelprofile"
 	"github.com/wangh00/SciAide/internal/apperr"
 	"github.com/wangh00/SciAide/internal/model"
+	"github.com/wangh00/SciAide/internal/modelutil"
 )
 
 const (
@@ -181,6 +182,10 @@ func (c *Client) open(ctx context.Context, request model.ChatRequest) (model.Str
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		responseBody, _ := io.ReadAll(io.LimitReader(response.Body, maxErrorBodyBytes))
 		response.Body.Close()
+		if request.ResolvedReasoningLevel.Valid() && modelutil.ReasoningControlRejected(response.StatusCode, responseBody) {
+			request.ResolvedReasoningLevel = ""
+			return c.open(ctx, request)
+		}
 		return nil, parseRetryAfter(response.Header.Get("Retry-After")), classifyStatus(response.StatusCode, response.Header, responseBody)
 	}
 	scanner := bufio.NewScanner(response.Body)
