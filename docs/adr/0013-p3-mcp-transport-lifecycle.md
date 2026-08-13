@@ -18,6 +18,7 @@ SciAide 需要接入本地 stdio 与远程 Streamable HTTP MCP Server，同时�
 7. Tools、Resources、Prompts 在连接后发现；列表变更通知触发重新发现与原子工具替换。Resource/Prompt 不自动加入对话。
 8. initialize 成功后才将 Server 标为 ready。异常断开会卸载工具并同步 failed；显式 Disconnect 会先从 Manager 移除会话，避免监控协程把正常断开误报为失败。
 9. 应用启动时恢复陈旧的 starting/initializing/ready/degraded/stopping 状态；P3 不自动启动 Server，避免未经当前用户动作启动本地进程或建立远端连接。
+10. Windows GUI 进程启动 stdio MCP 时设置隐藏窗口与 `CREATE_NO_WINDOW`，控制台不是用户交互或生命周期入口；stdio 管道、显式断开和应用退出仍是连接管理边界。
 
 ## 后果
 

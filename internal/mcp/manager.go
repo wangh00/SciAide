@@ -289,6 +289,7 @@ func buildTransport(server mcpserver.Server, secretEnv map[string]string) (mcpsd
 	switch server.Transport {
 	case mcpserver.TransportStdio:
 		command := exec.Command(server.Command, server.Args...)
+		configureBackgroundCommand(command)
 		command.Dir = server.WorkingDir
 		command.Env = minimalEnvironment(server.Env, secretEnv)
 		return &mcpsdk.CommandTransport{Command: command, TerminateDuration: 3 * time.Second}, nil
