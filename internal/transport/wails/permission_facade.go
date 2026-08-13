@@ -1,6 +1,10 @@
 package wails
 
-import "github.com/wangh00/SciAide/internal/app/permission"
+import (
+	"github.com/wangh00/SciAide/internal/app/chat"
+	"github.com/wangh00/SciAide/internal/app/permission"
+	"github.com/wangh00/SciAide/internal/app/tool"
+)
 
 // PermissionFacade is the typed UI boundary for P2 approvals and scoped
 // grants. The frontend cannot create grants directly; every grant originates
@@ -9,10 +13,11 @@ type PermissionFacade struct {
 	lifecycle   *LifecycleContext
 	engine      *permission.Engine
 	coordinator *permission.Coordinator
+	chat        *chat.Service
 }
 
-func NewPermissionFacade(lifecycle *LifecycleContext, engine *permission.Engine, coordinator *permission.Coordinator) *PermissionFacade {
-	return &PermissionFacade{lifecycle: lifecycle, engine: engine, coordinator: coordinator}
+func NewPermissionFacade(lifecycle *LifecycleContext, engine *permission.Engine, coordinator *permission.Coordinator, chatService *chat.Service) *PermissionFacade {
+	return &PermissionFacade{lifecycle: lifecycle, engine: engine, coordinator: coordinator, chat: chatService}
 }
 
 func (f *PermissionFacade) EvaluateToolCall(projectID, toolCallID string) (permission.Coordination, error) {
@@ -20,7 +25,16 @@ func (f *PermissionFacade) EvaluateToolCall(projectID, toolCallID string) (permi
 }
 
 func (f *PermissionFacade) ResolveApproval(command permission.ResolveCommand) (permission.Coordination, error) {
-	return f.coordinator.Resolve(f.lifecycle.Context(), command)
+	result, err := f.coordinator.Resolve(f.lifecycle.Context(), command)
+	if err != nil {
+		return result, err
+	}
+	if result.Run.Status == chat.RunRunning && (result.ToolCall.Status == tool.CallRunning || result.ToolCall.Status.Terminal()) {
+		if err := f.chat.Resume(f.lifecycle.Context(), result.Run.ID); err != nil {
+			return result, err
+		}
+	}
+	return result, nil
 }
 
 func (f *PermissionFacade) ListApprovals(runID string) ([]permission.Approval, error) {

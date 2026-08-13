@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wangh00/SciAide/internal/app/agent"
 	"github.com/wangh00/SciAide/internal/app/chat"
 	"github.com/wangh00/SciAide/internal/app/conversation"
 	"github.com/wangh00/SciAide/internal/app/modelprofile"
@@ -103,7 +104,12 @@ func New(options Options) (*Application, error) {
 	toolExecutor := tool.NewExecutor(toolRegistry, toolService, runRepository, tool.ExecutorOptions{})
 	approvalCoordinator := permission.NewCoordinator(permissionEngine, toolService, runRepository)
 	publisher := wailstransport.NewEventPublisher(lifecycle)
-	chatService := chat.NewService(runRepository, conversationRepository, runRepository, publisher, gateway.NewResolver(profileService))
+	chatService := chat.NewService(runRepository, conversationRepository, runRepository, publisher)
+	agentLoop := agent.NewLoop(runRepository, conversationRepository, toolService, toolRegistry, approvalCoordinator, toolExecutor, gateway.NewResolver(profileService), agent.NewEventObserver(chatService), agent.Options{})
+	if err := chatService.SetRunner(agent.NewRunner(agentLoop)); err != nil {
+		_ = store.Close()
+		return fail(fmt.Errorf("configure agent loop: %w", err))
+	}
 	if expired, err := permissionEngine.Recover(context.Background()); err != nil {
 		_ = store.Close()
 		return fail(fmt.Errorf("recover pending approvals: %w", err))
@@ -129,7 +135,7 @@ func New(options Options) (*Application, error) {
 		ConversationFacade: wailstransport.NewConversationFacade(lifecycle, conversationService),
 		ModelFacade:        wailstransport.NewModelFacade(lifecycle, profileService),
 		ChatFacade:         wailstransport.NewChatFacade(lifecycle, chatService),
-		PermissionFacade:   wailstransport.NewPermissionFacade(lifecycle, permissionEngine, approvalCoordinator),
+		PermissionFacade:   wailstransport.NewPermissionFacade(lifecycle, permissionEngine, approvalCoordinator, chatService),
 		ToolFacade:         wailstransport.NewToolFacade(lifecycle, toolExecutor, toolRegistry),
 		lifecycle:          lifecycle,
 		chat:               chatService,

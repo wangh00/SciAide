@@ -3,22 +3,20 @@ package chat
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/wangh00/SciAide/internal/app/conversation"
-	"github.com/wangh00/SciAide/internal/apperr"
 	"github.com/wangh00/SciAide/internal/events"
 	"github.com/wangh00/SciAide/internal/id"
 	"github.com/wangh00/SciAide/internal/model"
 )
 
-type ModelResolver interface {
-	Resolve(ctx context.Context, profileID, modelID string) (model.ChatModel, error)
+type RunExecutor interface {
+	Execute(ctx context.Context, runID string)
+	ResumeExecute(ctx context.Context, runID string)
 }
 
 type StartCommand struct {
@@ -28,11 +26,10 @@ type StartCommand struct {
 	Text           string `json:"text"`
 }
 
-const (
-	maxUserMessageChars = 100_000
-	maxContextChars     = 120_000
-)
+const maxUserMessageChars = 100_000
 
+// Snapshot is the durable UI recovery view. Events improve latency, but this
+// snapshot remains the source of truth after lost or out-of-order UI events.
 type Snapshot struct {
 	Run      Run                    `json:"run"`
 	Messages []conversation.Message `json:"messages"`
@@ -43,16 +40,34 @@ type Service struct {
 	conversations ConversationRepository
 	events        EventRepository
 	publisher     Publisher
-	models        ModelResolver
 	now           func() time.Time
 
-	mu     sync.Mutex
-	active map[string]context.CancelFunc
-	wg     sync.WaitGroup
+	mu            sync.Mutex
+	runner        RunExecutor
+	active        map[string]context.CancelFunc
+	pendingResume map[string]bool
+	closing       bool
+	wg            sync.WaitGroup
 }
 
-func NewService(runs Repository, conversations ConversationRepository, eventRepository EventRepository, publisher Publisher, models ModelResolver) *Service {
-	return &Service{runs: runs, conversations: conversations, events: eventRepository, publisher: publisher, models: models, now: func() time.Time { return time.Now().UTC() }, active: make(map[string]context.CancelFunc)}
+func NewService(runs Repository, conversations ConversationRepository, eventRepository EventRepository, publisher Publisher) *Service {
+	return &Service{runs: runs, conversations: conversations, events: eventRepository, publisher: publisher, now: func() time.Time { return time.Now().UTC() }, active: make(map[string]context.CancelFunc), pendingResume: make(map[string]bool)}
+}
+
+// SetRunner completes bootstrap's dependency cycle: Chat creates the durable
+// Run, while AgentLoop depends on Chat's typed Run repository and observer.
+// It must be called once during bootstrap before Start.
+func (s *Service) SetRunner(runner RunExecutor) error {
+	if runner == nil {
+		return fmt.Errorf("chat run executor is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.runner != nil {
+		return fmt.Errorf("chat run executor is already configured")
+	}
+	s.runner = runner
+	return nil
 }
 
 func (s *Service) Recover(ctx context.Context) (int64, error) {
@@ -69,6 +84,9 @@ func (s *Service) Start(ctx context.Context, cmd StartCommand) (Run, error) {
 	}
 	if len([]rune(cmd.Text)) > maxUserMessageChars {
 		return Run{}, fmt.Errorf("message is too long")
+	}
+	if s.currentRunner() == nil {
+		return Run{}, fmt.Errorf("chat run executor is not configured")
 	}
 	runID, err := id.New()
 	if err != nil {
@@ -99,13 +117,23 @@ func (s *Service) Start(ctx context.Context, cmd StartCommand) (Run, error) {
 	if err := s.runs.CreateWithMessages(ctx, run, user, assistant); err != nil {
 		return Run{}, fmt.Errorf("create chat run: %w", err)
 	}
-	runCtx, cancel := context.WithCancel(context.Background())
-	s.mu.Lock()
-	s.active[run.ID] = cancel
-	s.mu.Unlock()
-	s.wg.Add(1)
-	go func() { defer s.wg.Done(); defer s.removeActive(run.ID); s.execute(runCtx, run) }()
+	if err := s.launch(run.ID, false); err != nil {
+		return Run{}, err
+	}
 	return run, nil
+}
+
+// Resume schedules a Run only after PermissionCoordinator has atomically moved
+// it back to running. It never changes approval or ToolCall state itself.
+func (s *Service) Resume(_ context.Context, runID string) error {
+	run, err := s.runs.Get(context.Background(), strings.TrimSpace(runID))
+	if err != nil {
+		return err
+	}
+	if run.Status != RunRunning {
+		return fmt.Errorf("run is not ready to resume")
+	}
+	return s.launch(run.ID, true)
 }
 
 func (s *Service) Cancel(ctx context.Context, runID string) error {
@@ -140,6 +168,8 @@ func (s *Service) Snapshot(ctx context.Context, runID string) (Snapshot, error) 
 
 func (s *Service) Close() {
 	s.mu.Lock()
+	s.closing = true
+	clear(s.pendingResume)
 	for _, cancel := range s.active {
 		cancel()
 	}
@@ -147,136 +177,49 @@ func (s *Service) Close() {
 	s.wg.Wait()
 }
 
-func (s *Service) execute(ctx context.Context, run Run) {
-	sequence := int64(0)
-	emit := func(eventType string, payload any) {
-		sequence++
-		s.emit(context.Background(), run.ID, sequence, eventType, payload)
+func (s *Service) launch(runID string, resume bool) error {
+	s.mu.Lock()
+	if s.closing {
+		s.mu.Unlock()
+		return fmt.Errorf("chat service is closing")
 	}
-	now := s.now()
-	run.Status = RunRunning
-	run.StartedAt = &now
-	run.UpdatedAt = now
-	if err := s.runs.Update(context.Background(), run); err != nil {
-		return
+	if s.runner == nil {
+		s.mu.Unlock()
+		return fmt.Errorf("chat run executor is not configured")
 	}
-	emit("run.started", map[string]any{"runId": run.ID, "status": run.Status})
-	emit("content.started", map[string]any{"runId": run.ID, "messageId": run.AssistantMessageID})
-
-	messages, err := s.conversations.ListMessages(ctx, run.ConversationID, 200)
-	if err != nil {
-		s.fail(run, "CONTEXT_LOAD_FAILED", "无法加载会话上下文。", "", emit)
-		return
-	}
-	request := buildRequest(messages, run.AssistantMessageID, maxContextChars)
-	chatModel, err := s.models.Resolve(ctx, run.ModelProfileID, run.ModelID)
-	if err != nil {
-		s.finishError(run, err, "", emit)
-		return
-	}
-	stream, err := chatModel.Stream(ctx, request)
-	if err != nil {
-		s.finishError(run, err, "", emit)
-		return
-	}
-	defer stream.Close()
-
-	var text, pending string
-	lastPersist, lastEmit := s.now(), s.now()
-	for {
-		event, recvErr := stream.Recv()
-		if event.Type == model.EventTextDelta && event.Text != "" {
-			text += event.Text
-			pending += event.Text
-			now = s.now()
-			if len(pending) >= 64 || now.Sub(lastEmit) >= 35*time.Millisecond {
-				emit("content.delta", map[string]any{"messageId": run.AssistantMessageID, "delta": pending})
-				pending = ""
-				lastEmit = now
-			}
-			if len(text) >= 256 || now.Sub(lastPersist) >= 200*time.Millisecond {
-				_ = s.conversations.UpdateMessageText(context.Background(), run.AssistantMessageID, conversation.MessageStreaming, text, now)
-				lastPersist = now
-			}
+	if _, exists := s.active[runID]; exists {
+		if resume {
+			s.pendingResume[runID] = true
+			s.mu.Unlock()
+			return nil
 		}
-		if event.Type == model.EventUsage && event.Usage != nil {
-			run.InputTokens = event.Usage.InputTokens
-			run.OutputTokens = event.Usage.OutputTokens
-			emit("usage.updated", event.Usage)
-		}
-		if event.FinishReason != "" {
-			run.FinishReason = event.FinishReason
-		}
-		if recvErr != nil {
-			if errors.Is(recvErr, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
-				if pending != "" {
-					emit("content.delta", map[string]any{"messageId": run.AssistantMessageID, "delta": pending})
-				}
-				s.cancelled(run, text, emit)
-				return
-			}
-			if errors.Is(recvErr, io.EOF) {
-				break
-			}
-			s.finishError(run, recvErr, text, emit)
+		s.mu.Unlock()
+		return fmt.Errorf("run is already active")
+	}
+	runner := s.runner
+	runCtx, cancel := context.WithCancel(context.Background())
+	s.active[runID] = cancel
+	s.wg.Add(1)
+	s.mu.Unlock()
+	go func() {
+		defer s.wg.Done()
+		defer s.finishActive(runID)
+		if resume {
+			runner.ResumeExecute(runCtx, runID)
 			return
 		}
-		if event.Type == model.EventDone {
-			break
-		}
-	}
-	if pending != "" {
-		emit("content.delta", map[string]any{"messageId": run.AssistantMessageID, "delta": pending})
-	}
-	now = s.now()
-	if err := s.conversations.UpdateMessageText(context.Background(), run.AssistantMessageID, conversation.MessageComplete, text, now); err != nil {
-		s.fail(run, "MESSAGE_SAVE_FAILED", "回答已生成，但保存失败。", text, emit)
-		return
-	}
-	run.Status = RunCompleted
-	run.UpdatedAt = now
-	run.CompletedAt = &now
-	if err := s.runs.Update(context.Background(), run); err != nil {
-		return
-	}
-	emit("content.completed", map[string]any{"messageId": run.AssistantMessageID, "text": text})
-	emit("run.completed", map[string]any{"run": run})
+		runner.Execute(runCtx, runID)
+	}()
+	return nil
 }
 
-func (s *Service) cancelled(run Run, text string, emit func(string, any)) {
-	now := s.now()
-	_ = s.conversations.UpdateMessageText(context.Background(), run.AssistantMessageID, conversation.MessageIncomplete, text, now)
-	run.Status = RunCancelled
-	run.ErrorCode = "RUN_CANCELLED"
-	run.ErrorMessage = "已停止生成"
-	run.UpdatedAt = now
-	run.CompletedAt = &now
-	_ = s.runs.Update(context.Background(), run)
-	emit("run.cancelled", map[string]any{"run": run})
+func (s *Service) currentRunner() RunExecutor {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.runner
 }
 
-func (s *Service) finishError(run Run, err error, text string, emit func(string, any)) {
-	public := apperr.Public(err)
-	s.fail(run, public.Code, public.Message, text, emit)
-}
-
-func (s *Service) fail(run Run, code, message, text string, emit func(string, any)) {
-	now := s.now()
-	status := conversation.MessageFailed
-	if text != "" {
-		status = conversation.MessageIncomplete
-	}
-	_ = s.conversations.UpdateMessageText(context.Background(), run.AssistantMessageID, status, text, now)
-	run.Status = RunFailed
-	run.ErrorCode = code
-	run.ErrorMessage = message
-	run.UpdatedAt = now
-	run.CompletedAt = &now
-	_ = s.runs.Update(context.Background(), run)
-	emit("run.failed", map[string]any{"run": run})
-}
-
-func (s *Service) emit(ctx context.Context, runID string, sequence int64, eventType string, payload any) {
+func (s *Service) emit(ctx context.Context, runID, eventType string, payload any) {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return
@@ -285,7 +228,7 @@ func (s *Service) emit(ctx context.Context, runID string, sequence int64, eventT
 	if err != nil {
 		return
 	}
-	envelope := events.New(eventID, runID, "run", eventType, sequence, data)
+	envelope := events.New(eventID, runID, "run", eventType, 0, data)
 	envelope, err = s.events.AppendNext(ctx, envelope)
 	if err != nil {
 		return
@@ -295,20 +238,33 @@ func (s *Service) emit(ctx context.Context, runID string, sequence int64, eventT
 	}
 }
 
-func (s *Service) removeActive(runID string) { s.mu.Lock(); delete(s.active, runID); s.mu.Unlock() }
+func (s *Service) finishActive(runID string) {
+	s.mu.Lock()
+	delete(s.active, runID)
+	resume := s.pendingResume[runID] && !s.closing
+	if !resume {
+		delete(s.pendingResume, runID)
+	}
+	s.mu.Unlock()
+	if resume {
+		if err := s.launch(runID, true); err == nil {
+			s.mu.Lock()
+			delete(s.pendingResume, runID)
+			s.mu.Unlock()
+		}
+	}
+}
+
 func isTerminal(status RunStatus) bool {
 	return status == RunCompleted || status == RunFailed || status == RunCancelled || status == RunInterrupted
 }
-func messageText(message conversation.Message) string {
-	var builder strings.Builder
-	for _, part := range message.Parts {
-		if part.Type == "text" {
-			builder.WriteString(part.Text)
-		}
-	}
-	return builder.String()
+
+func (s *Service) PublishRunEvent(runID, eventType string, payload any) {
+	s.emit(context.Background(), runID, eventType, payload)
 }
 
+// Kept package-local for focused context-window regression tests. Production
+// requests are built by agent.ContextBuilder.
 func buildRequest(messages []conversation.Message, excludedMessageID string, maxChars int) model.ChatRequest {
 	reversed := make([]model.Message, 0, len(messages))
 	used := 0
@@ -317,15 +273,20 @@ func buildRequest(messages []conversation.Message, excludedMessageID string, max
 		if message.ID == excludedMessageID {
 			continue
 		}
-		text := messageText(message)
-		if text == "" {
+		var text strings.Builder
+		for _, part := range message.Parts {
+			if part.Type == "text" {
+				text.WriteString(part.Text)
+			}
+		}
+		if text.Len() == 0 {
 			continue
 		}
-		length := len([]rune(text))
+		length := len([]rune(text.String()))
 		if used > 0 && used+length > maxChars {
 			break
 		}
-		reversed = append(reversed, model.Message{Role: model.Role(message.Role), Content: text})
+		reversed = append(reversed, model.Message{Role: model.Role(message.Role), Content: text.String()})
 		used += length
 	}
 	request := model.ChatRequest{Messages: make([]model.Message, len(reversed))}

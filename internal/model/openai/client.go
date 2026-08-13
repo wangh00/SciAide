@@ -21,6 +21,14 @@ import (
 	"github.com/wangh00/SciAide/internal/model"
 )
 
+const (
+	maxStreamLineBytes    = 1024 * 1024
+	maxToolCallsPerTurn   = 32
+	maxToolCallIDBytes    = 1024
+	maxToolNameBytes      = 160
+	maxToolArgumentsBytes = 256 * 1024
+)
+
 type Client struct {
 	profile modelprofile.Profile
 	secret  []byte
@@ -68,7 +76,7 @@ func (c *Client) Discover(ctx context.Context, profile modelprofile.Profile, sec
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		io.CopyN(io.Discard, response.Body, 4096)
+		_, _ = io.CopyN(io.Discard, response.Body, 4096)
 		return nil, classifyStatus(response.StatusCode, response.Header)
 	}
 	decoder := json.NewDecoder(io.LimitReader(response.Body, 4<<20))
@@ -126,11 +134,18 @@ func (c *Client) open(ctx context.Context, request model.ChatRequest) (model.Str
 	payload := requestPayload{Model: c.profile.ModelID, Stream: true, StreamOptions: &streamOptions{IncludeUsage: true}, Temperature: c.profile.Temperature, MaxTokens: c.profile.MaxOutputTokens}
 	payload.Messages = make([]requestMessage, 0, len(request.Messages))
 	for _, message := range request.Messages {
-		content := message.Content
-		if message.Role != model.RoleSystem {
-			content = "<untrusted_conversation_content>\n" + content + "\n</untrusted_conversation_content>"
+		mapped, err := mapRequestMessage(message)
+		if err != nil {
+			return nil, 0, err
 		}
-		payload.Messages = append(payload.Messages, requestMessage{Role: string(message.Role), Content: content})
+		payload.Messages = append(payload.Messages, mapped)
+	}
+	payload.Tools = make([]requestTool, 0, len(request.Tools))
+	for _, definition := range request.Tools {
+		if err := validateModelToolDefinition(definition); err != nil {
+			return nil, 0, err
+		}
+		payload.Tools = append(payload.Tools, requestTool{Type: "function", Function: requestFunction{Name: definition.Name, Description: definition.Description, Parameters: append(json.RawMessage(nil), definition.InputSchema...)}})
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -148,13 +163,58 @@ func (c *Client) open(ctx context.Context, request model.ChatRequest) (model.Str
 		return nil, 0, classifyNetwork(err)
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		io.CopyN(io.Discard, response.Body, 4096)
+		_, _ = io.CopyN(io.Discard, response.Body, 4096)
 		response.Body.Close()
 		return nil, parseRetryAfter(response.Header.Get("Retry-After")), classifyStatus(response.StatusCode, response.Header)
 	}
 	scanner := bufio.NewScanner(response.Body)
-	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
-	return &stream{body: response.Body, scanner: scanner}, 0, nil
+	scanner.Buffer(make([]byte, 64*1024), maxStreamLineBytes)
+	return &stream{body: response.Body, scanner: scanner, toolCalls: make(map[int]*toolCallAccumulator)}, 0, nil
+}
+
+func mapRequestMessage(message model.Message) (requestMessage, error) {
+	content := message.Content
+	mapped := requestMessage{Role: string(message.Role), Content: &content}
+	switch message.Role {
+	case model.RoleSystem:
+	case model.RoleUser:
+		content = wrapUntrusted("conversation_content", message.Content)
+	case model.RoleAssistant:
+		if len(message.ToolCalls) > maxToolCallsPerTurn {
+			return requestMessage{}, fmt.Errorf("too many assistant tool calls")
+		}
+		mapped.ToolCalls = make([]requestToolCall, 0, len(message.ToolCalls))
+		for _, call := range message.ToolCalls {
+			if err := validateCompleteToolCall(call); err != nil {
+				return requestMessage{}, err
+			}
+			mapped.ToolCalls = append(mapped.ToolCalls, requestToolCall{ID: call.ID, Type: "function", Function: requestToolCallFunction{Name: call.Name, Arguments: string(call.Arguments)}})
+		}
+		if len(mapped.ToolCalls) > 0 && message.Content == "" {
+			mapped.Content = nil
+		}
+	case model.RoleTool:
+		if strings.TrimSpace(message.ToolCallID) == "" || len(message.ToolCallID) > maxToolCallIDBytes {
+			return requestMessage{}, fmt.Errorf("tool message requires a bounded tool call id")
+		}
+		mapped.ToolCallID = message.ToolCallID
+		content = wrapUntrusted("tool_result", message.Content)
+	default:
+		return requestMessage{}, fmt.Errorf("unsupported model message role %q", message.Role)
+	}
+	return mapped, nil
+}
+
+func validateModelToolDefinition(definition model.ToolDefinition) error {
+	name := strings.TrimSpace(definition.Name)
+	if name == "" || len(name) > maxToolNameBytes {
+		return fmt.Errorf("invalid model tool name")
+	}
+	var object map[string]json.RawMessage
+	if len(definition.InputSchema) == 0 || json.Unmarshal(definition.InputSchema, &object) != nil || object == nil {
+		return fmt.Errorf("tool input schema must be a JSON object")
+	}
+	return nil
 }
 
 func (c *Client) applyHeaders(req *http.Request) {
@@ -169,17 +229,50 @@ func (c *Client) applyHeaders(req *http.Request) {
 type requestPayload struct {
 	Model         string           `json:"model"`
 	Messages      []requestMessage `json:"messages"`
+	Tools         []requestTool    `json:"tools,omitempty"`
 	Stream        bool             `json:"stream"`
 	StreamOptions *streamOptions   `json:"stream_options,omitempty"`
 	Temperature   *float64         `json:"temperature,omitempty"`
 	MaxTokens     *int             `json:"max_tokens,omitempty"`
 }
+
 type requestMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role       string            `json:"role"`
+	Content    *string           `json:"content"`
+	ToolCalls  []requestToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string            `json:"tool_call_id,omitempty"`
 }
+
+type requestTool struct {
+	Type     string          `json:"type"`
+	Function requestFunction `json:"function"`
+}
+
+type requestFunction struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Parameters  json.RawMessage `json:"parameters"`
+}
+
+type requestToolCall struct {
+	ID       string                  `json:"id"`
+	Type     string                  `json:"type"`
+	Function requestToolCallFunction `json:"function"`
+}
+
+type requestToolCallFunction struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
+}
+
 type streamOptions struct {
 	IncludeUsage bool `json:"include_usage"`
+}
+
+type toolCallAccumulator struct {
+	id        strings.Builder
+	name      strings.Builder
+	arguments strings.Builder
 }
 
 type stream struct {
@@ -188,13 +281,12 @@ type stream struct {
 	queue        []model.Event
 	done         bool
 	finishReason string
+	toolCalls    map[int]*toolCallAccumulator
 }
 
 func (s *stream) Recv() (model.Event, error) {
 	if len(s.queue) > 0 {
-		event := s.queue[0]
-		s.queue = s.queue[1:]
-		return event, nil
+		return s.pop(), nil
 	}
 	if s.done {
 		return model.Event{}, io.EOF
@@ -209,8 +301,12 @@ func (s *stream) Recv() (model.Event, error) {
 		}
 		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 		if data == "[DONE]" {
+			if err := s.finalizeToolCalls(); err != nil {
+				return model.Event{}, err
+			}
 			s.done = true
-			return model.Event{Type: model.EventDone, FinishReason: s.finishReason}, nil
+			s.queue = append(s.queue, model.Event{Type: model.EventDone, FinishReason: s.finishReason})
+			return s.pop(), nil
 		}
 		var chunk responseChunk
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
@@ -220,27 +316,116 @@ func (s *stream) Recv() (model.Event, error) {
 			if choice.Delta.Content != "" {
 				s.queue = append(s.queue, model.Event{Type: model.EventTextDelta, Text: choice.Delta.Content})
 			}
+			for _, fragment := range choice.Delta.ToolCalls {
+				if err := s.appendToolCall(fragment); err != nil {
+					return model.Event{}, err
+				}
+			}
 			if choice.FinishReason != nil {
 				s.finishReason = *choice.FinishReason
+				if s.finishReason == "tool_calls" {
+					if err := s.finalizeToolCalls(); err != nil {
+						return model.Event{}, err
+					}
+				}
 			}
 		}
 		if chunk.Usage != nil {
 			s.queue = append(s.queue, model.Event{Type: model.EventUsage, Usage: &model.Usage{InputTokens: chunk.Usage.PromptTokens, OutputTokens: chunk.Usage.CompletionTokens}})
 		}
 		if len(s.queue) > 0 {
-			event := s.queue[0]
-			s.queue = s.queue[1:]
-			return event, nil
+			return s.pop(), nil
 		}
 	}
 	if err := s.scanner.Err(); err != nil {
 		return model.Event{}, modelError("MODEL_UNAVAILABLE", "模型连接意外中断。", false, err)
 	}
 	if s.finishReason != "" {
+		if err := s.finalizeToolCalls(); err != nil {
+			return model.Event{}, err
+		}
 		s.done = true
-		return model.Event{Type: model.EventDone, FinishReason: s.finishReason}, nil
+		s.queue = append(s.queue, model.Event{Type: model.EventDone, FinishReason: s.finishReason})
+		return s.pop(), nil
 	}
 	return model.Event{}, modelError("MODEL_STREAM_INVALID", "模型流在完成标记前结束。", false, io.ErrUnexpectedEOF)
+}
+
+func (s *stream) pop() model.Event {
+	event := s.queue[0]
+	s.queue = s.queue[1:]
+	return event
+}
+
+func (s *stream) appendToolCall(fragment responseToolCall) error {
+	if fragment.Index < 0 || fragment.Index >= maxToolCallsPerTurn {
+		return modelError("MODEL_TOOL_CALL_INVALID", "模型返回了过多或无效的工具调用。", false, nil)
+	}
+	value := s.toolCalls[fragment.Index]
+	if value == nil {
+		value = &toolCallAccumulator{}
+		s.toolCalls[fragment.Index] = value
+	}
+	if err := appendBounded(&value.id, fragment.ID, maxToolCallIDBytes); err != nil {
+		return modelError("MODEL_TOOL_CALL_INVALID", "模型返回的工具调用 ID 过长。", false, err)
+	}
+	if err := appendBounded(&value.name, fragment.Function.Name, maxToolNameBytes); err != nil {
+		return modelError("MODEL_TOOL_CALL_INVALID", "模型返回的工具名称过长。", false, err)
+	}
+	if err := appendBounded(&value.arguments, fragment.Function.Arguments, maxToolArgumentsBytes); err != nil {
+		return modelError("MODEL_TOOL_CALL_INVALID", "模型返回的工具参数过大。", false, err)
+	}
+	return nil
+}
+
+func appendBounded(builder *strings.Builder, fragment string, limit int) error {
+	if len(fragment) > limit-builder.Len() {
+		return fmt.Errorf("stream fragment exceeds limit")
+	}
+	builder.WriteString(fragment)
+	return nil
+}
+
+func (s *stream) finalizeToolCalls() error {
+	if len(s.toolCalls) == 0 {
+		return nil
+	}
+	indexes := make([]int, 0, len(s.toolCalls))
+	for index := range s.toolCalls {
+		indexes = append(indexes, index)
+	}
+	slices.Sort(indexes)
+	for _, index := range indexes {
+		value := s.toolCalls[index]
+		call := model.ToolCall{ID: value.id.String(), Name: value.name.String(), Arguments: json.RawMessage(value.arguments.String())}
+		if err := validateCompleteToolCall(call); err != nil {
+			return modelError("MODEL_TOOL_CALL_INVALID", "模型返回了不完整或无效的工具调用。", false, err)
+		}
+		s.queue = append(s.queue, model.Event{Type: model.EventToolCall, ToolCall: &call})
+	}
+	s.toolCalls = make(map[int]*toolCallAccumulator)
+	return nil
+}
+
+func validateCompleteToolCall(call model.ToolCall) error {
+	if strings.TrimSpace(call.ID) == "" || len(call.ID) > maxToolCallIDBytes {
+		return fmt.Errorf("invalid tool call id")
+	}
+	if strings.TrimSpace(call.Name) == "" || len(call.Name) > maxToolNameBytes {
+		return fmt.Errorf("invalid tool call name")
+	}
+	if len(call.Arguments) == 0 || len(call.Arguments) > maxToolArgumentsBytes || !json.Valid(call.Arguments) {
+		return fmt.Errorf("invalid tool call arguments")
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(call.Arguments, &object); err != nil || object == nil {
+		return fmt.Errorf("tool call arguments must be a JSON object")
+	}
+	return nil
+}
+
+func wrapUntrusted(label, value string) string {
+	return "<untrusted_" + label + ">\n" + value + "\n</untrusted_" + label + ">"
 }
 
 func (s *stream) Close() error { s.done = true; return s.body.Close() }
@@ -248,7 +433,8 @@ func (s *stream) Close() error { s.done = true; return s.body.Close() }
 type responseChunk struct {
 	Choices []struct {
 		Delta struct {
-			Content string `json:"content"`
+			Content   string             `json:"content"`
+			ToolCalls []responseToolCall `json:"tool_calls"`
 		} `json:"delta"`
 		FinishReason *string `json:"finish_reason"`
 	} `json:"choices"`
@@ -256,6 +442,15 @@ type responseChunk struct {
 		PromptTokens     int `json:"prompt_tokens"`
 		CompletionTokens int `json:"completion_tokens"`
 	} `json:"usage"`
+}
+
+type responseToolCall struct {
+	Index    int    `json:"index"`
+	ID       string `json:"id"`
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"function"`
 }
 
 type modelsResponse struct {
@@ -306,6 +501,7 @@ func classifyStatus(status int, _ http.Header) error {
 func modelError(code, message string, retryable bool, cause error) error {
 	return &apperr.Error{Code: code, UserMessage: message, Retryable: retryable, Cause: cause}
 }
+
 func parseRetryAfter(value string) time.Duration {
 	seconds, err := strconv.Atoi(strings.TrimSpace(value))
 	if err == nil && seconds > 0 && seconds <= 60 {

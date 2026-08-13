@@ -29,7 +29,7 @@ func TestStreamNormalizesSSE(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
 			t.Fatalf("decode request: %v", err)
 		}
-		if len(requestBody.Messages) != 1 || !strings.Contains(requestBody.Messages[0].Content, "<untrusted_conversation_content>") {
+		if len(requestBody.Messages) != 1 || requestBody.Messages[0].Content == nil || !strings.Contains(*requestBody.Messages[0].Content, "<untrusted_conversation_content>") {
 			t.Fatalf("request did not mark user content as untrusted: %#v", requestBody)
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -55,6 +55,65 @@ func TestStreamNormalizesSSE(t *testing.T) {
 	doneEvent, err := stream.Recv()
 	if err != nil || doneEvent.Type != model.EventDone || doneEvent.FinishReason != "stop" {
 		t.Fatalf("done event = %#v, err=%v", doneEvent, err)
+	}
+}
+
+func TestStreamMapsToolsAndAccumulatesFragmentedToolCalls(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var requestBody requestPayload
+		if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+			t.Fatal(err)
+		}
+		if len(requestBody.Tools) != 1 || requestBody.Tools[0].Function.Name != "builtin.workspace.read_text" {
+			t.Fatalf("tools = %#v", requestBody.Tools)
+		}
+		if len(requestBody.Messages) != 3 || len(requestBody.Messages[1].ToolCalls) != 1 || requestBody.Messages[2].ToolCallID != "call-old" || requestBody.Messages[2].Content == nil || !strings.Contains(*requestBody.Messages[2].Content, "<untrusted_tool_result>") {
+			t.Fatalf("messages = %#v", requestBody.Messages)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-","function":{"name":"builtin.workspace.","arguments":"{\"path\":"}}]},"finish_reason":null}]}`+"\n\n")
+		_, _ = io.WriteString(w, `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"new","function":{"name":"read_text","arguments":"\"paper.md\"}"}}]},"finish_reason":"tool_calls"}]}`+"\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+	client := New(modelprofile.Profile{BaseURL: server.URL, ModelID: "fixture", TimeoutSeconds: 5}, nil)
+	stream, err := client.Stream(context.Background(), model.ChatRequest{
+		Messages: []model.Message{
+			{Role: model.RoleUser, Content: "读取论文"},
+			{Role: model.RoleAssistant, ToolCalls: []model.ToolCall{{ID: "call-old", Name: "builtin.workspace.list", Arguments: json.RawMessage(`{}`)}}},
+			{Role: model.RoleTool, ToolCallID: "call-old", Content: "上一次结果"},
+		},
+		Tools: []model.ToolDefinition{{Name: "builtin.workspace.read_text", Description: "read", InputSchema: json.RawMessage(`{"type":"object"}`)}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	event, err := stream.Recv()
+	if err != nil || event.Type != model.EventToolCall || event.ToolCall == nil || event.ToolCall.ID != "call-new" || event.ToolCall.Name != "builtin.workspace.read_text" || string(event.ToolCall.Arguments) != `{"path":"paper.md"}` {
+		t.Fatalf("tool event = %#v, %v", event, err)
+	}
+	if event, err = stream.Recv(); err != nil || event.Type != model.EventDone || event.FinishReason != "tool_calls" {
+		t.Fatalf("done event = %#v, %v", event, err)
+	}
+}
+
+func TestStreamRejectsInvalidToolCallArguments(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call","function":{"name":"fixture","arguments":"not-json"}}]},"finish_reason":"tool_calls"}]}`+"\n\n")
+	}))
+	defer server.Close()
+	client := New(modelprofile.Profile{BaseURL: server.URL, ModelID: "fixture", TimeoutSeconds: 5}, nil)
+	stream, err := client.Stream(context.Background(), model.ChatRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	_, err = stream.Recv()
+	var appErr *apperr.Error
+	if !errors.As(err, &appErr) || appErr.Code != "MODEL_TOOL_CALL_INVALID" {
+		t.Fatalf("error = %#v", err)
 	}
 }
 

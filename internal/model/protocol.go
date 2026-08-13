@@ -15,9 +15,11 @@ const (
 )
 
 type Message struct {
-	Role    Role          `json:"role"`
-	Content string        `json:"content,omitempty"`
-	Parts   []ContentPart `json:"parts,omitempty"`
+	Role       Role          `json:"role"`
+	Content    string        `json:"content,omitempty"`
+	Parts      []ContentPart `json:"parts,omitempty"`
+	ToolCalls  []ToolCall    `json:"toolCalls,omitempty"`
+	ToolCallID string        `json:"toolCallId,omitempty"`
 }
 
 type ContentPart struct {

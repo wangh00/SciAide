@@ -1127,7 +1127,7 @@ sciaide/
 
 ### P2：Agent Loop、内置工具与权限（2～3 周）
 
-> 实施状态（2026-08-13）：P2.1 工具协议与持久化、P2.2 注册/权限/审批后端、P2.3 有界 ToolExecutor、Workspace PathGuard、内置列目录与 UTF-8 文本读取工具均已完成。下一步进入 P2.4 Provider Tool Calling、AgentLoop、ContextBuilder 与运行预算。
+> 实施状态（2026-08-13）：P2.1 工具协议与持久化、P2.2 注册/权限/审批后端、P2.3 有界 ToolExecutor 与 Workspace 只读工具、P2.4 Provider Tool Calling、AgentLoop、ContextBuilder、运行预算及审批暂停/恢复后端均已完成。下一步进入 P2.5 工具调用与审批 UI、时间线和交互收口。
 
 **目标：** 打通一条可审计的模型工具调用闭环。
 

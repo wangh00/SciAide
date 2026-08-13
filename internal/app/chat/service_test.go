@@ -71,10 +71,61 @@ func (r resolver) Resolve(context.Context, string, string) (model.ChatModel, err
 	return r.model, nil
 }
 
+type testRunner struct {
+	repo     *memoryRepo
+	provider model.ChatModel
+}
+
+func (r testRunner) Execute(ctx context.Context, runID string) {
+	run, _ := r.repo.Get(ctx, runID)
+	now := time.Now().UTC()
+	run.Status, run.StartedAt, run.UpdatedAt = RunRunning, &now, now
+	_ = r.repo.Update(ctx, run)
+	stream, err := r.provider.Stream(ctx, buildRequest(r.repo.messages, run.AssistantMessageID, 120_000))
+	if err != nil {
+		return
+	}
+	defer stream.Close()
+	text := ""
+	for {
+		event, recvErr := stream.Recv()
+		if event.Type == model.EventTextDelta {
+			text += event.Text
+		}
+		if event.FinishReason != "" {
+			run.FinishReason = event.FinishReason
+		}
+		if recvErr != nil || event.Type == model.EventDone {
+			break
+		}
+	}
+	now = time.Now().UTC()
+	_ = r.repo.UpdateMessageText(ctx, run.AssistantMessageID, conversation.MessageComplete, text, now)
+	run.Status, run.CompletedAt, run.UpdatedAt = RunCompleted, &now, now
+	_ = r.repo.Update(ctx, run)
+}
+
+func (r testRunner) ResumeExecute(ctx context.Context, runID string) { r.Execute(ctx, runID) }
+
+type blockingRunner struct {
+	started chan struct{}
+	release chan struct{}
+	resume  chan struct{}
+}
+
+func (r *blockingRunner) Execute(context.Context, string) {
+	close(r.started)
+	<-r.release
+}
+func (r *blockingRunner) ResumeExecute(context.Context, string) { close(r.resume) }
+
 func TestServiceCompletesAndPersistsBeforeTerminalEvent(t *testing.T) {
 	repo := &memoryRepo{}
 	provider := fake.New([]fake.Step{{Event: model.Event{Type: model.EventTextDelta, Text: "科研"}}, {Event: model.Event{Type: model.EventTextDelta, Text: "助手"}}, {Event: model.Event{Type: model.EventDone, FinishReason: "stop"}}})
-	service := NewService(repo, repo, repo, nil, resolver{model: provider})
+	service := NewService(repo, repo, repo, nil)
+	if err := service.SetRunner(testRunner{repo: repo, provider: provider}); err != nil {
+		t.Fatal(err)
+	}
 	defer service.Close()
 	run, err := service.Start(context.Background(), StartCommand{ConversationID: "conversation", ModelProfileID: "profile", ModelID: "fixture", Text: "你好"})
 	if err != nil {
@@ -109,4 +160,27 @@ func TestBuildRequestKeepsNewestMessagesWithinBudget(t *testing.T) {
 	if len(request.Messages) != 1 || request.Messages[0].Content != "67890" {
 		t.Fatalf("request = %#v", request)
 	}
+}
+
+func TestResumeQueuedWhileOriginalRunnerExits(t *testing.T) {
+	repo := &memoryRepo{run: Run{ID: "run", Status: RunRunning}}
+	runner := &blockingRunner{started: make(chan struct{}), release: make(chan struct{}), resume: make(chan struct{})}
+	service := NewService(repo, repo, repo, nil)
+	if err := service.SetRunner(runner); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.launch("run", false); err != nil {
+		t.Fatal(err)
+	}
+	<-runner.started
+	if err := service.Resume(context.Background(), "run"); err != nil {
+		t.Fatal(err)
+	}
+	close(runner.release)
+	select {
+	case <-runner.resume:
+	case <-time.After(time.Second):
+		t.Fatal("queued resume was lost")
+	}
+	service.Close()
 }

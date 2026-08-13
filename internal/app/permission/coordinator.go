@@ -65,6 +65,14 @@ func (c *Coordinator) EvaluateCall(ctx context.Context, projectID, callID string
 		return Coordination{}, err
 	}
 	result := Coordination{Evaluation: evaluation, ToolCall: call, Run: run}
+	if evaluation.Decision == DecisionAllow {
+		call, err = c.tools.Start(ctx, call.ID)
+		if err != nil {
+			return Coordination{}, err
+		}
+		result.ToolCall = call
+		return result, nil
+	}
 	if evaluation.Decision != DecisionAsk {
 		return result, nil
 	}

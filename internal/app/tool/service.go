@@ -83,6 +83,14 @@ func (s *Service) Get(ctx context.Context, callID string) (Call, error) {
 	return s.repository.Get(ctx, callID)
 }
 
+func (s *Service) ListByRun(ctx context.Context, runID string) ([]Call, error) {
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return nil, fmt.Errorf("run id is required")
+	}
+	return s.repository.ListByRun(ctx, runID)
+}
+
 func (s *Service) AwaitApproval(ctx context.Context, callID string) (Call, error) {
 	return s.transition(ctx, callID, CallAwaitingApproval, "", "")
 }

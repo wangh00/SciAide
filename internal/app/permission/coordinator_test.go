@@ -21,7 +21,7 @@ func (t *coordinatorTools) AwaitApproval(_ context.Context, _ string) (tool.Call
 	return t.call, nil
 }
 func (t *coordinatorTools) Start(_ context.Context, _ string) (tool.Call, error) {
-	if t.call.Status != tool.CallAwaitingApproval {
+	if t.call.Status != tool.CallPending && t.call.Status != tool.CallAwaitingApproval {
 		return tool.Call{}, tool.ErrTransitionConflict
 	}
 	t.call.Status = tool.CallRunning
@@ -97,5 +97,16 @@ func TestCoordinatorRejectsProjectMismatchBeforeMutation(t *testing.T) {
 	}
 	if tools.call.Status != tool.CallPending || runs.run.Status != chat.RunRunning || len(repository.approvals) != 0 {
 		t.Fatal("state changed before project ownership validation")
+	}
+}
+
+func TestCoordinatorStartsAllowedPendingCall(t *testing.T) {
+	repository := newMemoryRepository()
+	tools := &coordinatorTools{call: testCall(tool.RiskLow)}
+	runs := &coordinatorRuns{projectID: "project-1", run: chat.Run{ID: "run-1", Status: chat.RunRunning}}
+	coordinator := NewCoordinator(NewEngine(repository), tools, runs)
+	result, err := coordinator.EvaluateCall(context.Background(), "project-1", tools.call.ID)
+	if err != nil || result.Evaluation.Decision != DecisionAllow || result.ToolCall.Status != tool.CallRunning || tools.call.Status != tool.CallRunning {
+		t.Fatalf("EvaluateCall() = %#v, %v; call=%s", result, err, tools.call.Status)
 	}
 }
