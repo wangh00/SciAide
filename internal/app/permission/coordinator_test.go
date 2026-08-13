@@ -110,3 +110,17 @@ func TestCoordinatorStartsAllowedPendingCall(t *testing.T) {
 		t.Fatalf("EvaluateCall() = %#v, %v; call=%s", result, err, tools.call.Status)
 	}
 }
+
+func TestCoordinatorRejectsExpiredApprovalBeforeMutation(t *testing.T) {
+	coordinator, repository, tools, runs := newCoordinatorFixture()
+	tools.call.Status = tool.CallAwaitingApproval
+	runs.run.Status = chat.RunWaitingApproval
+	now := time.Now().UTC()
+	repository.approvals["expired"] = Approval{ID: "expired", RunID: tools.call.RunID, ToolCallID: tools.call.ID, ProjectID: runs.projectID, ToolName: tools.call.ToolName, ToolVersion: tools.call.ToolVersion, Status: ApprovalExpired, RequestedScope: ScopeCall, ResolvedScope: ScopeCall, ResolvedAt: &now}
+	if _, err := coordinator.Resolve(context.Background(), ResolveCommand{ApprovalID: "expired", Allow: true, Scope: ScopeCall}); !errors.Is(err, ErrApprovalConflict) {
+		t.Fatalf("Resolve(expired) error = %v", err)
+	}
+	if tools.call.Status != tool.CallAwaitingApproval || runs.run.Status != chat.RunWaitingApproval {
+		t.Fatalf("expired resolution mutated state: call=%s run=%s", tools.call.Status, runs.run.Status)
+	}
+}

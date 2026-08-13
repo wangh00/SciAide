@@ -109,6 +109,19 @@ func (e *Executor) Execute(ctx context.Context, projectID, callID string) (Execu
 		duration = 0
 	}
 	result.Meta.DurationMillis = duration.Milliseconds()
+	// A Run may have been terminated while a tool ignored cancellation and was
+	// still unwinding. Never persist a late ToolResult into that terminal Run.
+	if current, getErr := e.service.Get(context.Background(), call.ID); getErr != nil {
+		return Execution{}, getErr
+	} else if current.Status != CallRunning {
+		if current.Status.Terminal() {
+			if current.Result != nil {
+				return Execution{CallID: current.ID, Result: *current.Result, ErrorCode: current.ErrorCode, DurationMillis: duration.Milliseconds()}, nil
+			}
+			return Execution{CallID: current.ID, Result: Result{Status: ResultCancelled, Text: current.ErrorMessage, Meta: ResultMeta{DurationMillis: duration.Milliseconds()}}, ErrorCode: current.ErrorCode, DurationMillis: duration.Milliseconds()}, nil
+		}
+		return Execution{}, fmt.Errorf("tool call changed state while executing")
+	}
 
 	switch {
 	case panicOccurred:

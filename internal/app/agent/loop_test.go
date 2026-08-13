@@ -37,6 +37,16 @@ func (s *loopState) Update(_ context.Context, run chat.Run) error {
 	s.run = run
 	return nil
 }
+func (s *loopState) IncrementModelTurns(_ context.Context, _ string, maximum int, at time.Time) (chat.Run, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.run.Status != chat.RunRunning || s.run.ModelTurns >= maximum {
+		return chat.Run{}, chat.ErrModelTurnBudgetExceeded
+	}
+	s.run.ModelTurns++
+	s.run.UpdatedAt = at
+	return s.run, nil
+}
 func (s *loopState) ProjectIDForRun(context.Context, string) (string, error) { return "project", nil }
 func (s *loopState) transitionRun(expected, next chat.RunStatus) {
 	s.mu.Lock()
@@ -274,6 +284,34 @@ func TestAgentLoopPausesBeforeExecutingApprovalTool(t *testing.T) {
 	}
 }
 
+func TestAgentLoopModelTurnBudgetSurvivesApprovalResume(t *testing.T) {
+	first := []fake.Step{{Event: model.Event{Type: model.EventToolCall, ToolCall: &model.ToolCall{ID: "provider-call", Name: "builtin.fixture", Arguments: json.RawMessage(`{"query":"paper"}`)}}}, {Event: model.Event{Type: model.EventDone, FinishReason: "tool_calls"}}}
+	second := []fake.Step{{Event: model.Event{Type: model.EventTextDelta, Text: "should not run"}}, {Event: model.Event{Type: model.EventDone, FinishReason: "stop"}}}
+	loop, state, _ := newLoopFixture(t, nil, first, second)
+	loop.budget.MaxModelTurns = 1
+	ask := statefulAskCoordinator{service: loop.tools.(*tool.Service), state: state}
+	loop.approvals = ask
+	if outcome := loop.Run(context.Background(), "run"); outcome != OutcomeWaitingApproval {
+		t.Fatalf("first outcome = %s", outcome)
+	}
+	state.mu.Lock()
+	state.run.Status = chat.RunRunning
+	for id, call := range state.calls {
+		call.Status = tool.CallDenied
+		call.Result = &tool.Result{Status: tool.ResultDenied, Text: "denied"}
+		state.calls[id] = call
+	}
+	state.mu.Unlock()
+	if outcome := loop.Resume(context.Background(), "run"); outcome != OutcomeFailed {
+		t.Fatalf("resume outcome = %s", outcome)
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.run.ModelTurns != 1 || state.run.ErrorCode != "MODEL_TURN_BUDGET_EXCEEDED" {
+		t.Fatalf("durable budget run = %#v", state.run)
+	}
+}
+
 func TestAgentLoopResumeExecutesApprovedCallBeforeNextModelTurn(t *testing.T) {
 	second := []fake.Step{{Event: model.Event{Type: model.EventTextDelta, Text: "审批后完成"}}, {Event: model.Event{Type: model.EventDone, FinishReason: "stop"}}}
 	loop, state, provider := newLoopFixture(t, nil, second)
@@ -335,16 +373,6 @@ func TestContextBuilderBoundsCumulativeToolResults(t *testing.T) {
 	}
 	if len(request.Messages) != 3 || request.Messages[1].ToolCalls[0].ID != "new" || len([]rune(request.Messages[2].Content)) > 20 {
 		t.Fatalf("bounded tool context = %#v", request.Messages)
-	}
-}
-
-func TestBudgetStopsUnboundedModelTurns(t *testing.T) {
-	counter := newBudgetCounter(RunBudget{MaxModelTurns: 1, MaxToolCalls: 1, MaxDuration: time.Minute}, time.Now(), 0)
-	if err := counter.beforeModelTurn(); err != nil {
-		t.Fatal(err)
-	}
-	if err := counter.beforeModelTurn(); err == nil || err.Error() != "MODEL_TURN_BUDGET_EXCEEDED" {
-		t.Fatalf("error = %v", err)
 	}
 }
 

@@ -105,7 +105,17 @@ func New(options Options) (*Application, error) {
 	approvalCoordinator := permission.NewCoordinator(permissionEngine, toolService, runRepository)
 	publisher := wailstransport.NewEventPublisher(lifecycle)
 	chatService := chat.NewService(runRepository, conversationRepository, runRepository, publisher)
-	agentLoop := agent.NewLoop(runRepository, conversationRepository, toolService, toolRegistry, approvalCoordinator, toolExecutor, gateway.NewResolver(profileService), agent.NewEventObserver(chatService), agent.Options{})
+	terminator := chat.NewTerminator(runRepository, publisher)
+	terminator.SetToolCanceller(toolExecutor.Cancel)
+	if err := chatService.SetTerminator(terminator); err != nil {
+		_ = store.Close()
+		return fail(fmt.Errorf("configure run termination: %w", err))
+	}
+	if err := chatService.SetSnapshotToolCalls(toolService); err != nil {
+		_ = store.Close()
+		return fail(fmt.Errorf("configure chat snapshot: %w", err))
+	}
+	agentLoop := agent.NewLoop(runRepository, conversationRepository, toolService, toolRegistry, approvalCoordinator, toolExecutor, gateway.NewResolver(profileService), agent.NewEventObserver(chatService), agent.Options{Terminator: terminator})
 	if err := chatService.SetRunner(agent.NewRunner(agentLoop)); err != nil {
 		_ = store.Close()
 		return fail(fmt.Errorf("configure agent loop: %w", err))
@@ -134,7 +144,7 @@ func New(options Options) (*Application, error) {
 		ProjectFacade:      wailstransport.NewProjectFacade(lifecycle, projectService),
 		ConversationFacade: wailstransport.NewConversationFacade(lifecycle, conversationService),
 		ModelFacade:        wailstransport.NewModelFacade(lifecycle, profileService),
-		ChatFacade:         wailstransport.NewChatFacade(lifecycle, chatService),
+		ChatFacade:         wailstransport.NewChatFacade(lifecycle, chatService, permissionEngine),
 		PermissionFacade:   wailstransport.NewPermissionFacade(lifecycle, permissionEngine, approvalCoordinator, chatService),
 		ToolFacade:         wailstransport.NewToolFacade(lifecycle, toolExecutor, toolRegistry),
 		lifecycle:          lifecycle,

@@ -2,11 +2,14 @@ package chat
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/wangh00/SciAide/internal/app/conversation"
 	"github.com/wangh00/SciAide/internal/events"
 )
+
+var ErrModelTurnBudgetExceeded = errors.New("model turn budget exceeded")
 
 type RunStatus string
 
@@ -32,6 +35,7 @@ type Run struct {
 	ErrorMessage       string     `json:"errorMessage,omitempty"`
 	InputTokens        int        `json:"inputTokens"`
 	OutputTokens       int        `json:"outputTokens"`
+	ModelTurns         int        `json:"modelTurns"`
 	FinishReason       string     `json:"finishReason,omitempty"`
 	CreatedAt          time.Time  `json:"createdAt"`
 	StartedAt          *time.Time `json:"startedAt,omitempty"`
@@ -43,6 +47,7 @@ type Repository interface {
 	CreateWithMessages(ctx context.Context, value Run, userMessage, assistantMessage conversation.Message) error
 	Get(ctx context.Context, id string) (Run, error)
 	Update(ctx context.Context, value Run) error
+	IncrementModelTurns(ctx context.Context, runID string, maximum int, at time.Time) (Run, error)
 	InterruptActive(ctx context.Context, at time.Time) (int64, error)
 }
 

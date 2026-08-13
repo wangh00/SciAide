@@ -30,8 +30,12 @@ P2.1～P2.3 已建立 Tool 协议、持久化、权限审批和有界执行器�
 - FakeModel 已覆盖 Tool Call → 执行 → ToolResult 回填 → 最终回答；另有审批暂停不执行、上下文裁剪和预算测试。
 - OpenAI-compatible 服务必须正确支持 Chat Completions `tools/tool_calls`；不兼容实现会返回可理解的模型协议错误，而不会降级为无审计执行。
 - P2.5 需要在前端展示 `approval.required` 和 pending Approval，并调用已有 ResolveApproval；后端闭环与恢复入口已具备。
-- 当前预算计数是单次进程内执行的保守上限，已持久化 ToolCall 会计入恢复后的工具预算；若未来需要跨多次审批精确保留模型 Turn/持续时间，应增加独立 Run checkpoint 迁移。
+- 模型 Turn 通过 `runs.model_turns` 原子持久化并在每次模型请求前消费；ToolCall 数量由持久化记录累计，持续时间由 `Run.StartedAt` 计算，因此多次审批暂停/恢复不会重置任何一类预算。
 
 ## 复核补充（2026-08-13）
 
 P2.1～P2.4 安全复核后进一步收紧：Wails 不再暴露直接 Policy 评估或 Executor 执行入口；运行时 Deadline 会主动取消卡住的模型流；累计 ToolResult 与 Tool Definition 数量纳入上下文上限；JSON Schema/Instance 拒绝尾随 JSON；Tool Schema、Arguments、Permission 数量和资源长度均有硬边界。上述约束属于同一决策的纵深防御，不改变持久化协议。
+
+二次复核补充统一 Run 终止边界：主动取消或 AgentLoop 失败会在同一 SQLite 事务内关闭 Run、Assistant Message、所有非终态 ToolCall 和 pending Approval，并写入单一终态 RunEvent；`waiting_approval` 即使没有活动 goroutine 也可取消。Executor 在工具忽略取消并迟到返回时重新读取 ToolCall 状态，禁止用迟到结果覆盖终态。终态 Run 也拒绝旧 goroutine 的普通 Update 回写。
+
+P2.5 的用户权限入口收敛为 `Plan` 与 `Full Access` 两档。`Plan` 对每个 ToolCall 请求一次用户决定，`Full Access` 对已注册且通过参数/边界校验的 ToolCall 自动放行；风险信息只作展示，不覆盖用户选择。拒绝仍作为普通、持久化的 ToolResult 回填给 Provider，后续是否继续输出及输出内容完全由模型决定，应用层不拼接替代回答。审批恢复以 Approval ID 作为幂等键：同一审批的重复点击只触发一次恢复，不同审批周期可以继续恢复同一 Run。

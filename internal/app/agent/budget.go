@@ -19,11 +19,10 @@ type RunBudget struct {
 }
 
 type budgetCounter struct {
-	budget     RunBudget
-	startedAt  time.Time
-	modelTurns int
-	toolCalls  int
-	now        func() time.Time
+	budget    RunBudget
+	startedAt time.Time
+	toolCalls int
+	now       func() time.Time
 }
 
 type runDeadlineError struct{ cause error }
@@ -46,17 +45,6 @@ func normalizeBudget(value RunBudget) RunBudget {
 
 func newBudgetCounter(value RunBudget, startedAt time.Time, priorToolCalls int) *budgetCounter {
 	return &budgetCounter{budget: normalizeBudget(value), startedAt: startedAt, toolCalls: priorToolCalls, now: func() time.Time { return time.Now().UTC() }}
-}
-
-func (b *budgetCounter) beforeModelTurn() error {
-	if err := b.checkDuration(); err != nil {
-		return err
-	}
-	if b.modelTurns >= b.budget.MaxModelTurns {
-		return fmt.Errorf("MODEL_TURN_BUDGET_EXCEEDED")
-	}
-	b.modelTurns++
-	return nil
 }
 
 func (b *budgetCounter) beforeToolCall() error {

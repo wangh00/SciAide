@@ -106,6 +106,9 @@ func (c *Coordinator) Resolve(ctx context.Context, command ResolveCommand) (Coor
 	if err != nil {
 		return Coordination{}, err
 	}
+	if pending.Status != ApprovalPending {
+		return Coordination{}, ErrApprovalConflict
+	}
 	call, run, err := c.loadOwnedCall(ctx, pending.ProjectID, pending.ToolCallID)
 	if err != nil {
 		return Coordination{}, err

@@ -27,7 +27,7 @@ func (f *PermissionFacade) ResolveApproval(command permission.ResolveCommand) (p
 		return result, err
 	}
 	if result.Run.Status == chat.RunRunning && (result.ToolCall.Status == tool.CallRunning || result.ToolCall.Status.Terminal()) {
-		if err := f.chat.Resume(f.lifecycle.Context(), result.Run.ID); err != nil {
+		if err := f.chat.Resume(f.lifecycle.Context(), result.Run.ID, command.ApprovalID); err != nil {
 			return result, err
 		}
 	}

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/wangh00/SciAide/internal/app/conversation"
+	"github.com/wangh00/SciAide/internal/app/tool"
 	"github.com/wangh00/SciAide/internal/events"
 	"github.com/wangh00/SciAide/internal/id"
 	"github.com/wangh00/SciAide/internal/model"
@@ -31,8 +32,13 @@ const maxUserMessageChars = 100_000
 // Snapshot is the durable UI recovery view. Events improve latency, but this
 // snapshot remains the source of truth after lost or out-of-order UI events.
 type Snapshot struct {
-	Run      Run                    `json:"run"`
-	Messages []conversation.Message `json:"messages"`
+	Run       Run                    `json:"run"`
+	Messages  []conversation.Message `json:"messages"`
+	ToolCalls []tool.Call            `json:"toolCalls"`
+}
+
+type ToolCallReader interface {
+	ListByRun(ctx context.Context, runID string) ([]tool.Call, error)
 }
 
 type Service struct {
@@ -40,18 +46,47 @@ type Service struct {
 	conversations ConversationRepository
 	events        EventRepository
 	publisher     Publisher
+	terminator    *Terminator
+	toolCalls     ToolCallReader
 	now           func() time.Time
 
 	mu            sync.Mutex
 	runner        RunExecutor
 	active        map[string]context.CancelFunc
 	pendingResume map[string]bool
+	lastResumeKey map[string]string
 	closing       bool
 	wg            sync.WaitGroup
 }
 
+func (s *Service) SetSnapshotToolCalls(toolCalls ToolCallReader) error {
+	if toolCalls == nil {
+		return fmt.Errorf("chat snapshot tool call reader is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.toolCalls != nil {
+		return fmt.Errorf("chat snapshot tool call reader is already configured")
+	}
+	s.toolCalls = toolCalls
+	return nil
+}
+
+func (s *Service) SetTerminator(terminator *Terminator) error {
+	if terminator == nil {
+		return fmt.Errorf("chat run terminator is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.terminator != nil {
+		return fmt.Errorf("chat run terminator is already configured")
+	}
+	s.terminator = terminator
+	return nil
+}
+
 func NewService(runs Repository, conversations ConversationRepository, eventRepository EventRepository, publisher Publisher) *Service {
-	return &Service{runs: runs, conversations: conversations, events: eventRepository, publisher: publisher, now: func() time.Time { return time.Now().UTC() }, active: make(map[string]context.CancelFunc), pendingResume: make(map[string]bool)}
+	return &Service{runs: runs, conversations: conversations, events: eventRepository, publisher: publisher, now: func() time.Time { return time.Now().UTC() }, active: make(map[string]context.CancelFunc), pendingResume: make(map[string]bool), lastResumeKey: make(map[string]string)}
 }
 
 // SetRunner completes bootstrap's dependency cycle: Chat creates the durable
@@ -124,25 +159,50 @@ func (s *Service) Start(ctx context.Context, cmd StartCommand) (Run, error) {
 }
 
 // Resume schedules a Run only after PermissionCoordinator has atomically moved
-// it back to running. It never changes approval or ToolCall state itself.
-func (s *Service) Resume(_ context.Context, runID string) error {
-	run, err := s.runs.Get(context.Background(), strings.TrimSpace(runID))
+// it back to running. approvalID is the idempotency key for one approval cycle:
+// duplicate UI replies coalesce, while a later approval may resume the same Run.
+func (s *Service) Resume(_ context.Context, runID, approvalID string) error {
+	runID, approvalID = strings.TrimSpace(runID), strings.TrimSpace(approvalID)
+	if runID == "" || approvalID == "" {
+		return fmt.Errorf("run id and approval id are required")
+	}
+	run, err := s.runs.Get(context.Background(), runID)
 	if err != nil {
 		return err
 	}
 	if run.Status != RunRunning {
 		return fmt.Errorf("run is not ready to resume")
 	}
-	return s.launch(run.ID, true)
+	s.mu.Lock()
+	if s.lastResumeKey[run.ID] == approvalID {
+		s.mu.Unlock()
+		return nil
+	}
+	if s.active[run.ID] != nil {
+		s.pendingResume[run.ID] = true
+		s.lastResumeKey[run.ID] = approvalID
+		s.mu.Unlock()
+		return nil
+	}
+	err = s.launchLocked(run.ID, true)
+	if err == nil {
+		s.lastResumeKey[run.ID] = approvalID
+	}
+	s.mu.Unlock()
+	return err
 }
 
 func (s *Service) Cancel(ctx context.Context, runID string) error {
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return fmt.Errorf("run id is required")
+	}
 	s.mu.Lock()
 	cancel := s.active[runID]
+	terminator := s.terminator
 	s.mu.Unlock()
 	if cancel != nil {
 		cancel()
-		return nil
 	}
 	run, err := s.runs.Get(ctx, runID)
 	if err != nil {
@@ -151,7 +211,14 @@ func (s *Service) Cancel(ctx context.Context, runID string) error {
 	if isTerminal(run.Status) {
 		return nil
 	}
-	return fmt.Errorf("run is not active")
+	if terminator == nil {
+		if cancel != nil {
+			return nil
+		}
+		return fmt.Errorf("run is not active")
+	}
+	_, err = terminator.Cancel(ctx, run.ID)
+	return err
 }
 
 func (s *Service) Snapshot(ctx context.Context, runID string) (Snapshot, error) {
@@ -163,7 +230,17 @@ func (s *Service) Snapshot(ctx context.Context, runID string) (Snapshot, error) 
 	if err != nil {
 		return Snapshot{}, err
 	}
-	return Snapshot{Run: run, Messages: messages}, nil
+	snapshot := Snapshot{Run: run, Messages: messages, ToolCalls: []tool.Call{}}
+	s.mu.Lock()
+	toolCalls := s.toolCalls
+	s.mu.Unlock()
+	if toolCalls != nil {
+		snapshot.ToolCalls, err = toolCalls.ListByRun(ctx, run.ID)
+		if err != nil {
+			return Snapshot{}, err
+		}
+	}
+	return snapshot, nil
 }
 
 func (s *Service) Close() {
@@ -179,28 +256,30 @@ func (s *Service) Close() {
 
 func (s *Service) launch(runID string, resume bool) error {
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.launchLocked(runID, resume)
+}
+
+func (s *Service) launchLocked(runID string, resume bool) error {
 	if s.closing {
-		s.mu.Unlock()
 		return fmt.Errorf("chat service is closing")
 	}
 	if s.runner == nil {
-		s.mu.Unlock()
 		return fmt.Errorf("chat run executor is not configured")
 	}
 	if _, exists := s.active[runID]; exists {
 		if resume {
-			s.pendingResume[runID] = true
-			s.mu.Unlock()
+			if !s.pendingResume[runID] {
+				s.pendingResume[runID] = true
+			}
 			return nil
 		}
-		s.mu.Unlock()
 		return fmt.Errorf("run is already active")
 	}
 	runner := s.runner
 	runCtx, cancel := context.WithCancel(context.Background())
 	s.active[runID] = cancel
 	s.wg.Add(1)
-	s.mu.Unlock()
 	go func() {
 		defer s.wg.Done()
 		defer s.finishActive(runID)
@@ -242,16 +321,12 @@ func (s *Service) finishActive(runID string) {
 	s.mu.Lock()
 	delete(s.active, runID)
 	resume := s.pendingResume[runID] && !s.closing
-	if !resume {
-		delete(s.pendingResume, runID)
-	}
+	delete(s.pendingResume, runID)
 	s.mu.Unlock()
 	if resume {
-		if err := s.launch(runID, true); err == nil {
-			s.mu.Lock()
-			delete(s.pendingResume, runID)
-			s.mu.Unlock()
-		}
+		s.mu.Lock()
+		_ = s.launchLocked(runID, true)
+		s.mu.Unlock()
 	}
 }
 

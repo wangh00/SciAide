@@ -24,6 +24,7 @@ type ModelResolver interface {
 type Runs interface {
 	Get(ctx context.Context, runID string) (chat.Run, error)
 	Update(ctx context.Context, value chat.Run) error
+	IncrementModelTurns(ctx context.Context, runID string, maximum int, at time.Time) (chat.Run, error)
 	ProjectIDForRun(ctx context.Context, runID string) (string, error)
 }
 
@@ -78,6 +79,7 @@ func (NopObserver) RunCancelled(chat.Run)                              {}
 type Options struct {
 	Budget         RunBudget
 	ContextBuilder *ContextBuilder
+	Terminator     *chat.Terminator
 }
 
 type Outcome string
@@ -100,6 +102,7 @@ type Loop struct {
 	observer      Observer
 	builder       *ContextBuilder
 	budget        RunBudget
+	terminator    *chat.Terminator
 	now           func() time.Time
 }
 
@@ -110,7 +113,7 @@ func NewLoop(runs Runs, conversations Conversations, tools ToolCalls, registry t
 	if options.ContextBuilder == nil {
 		options.ContextBuilder = NewContextBuilder(0)
 	}
-	return &Loop{runs: runs, conversations: conversations, tools: tools, registry: registry, approvals: approvals, executor: executor, models: models, observer: observer, builder: options.ContextBuilder, budget: normalizeBudget(options.Budget), now: func() time.Time { return time.Now().UTC() }}
+	return &Loop{runs: runs, conversations: conversations, tools: tools, registry: registry, approvals: approvals, executor: executor, models: models, observer: observer, builder: options.ContextBuilder, budget: normalizeBudget(options.Budget), terminator: options.Terminator, now: func() time.Time { return time.Now().UTC() }}
 }
 
 func (l *Loop) Run(ctx context.Context, runID string) Outcome {
@@ -139,7 +142,9 @@ func (l *Loop) Run(ctx context.Context, runID string) Outcome {
 		return outcome
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
-		l.cancel(&run)
+		if current, loadErr := l.runs.Get(context.Background(), run.ID); loadErr != nil || current.Status != chat.RunCancelled {
+			l.cancel(&run)
+		}
 		return OutcomeCancelled
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
@@ -199,9 +204,17 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 	}
 
 	for {
-		if err := budget.beforeModelTurn(); err != nil {
+		if err := budget.checkDuration(); err != nil {
 			return OutcomeFailed, budgetError(err)
 		}
+		checkpoint, err := l.runs.IncrementModelTurns(context.Background(), run.ID, budget.budget.MaxModelTurns, l.now())
+		if err != nil {
+			if errors.Is(err, chat.ErrModelTurnBudgetExceeded) {
+				return OutcomeFailed, budgetError(fmt.Errorf("MODEL_TURN_BUDGET_EXCEEDED"))
+			}
+			return OutcomeFailed, err
+		}
+		run.ModelTurns, run.UpdatedAt = checkpoint.ModelTurns, checkpoint.UpdatedAt
 		request, err := l.builder.Build(ctx, messages, run.AssistantMessageID, definitions, calls)
 		if err != nil {
 			return OutcomeFailed, err
@@ -221,6 +234,11 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 		now := l.now()
 		if err := l.conversations.UpdateMessageText(context.Background(), run.AssistantMessageID, conversation.MessageStreaming, text, now); err != nil {
 			return OutcomeFailed, &apperr.Error{Code: "MESSAGE_SAVE_FAILED", UserMessage: "模型中间结果无法保存。", Cause: err}
+		}
+		if latest, err := l.runs.Get(context.Background(), run.ID); err != nil {
+			return OutcomeFailed, err
+		} else if latest.Status != chat.RunRunning {
+			return OutcomeFailed, fmt.Errorf("run is no longer running")
 		}
 		run.FinishReason, run.UpdatedAt = turn.finishReason, now
 		if err := l.runs.Update(context.Background(), *run); err != nil {
@@ -375,7 +393,19 @@ func (l *Loop) complete(run *chat.Run, text, finishReason string) (Outcome, erro
 }
 
 func (l *Loop) fail(run *chat.Run, code, message string) {
+	if current, err := l.runs.Get(context.Background(), run.ID); err == nil && isTerminalRun(current.Status) {
+		*run = current
+		return
+	}
 	now := l.now()
+	if l.terminator != nil {
+		terminated, terminateErr := l.terminator.Fail(context.Background(), run.ID, code, message)
+		if terminateErr == nil {
+			*run = terminated
+			return
+		}
+		return
+	}
 	text := l.currentText(run)
 	status := conversation.MessageFailed
 	if text != "" {
@@ -388,12 +418,20 @@ func (l *Loop) fail(run *chat.Run, code, message string) {
 }
 
 func (l *Loop) cancel(run *chat.Run) {
+	if current, err := l.runs.Get(context.Background(), run.ID); err == nil && isTerminalRun(current.Status) {
+		*run = current
+		return
+	}
 	now := l.now()
 	text := l.currentText(run)
 	_ = l.conversations.UpdateMessageText(context.Background(), run.AssistantMessageID, conversation.MessageIncomplete, text, now)
 	run.Status, run.ErrorCode, run.ErrorMessage, run.UpdatedAt, run.CompletedAt = chat.RunCancelled, "RUN_CANCELLED", "已停止生成", now, &now
 	_ = l.runs.Update(context.Background(), *run)
 	l.observer.RunCancelled(*run)
+}
+
+func isTerminalRun(status chat.RunStatus) bool {
+	return status == chat.RunCompleted || status == chat.RunFailed || status == chat.RunCancelled || status == chat.RunInterrupted
 }
 
 func (l *Loop) currentText(run *chat.Run) string {

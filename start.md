@@ -1127,7 +1127,9 @@ sciaide/
 
 ### P2：Agent Loop、内置工具与权限（2～3 周）
 
-> 实施状态（2026-08-13）：P2.1 工具协议与持久化、P2.2 注册/权限/审批后端、P2.3 有界 ToolExecutor 与 Workspace 只读工具、P2.4 Provider Tool Calling、AgentLoop、ContextBuilder、运行预算及审批暂停/恢复后端均已完成。下一步进入 P2.5 工具调用与审批 UI、时间线和交互收口。
+> 实施状态（2026-08-13）：P2.1 工具协议与持久化、P2.2 注册/权限/审批后端、P2.3 有界 ToolExecutor 与 Workspace 只读工具、P2.4 Provider Tool Calling、AgentLoop、ContextBuilder、跨审批持久化运行预算及统一终止后端均已完成。下一步进入 P2.5 工具调用与审批 UI、时间线和交互收口；`GetRunSnapshot` 已提供 Run、Messages、ToolCalls 与 pending Approvals 作为恢复事实源。
+
+P2.5 范围：`Plan` / `Full Access` 两档会话权限、审批卡片、ToolCall 时间线、Snapshot 轮询兜底、等待审批/执行中的统一取消、错误与结果的安全摘要，以及丢事件、重启和重复点击场景的 UI/E2E 验收。`Plan` 每个 ToolCall 均由用户 Accept/Reject，`Full Access` 自动放行已注册且通过工程边界校验的工具；风险等级仅提示，不替用户限制授权。拒绝以普通 ToolResult 交还模型，程序不改写、补写或强制模型生成替代回答。P2.5 不新增 MCP 或 Skill 执行能力；它们分别属于 P3、P4。
 
 **目标：** 打通一条可审计的模型工具调用闭环。
 
