@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -46,8 +47,15 @@ func (r *ModelProfileRepository) Save(ctx context.Context, value modelprofile.Pr
 		return fmt.Errorf("replace profile models: %w", err)
 	}
 	for _, item := range value.Models {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO model_profile_models(profile_id, model_id, owned_by, enabled, is_default, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			value.ID, item.ID, item.OwnedBy, item.Enabled, item.IsDefault, formatTime(value.CreatedAt), formatTime(value.UpdatedAt)); err != nil {
+		if item.ReasoningCapabilitySource == "" {
+			item.ReasoningCapabilitySource = "unsupported"
+		}
+		reasoningJSON, err := json.Marshal(item.ReasoningLevels)
+		if err != nil {
+			return fmt.Errorf("encode model reasoning levels: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO model_profile_models(profile_id, model_id, owned_by, enabled, is_default, reasoning_levels_json, reasoning_capability_source, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			value.ID, item.ID, item.OwnedBy, item.Enabled, item.IsDefault, string(reasoningJSON), item.ReasoningCapabilitySource, formatTime(value.CreatedAt), formatTime(value.UpdatedAt)); err != nil {
 			return fmt.Errorf("insert profile model: %w", err)
 		}
 	}
@@ -112,7 +120,7 @@ func (r *ModelProfileRepository) Delete(ctx context.Context, id string) error {
 }
 
 func (r *ModelProfileRepository) listModels(ctx context.Context, profileID, legacyDefault string) ([]modelprofile.ProfileModel, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT model_id, owned_by, enabled, is_default FROM model_profile_models WHERE profile_id = ? ORDER BY is_default DESC, model_id`, profileID)
+	rows, err := r.db.QueryContext(ctx, `SELECT model_id, owned_by, enabled, is_default, reasoning_levels_json, reasoning_capability_source FROM model_profile_models WHERE profile_id = ? ORDER BY is_default DESC, model_id`, profileID)
 	if err != nil {
 		return nil, fmt.Errorf("list profile models: %w", err)
 	}
@@ -120,7 +128,11 @@ func (r *ModelProfileRepository) listModels(ctx context.Context, profileID, lega
 	values := make([]modelprofile.ProfileModel, 0)
 	for rows.Next() {
 		var value modelprofile.ProfileModel
-		if err := rows.Scan(&value.ID, &value.OwnedBy, &value.Enabled, &value.IsDefault); err != nil {
+		var reasoningJSON string
+		if err := rows.Scan(&value.ID, &value.OwnedBy, &value.Enabled, &value.IsDefault, &reasoningJSON, &value.ReasoningCapabilitySource); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal([]byte(reasoningJSON), &value.ReasoningLevels); err != nil {
 			return nil, err
 		}
 		values = append(values, value)

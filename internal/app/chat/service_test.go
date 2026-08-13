@@ -11,6 +11,7 @@ import (
 	"github.com/wangh00/SciAide/internal/events"
 	"github.com/wangh00/SciAide/internal/model"
 	"github.com/wangh00/SciAide/internal/model/fake"
+	"github.com/wangh00/SciAide/internal/modelcap"
 )
 
 type memoryRepo struct {
@@ -119,6 +120,12 @@ func (m *memoryRepo) GetConversation(context.Context, string) (conversation.Conv
 	}
 	return conversation.Conversation{ID: "conversation", PermissionMode: mode}, nil
 }
+
+func (m *memoryRepo) UpdateReasoningLevel(_ context.Context, _ string, level modelcap.ReasoningLevel, _ time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return nil
+}
 func (m *memoryRepo) AppendNext(_ context.Context, event events.Envelope) (events.Envelope, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -129,8 +136,8 @@ func (m *memoryRepo) AppendNext(_ context.Context, event events.Envelope) (event
 
 type resolver struct{ model model.ChatModel }
 
-func (r resolver) Resolve(context.Context, string, string) (model.ChatModel, error) {
-	return r.model, nil
+func (r resolver) Resolve(context.Context, string, string) (model.ResolvedChatModel, error) {
+	return model.ResolvedChatModel{Model: r.model}, nil
 }
 
 type testRunner struct {
@@ -143,7 +150,7 @@ func (r testRunner) Execute(ctx context.Context, runID string) {
 	now := time.Now().UTC()
 	run.Status, run.StartedAt, run.UpdatedAt = RunRunning, &now, now
 	_ = r.repo.Update(ctx, run)
-	stream, err := r.provider.Stream(ctx, buildRequest(r.repo.messages, run.AssistantMessageID, 120_000))
+	stream, err := r.provider.Stream(ctx, buildRequest(r.repo.messages, run.AssistantMessageID, 200_000))
 	if err != nil {
 		return
 	}

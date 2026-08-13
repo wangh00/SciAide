@@ -16,7 +16,29 @@ import (
 	"github.com/wangh00/SciAide/internal/app/modelprofile"
 	"github.com/wangh00/SciAide/internal/apperr"
 	"github.com/wangh00/SciAide/internal/model"
+	"github.com/wangh00/SciAide/internal/modelcap"
 )
+
+func TestStreamSendsResolvedReasoningEffort(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var requestBody requestPayload
+		if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+			t.Fatal(err)
+		}
+		if requestBody.ReasoningEffort != "xhigh" {
+			t.Fatalf("reasoning_effort = %q", requestBody.ReasoningEffort)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+	client := New(modelprofile.Profile{BaseURL: server.URL, ModelID: "fixture", TimeoutSeconds: 5}, nil)
+	stream, err := client.Stream(context.Background(), model.ChatRequest{ResolvedReasoningLevel: modelcap.ReasoningXHigh})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+}
 
 func TestStreamNormalizesSSE(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

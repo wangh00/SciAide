@@ -1,6 +1,10 @@
 package modelprofile
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/wangh00/SciAide/internal/modelcap"
+)
 
 func TestSensitiveCustomHeadersRejected(t *testing.T) {
 	for _, name := range []string{"Authorization", "X-Goog-Api-Key", "X-Lab-Token", "X-Client-Secret", "Cookie"} {
@@ -8,6 +12,20 @@ func TestSensitiveCustomHeadersRejected(t *testing.T) {
 		if err := validateCommand(command); err == nil {
 			t.Fatalf("validateCommand() accepted %s header", name)
 		}
+	}
+}
+
+func TestNormalizeModelsPreservesManualReasoningCapabilities(t *testing.T) {
+	models, _ := normalizeModels([]ProfileModel{{ID: "custom", Enabled: true, ReasoningLevels: []modelcap.ReasoningLevel{modelcap.ReasoningMax, modelcap.ReasoningHigh}, ReasoningCapabilitySource: "manual"}}, "custom")
+	if len(models) != 1 || len(models[0].ReasoningLevels) != 2 || models[0].ReasoningLevels[0] != modelcap.ReasoningHigh || models[0].ReasoningCapabilitySource != "manual" {
+		t.Fatalf("models = %#v", models)
+	}
+}
+
+func TestNormalizeModelsDoesNotEnableReasoningForUnknownModel(t *testing.T) {
+	models, _ := normalizeModels([]ProfileModel{{ID: "private-model", Enabled: true}}, "private-model")
+	if len(models[0].ReasoningLevels) != 0 || models[0].ReasoningCapabilitySource != "unsupported" {
+		t.Fatalf("unknown model capabilities = %#v", models[0])
 	}
 }
 

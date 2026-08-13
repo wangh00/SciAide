@@ -16,6 +16,7 @@ import (
 	"github.com/wangh00/SciAide/internal/events"
 	"github.com/wangh00/SciAide/internal/model"
 	"github.com/wangh00/SciAide/internal/model/fake"
+	"github.com/wangh00/SciAide/internal/modelcap"
 )
 
 type loopState struct {
@@ -161,8 +162,8 @@ func (c statefulAskCoordinator) EvaluateCall(ctx context.Context, _ string, call
 
 type fakeResolver struct{ model model.ChatModel }
 
-func (r fakeResolver) Resolve(context.Context, string, string) (model.ChatModel, error) {
-	return r.model, nil
+func (r fakeResolver) Resolve(context.Context, string, string) (model.ResolvedChatModel, error) {
+	return model.ResolvedChatModel{Model: r.model, SupportedReasoningLevels: []modelcap.ReasoningLevel{modelcap.ReasoningLow, modelcap.ReasoningMedium, modelcap.ReasoningHigh, modelcap.ReasoningXHigh, modelcap.ReasoningMax}}, nil
 }
 
 type blockingModel struct{}
@@ -277,6 +278,21 @@ func TestAgentLoopPersistsReportedCacheUsage(t *testing.T) {
 	}
 }
 
+func TestAgentLoopPassesRequestedAndResolvedReasoning(t *testing.T) {
+	script := []fake.Step{{Event: model.Event{Type: model.EventDone, FinishReason: "stop"}}}
+	loop, state, provider := newLoopFixture(t, nil, script)
+	state.mu.Lock()
+	state.run.RequestedReasoningLevel = modelcap.ReasoningMax
+	state.mu.Unlock()
+	if outcome := loop.Run(context.Background(), "run"); outcome != OutcomeCompleted {
+		t.Fatalf("outcome = %s", outcome)
+	}
+	requests := provider.Requests()
+	if len(requests) != 1 || requests[0].RequestedReasoningLevel != modelcap.ReasoningMax || requests[0].ResolvedReasoningLevel != modelcap.ReasoningMax {
+		t.Fatalf("reasoning request = %#v", requests)
+	}
+}
+
 func TestAgentLoopPausesBeforeExecutingApprovalTool(t *testing.T) {
 	first := []fake.Step{{Event: model.Event{Type: model.EventToolCall, ToolCall: &model.ToolCall{ID: "provider-call", Name: "builtin.fixture", Arguments: json.RawMessage(`{"query":"paper"}`)}}}, {Event: model.Event{Type: model.EventDone, FinishReason: "tool_calls"}}}
 	loop, state, _ := newLoopFixture(t, nil, first)
@@ -372,6 +388,28 @@ func TestContextBuilderKeepsLatestMessageAndToolResults(t *testing.T) {
 	}
 	if request.Messages[1].Content != "67890" || roles[len(roles)-1] != model.RoleTool {
 		t.Fatalf("request = %#v", request)
+	}
+}
+
+func TestContextBuilderDefaultsTo200KCompactionWindow(t *testing.T) {
+	builder := NewContextBuilder(0)
+	if builder.maxChars != 200_000 {
+		t.Fatalf("default context window = %d", builder.maxChars)
+	}
+	old := strings.Repeat("a", 150_000)
+	latest := strings.Repeat("b", 100_000)
+	request, info, err := builder.BuildWithInfo(context.Background(), []conversation.Message{
+		{ID: "old", Role: conversation.RoleUser, Parts: []conversation.MessagePart{{Type: "text", Text: old}}},
+		{ID: "latest", Role: conversation.RoleUser, Parts: []conversation.MessagePart{{Type: "text", Text: latest}}},
+	}, "", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(request.Messages) != 2 || request.Messages[1].Content != latest {
+		t.Fatalf("compacted request contains %d messages", len(request.Messages))
+	}
+	if !info.Compacted || info.EstimatedTokens < len(latest) {
+		t.Fatalf("context info = %#v", info)
 	}
 }
 

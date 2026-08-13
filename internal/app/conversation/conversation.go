@@ -8,15 +8,17 @@ import (
 	"time"
 
 	"github.com/wangh00/SciAide/internal/id"
+	"github.com/wangh00/SciAide/internal/modelcap"
 )
 
 type Conversation struct {
-	ID             string         `json:"id"`
-	ProjectID      string         `json:"projectId"`
-	Title          string         `json:"title"`
-	PermissionMode PermissionMode `json:"permissionMode"`
-	CreatedAt      time.Time      `json:"createdAt"`
-	UpdatedAt      time.Time      `json:"updatedAt"`
+	ID             string                  `json:"id"`
+	ProjectID      string                  `json:"projectId"`
+	Title          string                  `json:"title"`
+	PermissionMode PermissionMode          `json:"permissionMode"`
+	ReasoningLevel modelcap.ReasoningLevel `json:"reasoningLevel"`
+	CreatedAt      time.Time               `json:"createdAt"`
+	UpdatedAt      time.Time               `json:"updatedAt"`
 }
 
 // PermissionMode is a conversation-level user choice. Plan permits only
@@ -82,6 +84,7 @@ type Repository interface {
 	UpdateMessageText(ctx context.Context, messageID string, status MessageStatus, text string, updatedAt time.Time) error
 	ListMessages(ctx context.Context, conversationID string, limit int) ([]Message, error)
 	UpdatePermissionMode(ctx context.Context, conversationID string, mode PermissionMode, updatedAt time.Time) error
+	UpdateReasoningLevel(ctx context.Context, conversationID string, level modelcap.ReasoningLevel, updatedAt time.Time) error
 	DeleteConversation(ctx context.Context, id string) error
 }
 
@@ -116,11 +119,23 @@ func (s *Service) Create(ctx context.Context, projectID, title string) (Conversa
 		return Conversation{}, err
 	}
 	now := s.now()
-	value := Conversation{ID: conversationID, ProjectID: projectID, Title: title, PermissionMode: PermissionPlan, CreatedAt: now, UpdatedAt: now}
+	value := Conversation{ID: conversationID, ProjectID: projectID, Title: title, PermissionMode: PermissionPlan, ReasoningLevel: modelcap.ReasoningMedium, CreatedAt: now, UpdatedAt: now}
 	if err := s.repository.CreateConversation(ctx, value); err != nil {
 		return Conversation{}, fmt.Errorf("create conversation: %w", err)
 	}
 	return value, nil
+}
+
+func (s *Service) SetReasoningLevel(ctx context.Context, conversationID string, level modelcap.ReasoningLevel) (Conversation, error) {
+	conversationID = strings.TrimSpace(conversationID)
+	if conversationID == "" || !level.Valid() {
+		return Conversation{}, fmt.Errorf("conversation id and valid reasoning level are required")
+	}
+	now := s.now()
+	if err := s.repository.UpdateReasoningLevel(ctx, conversationID, level, now); err != nil {
+		return Conversation{}, fmt.Errorf("update conversation reasoning level: %w", err)
+	}
+	return s.repository.GetConversation(ctx, conversationID)
 }
 
 func (s *Service) List(ctx context.Context, projectID string) ([]Conversation, error) {
@@ -129,6 +144,14 @@ func (s *Service) List(ctx context.Context, projectID string) ([]Conversation, e
 
 func (s *Service) Messages(ctx context.Context, conversationID string) ([]Message, error) {
 	return s.repository.ListMessages(ctx, conversationID, 200)
+}
+
+func (s *Service) Get(ctx context.Context, conversationID string) (Conversation, error) {
+	conversationID = strings.TrimSpace(conversationID)
+	if conversationID == "" {
+		return Conversation{}, fmt.Errorf("conversation id is required")
+	}
+	return s.repository.GetConversation(ctx, conversationID)
 }
 
 func (s *Service) SetPermissionMode(ctx context.Context, conversationID string, mode PermissionMode) (Conversation, error) {

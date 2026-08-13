@@ -13,6 +13,7 @@ import (
 	"github.com/wangh00/SciAide/internal/events"
 	"github.com/wangh00/SciAide/internal/id"
 	"github.com/wangh00/SciAide/internal/model"
+	"github.com/wangh00/SciAide/internal/modelcap"
 )
 
 type RunExecutor interface {
@@ -21,13 +22,15 @@ type RunExecutor interface {
 }
 
 type StartCommand struct {
-	ConversationID string `json:"conversationId"`
-	ModelProfileID string `json:"modelProfileId"`
-	ModelID        string `json:"modelId"`
-	Text           string `json:"text"`
+	ConversationID string                  `json:"conversationId"`
+	ModelProfileID string                  `json:"modelProfileId"`
+	ModelID        string                  `json:"modelId"`
+	ReasoningLevel modelcap.ReasoningLevel `json:"reasoningLevel"`
+	Text           string                  `json:"text"`
 }
 
 const maxUserMessageChars = 100_000
+const defaultContextWindowTokens = 200_000
 
 // Snapshot is the durable UI recovery view. Events improve latency, but this
 // snapshot remains the source of truth after lost or out-of-order UI events.
@@ -134,6 +137,18 @@ func (s *Service) start(ctx context.Context, cmd StartCommand, replacedRunID str
 	if !selectedConversation.PermissionMode.Valid() {
 		return Run{}, fmt.Errorf("conversation has an invalid permission mode")
 	}
+	if !cmd.ReasoningLevel.Valid() {
+		cmd.ReasoningLevel = selectedConversation.ReasoningLevel
+	}
+	if !cmd.ReasoningLevel.Valid() {
+		cmd.ReasoningLevel = modelcap.ReasoningMedium
+	}
+	if selectedConversation.ReasoningLevel != cmd.ReasoningLevel {
+		if err := s.conversations.UpdateReasoningLevel(ctx, selectedConversation.ID, cmd.ReasoningLevel, s.now()); err != nil {
+			return Run{}, fmt.Errorf("persist conversation reasoning level: %w", err)
+		}
+		selectedConversation.ReasoningLevel = cmd.ReasoningLevel
+	}
 	if previous, exists, latestErr := s.runs.LatestForConversation(ctx, cmd.ConversationID); latestErr != nil {
 		return Run{}, latestErr
 	} else if exists {
@@ -171,7 +186,7 @@ func (s *Service) start(ctx context.Context, cmd StartCommand, replacedRunID str
 		Parts: []conversation.MessagePart{{ID: userPartID, MessageID: userID, Ordinal: 0, Type: "text", Text: cmd.Text, CreatedAt: now}}}
 	assistant := conversation.Message{ID: assistantID, ConversationID: cmd.ConversationID, RunID: runID, Role: conversation.RoleAssistant, Status: conversation.MessageStreaming, CreatedAt: now.Add(time.Nanosecond), UpdatedAt: now,
 		Parts: []conversation.MessagePart{{ID: assistantPartID, MessageID: assistantID, Ordinal: 0, Type: "text", CreatedAt: now.Add(time.Nanosecond)}}}
-	run := Run{ID: runID, ConversationID: cmd.ConversationID, UserMessageID: userID, AssistantMessageID: assistantID, ModelProfileID: cmd.ModelProfileID, ModelID: cmd.ModelID, PermissionMode: selectedConversation.PermissionMode, Status: RunQueued, CreatedAt: now, UpdatedAt: now}
+	run := Run{ID: runID, ConversationID: cmd.ConversationID, UserMessageID: userID, AssistantMessageID: assistantID, ModelProfileID: cmd.ModelProfileID, ModelID: cmd.ModelID, RequestedReasoningLevel: cmd.ReasoningLevel, ContextWindowTokens: defaultContextWindowTokens, PermissionMode: selectedConversation.PermissionMode, Status: RunQueued, CreatedAt: now, UpdatedAt: now}
 	if err := s.runs.CreateWithMessages(ctx, run, user, assistant); err != nil {
 		return Run{}, fmt.Errorf("create chat run: %w", err)
 	}

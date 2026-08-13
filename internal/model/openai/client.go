@@ -53,7 +53,7 @@ func NewWithHTTPClient(profile modelprofile.Profile, secret []byte, client *http
 }
 
 func (c *Client) Capabilities(context.Context) (model.Capabilities, error) {
-	return model.Capabilities{Streaming: true, ToolCalling: true}, nil
+	return model.Capabilities{Streaming: true, ToolCalling: true, Reasoning: true, MaxContextTokens: 200_000}, nil
 }
 
 func (c *Client) Stream(ctx context.Context, request model.ChatRequest) (model.Stream, error) {
@@ -135,6 +135,9 @@ func (c *Client) openWithRetry(ctx context.Context, request model.ChatRequest) (
 
 func (c *Client) open(ctx context.Context, request model.ChatRequest) (model.Stream, time.Duration, error) {
 	payload := requestPayload{Model: c.profile.ModelID, Stream: true, StreamOptions: &streamOptions{IncludeUsage: true}, Temperature: c.profile.Temperature, MaxTokens: c.profile.MaxOutputTokens}
+	if request.ResolvedReasoningLevel.Valid() {
+		payload.ReasoningEffort = string(request.ResolvedReasoningLevel)
+	}
 	providerNames := make(map[string]string, len(request.Tools))
 	qualifiedNames := make(map[string]string, len(request.Tools))
 	for _, definition := range request.Tools {
@@ -283,13 +286,14 @@ func (c *Client) applyHeaders(req *http.Request) {
 }
 
 type requestPayload struct {
-	Model         string           `json:"model"`
-	Messages      []requestMessage `json:"messages"`
-	Tools         []requestTool    `json:"tools,omitempty"`
-	Stream        bool             `json:"stream"`
-	StreamOptions *streamOptions   `json:"stream_options,omitempty"`
-	Temperature   *float64         `json:"temperature,omitempty"`
-	MaxTokens     *int             `json:"max_tokens,omitempty"`
+	Model           string           `json:"model"`
+	Messages        []requestMessage `json:"messages"`
+	Tools           []requestTool    `json:"tools,omitempty"`
+	Stream          bool             `json:"stream"`
+	StreamOptions   *streamOptions   `json:"stream_options,omitempty"`
+	Temperature     *float64         `json:"temperature,omitempty"`
+	MaxTokens       *int             `json:"max_tokens,omitempty"`
+	ReasoningEffort string           `json:"reasoning_effort,omitempty"`
 }
 
 type requestMessage struct {

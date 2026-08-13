@@ -7,6 +7,7 @@ import (
 
 	"github.com/wangh00/SciAide/internal/app/conversation"
 	"github.com/wangh00/SciAide/internal/events"
+	"github.com/wangh00/SciAide/internal/modelcap"
 )
 
 var ErrModelTurnBudgetExceeded = errors.New("model turn budget exceeded")
@@ -30,6 +31,10 @@ type Run struct {
 	AssistantMessageID            string                      `json:"assistantMessageId,omitempty"`
 	ModelProfileID                string                      `json:"modelProfileId"`
 	ModelID                       string                      `json:"modelId"`
+	RequestedReasoningLevel       modelcap.ReasoningLevel     `json:"requestedReasoningLevel"`
+	ResolvedReasoningLevel        modelcap.ReasoningLevel     `json:"resolvedReasoningLevel,omitempty"`
+	ContextWindowTokens           int                         `json:"contextWindowTokens"`
+	ContextCompacted              bool                        `json:"contextCompacted"`
 	PermissionMode                conversation.PermissionMode `json:"permissionMode"`
 	Status                        RunStatus                   `json:"status"`
 	ErrorCode                     string                      `json:"errorCode,omitempty"`
@@ -109,6 +114,7 @@ type UsageDashboard struct {
 
 type ConversationRepository interface {
 	GetConversation(ctx context.Context, id string) (conversation.Conversation, error)
+	UpdateReasoningLevel(ctx context.Context, conversationID string, level modelcap.ReasoningLevel, updatedAt time.Time) error
 	UpdateMessageText(ctx context.Context, messageID string, status conversation.MessageStatus, text string, updatedAt time.Time) error
 	ListMessages(ctx context.Context, conversationID string, limit int) ([]conversation.Message, error)
 }

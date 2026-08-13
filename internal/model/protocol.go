@@ -3,6 +3,8 @@ package model
 import (
 	"context"
 	"encoding/json"
+
+	"github.com/wangh00/SciAide/internal/modelcap"
 )
 
 type Role string
@@ -35,8 +37,10 @@ type ToolDefinition struct {
 }
 
 type ChatRequest struct {
-	Messages []Message        `json:"messages"`
-	Tools    []ToolDefinition `json:"tools,omitempty"`
+	Messages                []Message               `json:"messages"`
+	Tools                   []ToolDefinition        `json:"tools,omitempty"`
+	RequestedReasoningLevel modelcap.ReasoningLevel `json:"requestedReasoningLevel,omitempty"`
+	ResolvedReasoningLevel  modelcap.ReasoningLevel `json:"resolvedReasoningLevel,omitempty"`
 }
 
 type Capabilities struct {
@@ -89,4 +93,11 @@ type Stream interface {
 type ChatModel interface {
 	Capabilities(ctx context.Context) (Capabilities, error)
 	Stream(ctx context.Context, request ChatRequest) (Stream, error)
+}
+
+// ResolvedChatModel carries model-level capabilities without making the agent
+// layer depend on a concrete gateway or provider adapter.
+type ResolvedChatModel struct {
+	Model                    ChatModel
+	SupportedReasoningLevels []modelcap.ReasoningLevel
 }

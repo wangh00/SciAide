@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/wangh00/SciAide/internal/id"
+	"github.com/wangh00/SciAide/internal/modelcap"
 )
 
 const ProviderOpenAICompatible = "openai_compatible"
@@ -38,10 +39,12 @@ type Profile struct {
 }
 
 type ProfileModel struct {
-	ID        string `json:"id"`
-	OwnedBy   string `json:"ownedBy,omitempty"`
-	Enabled   bool   `json:"enabled"`
-	IsDefault bool   `json:"isDefault"`
+	ID                        string                    `json:"id"`
+	OwnedBy                   string                    `json:"ownedBy,omitempty"`
+	Enabled                   bool                      `json:"enabled"`
+	IsDefault                 bool                      `json:"isDefault"`
+	ReasoningLevels           []modelcap.ReasoningLevel `json:"reasoningLevels"`
+	ReasoningCapabilitySource string                    `json:"reasoningCapabilitySource"`
 }
 
 type SaveCommand struct {
@@ -296,6 +299,19 @@ func normalizeModels(input []ProfileModel, legacyDefault string) ([]ProfileModel
 	for _, item := range input {
 		item.ID = strings.TrimSpace(item.ID)
 		item.OwnedBy = strings.TrimSpace(item.OwnedBy)
+		item.ReasoningLevels = modelcap.NormalizeReasoningLevels(item.ReasoningLevels)
+		item.ReasoningCapabilitySource = strings.TrimSpace(item.ReasoningCapabilitySource)
+		if len(item.ReasoningLevels) == 0 && item.ReasoningCapabilitySource == "" {
+			item.ReasoningLevels = modelcap.InferredReasoningLevels(item.ID)
+			if len(item.ReasoningLevels) > 0 {
+				item.ReasoningCapabilitySource = "inferred"
+			}
+		}
+		if len(item.ReasoningLevels) == 0 {
+			item.ReasoningCapabilitySource = "unsupported"
+		} else if item.ReasoningCapabilitySource == "" {
+			item.ReasoningCapabilitySource = "manual"
+		}
 		if item.ID == "" {
 			continue
 		}
@@ -303,6 +319,10 @@ func normalizeModels(input []ProfileModel, legacyDefault string) ([]ProfileModel
 			models[index].OwnedBy = item.OwnedBy
 			models[index].Enabled = models[index].Enabled || item.Enabled
 			models[index].IsDefault = models[index].IsDefault || item.IsDefault
+			if len(item.ReasoningLevels) > 0 {
+				models[index].ReasoningLevels = item.ReasoningLevels
+				models[index].ReasoningCapabilitySource = item.ReasoningCapabilitySource
+			}
 			continue
 		}
 		indexes[item.ID] = len(models)

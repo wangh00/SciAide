@@ -15,10 +15,11 @@ import (
 	"github.com/wangh00/SciAide/internal/app/tool"
 	"github.com/wangh00/SciAide/internal/apperr"
 	"github.com/wangh00/SciAide/internal/model"
+	"github.com/wangh00/SciAide/internal/modelcap"
 )
 
 type ModelResolver interface {
-	Resolve(ctx context.Context, profileID, modelID string) (model.ChatModel, error)
+	Resolve(ctx context.Context, profileID, modelID string) (model.ResolvedChatModel, error)
 }
 
 type Runs interface {
@@ -198,8 +199,13 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 	if blocked := firstUnresolvedToolCall(calls); blocked != nil {
 		return OutcomeFailed, &apperr.Error{Code: "TOOL_STATE_INVALID", UserMessage: "仍有未完成的工具调用，无法继续请求模型。"}
 	}
-	chatModel, err := l.models.Resolve(ctx, run.ModelProfileID, run.ModelID)
+	resolvedModel, err := l.models.Resolve(ctx, run.ModelProfileID, run.ModelID)
 	if err != nil {
+		return OutcomeFailed, err
+	}
+	chatModel := resolvedModel.Model
+	run.ResolvedReasoningLevel = modelcap.ResolveReasoningLevel(run.RequestedReasoningLevel, resolvedModel.SupportedReasoningLevels)
+	if err := l.runs.Update(context.Background(), *run); err != nil {
 		return OutcomeFailed, err
 	}
 
@@ -215,10 +221,18 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 			return OutcomeFailed, err
 		}
 		run.ModelTurns, run.UpdatedAt = checkpoint.ModelTurns, checkpoint.UpdatedAt
-		request, err := l.builder.Build(ctx, messages, run.AssistantMessageID, definitions, calls)
+		request, contextInfo, err := l.builder.BuildWithInfo(ctx, messages, run.AssistantMessageID, definitions, calls)
 		if err != nil {
 			return OutcomeFailed, err
 		}
+		if contextInfo.Compacted && !run.ContextCompacted {
+			run.ContextCompacted = true
+			if err := l.runs.Update(context.Background(), *run); err != nil {
+				return OutcomeFailed, err
+			}
+		}
+		request.RequestedReasoningLevel = run.RequestedReasoningLevel
+		request.ResolvedReasoningLevel = run.ResolvedReasoningLevel
 		stream, err := chatModel.Stream(ctx, request)
 		if err != nil {
 			return OutcomeFailed, err
