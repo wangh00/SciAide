@@ -19,6 +19,8 @@ SciAide 需要接入本地 stdio 与远程 Streamable HTTP MCP Server，同时�
 8. initialize 成功后才将 Server 标为 ready。异常断开会卸载工具并同步 failed；显式 Disconnect 会先从 Manager 移除会话，避免监控协程把正常断开误报为失败。
 9. 应用启动时恢复陈旧的 starting/initializing/ready/degraded/stopping 状态；P3 不自动启动 Server，避免未经当前用户动作启动本地进程或建立远端连接。
 10. Windows GUI 进程启动 stdio MCP 时设置隐藏窗口与 `CREATE_NO_WINDOW`，控制台不是用户交互或生命周期入口；stdio 管道、显式断开和应用退出仍是连接管理边界。
+11. 当前“连接并启用”建立本次应用生命周期内的正式连接并注册工具，保存配置本身不启动 Server。应用正常退出时统一关闭 MCP；重新启动后保持 disconnected，不能把历史 ready 状态当作活连接。
+12. MCP Tool Schema 必须在构建模型请求前可用，因此不能等模型已经调用未知工具后才启动 Server。未来自动连接应发生在 Agent 上下文构建前，并仅面向已启用、已信任且由用户选择自动连接的 Server；不能把“保存配置”解释为允许自动执行外部命令。
 
 ## 后果
 

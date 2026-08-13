@@ -274,6 +274,7 @@ function CreateModal({ value, setValue, close, submit }: { value: Exclude<Create
 function MCPSettings({ close }: { close: () => void }) {
   const [servers, setServers] = useState<MCPServer[]>([]);
   const [id, setId] = useState("");
+  const [toast, setToast] = useState<{ id: number; text: string } | null>(null);
   const [importOpen, setImportOpen] = useState(false);
   const [importJSON, setImportJSON] = useState("");
   const [importResult, setImportResult] = useState<MCPImportResult | null>(null);
@@ -302,6 +303,12 @@ function MCPSettings({ close }: { close: () => void }) {
   useEffect(() => {
     refresh().catch((error: unknown) => setFeedback(errorText(error)));
   }, [refresh]);
+
+  useEffect(() => {
+    if (!toast) return;
+    const timer = window.setTimeout(() => setToast(null), 2600);
+    return () => window.clearTimeout(timer);
+  }, [toast]);
 
   useEffect(() => {
     setName(current?.name ?? "");
@@ -363,7 +370,7 @@ function MCPSettings({ close }: { close: () => void }) {
       setId(saved.id);
       setSecretValues("");
       setClearSecrets([]);
-      setFeedback("MCP 配置已保存。连接前会再次检查信任状态与协议能力。");
+      setToast({ id: Date.now(), text: "MCP 配置已保存" });
     } catch (error) {
       setFeedback(errorText(error));
     } finally {
@@ -439,6 +446,7 @@ function MCPSettings({ close }: { close: () => void }) {
 
   return <div className="modal-backdrop">
     <section className="model-modal mcp-modal" role="dialog" aria-modal="true">
+      {toast && <div className="mcp-toast" role="status"><span><Icon name="check" size={15}/></span><div><b>{toast.text}</b><small>配置已安全写入，连接状态不会被自动改变。</small></div></div>}
       <header>
         <div><span className="dialog-icon gradient"><Icon name="server"/></span><div><p>MODEL CONTEXT PROTOCOL</p><h2>MCP Servers</h2></div></div>
         <button className="close" onClick={close} aria-label="关闭"><Icon name="close"/></button>
@@ -493,6 +501,7 @@ function MCPSettings({ close }: { close: () => void }) {
             <div className="form-heading"><span>02</span><div><h3>信任与能力</h3><p>服务器描述、ToolResult、Resource 和 Prompt 均视为不可信数据</p></div></div>
             <label className="trust-row"><input type="checkbox" checked={trusted} onChange={(event) => setTrusted(event.target.checked)} disabled={active}/><span>我确认信任此 Server 配置及其进程/远程端点</span></label>
             <label className="trust-row"><input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} disabled={active}/><span>启用此 Server</span></label>
+            <div className={`mcp-lifecycle-note ${active ? "connected" : ""}`}><Icon name="server" size={16}/><div><b>{active ? "当前连接已启用" : "保存配置不会启动进程"}</b><span>{active ? "工具已注册给模型；断开或退出 SciAide 时会卸载工具并关闭 MCP。" : "点击“连接并启用”完成能力发现后，模型才能使用该 Server 的工具。"}</span></div></div>
             {current && <div className="mcp-status"><b className={current.status}>{current.status}</b><span>{current.toolCount} Tools · {current.resourceCount} Resources · {current.promptCount} Prompts</span>{(current.protocolVersion || current.serverVersion) && <code>MCP {current.protocolVersion || "?"} · Server {current.serverVersion || "?"}</code>}{current.lastError && <small>{current.lastError}</small>}</div>}
             {capabilities && <div className="mcp-capabilities"><b>已注册工具</b>{capabilities.tools.map((item) => <span key={item.qualifiedName}><code>{item.qualifiedName}</code><small>{item.originalName}</small></span>)}{!capabilities.tools.length && <p>该 Server 未提供工具。</p>}<p>Resources / Prompts 仅发现与展示，不会自动注入对话上下文。</p></div>}
           </section>
@@ -500,7 +509,7 @@ function MCPSettings({ close }: { close: () => void }) {
           <footer className="modal-actions">
             {id && <button type="button" className="danger" onClick={() => void remove()} disabled={busy || active}>删除</button>}
             <span/>
-            {id && active ? <button type="button" onClick={() => void disconnect()} disabled={busy}>断开</button> : id && <button type="button" onClick={() => void connect()} disabled={busy || !trusted || !enabled}>连接测试</button>}
+            {id && active ? <button type="button" onClick={() => void disconnect()} disabled={busy}>断开</button> : id && <button type="button" onClick={() => void connect()} disabled={busy || !trusted || !enabled}>连接并启用</button>}
             <button className="primary" disabled={busy || active}>{busy ? "处理中…" : "保存配置"}</button>
           </footer>
           </>}

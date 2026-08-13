@@ -7,6 +7,7 @@
 - 增加 MCP Server 配置与状态 UI，支持 stdio 和 Streamable HTTP。
 - 增加兼容 `mcpServers` 结构的 JSON 批量导入；导入项默认不受信任且不自动连接，敏感 `env` 自动进入系统凭据库。
 - Windows 桌面版以隐藏控制台方式运行 stdio MCP 子进程，避免 `npx.cmd` 等命令弹出可关闭的 CMD 宿主窗口。
+- MCP 配置保存成功后显示自动消失的顶部 Toast，并将长连接操作明确命名为“连接并启用”。
 - 使用官方 Go MCP SDK 完成 initialize、协议/版本协商及 Tools、Resources、Prompts 分页发现。
 - MCP Tool 以稳定命名空间动态注册到统一 ToolRegistry，并复用现有 Schema、Plan/Full Access、ToolExecutor 和审计链路。
 - 支持 MCP SecretEnv 设置/清除，明文仅存 Windows Credential Manager，SQLite 只保存引用。
