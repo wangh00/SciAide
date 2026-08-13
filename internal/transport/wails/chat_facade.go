@@ -22,6 +22,9 @@ func NewChatFacade(lifecycle *LifecycleContext, service *chat.Service, approvals
 func (f *ChatFacade) StartChat(request chat.StartCommand) (chat.Run, error) {
 	return f.service.Start(f.lifecycle.Context(), request)
 }
+func (f *ChatFacade) SteerChat(activeRunID string, request chat.StartCommand) (chat.Run, error) {
+	return f.service.Steer(f.lifecycle.Context(), activeRunID, request)
+}
 func (f *ChatFacade) CancelRun(runID string) error {
 	return f.service.Cancel(f.lifecycle.Context(), runID)
 }
@@ -33,6 +36,18 @@ func (f *ChatFacade) GetRunSnapshot(runID string) (RunSnapshot, error) {
 	result := RunSnapshot{Snapshot: base, PendingApprovals: []permission.Approval{}}
 	if f.approvals != nil {
 		result.PendingApprovals, err = f.approvals.ListPending(f.lifecycle.Context(), runID)
+	}
+	return result, err
+}
+
+func (f *ChatFacade) GetLatestRunSnapshot(conversationID string) (*RunSnapshot, error) {
+	base, err := f.service.LatestSnapshot(f.lifecycle.Context(), conversationID)
+	if err != nil || base == nil {
+		return nil, err
+	}
+	result := &RunSnapshot{Snapshot: *base, PendingApprovals: []permission.Approval{}}
+	if f.approvals != nil {
+		result.PendingApprovals, err = f.approvals.ListPending(f.lifecycle.Context(), base.Run.ID)
 	}
 	return result, err
 }

@@ -14,10 +14,11 @@ import (
 )
 
 type memoryRepo struct {
-	mu        sync.Mutex
-	run       Run
-	messages  []conversation.Message
-	envelopes []events.Envelope
+	mu               sync.Mutex
+	run              Run
+	messages         []conversation.Message
+	envelopes        []events.Envelope
+	conversationMode conversation.PermissionMode
 }
 
 func (m *memoryRepo) CreateWithMessages(_ context.Context, run Run, user, assistant conversation.Message) error {
@@ -31,6 +32,11 @@ func (m *memoryRepo) Get(context.Context, string) (Run, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.run, nil
+}
+func (m *memoryRepo) LatestForConversation(context.Context, string) (Run, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.run, m.run.ID != "", nil
 }
 func (m *memoryRepo) Update(_ context.Context, run Run) error {
 	m.mu.Lock()
@@ -102,6 +108,13 @@ func (m *memoryRepo) ListMessages(context.Context, string, int) ([]conversation.
 	result := make([]conversation.Message, len(m.messages))
 	copy(result, m.messages)
 	return result, nil
+}
+func (m *memoryRepo) GetConversation(context.Context, string) (conversation.Conversation, error) {
+	mode := m.conversationMode
+	if !mode.Valid() {
+		mode = conversation.PermissionPlan
+	}
+	return conversation.Conversation{ID: "conversation", PermissionMode: mode}, nil
 }
 func (m *memoryRepo) AppendNext(_ context.Context, event events.Envelope) (events.Envelope, error) {
 	m.mu.Lock()
@@ -321,3 +334,66 @@ func TestCancelWaitingApprovalUsesDurableTerminator(t *testing.T) {
 		t.Fatalf("cancelled state = %#v, %#v, %#v", repo.run, repo.messages, repo.envelopes)
 	}
 }
+
+func TestStartCapturesConversationPermissionMode(t *testing.T) {
+	repo := &memoryRepo{conversationMode: conversation.PermissionFullAccess}
+	service := NewService(repo, repo, repo, nil)
+	if err := service.SetRunner(&blockingStartRunner{started: make(chan struct{})}); err != nil {
+		t.Fatal(err)
+	}
+	run, err := service.Start(context.Background(), StartCommand{ConversationID: "conversation", ModelProfileID: "profile", ModelID: "model", Text: "question"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.PermissionMode != conversation.PermissionFullAccess || repo.run.PermissionMode != conversation.PermissionFullAccess {
+		t.Fatalf("permission mode was not captured: %#v", run)
+	}
+	service.Close()
+}
+
+func TestSteerCancelsActiveRunBeforeStartingReplacement(t *testing.T) {
+	repo := &memoryRepo{run: Run{ID: "old", ConversationID: "conversation", Status: RunWaitingApproval}, conversationMode: conversation.PermissionPlan}
+	service := NewService(repo, repo, repo, nil)
+	if err := service.SetRunner(&blockingStartRunner{started: make(chan struct{})}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.SetTerminator(NewTerminator(repo, nil)); err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := service.Steer(context.Background(), "old", StartCommand{ConversationID: "conversation", ModelProfileID: "profile", ModelID: "model", Text: "new direction"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replacement.ID == "old" || replacement.Status != RunQueued {
+		t.Fatalf("replacement = %#v", replacement)
+	}
+	if len(repo.envelopes) != 1 || repo.envelopes[0].Type != "run.cancelled" {
+		t.Fatalf("old run was not durably cancelled: %#v", repo.envelopes)
+	}
+	service.Close()
+}
+
+func TestSteerRejectsStaleTerminalRunID(t *testing.T) {
+	repo := &memoryRepo{run: Run{ID: "old", ConversationID: "conversation", Status: RunCompleted}, conversationMode: conversation.PermissionPlan}
+	service := NewService(repo, repo, repo, nil)
+	if err := service.SetRunner(&blockingStartRunner{started: make(chan struct{})}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.SetTerminator(NewTerminator(repo, nil)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Steer(context.Background(), "old", StartCommand{ConversationID: "conversation", ModelProfileID: "profile", ModelID: "model", Text: "new direction"}); err == nil {
+		t.Fatal("stale terminal run was accepted as an active steer target")
+	}
+	if len(repo.envelopes) != 0 {
+		t.Fatalf("terminal run produced cancellation events: %#v", repo.envelopes)
+	}
+}
+
+type blockingStartRunner struct{ started chan struct{} }
+
+func (r *blockingStartRunner) Execute(ctx context.Context, _ string) {
+	close(r.started)
+	<-ctx.Done()
+}
+func (*blockingStartRunner) ResumeExecute(context.Context, string) {}

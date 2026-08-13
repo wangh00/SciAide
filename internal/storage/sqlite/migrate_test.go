@@ -76,6 +76,13 @@ func TestP2MigrationPreservesExistingRuns(t *testing.T) {
 	if err := db.QueryRowContext(ctx, `SELECT model_turns FROM runs WHERE id='run'`).Scan(&modelTurns); err != nil || modelTurns != 0 {
 		t.Fatalf("model turn checkpoint = %d, %v", modelTurns, err)
 	}
+	var permissionMode string
+	if err := db.QueryRowContext(ctx, `SELECT permission_mode FROM runs WHERE id='run'`).Scan(&permissionMode); err != nil || permissionMode != "plan" {
+		t.Fatalf("run permission mode = %q, %v", permissionMode, err)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT permission_mode FROM conversations WHERE id='conversation'`).Scan(&permissionMode); err != nil || permissionMode != "plan" {
+		t.Fatalf("conversation permission mode = %q, %v", permissionMode, err)
+	}
 	if _, err := db.ExecContext(ctx, `UPDATE runs SET status='waiting_approval' WHERE id='run'`); err != nil {
 		t.Fatalf("waiting_approval rejected after migration: %v", err)
 	}

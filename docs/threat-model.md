@@ -69,9 +69,9 @@ React WebView
 
 - ToolRegistry 注册时验证并深拷贝受信任定义，重名失败；模型、MCP 描述和 Skill 内容不能覆盖安全定义。
 - PolicyEngine 只读取 ToolCall 中的受信任权限快照，中风险及以上工具增加 `tool.invoke` 确认，不能由模型自行降级风险。
-- 长期 Grant 精确绑定 Project、Tool、PermissionKind 和 Resource；Run Grant 不跨 Run，不进行目录前缀或域名模糊匹配。
-- `filesystem.external`、`process.execute`、`destructive`、`secret.use` 以及 high/destructive 风险只允许本次调用，应用层与 SQLite 双重阻止长期授权。
-- Approval、Grant 与审计事件同事务持久化；同一 ToolCall 只存在一个 pending Approval，处理过的审批不能重复解析。
+- P2.5 权限入口只有会话级 `Plan` 与 `Full Access`。`Plan` 每个 ToolCall 都请求一次确认；`Full Access` 自动授权已注册并通过参数校验的工具。
+- 风险级别只向用户展示，不替用户限制授权；两种模式都不能绕过 Workspace 边界、Schema、超时、取消和结果大小限制。
+- Approval 与审计事件同事务持久化；同一 ToolCall 只存在一个 pending Approval，处理过的审批不能重复解析。历史 Grant 数据不再参与决策。
 - 启动时 pending Approval 先过期并审计，再中断 ToolCall 和 Run，不自动重放工具。
 
 ## P2 ToolExecutor 与 Workspace 只读工具已落实的控制

@@ -41,11 +41,3 @@ func (f *PermissionFacade) ListApprovals(runID string) ([]permission.Approval, e
 func (f *PermissionFacade) ListPendingApprovals(runID string) ([]permission.Approval, error) {
 	return f.engine.ListPending(f.lifecycle.Context(), runID)
 }
-
-func (f *PermissionFacade) ListPermissionGrants(projectID string) ([]permission.Grant, error) {
-	return f.engine.ListGrants(f.lifecycle.Context(), projectID)
-}
-
-func (f *PermissionFacade) RevokePermissionGrant(grantID string) error {
-	return f.engine.Revoke(f.lifecycle.Context(), grantID)
-}

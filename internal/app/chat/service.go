@@ -110,6 +110,10 @@ func (s *Service) Recover(ctx context.Context) (int64, error) {
 }
 
 func (s *Service) Start(ctx context.Context, cmd StartCommand) (Run, error) {
+	return s.start(ctx, cmd, "")
+}
+
+func (s *Service) start(ctx context.Context, cmd StartCommand, replacedRunID string) (Run, error) {
 	cmd.ConversationID = strings.TrimSpace(cmd.ConversationID)
 	cmd.ModelProfileID = strings.TrimSpace(cmd.ModelProfileID)
 	cmd.ModelID = strings.TrimSpace(cmd.ModelID)
@@ -122,6 +126,25 @@ func (s *Service) Start(ctx context.Context, cmd StartCommand) (Run, error) {
 	}
 	if s.currentRunner() == nil {
 		return Run{}, fmt.Errorf("chat run executor is not configured")
+	}
+	selectedConversation, err := s.conversations.GetConversation(ctx, cmd.ConversationID)
+	if err != nil {
+		return Run{}, fmt.Errorf("load conversation: %w", err)
+	}
+	if !selectedConversation.PermissionMode.Valid() {
+		return Run{}, fmt.Errorf("conversation has an invalid permission mode")
+	}
+	if previous, exists, latestErr := s.runs.LatestForConversation(ctx, cmd.ConversationID); latestErr != nil {
+		return Run{}, latestErr
+	} else if exists {
+		if !isTerminal(previous.Status) {
+			return Run{}, fmt.Errorf("conversation already has an active run")
+		}
+		if replacedRunID != "" && previous.ID != replacedRunID {
+			return Run{}, fmt.Errorf("conversation changed before the replacement run could start")
+		}
+	} else if replacedRunID != "" {
+		return Run{}, fmt.Errorf("cancelled run is no longer the latest conversation run")
 	}
 	runID, err := id.New()
 	if err != nil {
@@ -148,7 +171,7 @@ func (s *Service) Start(ctx context.Context, cmd StartCommand) (Run, error) {
 		Parts: []conversation.MessagePart{{ID: userPartID, MessageID: userID, Ordinal: 0, Type: "text", Text: cmd.Text, CreatedAt: now}}}
 	assistant := conversation.Message{ID: assistantID, ConversationID: cmd.ConversationID, RunID: runID, Role: conversation.RoleAssistant, Status: conversation.MessageStreaming, CreatedAt: now.Add(time.Nanosecond), UpdatedAt: now,
 		Parts: []conversation.MessagePart{{ID: assistantPartID, MessageID: assistantID, Ordinal: 0, Type: "text", CreatedAt: now.Add(time.Nanosecond)}}}
-	run := Run{ID: runID, ConversationID: cmd.ConversationID, UserMessageID: userID, AssistantMessageID: assistantID, ModelProfileID: cmd.ModelProfileID, ModelID: cmd.ModelID, Status: RunQueued, CreatedAt: now, UpdatedAt: now}
+	run := Run{ID: runID, ConversationID: cmd.ConversationID, UserMessageID: userID, AssistantMessageID: assistantID, ModelProfileID: cmd.ModelProfileID, ModelID: cmd.ModelID, PermissionMode: selectedConversation.PermissionMode, Status: RunQueued, CreatedAt: now, UpdatedAt: now}
 	if err := s.runs.CreateWithMessages(ctx, run, user, assistant); err != nil {
 		return Run{}, fmt.Errorf("create chat run: %w", err)
 	}
@@ -156,6 +179,61 @@ func (s *Service) Start(ctx context.Context, cmd StartCommand) (Run, error) {
 		return Run{}, err
 	}
 	return run, nil
+}
+
+// Steer intentionally means "cancel current work, preserve its partial text,
+// then start a fresh durable Run with the new user instruction". This keeps
+// one execution owner per conversation and gives the user a predictable
+// interrupt-and-continue interaction without mutating an in-flight request.
+func (s *Service) Steer(ctx context.Context, activeRunID string, cmd StartCommand) (Run, error) {
+	activeRunID = strings.TrimSpace(activeRunID)
+	if activeRunID == "" {
+		return Run{}, fmt.Errorf("active run id is required")
+	}
+	active, err := s.runs.Get(ctx, activeRunID)
+	if err != nil {
+		return Run{}, err
+	}
+	if strings.TrimSpace(cmd.ConversationID) != active.ConversationID {
+		return Run{}, fmt.Errorf("steer target does not match the active conversation")
+	}
+	if isTerminal(active.Status) {
+		return Run{}, fmt.Errorf("run is no longer active")
+	}
+	if latest, exists, latestErr := s.runs.LatestForConversation(ctx, active.ConversationID); latestErr != nil {
+		return Run{}, latestErr
+	} else if !exists || latest.ID != active.ID || isTerminal(latest.Status) {
+		return Run{}, fmt.Errorf("run is no longer the active conversation run")
+	}
+	if err := s.Cancel(ctx, active.ID); err != nil {
+		return Run{}, err
+	}
+	if err := s.waitInactive(ctx, active.ID, 5*time.Second); err != nil {
+		return Run{}, err
+	}
+	return s.start(ctx, cmd, active.ID)
+}
+
+func (s *Service) waitInactive(ctx context.Context, runID string, maximum time.Duration) error {
+	timer := time.NewTimer(maximum)
+	defer timer.Stop()
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		s.mu.Lock()
+		active := s.active[runID] != nil
+		s.mu.Unlock()
+		if !active {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+			return fmt.Errorf("current run did not stop in time; please retry")
+		case <-ticker.C:
+		}
+	}
 }
 
 // Resume schedules a Run only after PermissionCoordinator has atomically moved
@@ -217,8 +295,10 @@ func (s *Service) Cancel(ctx context.Context, runID string) error {
 		}
 		return fmt.Errorf("run is not active")
 	}
-	_, err = terminator.Cancel(ctx, run.ID)
-	return err
+	if _, err = terminator.Cancel(ctx, run.ID); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (s *Service) Snapshot(ctx context.Context, runID string) (Snapshot, error) {
@@ -241,6 +321,22 @@ func (s *Service) Snapshot(ctx context.Context, runID string) (Snapshot, error) 
 		}
 	}
 	return snapshot, nil
+}
+
+func (s *Service) LatestSnapshot(ctx context.Context, conversationID string) (*Snapshot, error) {
+	conversationID = strings.TrimSpace(conversationID)
+	if conversationID == "" {
+		return nil, fmt.Errorf("conversation id is required")
+	}
+	run, exists, err := s.runs.LatestForConversation(ctx, conversationID)
+	if err != nil || !exists {
+		return nil, err
+	}
+	snapshot, err := s.Snapshot(ctx, run.ID)
+	if err != nil {
+		return nil, err
+	}
+	return &snapshot, nil
 }
 
 func (s *Service) Close() {

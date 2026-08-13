@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wangh00/SciAide/internal/app/conversation"
 	"github.com/wangh00/SciAide/internal/app/tool"
 	"github.com/wangh00/SciAide/internal/events"
 )
@@ -163,7 +164,7 @@ func TestEngineAddsSyntheticInvokePermission(t *testing.T) {
 	}
 }
 
-func TestEngineGrantMatchingIsExactAndScoped(t *testing.T) {
+func TestLegacyGrantsNoLongerBypassCurrentPermissionDecision(t *testing.T) {
 	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
 	requirement := tool.PermissionRequirement{Kind: tool.PermissionWorkspaceRead, Resource: "papers/current"}
 	call := testCall(tool.RiskLow, requirement)
@@ -173,12 +174,12 @@ func TestEngineGrantMatchingIsExactAndScoped(t *testing.T) {
 		grant Grant
 		allow bool
 	}{
-		{"exact project grant", Grant{ID: "exact", ProjectID: "project-1", ToolName: call.ToolName, PermissionKind: requirement.Kind, Resource: requirement.Resource, Scope: ScopeProject}, true},
+		{"exact project grant", Grant{ID: "exact", ProjectID: "project-1", ToolName: call.ToolName, PermissionKind: requirement.Kind, Resource: requirement.Resource, Scope: ScopeProject}, false},
 		{"different tool", Grant{ID: "other-tool", ProjectID: "project-1", ToolName: "builtin.workspace.other", PermissionKind: requirement.Kind, Resource: requirement.Resource, Scope: ScopeProject}, false},
 		{"parent resource", Grant{ID: "parent", ProjectID: "project-1", ToolName: call.ToolName, PermissionKind: requirement.Kind, Resource: "papers", Scope: ScopeProject}, false},
 		{"different project", Grant{ID: "other-project", ProjectID: "project-2", ToolName: call.ToolName, PermissionKind: requirement.Kind, Resource: requirement.Resource, Scope: ScopeProject}, false},
 		{"different run", Grant{ID: "other-run", ProjectID: "project-1", RunID: "run-2", ToolName: call.ToolName, PermissionKind: requirement.Kind, Resource: requirement.Resource, Scope: ScopeRun}, false},
-		{"same run", Grant{ID: "same-run", ProjectID: "project-1", RunID: "run-1", ToolName: call.ToolName, PermissionKind: requirement.Kind, Resource: requirement.Resource, Scope: ScopeRun}, true},
+		{"same run", Grant{ID: "same-run", ProjectID: "project-1", RunID: "run-1", ToolName: call.ToolName, PermissionKind: requirement.Kind, Resource: requirement.Resource, Scope: ScopeRun}, false},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -197,25 +198,21 @@ func TestEngineGrantMatchingIsExactAndScoped(t *testing.T) {
 	}
 }
 
-func TestDangerousPermissionsAreCallScopedAndRequireEachCall(t *testing.T) {
+func TestPermissionScopeIsNotRestrictedByRisk(t *testing.T) {
 	for _, test := range []struct {
-		name         string
-		risk         tool.RiskLevel
-		permission   tool.PermissionKind
-		withOldGrant bool
+		name       string
+		risk       tool.RiskLevel
+		permission tool.PermissionKind
 	}{
-		{"external", tool.RiskLow, tool.PermissionFilesystemExternal, true},
-		{"destructive", tool.RiskDestructive, tool.PermissionDestructive, true},
-		{"process", tool.RiskLow, tool.PermissionProcessExecute, false},
-		{"secret", tool.RiskLow, tool.PermissionSecretUse, false},
-		{"high risk", tool.RiskHigh, tool.PermissionWorkspaceRead, true},
+		{"external", tool.RiskLow, tool.PermissionFilesystemExternal},
+		{"destructive", tool.RiskDestructive, tool.PermissionDestructive},
+		{"process", tool.RiskLow, tool.PermissionProcessExecute},
+		{"secret", tool.RiskLow, tool.PermissionSecretUse},
+		{"high risk", tool.RiskHigh, tool.PermissionWorkspaceRead},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			repository := newMemoryRepository()
 			call := testCall(test.risk, tool.PermissionRequirement{Kind: test.permission, Resource: "exact"})
-			if test.withOldGrant {
-				repository.grants["old"] = Grant{ID: "old", ProjectID: "project-1", ToolName: call.ToolName, PermissionKind: test.permission, Resource: "exact", Scope: ScopeProject}
-			}
 			engine := NewEngine(repository)
 			request := EvaluationRequest{ProjectID: "project-1", RunID: "run-1", Call: call}
 			evaluation, err := engine.Evaluate(context.Background(), request)
@@ -226,14 +223,32 @@ func TestDangerousPermissionsAreCallScopedAndRequireEachCall(t *testing.T) {
 			if err != nil || approval.RequestedScope != ScopeCall {
 				t.Fatalf("RequestApproval() = %#v, %v", approval, err)
 			}
-			if _, _, err := engine.Resolve(context.Background(), ResolveCommand{ApprovalID: approval.ID, Allow: true, Scope: ScopeProject}); err == nil {
-				t.Fatal("dangerous approval accepted project scope")
+			if approval.RequestedScope != ScopeCall {
+				t.Fatalf("RequestedScope = %q, want call", approval.RequestedScope)
+			}
+			if resolved, grant, err := engine.Resolve(context.Background(), ResolveCommand{ApprovalID: approval.ID, Allow: true, Scope: ScopeProject}); err != nil || resolved.ResolvedScope != ScopeCall || grant != nil {
+				t.Fatalf("Plan approval must resolve one call: approval=%#v grant=%#v err=%v", resolved, grant, err)
 			}
 		})
 	}
 }
 
-func TestApprovalFlowHandlesMissingPermissionsOneAtATime(t *testing.T) {
+func TestPermissionModesApplyPerToolCall(t *testing.T) {
+	repository := newMemoryRepository()
+	engine := NewEngine(repository)
+	call := testCall(tool.RiskHigh, tool.PermissionRequirement{Kind: tool.PermissionProcessExecute, Resource: "python analysis.py"})
+	request := EvaluationRequest{ProjectID: "project-1", RunID: "run-1", Call: call}
+	plan, err := engine.EvaluateCall(context.Background(), request, conversation.PermissionPlan)
+	if err != nil || plan.Decision != DecisionAsk || len(plan.Missing) != 1 || plan.Missing[0].Kind != tool.PermissionToolInvoke {
+		t.Fatalf("plan evaluation = %#v, %v", plan, err)
+	}
+	full, err := engine.EvaluateCall(context.Background(), request, conversation.PermissionFullAccess)
+	if err != nil || full.Decision != DecisionAllow || len(full.Missing) != 0 {
+		t.Fatalf("full access evaluation = %#v, %v", full, err)
+	}
+}
+
+func TestLegacyEvaluationFlowHandlesMissingPermissionsOneAtATime(t *testing.T) {
 	repository := newMemoryRepository()
 	engine := NewEngine(repository)
 	call := testCall(tool.RiskModerate, tool.PermissionRequirement{Kind: tool.PermissionNetworkDomain, Resource: "api.example.test:443"})
@@ -259,8 +274,8 @@ func TestApprovalFlowHandlesMissingPermissionsOneAtATime(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, grant, err := engine.Resolve(context.Background(), ResolveCommand{ApprovalID: approval.ID, Allow: true, Scope: ScopeProject}); err != nil || grant == nil || grant.Resource != "api.example.test:443" {
-		t.Fatalf("Resolve(project) grant=%#v err=%v", grant, err)
+	if _, grant, err := engine.Resolve(context.Background(), ResolveCommand{ApprovalID: approval.ID, Allow: true, Scope: ScopeProject}); err != nil || grant != nil {
+		t.Fatalf("Resolve(call) grant=%#v err=%v", grant, err)
 	}
 	final, err := engine.Evaluate(context.Background(), request)
 	if err != nil || final.Decision != DecisionAllow {
@@ -287,15 +302,15 @@ func TestDenyDoesNotGrantAndResolutionCannotReplay(t *testing.T) {
 	}
 }
 
-func TestRevokeGrantWritesAuditEventAndRemovesCoverage(t *testing.T) {
+func TestLegacyGrantAPIsAreDisabled(t *testing.T) {
 	repository := newMemoryRepository()
 	repository.grants["grant-1"] = Grant{ID: "grant-1", ProjectID: "project-1", ToolName: "builtin.workspace.read", PermissionKind: tool.PermissionWorkspaceRead, Resource: "paper.md", Scope: ScopeProject, GrantedBy: SubjectUser, CreatedAt: time.Now().UTC()}
 	engine := NewEngine(repository)
-	if err := engine.Revoke(context.Background(), "grant-1"); err != nil {
-		t.Fatal(err)
+	if values, err := engine.ListGrants(context.Background(), "project-1"); err != nil || len(values) != 0 {
+		t.Fatalf("ListGrants() = %#v, %v", values, err)
 	}
-	if repository.grants["grant-1"].RevokedAt == nil || len(repository.events) != 1 || repository.events[0].Type != "permission.grant_revoked" || repository.events[0].AggregateType != "project" {
-		t.Fatalf("revoke state = %#v, events=%#v", repository.grants["grant-1"], repository.events)
+	if err := engine.Revoke(context.Background(), "grant-1"); err == nil {
+		t.Fatal("legacy grant revoke API remained active")
 	}
 }
 

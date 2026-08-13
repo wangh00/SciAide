@@ -2,13 +2,19 @@ import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState
 import { eventsOn } from "./lib/wailsRuntime";
 
 type Project = { id: string; name: string; description: string; workspacePath: string; workspaceKind: "managed" | "external" };
-type Conversation = { id: string; projectId: string; title: string };
+type PermissionMode = "plan" | "full_access";
+type Conversation = { id: string; projectId: string; title: string; permissionMode: PermissionMode };
 type MessagePart = { type: string; text?: string };
 type Message = { id: string; runId?: string; role: "user" | "assistant" | "system" | "tool"; status: string; parts: MessagePart[] };
 type ProfileModel = { id: string; ownedBy?: string; enabled: boolean; isDefault: boolean };
 type Profile = { id: string; name: string; baseUrl: string; modelId: string; models: ProfileModel[]; secretConfigured: boolean; secretMasked?: string; timeoutSeconds: number; customHeaders: Record<string, string>; enabled: boolean; isDefault: boolean };
 type AvailableModel = { id: string; ownedBy?: string };
-type Run = { id: string; status: string; errorMessage?: string; inputTokens: number; outputTokens: number };
+type Run = { id: string; conversationId: string; status: string; errorMessage?: string; inputTokens: number; outputTokens: number; permissionMode: PermissionMode };
+type PermissionRequirement = { kind: string; resource: string };
+type ToolResult = { status: string; text: string; truncated: boolean; meta: { durationMillis?: number; originalBytes?: number } };
+type ToolCall = { id: string; runId: string; toolName: string; toolVersion: string; arguments: unknown; status: string; risk: string; permissions: PermissionRequirement[]; errorMessage?: string; result?: ToolResult; createdAt: string; startedAt?: string; completedAt?: string };
+type Approval = { id: string; runId: string; toolCallId: string; toolName: string; toolVersion: string; permissionKind: string; resource: string; risk: string; status: string; reason: string };
+type RunSnapshot = { run: Run; messages: Message[]; toolCalls: ToolCall[]; pendingApprovals: Approval[] };
 type Envelope = { aggregateId: string; type: string; payload: Record<string, unknown> };
 type CreateDialog = { kind: "project" | "conversation"; title: string; description: string; workspacePath: string } | null;
 
@@ -33,7 +39,7 @@ const first = <T,>(items: T[]) => items[0];
 const modelKey = (profileId: string, modelId: string) => `${profileId}\t${modelId}`;
 const splitModelKey = (value: string): [string, string] => { const index = value.indexOf("\t"); return index < 0 ? ["", ""] : [value.slice(0, index), value.slice(index + 1)]; };
 
-function Icon({ name, size = 18 }: { name: "spark" | "plus" | "chat" | "settings" | "shield" | "model" | "send" | "stop" | "search" | "refresh" | "folder" | "check" | "close" | "trash"; size?: number }) {
+function Icon({ name, size = 18 }: { name: "spark" | "plus" | "chat" | "settings" | "shield" | "model" | "send" | "stop" | "search" | "refresh" | "folder" | "check" | "close" | "trash" | "tool"; size?: number }) {
   const paths: Record<typeof name, ReactNode> = {
     spark: <><path d="m12 2 1.35 4.15L17.5 7.5l-4.15 1.35L12 13l-1.35-4.15L6.5 7.5l4.15-1.35L12 2Z"/><path d="m5 14 .8 2.2L8 17l-2.2.8L5 20l-.8-2.2L2 17l2.2-.8L5 14Z"/></>,
     plus: <><path d="M12 5v14M5 12h14"/></>, chat: <path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4v8Z"/>,
@@ -41,7 +47,7 @@ function Icon({ name, size = 18 }: { name: "spark" | "plus" | "chat" | "settings
     shield: <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/>, model: <><rect x="3" y="3" width="18" height="18" rx="5"/><path d="M8 9h8M8 12h5M8 15h7"/></>,
     send: <><path d="m22 2-7 20-4-9-9-4 20-7Z"/><path d="M22 2 11 13"/></>, stop: <rect x="6" y="6" width="12" height="12" rx="2"/>, search: <><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></>,
     refresh: <><path d="M20 11a8 8 0 1 0-2.34 5.66"/><path d="M20 4v7h-7"/></>, folder: <path d="M3 6a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6Z"/>,
-    check: <path d="m5 12 4 4L19 6"/>, close: <><path d="m6 6 12 12M18 6 6 18"/></>, trash: <><path d="M3 6h18M8 6V4h8v2M19 6l-1 15H6L5 6M10 11v5M14 11v5"/></>,
+    check: <path d="m5 12 4 4L19 6"/>, close: <><path d="m6 6 12 12M18 6 6 18"/></>, trash: <><path d="M3 6h18M8 6V4h8v2M19 6l-1 15H6L5 6M10 11v5M14 11v5"/></>, tool: <><path d="M14.7 6.3a4 4 0 0 0-5 5L3 18l3 3 6.7-6.7a4 4 0 0 0 5-5l-2.2 2.2-3-3 2.2-2.2Z"/></>,
   };
   return <svg aria-hidden="true" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">{paths[name]}</svg>;
 }
@@ -56,15 +62,20 @@ export default function App() {
   const [profileId, setProfileId] = useState("");
   const [modelId, setModelId] = useState("");
   const [activeRun, setActiveRun] = useState<Run | null>(null);
+  const [toolCalls, setToolCalls] = useState<ToolCall[]>([]);
+  const [pendingApprovals, setPendingApprovals] = useState<Approval[]>([]);
+  const [resolvingApprovalId, setResolvingApprovalId] = useState("");
   const [input, setInput] = useState("");
   const [notice, setNotice] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [createDialog, setCreateDialog] = useState<CreateDialog>(null);
   const [busy, setBusy] = useState(false);
   const activeRunRef = useRef<Run | null>(null);
+  const conversationIdRef = useRef("");
   const modelSelectionRef = useRef({ profileId: "", modelId: "" });
   const chatRef = useRef<HTMLElement | null>(null);
   activeRunRef.current = activeRun;
+  conversationIdRef.current = conversationId;
   modelSelectionRef.current = { profileId, modelId };
 
   const loadProjects = useCallback(async () => {
@@ -90,10 +101,28 @@ export default function App() {
     if (!selectedConversation) { setMessages([]); return; }
     setMessages(await backend<Message[]>("ConversationFacade", "ListMessages", selectedConversation));
   }, []);
+  const applySnapshot = useCallback((snapshot: RunSnapshot) => {
+    if (snapshot.run.conversationId !== conversationIdRef.current) return;
+    setActiveRun(snapshot.run);
+    setToolCalls(snapshot.toolCalls ?? []);
+    setPendingApprovals(snapshot.pendingApprovals ?? []);
+    setMessages((current) => snapshot.messages.map((message) => {
+      const live = current.find((item) => item.id === message.id);
+      return live && textOf(live).length > textOf(message).length ? live : message;
+    }));
+    setBusy(!["completed", "failed", "cancelled", "interrupted"].includes(snapshot.run.status));
+  }, []);
 
   useEffect(() => { Promise.all([loadProjects(), loadProfiles()]).catch((error: unknown) => setNotice(errorText(error))); }, [loadProfiles, loadProjects]);
   useEffect(() => { loadConversations(projectId).catch((error: unknown) => setNotice(errorText(error))); }, [loadConversations, projectId]);
-  useEffect(() => { loadMessages(conversationId).catch((error: unknown) => setNotice(errorText(error))); }, [conversationId, loadMessages]);
+  useEffect(() => {
+    setActiveRun(null); setToolCalls([]); setPendingApprovals([]); setBusy(false);
+    if (!conversationId) { setMessages([]); return; }
+    Promise.all([
+      loadMessages(conversationId),
+      backend<RunSnapshot | null>("ChatFacade", "GetLatestRunSnapshot", conversationId).then((snapshot) => { if (snapshot) applySnapshot(snapshot); }),
+    ]).catch((error: unknown) => setNotice(errorText(error)));
+  }, [applySnapshot, conversationId, loadMessages]);
   useEffect(() => { chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: "smooth" }); }, [messages]);
 
   useEffect(() => eventsOn<Envelope>("sciaide:run-event", (event) => {
@@ -104,20 +133,17 @@ export default function App() {
       setMessages((current) => current.map((message) => message.id === messageId ? { ...message, parts: [{ type: "text", text: textOf(message) + delta }] } : message));
     }
     if (event.type.startsWith("run.") && event.payload.run) setActiveRun(event.payload.run as Run);
+    if (event.type.startsWith("tool.") || event.type.startsWith("approval.")) {
+      backend<RunSnapshot>("ChatFacade", "GetRunSnapshot", run.id).then(applySnapshot).catch(() => undefined);
+    }
     if (["run.completed", "run.failed", "run.cancelled"].includes(event.type)) { setBusy(false); loadMessages(conversationId).catch(() => undefined); }
   }), [conversationId, loadMessages]);
 
   useEffect(() => {
     if (!activeRun || ["completed", "failed", "cancelled", "interrupted"].includes(activeRun.status)) return;
-    const timer = window.setInterval(() => backend<{ run: Run; messages: Message[] }>("ChatFacade", "GetRunSnapshot", activeRun.id).then((snapshot) => {
-      setActiveRun(snapshot.run); setMessages((current) => snapshot.messages.map((message) => {
-        const live = current.find((item) => item.id === message.id);
-        return live && textOf(live).length > textOf(message).length ? live : message;
-      }));
-      if (["completed", "failed", "cancelled", "interrupted"].includes(snapshot.run.status)) setBusy(false);
-    }).catch(() => undefined), 700);
+    const timer = window.setInterval(() => backend<RunSnapshot>("ChatFacade", "GetRunSnapshot", activeRun.id).then(applySnapshot).catch(() => undefined), 700);
     return () => window.clearInterval(timer);
-  }, [activeRun?.id, activeRun?.status]);
+  }, [activeRun?.id, activeRun?.status, applySnapshot]);
 
   async function submitCreate(event: FormEvent) {
     event.preventDefault(); if (!createDialog?.title.trim()) return;
@@ -135,12 +161,14 @@ export default function App() {
 
   async function send(event: FormEvent) {
     event.preventDefault(); const text = input.trim();
-    if (!text || !conversationId || !profileId || !modelId || busy) return;
+    if (!text || !conversationId || !profileId || !modelId) return;
+    const runToSteer = busy && activeRun?.conversationId === conversationId ? activeRun : null;
     setNotice(""); setInput(""); setBusy(true);
     try {
-      const run = await backend<Run>("ChatFacade", "StartChat", { conversationId, modelProfileId: profileId, modelId, text });
+      const command = { conversationId, modelProfileId: profileId, modelId, text };
+      const run = runToSteer ? await backend<Run>("ChatFacade", "SteerChat", runToSteer.id, command) : await backend<Run>("ChatFacade", "StartChat", command);
       setActiveRun(run); await loadMessages(conversationId);
-    } catch (error) { setBusy(false); setNotice(errorText(error)); }
+    } catch (error) { setInput((current) => current || text); setBusy(false); setNotice(errorText(error)); }
   }
 
   const selectedProject = projects.find((item) => item.id === projectId);
@@ -161,11 +189,11 @@ export default function App() {
     </aside>
 
     <main className="workspace">
-      <header className="topbar"><div className="breadcrumbs"><span>{selectedProject?.name ?? "Workspace"}</span><i>/</i><strong>{selectedConversation?.title ?? "新研究"}</strong></div><div className="top-actions"><span className="local-badge"><Icon name="shield" size={13}/> 本地记录</span><div className="model-picker"><span className={selectedProfile?.secretConfigured ? "status-dot ready" : "status-dot"}/><select aria-label="选择模型" value={selectedModelKey} onChange={(event) => { const [nextProfile, nextModel] = splitModelKey(event.target.value); setProfileId(nextProfile); setModelId(nextModel); }}><option value="">选择模型</option>{selectableModels.map(({ profile, model }) => <option key={modelKey(profile.id, model.id)} value={modelKey(profile.id, model.id)}>{profile.name} · {model.id}</option>)}</select></div></div></header>
+      <header className="topbar"><div className="breadcrumbs"><span>{selectedProject?.name ?? "Workspace"}</span><i>/</i><strong>{selectedConversation?.title ?? "新研究"}</strong></div><div className="top-actions"><div className="permission-picker" title={busy ? "运行期间不能切换权限模式" : "选择当前研究会话的工具权限模式"}><Icon name="shield" size={13}/><select aria-label="工具权限模式" value={selectedConversation?.permissionMode ?? "plan"} disabled={!selectedConversation || busy} onChange={(event) => void changePermissionMode(event.target.value as PermissionMode)}><option value="plan">Plan · 每次确认</option><option value="full_access">Full Access</option></select></div><div className="model-picker"><span className={selectedProfile?.secretConfigured ? "status-dot ready" : "status-dot"}/><select aria-label="选择模型" value={selectedModelKey} onChange={(event) => { const [nextProfile, nextModel] = splitModelKey(event.target.value); setProfileId(nextProfile); setModelId(nextModel); }}><option value="">选择模型</option>{selectableModels.map(({ profile, model }) => <option key={modelKey(profile.id, model.id)} value={modelKey(profile.id, model.id)}>{profile.name} · {model.id}</option>)}</select></div></div></header>
       <section className="chat" aria-live="polite" ref={chatRef}>
-        {messages.length === 0 ? <EmptyState hasProject={Boolean(projectId)} hasConversation={Boolean(conversationId)} hasProfile={Boolean(profileId && modelId)} openSettings={() => setSettingsOpen(true)} createConversation={() => setCreateDialog({ kind: "conversation", title: "", description: "", workspacePath: "" })} setPrompt={setInput}/> : <div className="message-stack">{messages.map((message) => <article key={message.id} className={`message ${message.role}`}><div className="avatar">{message.role === "user" ? "你" : <Icon name="spark" size={17}/>}</div><div className="message-body"><div className="message-meta"><b>{message.role === "user" ? "你" : selectedProfile?.name ?? "SciAide"}</b>{message.status === "incomplete" && <span>生成已中断</span>}</div><div className="bubble">{textOf(message) || (message.status === "streaming" ? <span className="typing"><i/><i/><i/> 正在生成回答</span> : "")}</div></div></article>)}</div>}
+        {messages.length === 0 ? <EmptyState hasProject={Boolean(projectId)} hasConversation={Boolean(conversationId)} hasProfile={Boolean(profileId && modelId)} openSettings={() => setSettingsOpen(true)} createConversation={() => setCreateDialog({ kind: "conversation", title: "", description: "", workspacePath: "" })} setPrompt={setInput}/> : <div className="message-stack">{messages.map((message) => <article key={message.id} className={`message ${message.role}`}><div className="avatar">{message.role === "user" ? "你" : <Icon name="spark" size={17}/>}</div><div className="message-body"><div className="message-meta"><b>{message.role === "user" ? "你" : selectedProfile?.name ?? "SciAide"}</b>{message.status === "incomplete" && <span>生成已中断</span>}</div><div className="bubble">{textOf(message) || (message.status === "streaming" && activeRun?.status !== "waiting_approval" ? <span className="typing"><i/><i/><i/> 正在生成回答</span> : "")}</div>{message.role === "assistant" && message.runId === activeRun?.id && <RunActivity toolCalls={toolCalls} approvals={pendingApprovals} resolvingApprovalId={resolvingApprovalId} resolveApproval={resolveApproval}/>}</div></article>)}</div>}
       </section>
-      <footer className="composer-wrap">{notice && <div className="notice"><Icon name="shield" size={15}/>{notice}<button onClick={() => setNotice("")}><Icon name="close" size={14}/></button></div>}{activeRun?.errorMessage && <div className="notice error">{activeRun.errorMessage}</div>}<form className="composer" onSubmit={(event) => void send(event)}><textarea value={input} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder={conversationId ? "向 SciAide 描述你的研究问题…" : "请先创建或选择研究会话"} disabled={!conversationId || !profileId || !modelId || busy}/><div className="composer-actions"><span>{usage || <><kbd>Enter</kbd> 发送 · <kbd>Shift Enter</kbd> 换行</>}</span>{busy ? <button type="button" className="stop" onClick={() => activeRun && void backend<void>("ChatFacade", "CancelRun", activeRun.id)}><Icon name="stop" size={15}/> 停止</button> : <button className="send" aria-label="发送" disabled={!input.trim() || !conversationId || !profileId || !modelId}><Icon name="send" size={17}/></button>}</div></form><p className="composer-hint">AI 可能会出错，重要科研结论请核验原始来源。</p></footer>
+      <footer className="composer-wrap">{notice && <div className="notice"><Icon name="shield" size={15}/>{notice}<button onClick={() => setNotice("")}><Icon name="close" size={14}/></button></div>}{activeRun?.errorMessage && <div className="notice error">{activeRun.errorMessage}</div>}<form className="composer" onSubmit={(event) => void send(event)}><textarea value={input} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder={!conversationId ? "请先创建或选择研究会话" : busy ? "输入新指令可中断当前生成并继续…" : "向 SciAide 描述你的研究问题…"} disabled={!conversationId || !profileId || !modelId}/><div className="composer-actions"><span>{busy ? "发送新消息将中断当前生成并立即继续" : usage || <><kbd>Enter</kbd> 发送 · <kbd>Shift Enter</kbd> 换行</>}</span><div className="composer-buttons">{busy && <button type="button" className="stop" onClick={() => activeRun && void backend<void>("ChatFacade", "CancelRun", activeRun.id).catch((error: unknown) => setNotice(errorText(error)))}><Icon name="stop" size={15}/> 停止</button>}<button className="send" aria-label={busy ? "中断并发送" : "发送"} disabled={!input.trim() || !conversationId || !profileId || !modelId}><Icon name="send" size={17}/></button></div></div></form><p className="composer-hint">AI 可能会出错，重要科研结论请核验原始来源。</p></footer>
     </main>
     {settingsOpen && <ModelSettings profiles={profiles} close={() => setSettingsOpen(false)} refresh={loadProfiles} select={setProfileId}/>}
     {createDialog && <CreateModal value={createDialog} setValue={setCreateDialog} close={() => setCreateDialog(null)} submit={submitCreate}/>}
@@ -177,10 +205,51 @@ export default function App() {
     try { await backend("ProjectFacade", "RemoveProject", value.id); setProjectId(""); setConversationId(""); setMessages([]); await loadProjects(); setNotice("项目已从 SciAide 移除。"); } catch (error) { setNotice(errorText(error)); }
   }
 
+  async function resolveApproval(approval: Approval, allow: boolean) {
+    if (resolvingApprovalId) return;
+    setResolvingApprovalId(approval.id);
+    try {
+      await backend("PermissionFacade", "ResolveApproval", { approvalId: approval.id, allow, scope: "call" });
+      applySnapshot(await backend<RunSnapshot>("ChatFacade", "GetRunSnapshot", approval.runId));
+    } catch (error) { setNotice(errorText(error)); }
+    finally { setResolvingApprovalId(""); }
+  }
+
+  async function changePermissionMode(mode: PermissionMode) {
+    if (!selectedConversation || busy || selectedConversation.permissionMode === mode) return;
+    try {
+      const updated = await backend<Conversation>("ConversationFacade", "SetPermissionMode", selectedConversation.id, mode);
+      setConversations((current) => current.map((item) => item.id === updated.id ? updated : item));
+      setNotice(mode === "full_access" ? "已启用 Full Access：注册工具将自动执行。" : "已切换到 Plan：每次工具调用都需要确认。");
+    } catch (error) { setNotice(errorText(error)); }
+  }
+
   async function removeConversation(value: Conversation) {
     if (!window.confirm(`移除研究会话“${value.title}”？\n\n该会话的消息和运行记录将删除，Workspace 文件不受影响。`)) return;
     try { await backend("ConversationFacade", "RemoveConversation", value.id); if (conversationId === value.id) { setConversationId(""); setMessages([]); } await loadConversations(projectId); setNotice("研究会话已移除。"); } catch (error) { setNotice(errorText(error)); }
   }
+}
+
+const toolStatusText: Record<string, string> = {
+  pending: "已请求", awaiting_approval: "等待确认", running: "执行中", completed: "已完成",
+  failed: "失败", denied: "已拒绝", cancelled: "已取消", interrupted: "已中断",
+};
+
+function RunActivity({ toolCalls, approvals, resolvingApprovalId, resolveApproval }: { toolCalls: ToolCall[]; approvals: Approval[]; resolvingApprovalId: string; resolveApproval: (approval: Approval, allow: boolean) => Promise<void> }) {
+  if (!toolCalls.length && !approvals.length) return null;
+  return <section className="run-activity" aria-label="工具调用时间线">
+    {toolCalls.map((call) => {
+      const approval = approvals.find((item) => item.toolCallId === call.id);
+      const argumentText = JSON.stringify(call.arguments ?? {}, null, 2);
+      return <article className={`tool-card ${call.status}`} key={call.id}>
+        <header><span className="tool-icon"><Icon name="tool" size={15}/></span><div><b>{call.toolName}</b><small>v{call.toolVersion} · {toolStatusText[call.status] ?? call.status}</small></div><span className={`risk ${call.risk}`}>{call.risk}</span></header>
+        <details><summary>查看参数与资源</summary><pre>{argumentText}</pre>{call.permissions.length > 0 && <div className="permission-list">{call.permissions.map((permission) => <span key={`${permission.kind}:${permission.resource}`}><b>{permission.kind}</b>{permission.resource || "全部资源"}</span>)}</div>}</details>
+        {approval && <div className="approval-panel"><div><b>需要你的确认</b><p>Plan 模式下，本次工具调用只有在接受后才会执行。风险标签仅供参考，决定权完全属于你。</p></div><div className="approval-actions"><button disabled={Boolean(resolvingApprovalId)} onClick={() => void resolveApproval(approval, false)}>拒绝</button><button className="accept" disabled={Boolean(resolvingApprovalId)} onClick={() => void resolveApproval(approval, true)}>{resolvingApprovalId === approval.id ? "处理中…" : "Accept"}</button></div></div>}
+        {call.result && <div className={`tool-result ${call.result.status}`}><span>{call.result.text || toolStatusText[call.status] || call.status}</span>{call.result.truncated && <small>结果已截断</small>}{call.result.meta?.durationMillis !== undefined && <small>{call.result.meta.durationMillis} ms</small>}</div>}
+        {!call.result && call.errorMessage && <div className="tool-result error">{call.errorMessage}</div>}
+      </article>;
+    })}
+  </section>;
 }
 
 function EmptyState({ hasProject, hasConversation, hasProfile, openSettings, createConversation, setPrompt }: { hasProject: boolean; hasConversation: boolean; hasProfile: boolean; openSettings: () => void; createConversation: () => void; setPrompt: (value: string) => void }) {

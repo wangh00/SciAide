@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/wangh00/SciAide/internal/app/chat"
+	"github.com/wangh00/SciAide/internal/app/conversation"
 	"github.com/wangh00/SciAide/internal/app/tool"
 )
 
@@ -56,11 +57,11 @@ func newCoordinatorFixture() (*Coordinator, *memoryRepository, *coordinatorTools
 	repository := newMemoryRepository()
 	engine := NewEngine(repository)
 	tools := &coordinatorTools{call: testCall(tool.RiskModerate, tool.PermissionRequirement{Kind: tool.PermissionNetworkDomain, Resource: "api.example.test:443"})}
-	runs := &coordinatorRuns{projectID: "project-1", run: chat.Run{ID: "run-1", Status: chat.RunRunning}}
+	runs := &coordinatorRuns{projectID: "project-1", run: chat.Run{ID: "run-1", PermissionMode: conversation.PermissionPlan, Status: chat.RunRunning}}
 	return NewCoordinator(engine, tools, runs), repository, tools, runs
 }
 
-func TestCoordinatorMovesThroughSequentialApprovalsToReadyTool(t *testing.T) {
+func TestCoordinatorPlanApprovesWholeCallOnce(t *testing.T) {
 	coordinator, _, tools, runs := newCoordinatorFixture()
 	ctx := context.Background()
 	result, err := coordinator.EvaluateCall(ctx, "project-1", tools.call.ID)
@@ -68,12 +69,8 @@ func TestCoordinatorMovesThroughSequentialApprovalsToReadyTool(t *testing.T) {
 		t.Fatalf("EvaluateCall() = %#v, %v; call=%s run=%s", result, err, tools.call.Status, runs.run.Status)
 	}
 	result, err = coordinator.Resolve(ctx, ResolveCommand{ApprovalID: result.Approval.ID, Allow: true, Scope: ScopeCall})
-	if err != nil || result.Approval == nil || result.Approval.PermissionKind != tool.PermissionNetworkDomain || tools.call.Status != tool.CallAwaitingApproval || runs.run.Status != chat.RunWaitingApproval {
-		t.Fatalf("Resolve(first) = %#v, %v; call=%s run=%s", result, err, tools.call.Status, runs.run.Status)
-	}
-	result, err = coordinator.Resolve(ctx, ResolveCommand{ApprovalID: result.Approval.ID, Allow: true, Scope: ScopeProject})
 	if err != nil || result.Evaluation.Decision != DecisionAllow || tools.call.Status != tool.CallRunning || runs.run.Status != chat.RunRunning {
-		t.Fatalf("Resolve(second) = %#v, %v; call=%s run=%s", result, err, tools.call.Status, runs.run.Status)
+		t.Fatalf("Resolve() = %#v, %v; call=%s run=%s", result, err, tools.call.Status, runs.run.Status)
 	}
 }
 
@@ -103,7 +100,7 @@ func TestCoordinatorRejectsProjectMismatchBeforeMutation(t *testing.T) {
 func TestCoordinatorStartsAllowedPendingCall(t *testing.T) {
 	repository := newMemoryRepository()
 	tools := &coordinatorTools{call: testCall(tool.RiskLow)}
-	runs := &coordinatorRuns{projectID: "project-1", run: chat.Run{ID: "run-1", Status: chat.RunRunning}}
+	runs := &coordinatorRuns{projectID: "project-1", run: chat.Run{ID: "run-1", PermissionMode: conversation.PermissionFullAccess, Status: chat.RunRunning}}
 	coordinator := NewCoordinator(NewEngine(repository), tools, runs)
 	result, err := coordinator.EvaluateCall(context.Background(), "project-1", tools.call.ID)
 	if err != nil || result.Evaluation.Decision != DecisionAllow || result.ToolCall.Status != tool.CallRunning || tools.call.Status != tool.CallRunning {

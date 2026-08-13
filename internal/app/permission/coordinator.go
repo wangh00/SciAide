@@ -60,7 +60,7 @@ func (c *Coordinator) EvaluateCall(ctx context.Context, projectID, callID string
 		return Coordination{}, fmt.Errorf("tool call is not pending")
 	}
 	request := EvaluationRequest{ProjectID: projectID, RunID: call.RunID, Call: call}
-	evaluation, err := c.engine.Evaluate(ctx, request)
+	evaluation, err := c.engine.EvaluateCall(ctx, request, run.PermissionMode)
 	if err != nil {
 		return Coordination{}, err
 	}
@@ -132,7 +132,7 @@ func (c *Coordinator) Resolve(ctx context.Context, command ResolveCommand) (Coor
 		result.Evaluation = Evaluation{Decision: DecisionDeny, Reason: "用户拒绝了工具调用权限。", Missing: []tool.PermissionRequirement{}}
 	} else {
 		request := EvaluationRequest{ProjectID: resolved.ProjectID, RunID: call.RunID, Call: call}
-		evaluation, err := c.engine.Evaluate(ctx, request)
+		evaluation, err := c.engine.EvaluateCall(ctx, request, run.PermissionMode)
 		if err != nil {
 			return Coordination{}, err
 		}

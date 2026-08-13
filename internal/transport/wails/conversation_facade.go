@@ -28,3 +28,7 @@ func (f *ConversationFacade) ListMessages(conversationID string) ([]conversation
 func (f *ConversationFacade) RemoveConversation(conversationID string) error {
 	return f.service.Remove(f.lifecycle.Context(), conversationID)
 }
+
+func (f *ConversationFacade) SetPermissionMode(conversationID string, mode conversation.PermissionMode) (conversation.Conversation, error) {
+	return f.service.SetPermissionMode(f.lifecycle.Context(), conversationID, mode)
+}

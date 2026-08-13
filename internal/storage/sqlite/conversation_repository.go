@@ -17,8 +17,8 @@ func NewConversationRepository(db *sql.DB) *ConversationRepository {
 }
 
 func (r *ConversationRepository) CreateConversation(ctx context.Context, value conversation.Conversation) error {
-	_, err := r.db.ExecContext(ctx, `INSERT INTO conversations(id, project_id, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`,
-		value.ID, value.ProjectID, value.Title, formatTime(value.CreatedAt), formatTime(value.UpdatedAt))
+	_, err := r.db.ExecContext(ctx, `INSERT INTO conversations(id, project_id, title, permission_mode, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		value.ID, value.ProjectID, value.Title, value.PermissionMode, formatTime(value.CreatedAt), formatTime(value.UpdatedAt))
 	if err != nil {
 		return fmt.Errorf("insert conversation: %w", err)
 	}
@@ -26,11 +26,11 @@ func (r *ConversationRepository) CreateConversation(ctx context.Context, value c
 }
 
 func (r *ConversationRepository) GetConversation(ctx context.Context, id string) (conversation.Conversation, error) {
-	return scanConversation(r.db.QueryRowContext(ctx, `SELECT id, project_id, title, created_at, updated_at FROM conversations WHERE id = ?`, id))
+	return scanConversation(r.db.QueryRowContext(ctx, `SELECT id, project_id, title, permission_mode, created_at, updated_at FROM conversations WHERE id = ?`, id))
 }
 
 func (r *ConversationRepository) ListConversations(ctx context.Context, projectID string) ([]conversation.Conversation, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT id, project_id, title, created_at, updated_at FROM conversations WHERE project_id = ? ORDER BY updated_at DESC, id`, projectID)
+	rows, err := r.db.QueryContext(ctx, `SELECT id, project_id, title, permission_mode, created_at, updated_at FROM conversations WHERE project_id = ? ORDER BY updated_at DESC, id`, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("list conversations: %w", err)
 	}
@@ -73,6 +73,27 @@ func (r *ConversationRepository) DeleteConversation(ctx context.Context, convers
 		return fmt.Errorf("conversation not found")
 	}
 	return tx.Commit()
+}
+
+func (r *ConversationRepository) UpdatePermissionMode(ctx context.Context, conversationID string, mode conversation.PermissionMode, updatedAt time.Time) error {
+	if !mode.Valid() {
+		return fmt.Errorf("invalid permission mode")
+	}
+	result, err := r.db.ExecContext(ctx, `UPDATE conversations SET permission_mode=?, updated_at=? WHERE id=? AND NOT EXISTS (SELECT 1 FROM runs WHERE conversation_id=? AND status IN ('queued','running','waiting_approval'))`, mode, formatTime(updatedAt), conversationID, conversationID)
+	if err != nil {
+		return fmt.Errorf("update conversation permission mode: %w", err)
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		var exists int
+		if err := r.db.QueryRowContext(ctx, `SELECT count(*) FROM conversations WHERE id=?`, conversationID).Scan(&exists); err != nil {
+			return err
+		}
+		if exists == 0 {
+			return fmt.Errorf("conversation not found")
+		}
+		return fmt.Errorf("permission mode cannot change during an active run")
+	}
+	return nil
 }
 
 func (r *ConversationRepository) CreateMessage(ctx context.Context, value conversation.Message) error {
@@ -205,7 +226,7 @@ func (r *ConversationRepository) listParts(ctx context.Context, messageID string
 func scanConversation(row rowScanner) (conversation.Conversation, error) {
 	var value conversation.Conversation
 	var createdAt, updatedAt string
-	if err := row.Scan(&value.ID, &value.ProjectID, &value.Title, &createdAt, &updatedAt); err != nil {
+	if err := row.Scan(&value.ID, &value.ProjectID, &value.Title, &value.PermissionMode, &createdAt, &updatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return conversation.Conversation{}, fmt.Errorf("conversation not found")
 		}

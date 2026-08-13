@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wangh00/SciAide/internal/app/conversation"
 	"github.com/wangh00/SciAide/internal/app/tool"
 	"github.com/wangh00/SciAide/internal/events"
 	"github.com/wangh00/SciAide/internal/id"
@@ -123,6 +124,20 @@ func NewEngine(repository Repository) *Engine {
 }
 
 func (e *Engine) Evaluate(ctx context.Context, request EvaluationRequest) (Evaluation, error) {
+	return e.evaluate(ctx, request, false, false)
+}
+
+// EvaluateCall applies the explicit conversation permission mode captured on
+// the Run. Full Access bypasses approval/grant lookup, never registry/schema
+// validation or the Executor's operational boundaries.
+func (e *Engine) EvaluateCall(ctx context.Context, request EvaluationRequest, mode conversation.PermissionMode) (Evaluation, error) {
+	if !mode.Valid() {
+		return Evaluation{}, fmt.Errorf("invalid permission mode")
+	}
+	return e.evaluate(ctx, request, mode == conversation.PermissionFullAccess, mode == conversation.PermissionPlan)
+}
+
+func (e *Engine) evaluate(ctx context.Context, request EvaluationRequest, fullAccess, approveWholeCall bool) (Evaluation, error) {
 	request.ProjectID, request.RunID = strings.TrimSpace(request.ProjectID), strings.TrimSpace(request.RunID)
 	if request.ProjectID == "" || request.RunID == "" || strings.TrimSpace(request.Call.ID) == "" {
 		return Evaluation{}, fmt.Errorf("project, run and tool call are required")
@@ -137,6 +152,20 @@ func (e *Engine) Evaluate(ctx context.Context, request EvaluationRequest) (Evalu
 	if request.Call.Status != tool.CallPending && request.Call.Status != tool.CallAwaitingApproval {
 		return Evaluation{}, fmt.Errorf("tool call is not eligible for policy evaluation")
 	}
+	if fullAccess {
+		return Evaluation{Decision: DecisionAllow, Reason: "用户已为该会话启用 Full Access。", Missing: []tool.PermissionRequirement{}, GrantIDs: []string{}}, nil
+	}
+	if approveWholeCall {
+		requirement := tool.PermissionRequirement{Kind: tool.PermissionToolInvoke, Resource: request.Call.ToolName}
+		approvals, err := e.repository.ListGrantedApprovals(ctx, request.Call.ID)
+		if err != nil {
+			return Evaluation{}, fmt.Errorf("list granted approvals: %w", err)
+		}
+		if approvalCovers(approvals, requirement) {
+			return Evaluation{Decision: DecisionAllow, Reason: "用户已接受本次工具调用。", Missing: []tool.PermissionRequirement{}, GrantIDs: []string{}}, nil
+		}
+		return Evaluation{Decision: DecisionAsk, Reason: "Plan 模式要求用户确认每次工具调用。", Missing: []tool.PermissionRequirement{requirement}, GrantIDs: []string{}}, nil
+	}
 	requirements := cloneRequirements(request.Call.Permissions)
 	if (request.Call.Risk == tool.RiskModerate || request.Call.Risk == tool.RiskHigh || request.Call.Risk == tool.RiskDestructive) && !containsPermission(requirements, tool.PermissionToolInvoke) {
 		requirements = append([]tool.PermissionRequirement{{Kind: tool.PermissionToolInvoke, Resource: request.Call.ToolName}}, requirements...)
@@ -145,10 +174,6 @@ func (e *Engine) Evaluate(ctx context.Context, request EvaluationRequest) (Evalu
 	if err != nil {
 		return Evaluation{}, fmt.Errorf("list granted approvals: %w", err)
 	}
-	grants, err := e.repository.ListActiveGrants(ctx, request.ProjectID, request.RunID, request.Call.ToolName, e.now())
-	if err != nil {
-		return Evaluation{}, fmt.Errorf("list permission grants: %w", err)
-	}
 	missing := make([]tool.PermissionRequirement, 0)
 	used := make([]string, 0)
 	for _, requirement := range requirements {
@@ -156,33 +181,12 @@ func (e *Engine) Evaluate(ctx context.Context, request EvaluationRequest) (Evalu
 		if approvalCovers(approvals, requirement) {
 			continue
 		}
-		if !persistentGrantAllowed(request.Call, requirement) {
-			missing = append(missing, requirement)
-			continue
-		}
-		grantID := matchingGrant(grants, request, requirement)
-		if grantID == "" {
-			missing = append(missing, requirement)
-		} else {
-			used = append(used, grantID)
-		}
+		missing = append(missing, requirement)
 	}
 	if len(missing) == 0 {
 		return Evaluation{Decision: DecisionAllow, Reason: "调用所需权限已由有效授权覆盖。", Missing: []tool.PermissionRequirement{}, GrantIDs: used}, nil
 	}
 	return Evaluation{Decision: DecisionAsk, Reason: "调用需要用户确认尚未授权的权限范围。", Missing: missing, GrantIDs: used}, nil
-}
-
-func persistentGrantAllowed(call tool.Call, requirement tool.PermissionRequirement) bool {
-	if call.Risk == tool.RiskHigh || call.Risk == tool.RiskDestructive {
-		return false
-	}
-	switch requirement.Kind {
-	case tool.PermissionFilesystemExternal, tool.PermissionProcessExecute, tool.PermissionDestructive, tool.PermissionSecretUse:
-		return false
-	default:
-		return true
-	}
 }
 
 func (e *Engine) RequestApproval(ctx context.Context, request EvaluationRequest, evaluation Evaluation) (Approval, error) {
@@ -224,20 +228,6 @@ func (e *Engine) Resolve(ctx context.Context, command ResolveCommand) (Approval,
 	var grant *Grant
 	if command.Allow {
 		next = ApprovalGranted
-		scope = command.Scope
-		if err := validateResolvedScope(value, scope); err != nil {
-			return Approval{}, nil, err
-		}
-		if scope != ScopeCall {
-			grantID, err := id.New()
-			if err != nil {
-				return Approval{}, nil, err
-			}
-			grant = &Grant{ID: grantID, ProjectID: value.ProjectID, ToolName: value.ToolName, PermissionKind: value.PermissionKind, Resource: value.Resource, Scope: scope, GrantedBy: SubjectUser, CreatedAt: now}
-			if scope == ScopeRun {
-				grant.RunID = value.RunID
-			}
-		}
 	}
 	projected := value
 	projected.Status, projected.ResolvedScope, projected.ResolvedAt = next, scope, &now
@@ -285,7 +275,7 @@ func (e *Engine) ListGrants(ctx context.Context, projectID string) ([]Grant, err
 	if projectID == "" {
 		return nil, fmt.Errorf("project id is required")
 	}
-	return e.repository.ListGrantsByProject(ctx, projectID)
+	return []Grant{}, nil
 }
 
 func (e *Engine) Revoke(ctx context.Context, grantID string) error {
@@ -293,60 +283,15 @@ func (e *Engine) Revoke(ctx context.Context, grantID string) error {
 	if grantID == "" {
 		return fmt.Errorf("permission grant id is required")
 	}
-	grant, err := e.repository.GetGrant(ctx, grantID)
-	if err != nil {
-		return err
-	}
-	at := e.now()
-	aggregateID, aggregateType := grant.ProjectID, "project"
-	if grant.Scope == ScopeRun {
-		aggregateID, aggregateType = grant.RunID, "run"
-	}
-	event, err := permissionEvent(aggregateID, aggregateType, "permission.grant_revoked", map[string]any{"grantId": grant.ID, "revokedAt": at})
-	if err != nil {
-		return err
-	}
-	return e.repository.RevokeGrantWithEvent(ctx, grantID, at, event)
+	return fmt.Errorf("persistent permission grants are not supported by Plan / Full Access mode")
 }
 
 func (e *Engine) Recover(ctx context.Context) (int64, error) {
 	return e.repository.ExpirePending(ctx, e.now())
 }
 
-func maximumScope(call tool.Call, requirement tool.PermissionRequirement) Scope {
-	if call.Risk == tool.RiskHigh || call.Risk == tool.RiskDestructive || requirement.Kind == tool.PermissionDestructive || requirement.Kind == tool.PermissionFilesystemExternal || requirement.Kind == tool.PermissionProcessExecute || requirement.Kind == tool.PermissionSecretUse {
-		return ScopeCall
-	}
-	return ScopeProject
-}
-
-func validateResolvedScope(value Approval, scope Scope) error {
-	if scope != ScopeCall && scope != ScopeRun && scope != ScopeProject {
-		return fmt.Errorf("invalid approval scope %q", scope)
-	}
-	if value.RequestedScope == ScopeCall && scope != ScopeCall {
-		return fmt.Errorf("this permission can only be allowed once")
-	}
-	if value.RequestedScope == ScopeRun && scope == ScopeProject {
-		return fmt.Errorf("approval scope exceeds requested scope")
-	}
-	return nil
-}
-
-func matchingGrant(grants []Grant, request EvaluationRequest, requirement tool.PermissionRequirement) string {
-	for _, grant := range grants {
-		if grant.ToolName != request.Call.ToolName || grant.PermissionKind != requirement.Kind || grant.Resource != strings.TrimSpace(requirement.Resource) {
-			continue
-		}
-		if grant.Scope == ScopeRun && grant.RunID != request.RunID {
-			continue
-		}
-		if grant.Scope != ScopeRun && grant.Scope != ScopeProject {
-			continue
-		}
-		return grant.ID
-	}
-	return ""
+func maximumScope(_ tool.Call, _ tool.PermissionRequirement) Scope {
+	return ScopeCall
 }
 
 func approvalCovers(values []Approval, requirement tool.PermissionRequirement) bool {
@@ -374,7 +319,7 @@ func cloneRequirements(values []tool.PermissionRequirement) []tool.PermissionReq
 }
 
 func callRequires(call tool.Call, target tool.PermissionRequirement) bool {
-	if target.Kind == tool.PermissionToolInvoke && (call.Risk == tool.RiskModerate || call.Risk == tool.RiskHigh || call.Risk == tool.RiskDestructive) {
+	if target.Kind == tool.PermissionToolInvoke {
 		return target.Resource == strings.TrimSpace(call.ToolName)
 	}
 	for _, requirement := range call.Permissions {
