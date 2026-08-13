@@ -157,8 +157,15 @@ func (r *ConversationRepository) ListMessages(ctx context.Context, conversationI
 	}
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT id, conversation_id, COALESCE(run_id, ''), role, status, created_at, updated_at
-		FROM (SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at DESC, id DESC LIMIT ?)
-		ORDER BY created_at, id`, conversationID, limit)
+		FROM (
+			SELECT m.*,
+				CASE WHEN m.role = 'user' THEN 0 WHEN m.role = 'assistant' THEN 1 ELSE 2 END AS role_order
+			FROM messages m
+			WHERE m.conversation_id = ?
+			ORDER BY m.created_at DESC, role_order DESC, m.id DESC
+			LIMIT ?
+		)
+		ORDER BY created_at, role_order, id`, conversationID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list messages: %w", err)
 	}

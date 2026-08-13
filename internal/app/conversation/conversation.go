@@ -19,9 +19,11 @@ type Conversation struct {
 	UpdatedAt      time.Time      `json:"updatedAt"`
 }
 
-// PermissionMode is a conversation-level user choice. Plan asks once for
-// every ToolCall; Full Access automatically authorizes registered tools while
-// keeping schema, workspace, timeout and cancellation boundaries intact.
+// PermissionMode is a conversation-level user choice. Plan permits only
+// low-risk idempotent reads already confined to the current Workspace and asks
+// for external reads, writes and other tool calls. Full Access automatically
+// authorizes registered tools while keeping schema, workspace, timeout and
+// cancellation boundaries intact.
 type PermissionMode string
 
 const (

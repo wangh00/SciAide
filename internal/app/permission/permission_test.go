@@ -248,6 +248,40 @@ func TestPermissionModesApplyPerToolCall(t *testing.T) {
 	}
 }
 
+func TestPlanAllowsOnlyLowRiskIdempotentWorkspaceRead(t *testing.T) {
+	repository := newMemoryRepository()
+	engine := NewEngine(repository)
+	base := testCall(tool.RiskLow, tool.PermissionRequirement{Kind: tool.PermissionWorkspaceRead, Resource: "."})
+	base.Idempotent = true
+	request := EvaluationRequest{ProjectID: "project-1", RunID: "run-1", Call: base}
+
+	allowed, err := engine.EvaluateCall(context.Background(), request, conversation.PermissionPlan)
+	if err != nil || allowed.Decision != DecisionAllow {
+		t.Fatalf("workspace read = %#v, %v", allowed, err)
+	}
+	for name, mutate := range map[string]func(*tool.Call){
+		"write": func(call *tool.Call) {
+			call.Permissions = []tool.PermissionRequirement{{Kind: tool.PermissionWorkspaceWrite, Resource: "."}}
+		},
+		"external": func(call *tool.Call) {
+			call.Permissions = []tool.PermissionRequirement{{Kind: tool.PermissionFilesystemExternal, Resource: `C:\outside`}}
+		},
+		"tool invoke": func(call *tool.Call) {
+			call.Permissions = []tool.PermissionRequirement{{Kind: tool.PermissionToolInvoke, Resource: call.ToolName}}
+		},
+		"non-idempotent": func(call *tool.Call) { call.Idempotent = false },
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := base
+			mutate(&candidate)
+			result, err := engine.EvaluateCall(context.Background(), EvaluationRequest{ProjectID: "project-1", RunID: "run-1", Call: candidate}, conversation.PermissionPlan)
+			if err != nil || result.Decision != DecisionAsk {
+				t.Fatalf("evaluation = %#v, %v", result, err)
+			}
+		})
+	}
+}
+
 func TestLegacyEvaluationFlowHandlesMissingPermissionsOneAtATime(t *testing.T) {
 	repository := newMemoryRepository()
 	engine := NewEngine(repository)

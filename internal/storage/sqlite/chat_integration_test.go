@@ -64,6 +64,37 @@ func TestChatSchemaPersistsAndRecoversActiveRun(t *testing.T) {
 	}
 }
 
+func TestConversationMessagesKeepUserBeforeAssistantAtSameTimestamp(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "message-order.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	root := t.TempDir()
+	createdProject, err := project.NewService(NewProjectRepository(store.DB()), filepath.Join(root, "workspaces"), filepath.Join(root, "trash")).Create(ctx, "Order", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	createdConversation, err := conversation.NewService(NewConversationRepository(store.DB())).Create(ctx, createdProject.ID, "order")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	for _, message := range []conversation.Message{
+		{ID: "aaa-assistant", ConversationID: createdConversation.ID, Role: conversation.RoleAssistant, Status: conversation.MessageComplete, CreatedAt: now, UpdatedAt: now, Parts: []conversation.MessagePart{{ID: "assistant-part", MessageID: "aaa-assistant", Type: "text", Text: "answer", CreatedAt: now}}},
+		{ID: "zzz-user", ConversationID: createdConversation.ID, Role: conversation.RoleUser, Status: conversation.MessageComplete, CreatedAt: now, UpdatedAt: now, Parts: []conversation.MessagePart{{ID: "user-part", MessageID: "zzz-user", Type: "text", Text: "question", CreatedAt: now}}},
+	} {
+		if err := NewConversationRepository(store.DB()).CreateMessage(ctx, message); err != nil {
+			t.Fatal(err)
+		}
+	}
+	messages, err := NewConversationRepository(store.DB()).ListMessages(ctx, createdConversation.ID, 10)
+	if err != nil || len(messages) != 2 || messages[0].Role != conversation.RoleUser || messages[1].Role != conversation.RoleAssistant {
+		t.Fatalf("message order = %#v, %v", messages, err)
+	}
+}
+
 func TestRunRepositoryPersistsAndBoundsModelTurns(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(ctx, filepath.Join(t.TempDir(), "sciaide.db"))

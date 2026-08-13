@@ -156,6 +156,12 @@ func (e *Engine) evaluate(ctx context.Context, request EvaluationRequest, fullAc
 		return Evaluation{Decision: DecisionAllow, Reason: "用户已为该会话启用 Full Access。", Missing: []tool.PermissionRequirement{}, GrantIDs: []string{}}, nil
 	}
 	if approveWholeCall {
+		// Plan mode allows low-risk, idempotent reads that are already confined
+		// to the current project's Workspace by the tool executor/pathguard.
+		// External paths, writes and all other tool invocations still ask.
+		if planAllowsWorkspaceRead(request.Call) {
+			return Evaluation{Decision: DecisionAllow, Reason: "Plan 模式允许只读访问当前项目 Workspace。", Missing: []tool.PermissionRequirement{}, GrantIDs: []string{}}, nil
+		}
 		requirement := tool.PermissionRequirement{Kind: tool.PermissionToolInvoke, Resource: request.Call.ToolName}
 		approvals, err := e.repository.ListGrantedApprovals(ctx, request.Call.ID)
 		if err != nil {
@@ -187,6 +193,18 @@ func (e *Engine) evaluate(ctx context.Context, request EvaluationRequest, fullAc
 		return Evaluation{Decision: DecisionAllow, Reason: "调用所需权限已由有效授权覆盖。", Missing: []tool.PermissionRequirement{}, GrantIDs: used}, nil
 	}
 	return Evaluation{Decision: DecisionAsk, Reason: "调用需要用户确认尚未授权的权限范围。", Missing: missing, GrantIDs: used}, nil
+}
+
+func planAllowsWorkspaceRead(call tool.Call) bool {
+	if call.Risk != tool.RiskLow || !call.Idempotent || len(call.Permissions) == 0 {
+		return false
+	}
+	for _, requirement := range call.Permissions {
+		if requirement.Kind != tool.PermissionWorkspaceRead {
+			return false
+		}
+	}
+	return true
 }
 
 func (e *Engine) RequestApproval(ctx context.Context, request EvaluationRequest, evaluation Evaluation) (Approval, error) {

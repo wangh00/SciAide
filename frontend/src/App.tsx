@@ -44,6 +44,14 @@ const textOf = (message: Message) => message.parts.filter((part) => part.type ==
 const first = <T,>(items: T[]) => items[0];
 const modelKey = (profileId: string, modelId: string) => `${profileId}\t${modelId}`;
 const splitModelKey = (value: string): [string, string] => { const index = value.indexOf("\t"); return index < 0 ? ["", ""] : [value.slice(0, index), value.slice(index + 1)]; };
+const messageRoleRank = (role: Message["role"]) => role === "user" ? 0 : role === "assistant" ? 1 : 2;
+const orderedMessages = (values: Message[]) => values.map((message, index) => ({ message, index })).sort((left, right) => {
+  if (left.message.runId && left.message.runId === right.message.runId) {
+    const rank = messageRoleRank(left.message.role) - messageRoleRank(right.message.role);
+    if (rank !== 0) return rank;
+  }
+  return left.index - right.index;
+}).map(({ message }) => message);
 
 function Icon({ name, size = 18 }: { name: "spark" | "plus" | "chat" | "settings" | "shield" | "model" | "send" | "stop" | "search" | "refresh" | "folder" | "check" | "close" | "trash" | "tool" | "server"; size?: number }) {
   const paths: Record<typeof name, ReactNode> = {
@@ -106,17 +114,17 @@ export default function App() {
   }, []);
   const loadMessages = useCallback(async (selectedConversation: string) => {
     if (!selectedConversation) { setMessages([]); return; }
-    setMessages(await backend<Message[]>("ConversationFacade", "ListMessages", selectedConversation));
+    setMessages(orderedMessages(await backend<Message[]>("ConversationFacade", "ListMessages", selectedConversation)));
   }, []);
   const applySnapshot = useCallback((snapshot: RunSnapshot) => {
     if (snapshot.run.conversationId !== conversationIdRef.current) return;
     setActiveRun(snapshot.run);
     setToolCalls(snapshot.toolCalls ?? []);
     setPendingApprovals(snapshot.pendingApprovals ?? []);
-    setMessages((current) => snapshot.messages.map((message) => {
+    setMessages((current) => orderedMessages(snapshot.messages.map((message) => {
       const live = current.find((item) => item.id === message.id);
       return live && textOf(live).length > textOf(message).length ? live : message;
-    }));
+    })));
     setBusy(!["completed", "failed", "cancelled", "interrupted"].includes(snapshot.run.status));
   }, []);
 
@@ -196,7 +204,7 @@ export default function App() {
     </aside>
 
     <main className="workspace">
-      <header className="topbar"><div className="breadcrumbs"><span>{selectedProject?.name ?? "Workspace"}</span><i>/</i><strong>{selectedConversation?.title ?? "新研究"}</strong></div><div className="top-actions"><div className="permission-picker" title={busy ? "运行期间不能切换权限模式" : "选择当前研究会话的工具权限模式"}><Icon name="shield" size={13}/><select aria-label="工具权限模式" value={selectedConversation?.permissionMode ?? "plan"} disabled={!selectedConversation || busy} onChange={(event) => void changePermissionMode(event.target.value as PermissionMode)}><option value="plan">Plan · 每次确认</option><option value="full_access">Full Access</option></select></div><div className="model-picker"><span className={selectedProfile?.secretConfigured ? "status-dot ready" : "status-dot"}/><select aria-label="选择模型" value={selectedModelKey} onChange={(event) => { const [nextProfile, nextModel] = splitModelKey(event.target.value); setProfileId(nextProfile); setModelId(nextModel); }}><option value="">选择模型</option>{selectableModels.map(({ profile, model }) => <option key={modelKey(profile.id, model.id)} value={modelKey(profile.id, model.id)}>{profile.name} · {model.id}</option>)}</select></div></div></header>
+      <header className="topbar"><div className="breadcrumbs"><span>{selectedProject?.name ?? "Workspace"}</span><i>/</i><strong>{selectedConversation?.title ?? "新研究"}</strong></div><div className="top-actions"><div className="permission-picker" title={busy ? "运行期间不能切换权限模式" : "当前 Workspace 内只读免确认；外部读取、写入和其他工具需确认"}><Icon name="shield" size={13}/><select aria-label="工具权限模式" value={selectedConversation?.permissionMode ?? "plan"} disabled={!selectedConversation || busy} onChange={(event) => void changePermissionMode(event.target.value as PermissionMode)}><option value="plan">Plan · 写入/工具确认</option><option value="full_access">Full Access</option></select></div><div className="model-picker"><span className={selectedProfile?.secretConfigured ? "status-dot ready" : "status-dot"}/><select aria-label="选择模型" value={selectedModelKey} onChange={(event) => { const [nextProfile, nextModel] = splitModelKey(event.target.value); setProfileId(nextProfile); setModelId(nextModel); }}><option value="">选择模型</option>{selectableModels.map(({ profile, model }) => <option key={modelKey(profile.id, model.id)} value={modelKey(profile.id, model.id)}>{profile.name} · {model.id}</option>)}</select></div></div></header>
       <section className="chat" aria-live="polite" ref={chatRef}>
         {messages.length === 0 ? <EmptyState hasProject={Boolean(projectId)} hasConversation={Boolean(conversationId)} hasProfile={Boolean(profileId && modelId)} openSettings={() => setSettingsOpen(true)} createConversation={() => setCreateDialog({ kind: "conversation", title: "", description: "", workspacePath: "" })} setPrompt={setInput}/> : <div className="message-stack">{messages.map((message) => <article key={message.id} className={`message ${message.role}`}><div className="avatar">{message.role === "user" ? "你" : <Icon name="spark" size={17}/>}</div><div className="message-body"><div className="message-meta"><b>{message.role === "user" ? "你" : selectedProfile?.name ?? "SciAide"}</b>{message.status === "incomplete" && <span>生成已中断</span>}</div><div className="bubble">{textOf(message) || (message.status === "streaming" && activeRun?.status !== "waiting_approval" ? <span className="typing"><i/><i/><i/> 正在生成回答</span> : "")}</div>{message.role === "assistant" && message.runId === activeRun?.id && <RunActivity toolCalls={toolCalls} approvals={pendingApprovals} resolvingApprovalId={resolvingApprovalId} resolveApproval={resolveApproval}/>}</div></article>)}</div>}
       </section>
