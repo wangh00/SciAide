@@ -15,11 +15,20 @@ import (
 
 const ProviderOpenAICompatible = "openai_compatible"
 
+type APIProtocol = modelcap.APIProtocol
+
+const (
+	ProtocolOpenAIChat      = modelcap.ProtocolOpenAIChat
+	ProtocolOpenAIResponses = modelcap.ProtocolOpenAIResponses
+	ProtocolAnthropic       = modelcap.ProtocolAnthropic
+)
+
 type Profile struct {
-	ID           string `json:"id"`
-	Name         string `json:"name"`
-	ProviderType string `json:"providerType"`
-	BaseURL      string `json:"baseUrl"`
+	ID           string      `json:"id"`
+	Name         string      `json:"name"`
+	ProviderType string      `json:"providerType"`
+	APIProtocol  APIProtocol `json:"apiProtocol"`
+	BaseURL      string      `json:"baseUrl"`
 	// ModelID is the default model kept for backwards compatibility with P1
 	// clients and the original model_profiles schema. Models is the source of
 	// truth for all selectable models on this connection.
@@ -51,6 +60,7 @@ type SaveCommand struct {
 	ID              string            `json:"id"`
 	Name            string            `json:"name"`
 	BaseURL         string            `json:"baseUrl"`
+	APIProtocol     APIProtocol       `json:"apiProtocol"`
 	ModelID         string            `json:"modelId"`
 	Models          []ProfileModel    `json:"models"`
 	APIKey          string            `json:"apiKey"`
@@ -86,6 +96,7 @@ type DiscoveryCommand struct {
 	BaseURL       string            `json:"baseUrl"`
 	APIKey        string            `json:"apiKey"`
 	CustomHeaders map[string]string `json:"customHeaders"`
+	APIProtocol   APIProtocol       `json:"apiProtocol"`
 }
 
 type AvailableModel struct {
@@ -128,6 +139,10 @@ func (s *Service) Save(ctx context.Context, cmd SaveCommand) (Profile, error) {
 	}
 	value.Name = strings.TrimSpace(cmd.Name)
 	value.ProviderType = ProviderOpenAICompatible
+	value.APIProtocol = cmd.APIProtocol
+	if !value.APIProtocol.Valid() {
+		value.APIProtocol = ProtocolOpenAIChat
+	}
 	value.BaseURL = strings.TrimRight(strings.TrimSpace(cmd.BaseURL), "/")
 	value.Models, value.ModelID = normalizeModels(cmd.Models, cmd.ModelID)
 	value.TimeoutSeconds = cmd.TimeoutSeconds
@@ -227,7 +242,10 @@ func (s *Service) Test(ctx context.Context, profileID string) error {
 }
 
 func (s *Service) Discover(ctx context.Context, cmd DiscoveryCommand) ([]AvailableModel, error) {
-	profile := Profile{BaseURL: strings.TrimRight(strings.TrimSpace(cmd.BaseURL), "/"), TimeoutSeconds: 30, CustomHeaders: cloneHeaders(cmd.CustomHeaders)}
+	profile := Profile{BaseURL: strings.TrimRight(strings.TrimSpace(cmd.BaseURL), "/"), APIProtocol: cmd.APIProtocol, TimeoutSeconds: 30, CustomHeaders: cloneHeaders(cmd.CustomHeaders)}
+	if !profile.APIProtocol.Valid() {
+		profile.APIProtocol = ProtocolOpenAIChat
+	}
 	if profile.BaseURL == "" {
 		return nil, fmt.Errorf("base URL is required")
 	}
@@ -267,6 +285,9 @@ func validateCommand(cmd SaveCommand) error {
 	}
 	if err := validateBaseURL(cmd.BaseURL); err != nil {
 		return err
+	}
+	if cmd.APIProtocol != "" && !cmd.APIProtocol.Valid() {
+		return fmt.Errorf("unsupported API protocol %q", cmd.APIProtocol)
 	}
 	if cmd.TimeoutSeconds < 5 || cmd.TimeoutSeconds > 600 {
 		return fmt.Errorf("timeout seconds must be between 5 and 600")

@@ -95,3 +95,59 @@ func TestP2MigrationPreservesExistingRuns(t *testing.T) {
 		t.Fatalf("P2.1 tool result = %q, %v", resultText, err)
 	}
 }
+
+func TestProtocolMigrationDefaultsLegacyRows(t *testing.T) {
+	ctx := context.Background()
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "protocol-upgrade.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	if _, err := db.ExecContext(ctx, `CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY NOT NULL, name TEXT NOT NULL, checksum TEXT NOT NULL, applied_at TEXT NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	migrations, err := loadMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range migrations {
+		if item.version >= 13 {
+			break
+		}
+		if _, err := db.ExecContext(ctx, item.sql); err != nil {
+			t.Fatalf("apply migration %d: %v", item.version, err)
+		}
+		if _, err := db.ExecContext(ctx, `INSERT INTO schema_migrations(version,name,checksum,applied_at) VALUES (?,?,?,'2026-01-01T00:00:00Z')`, item.version, item.name, item.checksum); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, statement := range []string{
+		`INSERT INTO projects(id,name,description,workspace_path,workspace_kind,created_at,updated_at) VALUES ('project','Protocol','','C:/fixture','external','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`,
+		`INSERT INTO conversations(id,project_id,title,created_at,updated_at) VALUES ('conversation','project','upgrade','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`,
+		`INSERT INTO model_profiles(id,name,provider_type,base_url,model_id,secret_ref,timeout_seconds,custom_headers_json,enabled,is_default,created_at,updated_at) VALUES ('profile','fixture','openai_compatible','https://example.test/v1','model','secret',60,'{}',1,1,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`,
+		`INSERT INTO messages(id,conversation_id,run_id,role,status,created_at,updated_at) VALUES ('user','conversation','run','user','complete','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`,
+		`INSERT INTO messages(id,conversation_id,run_id,role,status,created_at,updated_at) VALUES ('assistant','conversation','run','assistant','streaming','2026-01-01T00:00:01Z','2026-01-01T00:00:01Z')`,
+		`INSERT INTO runs(id,conversation_id,user_message_id,assistant_message_id,model_profile_id,status,created_at,updated_at,model_id) VALUES ('run','conversation','user','assistant','profile','running','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z','model')`,
+	} {
+		if _, err := db.ExecContext(ctx, statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := Migrate(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	var profileProtocol, runProtocol string
+	if err := db.QueryRowContext(ctx, `SELECT api_protocol FROM model_profiles WHERE id='profile'`).Scan(&profileProtocol); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT api_protocol FROM runs WHERE id='run'`).Scan(&runProtocol); err != nil {
+		t.Fatal(err)
+	}
+	if profileProtocol != "openai_chat_completions" || runProtocol != "openai_chat_completions" {
+		t.Fatalf("legacy defaults = (%q,%q)", profileProtocol, runProtocol)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE model_profiles SET api_protocol='invalid' WHERE id='profile'`); err == nil {
+		t.Fatal("protocol check accepted invalid profile value")
+	}
+}

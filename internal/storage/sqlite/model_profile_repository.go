@@ -17,6 +17,9 @@ func NewModelProfileRepository(db *sql.DB) *ModelProfileRepository {
 }
 
 func (r *ModelProfileRepository) Save(ctx context.Context, value modelprofile.Profile) error {
+	if !value.APIProtocol.Valid() {
+		value.APIProtocol = modelprofile.ProtocolOpenAIChat
+	}
 	headersJSON, err := modelprofile.EncodeHeaders(value.CustomHeaders)
 	if err != nil {
 		return fmt.Errorf("encode custom headers: %w", err)
@@ -32,13 +35,13 @@ func (r *ModelProfileRepository) Save(ctx context.Context, value modelprofile.Pr
 		}
 	}
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO model_profiles(id, name, provider_type, base_url, model_id, secret_ref, timeout_seconds, temperature, max_output_tokens, custom_headers_json, enabled, is_default, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO model_profiles(id, name, provider_type, api_protocol, base_url, model_id, secret_ref, timeout_seconds, temperature, max_output_tokens, custom_headers_json, enabled, is_default, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET name=excluded.name, provider_type=excluded.provider_type, base_url=excluded.base_url,
-		model_id=excluded.model_id, timeout_seconds=excluded.timeout_seconds, temperature=excluded.temperature,
+		api_protocol=excluded.api_protocol, model_id=excluded.model_id, timeout_seconds=excluded.timeout_seconds, temperature=excluded.temperature,
 		max_output_tokens=excluded.max_output_tokens, custom_headers_json=excluded.custom_headers_json,
 		enabled=excluded.enabled, is_default=excluded.is_default, updated_at=excluded.updated_at`,
-		value.ID, value.Name, value.ProviderType, value.BaseURL, value.ModelID, value.SecretRef, value.TimeoutSeconds,
+		value.ID, value.Name, value.ProviderType, value.APIProtocol, value.BaseURL, value.ModelID, value.SecretRef, value.TimeoutSeconds,
 		value.Temperature, value.MaxOutputTokens, headersJSON, value.Enabled, value.IsDefault, formatTime(value.CreatedAt), formatTime(value.UpdatedAt))
 	if err != nil {
 		return fmt.Errorf("upsert model profile: %w", err)
@@ -63,7 +66,7 @@ func (r *ModelProfileRepository) Save(ctx context.Context, value modelprofile.Pr
 }
 
 func (r *ModelProfileRepository) Get(ctx context.Context, id string) (modelprofile.Profile, error) {
-	value, err := scanModelProfile(r.db.QueryRowContext(ctx, `SELECT id, name, provider_type, base_url, model_id, secret_ref, timeout_seconds, temperature, max_output_tokens, custom_headers_json, enabled, is_default, created_at, updated_at FROM model_profiles WHERE id = ?`, id))
+	value, err := scanModelProfile(r.db.QueryRowContext(ctx, `SELECT id, name, provider_type, api_protocol, base_url, model_id, secret_ref, timeout_seconds, temperature, max_output_tokens, custom_headers_json, enabled, is_default, created_at, updated_at FROM model_profiles WHERE id = ?`, id))
 	if err != nil {
 		return value, err
 	}
@@ -72,7 +75,7 @@ func (r *ModelProfileRepository) Get(ctx context.Context, id string) (modelprofi
 }
 
 func (r *ModelProfileRepository) List(ctx context.Context) ([]modelprofile.Profile, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT id, name, provider_type, base_url, model_id, secret_ref, timeout_seconds, temperature, max_output_tokens, custom_headers_json, enabled, is_default, created_at, updated_at FROM model_profiles ORDER BY is_default DESC, updated_at DESC, id`)
+	rows, err := r.db.QueryContext(ctx, `SELECT id, name, provider_type, api_protocol, base_url, model_id, secret_ref, timeout_seconds, temperature, max_output_tokens, custom_headers_json, enabled, is_default, created_at, updated_at FROM model_profiles ORDER BY is_default DESC, updated_at DESC, id`)
 	if err != nil {
 		return nil, fmt.Errorf("list model profiles: %w", err)
 	}
@@ -151,7 +154,7 @@ func scanModelProfile(row rowScanner) (modelprofile.Profile, error) {
 	var temperature sql.NullFloat64
 	var maxOutput sql.NullInt64
 	var headersJSON, createdAt, updatedAt string
-	if err := row.Scan(&value.ID, &value.Name, &value.ProviderType, &value.BaseURL, &value.ModelID, &value.SecretRef, &value.TimeoutSeconds,
+	if err := row.Scan(&value.ID, &value.Name, &value.ProviderType, &value.APIProtocol, &value.BaseURL, &value.ModelID, &value.SecretRef, &value.TimeoutSeconds,
 		&temperature, &maxOutput, &headersJSON, &value.Enabled, &value.IsDefault, &createdAt, &updatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return modelprofile.Profile{}, fmt.Errorf("model profile not found")

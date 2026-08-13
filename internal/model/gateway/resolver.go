@@ -7,7 +7,9 @@ import (
 	"github.com/wangh00/SciAide/internal/app/modelprofile"
 	"github.com/wangh00/SciAide/internal/apperr"
 	"github.com/wangh00/SciAide/internal/model"
+	"github.com/wangh00/SciAide/internal/model/anthropic"
 	"github.com/wangh00/SciAide/internal/model/openai"
+	"github.com/wangh00/SciAide/internal/model/responses"
 	"github.com/wangh00/SciAide/internal/modelcap"
 )
 
@@ -40,5 +42,20 @@ func (r *Resolver) Resolve(ctx context.Context, profileID, modelID string) (mode
 		return model.ResolvedChatModel{}, &apperr.Error{Code: "MODEL_NOT_CONFIGURED", UserMessage: "所选模型未在该 API 配置中启用，请重新选择。", Cause: fmt.Errorf("model %q is not enabled for profile", modelID)}
 	}
 	profile.ModelID = modelID
-	return model.ResolvedChatModel{Model: openai.New(profile, secret), SupportedReasoningLevels: supported}, nil
+	protocol := profile.APIProtocol
+	if !protocol.Valid() {
+		protocol = modelprofile.ProtocolOpenAIChat
+	}
+	var chatModel model.ChatModel
+	switch protocol {
+	case modelprofile.ProtocolOpenAIChat:
+		chatModel = openai.New(profile, secret)
+	case modelprofile.ProtocolOpenAIResponses:
+		chatModel = responses.New(profile, secret)
+	case modelprofile.ProtocolAnthropic:
+		chatModel = anthropic.New(profile, secret)
+	default:
+		return model.ResolvedChatModel{}, &apperr.Error{Code: "MODEL_PROTOCOL_UNSUPPORTED", UserMessage: "当前 API 协议不受支持，请检查模型配置。", Cause: fmt.Errorf("unsupported protocol %q", protocol)}
+	}
+	return model.ResolvedChatModel{Model: chatModel, SupportedReasoningLevels: supported, APIProtocol: protocol}, nil
 }

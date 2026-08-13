@@ -31,6 +31,7 @@ type Run struct {
 	AssistantMessageID            string                      `json:"assistantMessageId,omitempty"`
 	ModelProfileID                string                      `json:"modelProfileId"`
 	ModelID                       string                      `json:"modelId"`
+	APIProtocol                   modelcap.APIProtocol        `json:"apiProtocol"`
 	RequestedReasoningLevel       modelcap.ReasoningLevel     `json:"requestedReasoningLevel"`
 	ResolvedReasoningLevel        modelcap.ReasoningLevel     `json:"resolvedReasoningLevel,omitempty"`
 	ContextWindowTokens           int                         `json:"contextWindowTokens"`

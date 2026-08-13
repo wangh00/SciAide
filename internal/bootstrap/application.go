@@ -19,7 +19,6 @@ import (
 	"github.com/wangh00/SciAide/internal/app/tool"
 	mcpadapter "github.com/wangh00/SciAide/internal/mcp"
 	"github.com/wangh00/SciAide/internal/model/gateway"
-	"github.com/wangh00/SciAide/internal/model/openai"
 	"github.com/wangh00/SciAide/internal/observability"
 	"github.com/wangh00/SciAide/internal/platform/appdirs"
 	"github.com/wangh00/SciAide/internal/platform/secretstore"
@@ -91,7 +90,7 @@ func New(options Options) (*Application, error) {
 	conversationService := conversation.NewService(conversationRepository)
 	profileRepository := sqlite.NewModelProfileRepository(store.DB())
 	secrets := secretstore.NewNative("SciAide")
-	connectionTester := openai.New(modelprofile.Profile{TimeoutSeconds: 30}, nil)
+	connectionTester := gateway.NewConnectionTester()
 	profileService := modelprofile.NewService(profileRepository, secrets, connectionTester)
 	runRepository := sqlite.NewRunRepository(store.DB())
 	toolRepository := sqlite.NewToolRepository(store.DB())

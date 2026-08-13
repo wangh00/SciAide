@@ -100,4 +100,5 @@ type ChatModel interface {
 type ResolvedChatModel struct {
 	Model                    ChatModel
 	SupportedReasoningLevels []modelcap.ReasoningLevel
+	APIProtocol              modelcap.APIProtocol
 }

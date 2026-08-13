@@ -15,6 +15,7 @@ import (
 	"github.com/wangh00/SciAide/internal/app/project"
 	"github.com/wangh00/SciAide/internal/app/tool"
 	"github.com/wangh00/SciAide/internal/events"
+	"github.com/wangh00/SciAide/internal/modelcap"
 )
 
 func TestChatSchemaPersistsAndRecoversActiveRun(t *testing.T) {
@@ -61,6 +62,51 @@ func TestChatSchemaPersistsAndRecoversActiveRun(t *testing.T) {
 	}
 	if err != nil || assistantStatus != conversation.MessageIncomplete {
 		t.Fatalf("messages=%#v err=%v", messages, err)
+	}
+}
+
+func TestModelProfileAndRunProtocolPersistAcrossReopen(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "protocol.db")
+	store, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	createdProject, err := project.NewService(NewProjectRepository(store.DB()), filepath.Join(root, "workspaces"), filepath.Join(root, "trash")).Create(ctx, "Protocol", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	createdConversation, err := conversation.NewService(NewConversationRepository(store.DB())).Create(ctx, createdProject.ID, "messages")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	profile := modelprofile.Profile{ID: "protocol-profile", Name: "Anthropic", ProviderType: modelprofile.ProviderOpenAICompatible, APIProtocol: modelcap.ProtocolAnthropic, BaseURL: "https://api.anthropic.com/v1", ModelID: "claude", Models: []modelprofile.ProfileModel{{ID: "claude", Enabled: true, IsDefault: true}}, SecretRef: "secret", TimeoutSeconds: 60, CustomHeaders: map[string]string{}, Enabled: true, CreatedAt: now, UpdatedAt: now}
+	if err := NewModelProfileRepository(store.DB()).Save(ctx, profile); err != nil {
+		t.Fatal(err)
+	}
+	run := chat.Run{ID: "protocol-run", ConversationID: createdConversation.ID, UserMessageID: "protocol-user", AssistantMessageID: "protocol-assistant", ModelProfileID: profile.ID, ModelID: "claude", APIProtocol: modelcap.ProtocolAnthropic, Status: chat.RunQueued, CreatedAt: now, UpdatedAt: now}
+	user := conversation.Message{ID: run.UserMessageID, ConversationID: createdConversation.ID, RunID: run.ID, Role: conversation.RoleUser, Status: conversation.MessageComplete, CreatedAt: now, UpdatedAt: now, Parts: []conversation.MessagePart{{ID: "protocol-user-part", MessageID: run.UserMessageID, Type: "text", Text: "q", CreatedAt: now}}}
+	assistant := conversation.Message{ID: run.AssistantMessageID, ConversationID: createdConversation.ID, RunID: run.ID, Role: conversation.RoleAssistant, Status: conversation.MessageStreaming, CreatedAt: now, UpdatedAt: now, Parts: []conversation.MessagePart{{ID: "protocol-assistant-part", MessageID: run.AssistantMessageID, Type: "text", CreatedAt: now}}}
+	if err := NewRunRepository(store.DB()).CreateWithMessages(ctx, run, user, assistant); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	loadedProfile, err := NewModelProfileRepository(store.DB()).Get(ctx, profile.ID)
+	if err != nil || loadedProfile.APIProtocol != modelcap.ProtocolAnthropic {
+		t.Fatalf("profile = %#v, %v", loadedProfile, err)
+	}
+	loadedRun, err := NewRunRepository(store.DB()).Get(ctx, run.ID)
+	if err != nil || loadedRun.APIProtocol != modelcap.ProtocolAnthropic {
+		t.Fatalf("run = %#v, %v", loadedRun, err)
 	}
 }
 

@@ -204,6 +204,11 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 		return OutcomeFailed, err
 	}
 	chatModel := resolvedModel.Model
+	if resolvedModel.APIProtocol.Valid() {
+		run.APIProtocol = resolvedModel.APIProtocol
+	} else if !run.APIProtocol.Valid() {
+		run.APIProtocol = modelcap.ProtocolOpenAIChat
+	}
 	run.ResolvedReasoningLevel = modelcap.ResolveReasoningLevel(run.RequestedReasoningLevel, resolvedModel.SupportedReasoningLevels)
 	if err := l.runs.Update(context.Background(), *run); err != nil {
 		return OutcomeFailed, err
