@@ -74,6 +74,7 @@ const inferredReasoningLevels = (protocol: APIProtocol, modelId: string): Reason
     return ["5.2", "5.3", "5.4", "codex-max"].some((value) => id.includes(value)) ? ["low", "medium", "high", "xhigh"] : ["low", "medium", "high"];
   }
   if (id.includes("grok-3-mini")) return ["low", "high"];
+  if (id.includes("deepseek-v4")) return ["low", "medium", "high", "max"];
   return ["low", "medium", "high"];
 };
 const messageRoleRank = (role: Message["role"]) => role === "user" ? 0 : role === "assistant" ? 1 : 2;

@@ -133,6 +133,8 @@ func InferredReasoningLevelsForProtocol(protocol APIProtocol, modelID string) []
 		return []ReasoningLevel{ReasoningLow, ReasoningMedium, ReasoningHigh}
 	case strings.Contains(id, "grok-3-mini"):
 		return []ReasoningLevel{ReasoningLow, ReasoningHigh}
+	case strings.Contains(id, "deepseek-v4"):
+		return []ReasoningLevel{ReasoningLow, ReasoningMedium, ReasoningHigh, ReasoningMax}
 	default:
 		return []ReasoningLevel{ReasoningLow, ReasoningMedium, ReasoningHigh}
 	}
