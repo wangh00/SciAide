@@ -97,6 +97,20 @@ func TestServiceStoresSecretValuesAsReferencesAndResolvesThem(t *testing.T) {
 	}
 }
 
+func TestServiceRejectsDuplicateStableNamespace(t *testing.T) {
+	repository := &memoryRepository{values: map[string]Server{
+		"existing": {ID: "existing", Name: "Existing", Namespace: "papers", Transport: TransportStdio, Command: "server", Enabled: true, Trust: TrustUser, TimeoutSeconds: 30},
+	}}
+	service := NewService(repository, nil)
+	_, err := service.Save(context.Background(), SaveCommand{Name: "Duplicate", Namespace: "papers", Transport: TransportStdio, Command: "other-server", Enabled: true, Trust: TrustUser, TimeoutSeconds: 30})
+	if err == nil {
+		t.Fatal("duplicate MCP namespace was accepted")
+	}
+	if len(repository.values) != 1 {
+		t.Fatalf("duplicate save mutated repository: %#v", repository.values)
+	}
+}
+
 func TestValidateSaveRejectsSensitiveHeadersAndShellLikeConfigurationMixing(t *testing.T) {
 	value := SaveCommand{Name: "Remote", Namespace: "remote", Transport: TransportStreamableHTTP, URL: "https://mcp.example.test/mcp", Headers: map[string]string{"Authorization": "Bearer secret"}, Trust: TrustUser, TimeoutSeconds: 30}
 	if err := validateSave(normalizeSave(value)); err == nil {

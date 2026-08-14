@@ -20,11 +20,12 @@ import (
 )
 
 type loopState struct {
-	mu        sync.Mutex
-	run       chat.Run
-	messages  []conversation.Message
-	calls     map[string]tool.Call
-	callOrder []string
+	mu            sync.Mutex
+	run           chat.Run
+	messages      []conversation.Message
+	calls         map[string]tool.Call
+	callOrder     []string
+	providerTurns []model.ProviderTurn
 }
 
 func (s *loopState) Get(context.Context, string) (chat.Run, error) {
@@ -49,6 +50,17 @@ func (s *loopState) IncrementModelTurns(_ context.Context, _ string, maximum int
 	return s.run, nil
 }
 func (s *loopState) ProjectIDForRun(context.Context, string) (string, error) { return "project", nil }
+func (s *loopState) SaveProviderTurn(_ context.Context, _ string, turn model.ProviderTurn, _ time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.providerTurns = append(s.providerTurns, turn)
+	return nil
+}
+func (s *loopState) ListProviderTurns(context.Context, string) ([]model.ProviderTurn, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]model.ProviderTurn(nil), s.providerTurns...), nil
+}
 func (s *loopState) transitionRun(expected, next chat.RunStatus) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -166,6 +178,15 @@ func (r fakeResolver) Resolve(context.Context, string, string) (model.ResolvedCh
 	return model.ResolvedChatModel{Model: r.model, SupportedReasoningLevels: []modelcap.ReasoningLevel{modelcap.ReasoningLow, modelcap.ReasoningMedium, modelcap.ReasoningHigh, modelcap.ReasoningXHigh, modelcap.ReasoningMax}}, nil
 }
 
+type protocolResolver struct {
+	model    model.ChatModel
+	protocol modelcap.APIProtocol
+}
+
+func (r protocolResolver) Resolve(context.Context, string, string) (model.ResolvedChatModel, error) {
+	return model.ResolvedChatModel{Model: r.model, APIProtocol: r.protocol, SupportedReasoningLevels: []modelcap.ReasoningLevel{modelcap.ReasoningLow, modelcap.ReasoningMedium, modelcap.ReasoningHigh, modelcap.ReasoningXHigh, modelcap.ReasoningMax}}, nil
+}
+
 type blockingModel struct{}
 
 func (blockingModel) Capabilities(context.Context) (model.Capabilities, error) {
@@ -182,6 +203,23 @@ func (s blockingStream) Recv() (model.Event, error) {
 	return model.Event{}, s.ctx.Err()
 }
 func (blockingStream) Close() error { return nil }
+
+type resolutionModel struct {
+	inner    model.ChatModel
+	resolved modelcap.ReasoningLevel
+}
+
+func (m resolutionModel) Capabilities(ctx context.Context) (model.Capabilities, error) {
+	return m.inner.Capabilities(ctx)
+}
+
+func (m resolutionModel) Stream(ctx context.Context, request model.ChatRequest) (model.Stream, error) {
+	stream, err := m.inner.Stream(ctx, request)
+	if err != nil {
+		return nil, err
+	}
+	return model.WithReasoningResolution(stream, request.RequestedReasoningLevel, m.resolved), nil
+}
 
 type executionAdapter struct{ executor *tool.Executor }
 
@@ -264,8 +302,83 @@ func TestAgentLoopCompletesFakeModelToolRoundTrip(t *testing.T) {
 	}
 }
 
+func TestAgentLoopPersistsAndReplaysAnthropicProviderTurn(t *testing.T) {
+	thinking := model.ProviderItem{Ordinal: 0, Type: "thinking", Payload: json.RawMessage(`{"type":"thinking","thinking":"inspect","signature":"signed"}`)}
+	toolItem := model.ProviderItem{Ordinal: 1, Type: "tool_use", CallID: "provider-call", Payload: json.RawMessage(`{"type":"tool_use","id":"provider-call","name":"fixture","input":{"query":"paper"}}`)}
+	first := []fake.Step{
+		{Event: model.Event{Type: model.EventProviderItem, ProviderItem: &thinking}},
+		{Event: model.Event{Type: model.EventToolCall, ToolCall: &model.ToolCall{ID: "provider-call", Name: "builtin.fixture", Arguments: json.RawMessage(`{"query":"paper"}`)}}},
+		{Event: model.Event{Type: model.EventProviderItem, ProviderItem: &toolItem}},
+		{Event: model.Event{Type: model.EventDone, FinishReason: "tool_calls"}},
+	}
+	second := []fake.Step{{Event: model.Event{Type: model.EventTextDelta, Text: "done"}}, {Event: model.Event{Type: model.EventDone, FinishReason: "stop"}}}
+	loop, state, provider := newLoopFixture(t, nil, first, second)
+	loop.models = protocolResolver{model: provider, protocol: modelcap.ProtocolAnthropic}
+	if outcome := loop.Run(context.Background(), "run"); outcome != OutcomeCompleted {
+		t.Fatalf("outcome = %s", outcome)
+	}
+	state.mu.Lock()
+	if len(state.providerTurns) != 1 || len(state.providerTurns[0].Items) != 2 {
+		t.Fatalf("provider turns = %#v", state.providerTurns)
+	}
+	if !state.run.ReasoningObserved || !state.run.ReasoningSignatureObserved {
+		t.Fatalf("reasoning evidence = %#v", state.run)
+	}
+	state.mu.Unlock()
+	requests := provider.Requests()
+	if len(requests) != 2 || len(requests[1].ProviderTurns) != 1 || len(requests[1].ProviderTurns[0].ToolResults) != 1 || requests[1].ProviderTurns[0].ToolResults[0].ToolCallID != "provider-call" {
+		t.Fatalf("replayed request = %#v", requests)
+	}
+}
+
+func TestAgentLoopPersistsResponsesReasoningEvidenceAndReplaysProviderTurn(t *testing.T) {
+	reasoning := model.ProviderItem{Ordinal: 0, Type: "reasoning", Payload: json.RawMessage(`{"type":"reasoning","id":"rs_1","summary":[],"encrypted_content":"opaque"}`)}
+	functionCall := model.ProviderItem{Ordinal: 1, Type: "function_call", CallID: "provider-call", Payload: json.RawMessage(`{"type":"function_call","id":"fc_1","call_id":"provider-call","name":"fixture","arguments":"{\"query\":\"paper\"}"}`)}
+	first := []fake.Step{
+		{Event: model.Event{Type: model.EventProviderItem, ProviderItem: &reasoning}},
+		{Event: model.Event{Type: model.EventToolCall, ToolCall: &model.ToolCall{ID: "provider-call", Name: "builtin.fixture", Arguments: json.RawMessage(`{"query":"paper"}`)}}},
+		{Event: model.Event{Type: model.EventProviderItem, ProviderItem: &functionCall}},
+		{Event: model.Event{Type: model.EventDone, FinishReason: "tool_calls"}},
+	}
+	second := []fake.Step{{Event: model.Event{Type: model.EventTextDelta, Text: "done"}}, {Event: model.Event{Type: model.EventDone, FinishReason: "stop"}}}
+	loop, state, provider := newLoopFixture(t, nil, first, second)
+	loop.models = protocolResolver{model: provider, protocol: modelcap.ProtocolOpenAIResponses}
+	if outcome := loop.Run(context.Background(), "run"); outcome != OutcomeCompleted {
+		t.Fatalf("outcome = %s", outcome)
+	}
+	state.mu.Lock()
+	if !state.run.ReasoningObserved || state.run.ReasoningSignatureObserved {
+		t.Fatalf("reasoning evidence = %#v", state.run)
+	}
+	if len(state.providerTurns) != 1 || len(state.providerTurns[0].Items) != 2 {
+		t.Fatalf("provider turns = %#v", state.providerTurns)
+	}
+	state.mu.Unlock()
+	requests := provider.Requests()
+	if len(requests) != 2 || len(requests[1].ProviderTurns) != 1 || len(requests[1].ProviderTurns[0].ToolResults) != 1 || requests[1].ProviderTurns[0].ToolResults[0].ToolCallID != "provider-call" {
+		t.Fatalf("replayed request = %#v", requests)
+	}
+}
+
+func TestAgentLoopRejectsResponsesToolCallWithoutProviderState(t *testing.T) {
+	first := []fake.Step{
+		{Event: model.Event{Type: model.EventToolCall, ToolCall: &model.ToolCall{ID: "provider-call", Name: "builtin.fixture", Arguments: json.RawMessage(`{"query":"paper"}`)}}},
+		{Event: model.Event{Type: model.EventDone, FinishReason: "tool_calls"}},
+	}
+	loop, state, provider := newLoopFixture(t, nil, first)
+	loop.models = protocolResolver{model: provider, protocol: modelcap.ProtocolOpenAIResponses}
+	if outcome := loop.Run(context.Background(), "run"); outcome != OutcomeFailed {
+		t.Fatalf("outcome = %s", outcome)
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.run.ErrorCode != "MODEL_PROTOCOL_STATE_MISSING" || len(state.calls) != 0 {
+		t.Fatalf("state = run:%#v calls:%#v", state.run, state.calls)
+	}
+}
+
 func TestAgentLoopPersistsReportedCacheUsage(t *testing.T) {
-	usage := model.Usage{InputTokens: 120, FreshInputTokens: 28, OutputTokens: 18, CachedInputTokens: 80, CacheWriteTokens: 12, CacheDetailsReported: true}
+	usage := model.Usage{InputTokens: 120, FreshInputTokens: 28, OutputTokens: 18, ReasoningTokens: 7, CachedInputTokens: 80, CacheWriteTokens: 12, CacheDetailsReported: true}
 	script := []fake.Step{{Event: model.Event{Type: model.EventUsage, Usage: &usage}}, {Event: model.Event{Type: model.EventDone, FinishReason: "stop"}}}
 	loop, state, _ := newLoopFixture(t, nil, script)
 	if outcome := loop.Run(context.Background(), "run"); outcome != OutcomeCompleted {
@@ -273,7 +386,7 @@ func TestAgentLoopPersistsReportedCacheUsage(t *testing.T) {
 	}
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	if state.run.InputTokens != 120 || state.run.FreshInputTokens != 28 || state.run.OutputTokens != 18 || state.run.CachedInputTokens != 80 || state.run.CacheWriteTokens != 12 || state.run.CacheReportedTurns != 1 || state.run.CacheReportedFreshInputTokens != 28 || state.run.CacheHitTurns != 1 {
+	if state.run.InputTokens != 120 || state.run.FreshInputTokens != 28 || state.run.OutputTokens != 18 || state.run.ReasoningTokens != 7 || !state.run.ReasoningObserved || state.run.CachedInputTokens != 80 || state.run.CacheWriteTokens != 12 || state.run.CacheReportedTurns != 1 || state.run.CacheReportedFreshInputTokens != 28 || state.run.CacheHitTurns != 1 {
 		t.Fatalf("cache usage run = %#v", state.run)
 	}
 }
@@ -290,6 +403,23 @@ func TestAgentLoopPassesRequestedAndResolvedReasoning(t *testing.T) {
 	requests := provider.Requests()
 	if len(requests) != 1 || requests[0].RequestedReasoningLevel != modelcap.ReasoningMax || requests[0].ResolvedReasoningLevel != modelcap.ReasoningMax {
 		t.Fatalf("reasoning request = %#v", requests)
+	}
+}
+
+func TestAgentLoopPersistsProviderNegotiatedReasoning(t *testing.T) {
+	script := []fake.Step{{Event: model.Event{Type: model.EventDone, FinishReason: "stop"}}}
+	loop, state, provider := newLoopFixture(t, nil, script)
+	state.mu.Lock()
+	state.run.RequestedReasoningLevel = modelcap.ReasoningMax
+	state.mu.Unlock()
+	loop.models = fakeResolver{model: resolutionModel{inner: provider, resolved: modelcap.ReasoningXHigh}}
+	if outcome := loop.Run(context.Background(), "run"); outcome != OutcomeCompleted {
+		t.Fatalf("outcome = %s", outcome)
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.run.ResolvedReasoningLevel != modelcap.ReasoningXHigh {
+		t.Fatalf("resolved reasoning = %q", state.run.ResolvedReasoningLevel)
 	}
 }
 
@@ -372,7 +502,8 @@ func TestAgentLoopResumeExecutesApprovedCallBeforeNextModelTurn(t *testing.T) {
 }
 
 func TestContextBuilderKeepsLatestMessageAndToolResults(t *testing.T) {
-	builder := NewContextBuilder(5)
+	baseTokens := len([]rune(fixedSystemRules))
+	builder := NewContextBuilder(baseTokens + 5 + len([]rune("fixture")) + len([]rune(`{}`)) + 20)
 	messages := []conversation.Message{
 		{ID: "old", Role: conversation.RoleUser, Parts: []conversation.MessagePart{{Type: "text", Text: "12345"}}},
 		{ID: "new", Role: conversation.RoleUser, Parts: []conversation.MessagePart{{Type: "text", Text: "67890"}}},
@@ -388,6 +519,30 @@ func TestContextBuilderKeepsLatestMessageAndToolResults(t *testing.T) {
 	}
 	if request.Messages[1].Content != "67890" || roles[len(roles)-1] != model.RoleTool {
 		t.Fatalf("request = %#v", request)
+	}
+}
+
+func TestContextBuilderAttachesToolResultToProviderTurnWithoutDuplicateToolMessage(t *testing.T) {
+	builder := NewContextBuilder(10_000)
+	calls := []tool.Call{{ProviderCallID: "call_1", ToolName: "fixture", Arguments: json.RawMessage(`{"query":"paper"}`), Result: &tool.Result{Status: tool.ResultSuccess, Text: "paper"}}}
+	turn := model.ProviderTurn{TurnIndex: 1, Protocol: modelcap.ProtocolAnthropic, Items: []model.ProviderItem{
+		{Ordinal: 0, Type: "thinking", Payload: json.RawMessage(`{"type":"thinking","thinking":"inspect","signature":"signed"}`)},
+		{Ordinal: 1, Type: "tool_use", CallID: "call_1", Payload: json.RawMessage(`{"type":"tool_use","id":"call_1","name":"fixture","input":{"query":"paper"}}`)},
+	}}
+	request, info, err := builder.BuildWithInfo(context.Background(), []conversation.Message{{ID: "user", Role: conversation.RoleUser, Parts: []conversation.MessagePart{{Type: "text", Text: "read"}}}}, "", nil, calls, turn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(request.ProviderTurns) != 1 || len(request.ProviderTurns[0].ToolResults) != 1 || request.ProviderTurns[0].ToolResults[0].ToolCallID != "call_1" {
+		t.Fatalf("provider turns = %#v", request.ProviderTurns)
+	}
+	for _, message := range request.Messages {
+		if message.Role == model.RoleTool || len(message.ToolCalls) > 0 {
+			t.Fatalf("provider tool state was duplicated in normalized messages: %#v", request.Messages)
+		}
+	}
+	if info.Compacted {
+		t.Fatalf("context unexpectedly compacted: %#v", info)
 	}
 }
 
@@ -414,7 +569,8 @@ func TestContextBuilderDefaultsTo200KCompactionWindow(t *testing.T) {
 }
 
 func TestContextBuilderBoundsCumulativeToolResults(t *testing.T) {
-	builder := NewContextBuilder(20)
+	baseTokens := len([]rune(fixedSystemRules))
+	builder := NewContextBuilder(baseTokens + len([]rune("fixture")) + len([]rune(`{}`)) + 20)
 	calls := []tool.Call{
 		{ProviderCallID: "old", ToolName: "fixture", Arguments: json.RawMessage(`{}`), Result: &tool.Result{Status: tool.ResultSuccess, Text: strings.Repeat("o", 100)}},
 		{ProviderCallID: "new", ToolName: "fixture", Arguments: json.RawMessage(`{}`), Result: &tool.Result{Status: tool.ResultSuccess, Text: "newest"}},
@@ -425,6 +581,39 @@ func TestContextBuilderBoundsCumulativeToolResults(t *testing.T) {
 	}
 	if len(request.Messages) != 3 || request.Messages[1].ToolCalls[0].ID != "new" || len([]rune(request.Messages[2].Content)) > 20 {
 		t.Fatalf("bounded tool context = %#v", request.Messages)
+	}
+}
+
+func TestContextBuilderCompactsOnlyWholeProviderTurns(t *testing.T) {
+	oldPayload := json.RawMessage(`{"type":"tool_use","id":"old","name":"fixture","input":{}}`)
+	newReasoning := json.RawMessage(`{"type":"thinking","thinking":"inspect","signature":"signed"}`)
+	newTool := json.RawMessage(`{"type":"tool_use","id":"new","name":"fixture","input":{}}`)
+	latest := "read"
+	baseTokens := len([]rune(fixedSystemRules))
+	newNativeTokens := len([]rune(string(newReasoning))) + len([]rune(string(newTool)))
+	builder := NewContextBuilder(baseTokens + len([]rune(latest)) + newNativeTokens + 20)
+	calls := []tool.Call{
+		{ProviderCallID: "old", ToolName: "fixture", Arguments: json.RawMessage(`{}`), Result: &tool.Result{Status: tool.ResultSuccess, Text: strings.Repeat("old", 30)}},
+		{ProviderCallID: "new", ToolName: "fixture", Arguments: json.RawMessage(`{}`), Result: &tool.Result{Status: tool.ResultSuccess, Text: strings.Repeat("new", 30)}},
+	}
+	turns := []model.ProviderTurn{
+		{TurnIndex: 1, Protocol: modelcap.ProtocolAnthropic, Items: []model.ProviderItem{{Ordinal: 0, Type: "tool_use", CallID: "old", Payload: oldPayload}}},
+		{TurnIndex: 2, Protocol: modelcap.ProtocolAnthropic, Items: []model.ProviderItem{{Ordinal: 0, Type: "thinking", Payload: newReasoning}, {Ordinal: 1, Type: "tool_use", CallID: "new", Payload: newTool}}},
+	}
+	request, info, err := builder.BuildWithInfo(context.Background(), []conversation.Message{{ID: "latest", Role: conversation.RoleUser, Parts: []conversation.MessagePart{{Type: "text", Text: latest}}}}, "", nil, calls, turns...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(request.ProviderTurns) != 1 || request.ProviderTurns[0].TurnIndex != 2 || len(request.ProviderTurns[0].Items) != 2 || len(request.ProviderTurns[0].ToolResults) != 1 || request.ProviderTurns[0].ToolResults[0].ToolCallID != "new" {
+		t.Fatalf("provider suffix = %#v", request.ProviderTurns)
+	}
+	for _, message := range request.Messages {
+		if message.Role == model.RoleTool || len(message.ToolCalls) > 0 {
+			t.Fatalf("dropped provider turn leaked into normalized messages: %#v", request.Messages)
+		}
+	}
+	if !info.Compacted || info.EstimatedTokens > builder.maxChars {
+		t.Fatalf("context info = %#v", info)
 	}
 }
 

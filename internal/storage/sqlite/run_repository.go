@@ -1,8 +1,10 @@
 package sqlite
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -12,11 +14,119 @@ import (
 	"github.com/wangh00/SciAide/internal/app/conversation"
 	"github.com/wangh00/SciAide/internal/app/modelprofile"
 	"github.com/wangh00/SciAide/internal/events"
+	"github.com/wangh00/SciAide/internal/model"
+	"github.com/wangh00/SciAide/internal/modelcap"
 )
 
 type RunRepository struct{ db *sql.DB }
 
 func NewRunRepository(db *sql.DB) *RunRepository { return &RunRepository{db: db} }
+
+const (
+	maxProviderItemsPerTurn  = 128
+	maxProviderItemBytes     = 8 * 1024 * 1024
+	maxProviderTurnBytes     = 16 * 1024 * 1024
+	maxProviderItemTypeBytes = 128
+)
+
+// SaveProviderTurn persists completed provider-native content items without
+// exposing them through the conversation repository. Existing items are
+// immutable: an idempotent retry may write the same value, but never replace a
+// signature or encrypted reasoning payload already used by a tool turn.
+func (r *RunRepository) SaveProviderTurn(ctx context.Context, runID string, turn model.ProviderTurn, at time.Time) error {
+	runID = strings.TrimSpace(runID)
+	if runID == "" || turn.TurnIndex <= 0 || !turn.Protocol.Valid() {
+		return fmt.Errorf("invalid provider turn identity")
+	}
+	if len(turn.Items) == 0 || len(turn.Items) > maxProviderItemsPerTurn {
+		return fmt.Errorf("invalid provider item count")
+	}
+	seen := make(map[int]struct{}, len(turn.Items))
+	totalBytes := 0
+	for _, item := range turn.Items {
+		if item.Ordinal < 0 || len(item.Type) == 0 || len(item.Type) > maxProviderItemTypeBytes || strings.TrimSpace(item.Type) != item.Type {
+			return fmt.Errorf("invalid provider item metadata")
+		}
+		if _, exists := seen[item.Ordinal]; exists {
+			return fmt.Errorf("duplicate provider item ordinal")
+		}
+		seen[item.Ordinal] = struct{}{}
+		if len(item.Payload) == 0 || len(item.Payload) > maxProviderItemBytes || !json.Valid(item.Payload) || item.Payload[0] != '{' {
+			return fmt.Errorf("invalid provider item payload")
+		}
+		totalBytes += len(item.Payload)
+		if totalBytes > maxProviderTurnBytes {
+			return fmt.Errorf("provider turn payload exceeds limit")
+		}
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin provider turn save: %w", err)
+	}
+	defer tx.Rollback()
+	var runProtocol modelcap.APIProtocol
+	if err := tx.QueryRowContext(ctx, `SELECT api_protocol FROM runs WHERE id=?`, runID).Scan(&runProtocol); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("run not found")
+		}
+		return fmt.Errorf("read run provider protocol: %w", err)
+	}
+	if runProtocol != turn.Protocol {
+		return fmt.Errorf("provider turn protocol does not match run")
+	}
+	createdAt := formatTime(at)
+	for _, item := range turn.Items {
+		result, err := tx.ExecContext(ctx, `INSERT INTO provider_turn_items(run_id,turn_index,api_protocol,item_ordinal,item_type,provider_call_id,payload_json,created_at) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(run_id,turn_index,item_ordinal) DO NOTHING`,
+			runID, turn.TurnIndex, turn.Protocol, item.Ordinal, item.Type, item.CallID, string(item.Payload), createdAt)
+		if err != nil {
+			return fmt.Errorf("insert provider item: %w", err)
+		}
+		if affected, _ := result.RowsAffected(); affected == 1 {
+			continue
+		}
+		var protocol modelcap.APIProtocol
+		var itemType, callID, payload string
+		if err := tx.QueryRowContext(ctx, `SELECT api_protocol,item_type,provider_call_id,payload_json FROM provider_turn_items WHERE run_id=? AND turn_index=? AND item_ordinal=?`, runID, turn.TurnIndex, item.Ordinal).Scan(&protocol, &itemType, &callID, &payload); err != nil {
+			return fmt.Errorf("read existing provider item: %w", err)
+		}
+		if protocol != turn.Protocol || itemType != item.Type || callID != item.CallID || !bytes.Equal([]byte(payload), item.Payload) {
+			return fmt.Errorf("provider item is immutable and conflicts with persisted state")
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit provider turn: %w", err)
+	}
+	return nil
+}
+
+func (r *RunRepository) ListProviderTurns(ctx context.Context, runID string) ([]model.ProviderTurn, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT turn_index,api_protocol,item_ordinal,item_type,provider_call_id,payload_json FROM provider_turn_items WHERE run_id=? ORDER BY turn_index,item_ordinal`, strings.TrimSpace(runID))
+	if err != nil {
+		return nil, fmt.Errorf("list provider turns: %w", err)
+	}
+	defer rows.Close()
+	turns := make([]model.ProviderTurn, 0)
+	for rows.Next() {
+		var turnIndex, ordinal int
+		var protocol modelcap.APIProtocol
+		var itemType, callID, payload string
+		if err := rows.Scan(&turnIndex, &protocol, &ordinal, &itemType, &callID, &payload); err != nil {
+			return nil, err
+		}
+		if len(turns) == 0 || turns[len(turns)-1].TurnIndex != turnIndex {
+			turns = append(turns, model.ProviderTurn{TurnIndex: turnIndex, Protocol: protocol, Items: []model.ProviderItem{}})
+		}
+		turn := &turns[len(turns)-1]
+		if turn.Protocol != protocol {
+			return nil, fmt.Errorf("provider turn contains mixed protocols")
+		}
+		turn.Items = append(turn.Items, model.ProviderItem{Ordinal: ordinal, Type: itemType, CallID: callID, Payload: json.RawMessage(payload)})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list provider turns: %w", err)
+	}
+	return turns, nil
+}
 
 func (r *RunRepository) CreateWithMessages(ctx context.Context, value chat.Run, userMessage, assistantMessage conversation.Message) error {
 	if !value.PermissionMode.Valid() {
@@ -42,8 +152,8 @@ func (r *RunRepository) CreateWithMessages(ctx context.Context, value chat.Run, 
 	if err := insertMessage(ctx, tx, assistantMessage); err != nil {
 		return err
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO runs(id, conversation_id, user_message_id, assistant_message_id, model_profile_id, model_id, api_protocol, requested_reasoning_level, resolved_reasoning_level, context_window_tokens, context_compacted, permission_mode, status, error_code, error_message, input_tokens, fresh_input_tokens, output_tokens, cached_input_tokens, cache_write_tokens, cache_reported_turns, cache_reported_fresh_input_tokens, cache_hit_turns, model_turns, finish_reason, created_at, started_at, completed_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		value.ID, value.ConversationID, value.UserMessageID, nullableString(value.AssistantMessageID), value.ModelProfileID, value.ModelID, value.APIProtocol, value.RequestedReasoningLevel, value.ResolvedReasoningLevel, value.ContextWindowTokens, value.ContextCompacted, value.PermissionMode, value.Status, value.ErrorCode, value.ErrorMessage, value.InputTokens, value.FreshInputTokens, value.OutputTokens, value.CachedInputTokens, value.CacheWriteTokens, value.CacheReportedTurns, value.CacheReportedFreshInputTokens, value.CacheHitTurns, value.ModelTurns, value.FinishReason, formatTime(value.CreatedAt), nullableTime(value.StartedAt), nullableTime(value.CompletedAt), formatTime(value.UpdatedAt))
+	_, err = tx.ExecContext(ctx, `INSERT INTO runs(id, conversation_id, user_message_id, assistant_message_id, model_profile_id, model_id, api_protocol, requested_reasoning_level, resolved_reasoning_level, context_window_tokens, context_compacted, permission_mode, status, error_code, error_message, input_tokens, fresh_input_tokens, output_tokens, reasoning_tokens, reasoning_observed, reasoning_signature_observed, cached_input_tokens, cache_write_tokens, cache_reported_turns, cache_reported_fresh_input_tokens, cache_hit_turns, model_turns, finish_reason, created_at, started_at, completed_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		value.ID, value.ConversationID, value.UserMessageID, nullableString(value.AssistantMessageID), value.ModelProfileID, value.ModelID, value.APIProtocol, value.RequestedReasoningLevel, value.ResolvedReasoningLevel, value.ContextWindowTokens, value.ContextCompacted, value.PermissionMode, value.Status, value.ErrorCode, value.ErrorMessage, value.InputTokens, value.FreshInputTokens, value.OutputTokens, value.ReasoningTokens, value.ReasoningObserved, value.ReasoningSignatureObserved, value.CachedInputTokens, value.CacheWriteTokens, value.CacheReportedTurns, value.CacheReportedFreshInputTokens, value.CacheHitTurns, value.ModelTurns, value.FinishReason, formatTime(value.CreatedAt), nullableTime(value.StartedAt), nullableTime(value.CompletedAt), formatTime(value.UpdatedAt))
 	if err != nil {
 		return fmt.Errorf("insert run: %w", err)
 	}
@@ -101,8 +211,8 @@ func (r *RunRepository) Update(ctx context.Context, value chat.Run) error {
 	if !value.APIProtocol.Valid() {
 		value.APIProtocol = modelprofile.ProtocolOpenAIChat
 	}
-	result, err := r.db.ExecContext(ctx, `UPDATE runs SET assistant_message_id=?, api_protocol=?, resolved_reasoning_level=?, context_compacted=?, status=?, error_code=?, error_message=?, input_tokens=?, fresh_input_tokens=?, output_tokens=?, cached_input_tokens=?, cache_write_tokens=?, cache_reported_turns=?, cache_reported_fresh_input_tokens=?, cache_hit_turns=?, finish_reason=?, started_at=?, completed_at=?, updated_at=? WHERE id=? AND status NOT IN ('completed','failed','cancelled','interrupted')`,
-		nullableString(value.AssistantMessageID), value.APIProtocol, value.ResolvedReasoningLevel, value.ContextCompacted, value.Status, value.ErrorCode, value.ErrorMessage, value.InputTokens, value.FreshInputTokens, value.OutputTokens, value.CachedInputTokens, value.CacheWriteTokens, value.CacheReportedTurns, value.CacheReportedFreshInputTokens, value.CacheHitTurns, value.FinishReason, nullableTime(value.StartedAt), nullableTime(value.CompletedAt), formatTime(value.UpdatedAt), value.ID)
+	result, err := r.db.ExecContext(ctx, `UPDATE runs SET assistant_message_id=?, api_protocol=?, resolved_reasoning_level=?, context_compacted=?, status=?, error_code=?, error_message=?, input_tokens=?, fresh_input_tokens=?, output_tokens=?, reasoning_tokens=?, reasoning_observed=?, reasoning_signature_observed=?, cached_input_tokens=?, cache_write_tokens=?, cache_reported_turns=?, cache_reported_fresh_input_tokens=?, cache_hit_turns=?, finish_reason=?, started_at=?, completed_at=?, updated_at=? WHERE id=? AND status NOT IN ('completed','failed','cancelled','interrupted')`,
+		nullableString(value.AssistantMessageID), value.APIProtocol, value.ResolvedReasoningLevel, value.ContextCompacted, value.Status, value.ErrorCode, value.ErrorMessage, value.InputTokens, value.FreshInputTokens, value.OutputTokens, value.ReasoningTokens, value.ReasoningObserved, value.ReasoningSignatureObserved, value.CachedInputTokens, value.CacheWriteTokens, value.CacheReportedTurns, value.CacheReportedFreshInputTokens, value.CacheHitTurns, value.FinishReason, nullableTime(value.StartedAt), nullableTime(value.CompletedAt), formatTime(value.UpdatedAt), value.ID)
 	if err != nil {
 		return fmt.Errorf("update run: %w", err)
 	}
@@ -323,6 +433,7 @@ func (r *RunRepository) UsageDashboard(ctx context.Context, query chat.UsageQuer
 
 	summaryQuery := `SELECT COUNT(*), COALESCE(SUM(r.model_turns),0),
 		COALESCE(SUM(r.fresh_input_tokens),0), COALESCE(SUM(r.output_tokens),0),
+		COALESCE(SUM(r.reasoning_tokens),0),
 		COALESCE(SUM(r.cached_input_tokens),0), COALESCE(SUM(r.cache_write_tokens),0),
 		COALESCE(SUM(r.cache_reported_turns),0), COALESCE(SUM(r.cache_hit_turns),0),
 		COALESCE(SUM(r.cache_reported_fresh_input_tokens),0)
@@ -333,7 +444,7 @@ func (r *RunRepository) UsageDashboard(ctx context.Context, query chat.UsageQuer
 
 	dailyRows, err := r.db.QueryContext(ctx, `SELECT substr(datetime(r.created_at, 'localtime'),1,10), COUNT(*),
 		COALESCE(SUM(r.model_turns),0), COALESCE(SUM(r.fresh_input_tokens),0),
-		COALESCE(SUM(r.output_tokens),0), COALESCE(SUM(r.cached_input_tokens),0),
+		COALESCE(SUM(r.output_tokens),0), COALESCE(SUM(r.reasoning_tokens),0), COALESCE(SUM(r.cached_input_tokens),0),
 		COALESCE(SUM(r.cache_write_tokens),0), COALESCE(SUM(r.cache_reported_turns),0),
 		COALESCE(SUM(r.cache_hit_turns),0), COALESCE(SUM(r.cache_reported_fresh_input_tokens),0)
 		FROM runs r`+where+` GROUP BY 1 ORDER BY 1`, args...)
@@ -345,7 +456,7 @@ func (r *RunRepository) UsageDashboard(ctx context.Context, query chat.UsageQuer
 		var item chat.DailyUsage
 		var reportedFresh int
 		if err := dailyRows.Scan(&item.Date, &item.RunCount, &item.ModelTurns, &item.FreshInputTokens,
-			&item.OutputTokens, &item.CacheReadTokens, &item.CacheCreationTokens,
+			&item.OutputTokens, &item.ReasoningTokens, &item.CacheReadTokens, &item.CacheCreationTokens,
 			&item.CacheReportedTurns, &item.CacheHitTurns, &reportedFresh); err != nil {
 			return result, err
 		}
@@ -358,7 +469,7 @@ func (r *RunRepository) UsageDashboard(ctx context.Context, query chat.UsageQuer
 
 	modelRows, err := r.db.QueryContext(ctx, `SELECT r.model_profile_id, COALESCE(p.name,''), r.model_id,
 		COUNT(*), COALESCE(SUM(r.model_turns),0), COALESCE(SUM(r.fresh_input_tokens),0),
-		COALESCE(SUM(r.output_tokens),0), COALESCE(SUM(r.cached_input_tokens),0),
+		COALESCE(SUM(r.output_tokens),0), COALESCE(SUM(r.reasoning_tokens),0), COALESCE(SUM(r.cached_input_tokens),0),
 		COALESCE(SUM(r.cache_write_tokens),0), COALESCE(SUM(r.cache_reported_turns),0),
 		COALESCE(SUM(r.cache_hit_turns),0), COALESCE(SUM(r.cache_reported_fresh_input_tokens),0)
 		FROM runs r LEFT JOIN model_profiles p ON p.id=r.model_profile_id`+where+`
@@ -373,7 +484,7 @@ func (r *RunRepository) UsageDashboard(ctx context.Context, query chat.UsageQuer
 		var reportedFresh int
 		if err := modelRows.Scan(&item.ModelProfileID, &item.ProfileName, &item.ModelID,
 			&item.RunCount, &item.ModelTurns, &item.FreshInputTokens, &item.OutputTokens,
-			&item.CacheReadTokens, &item.CacheCreationTokens, &item.CacheReportedTurns,
+			&item.ReasoningTokens, &item.CacheReadTokens, &item.CacheCreationTokens, &item.CacheReportedTurns,
 			&item.CacheHitTurns, &reportedFresh); err != nil {
 			return result, err
 		}
@@ -409,7 +520,7 @@ func usageWhere(query chat.UsageQuery, alias string) (string, []any) {
 func scanUsageSummary(row rowScanner, target *chat.UsageSummary) error {
 	var reportedFresh int
 	if err := row.Scan(&target.RunCount, &target.ModelTurns, &target.FreshInputTokens,
-		&target.OutputTokens, &target.CacheReadTokens, &target.CacheCreationTokens,
+		&target.OutputTokens, &target.ReasoningTokens, &target.CacheReadTokens, &target.CacheCreationTokens,
 		&target.CacheReportedTurns, &target.CacheHitTurns, &reportedFresh); err != nil {
 		return err
 	}
@@ -464,7 +575,7 @@ func scanRun(row rowScanner) (chat.Run, error) {
 	var createdAt, updatedAt string
 	var startedAt, completedAt sql.NullString
 	if err := row.Scan(&value.ID, &value.ConversationID, &value.UserMessageID, &value.AssistantMessageID, &value.ModelProfileID, &value.ModelID, &value.APIProtocol, &value.RequestedReasoningLevel, &value.ResolvedReasoningLevel, &value.ContextWindowTokens, &value.ContextCompacted, &value.PermissionMode, &value.Status,
-		&value.ErrorCode, &value.ErrorMessage, &value.InputTokens, &value.FreshInputTokens, &value.OutputTokens, &value.CachedInputTokens, &value.CacheWriteTokens, &value.CacheReportedTurns, &value.CacheReportedFreshInputTokens, &value.CacheHitTurns, &value.ModelTurns, &value.FinishReason, &createdAt, &startedAt, &completedAt, &updatedAt); err != nil {
+		&value.ErrorCode, &value.ErrorMessage, &value.InputTokens, &value.FreshInputTokens, &value.OutputTokens, &value.ReasoningTokens, &value.ReasoningObserved, &value.ReasoningSignatureObserved, &value.CachedInputTokens, &value.CacheWriteTokens, &value.CacheReportedTurns, &value.CacheReportedFreshInputTokens, &value.CacheHitTurns, &value.ModelTurns, &value.FinishReason, &createdAt, &startedAt, &completedAt, &updatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return chat.Run{}, fmt.Errorf("run not found: %w", sql.ErrNoRows)
 		}
@@ -496,7 +607,7 @@ func scanRun(row rowScanner) (chat.Run, error) {
 	return value, nil
 }
 
-const runSelect = `SELECT id, conversation_id, user_message_id, COALESCE(assistant_message_id, ''), model_profile_id, model_id, api_protocol, requested_reasoning_level, resolved_reasoning_level, context_window_tokens, context_compacted, permission_mode, status, error_code, error_message, input_tokens, fresh_input_tokens, output_tokens, cached_input_tokens, cache_write_tokens, cache_reported_turns, cache_reported_fresh_input_tokens, cache_hit_turns, model_turns, finish_reason, created_at, started_at, completed_at, updated_at FROM runs`
+const runSelect = `SELECT id, conversation_id, user_message_id, COALESCE(assistant_message_id, ''), model_profile_id, model_id, api_protocol, requested_reasoning_level, resolved_reasoning_level, context_window_tokens, context_compacted, permission_mode, status, error_code, error_message, input_tokens, fresh_input_tokens, output_tokens, reasoning_tokens, reasoning_observed, reasoning_signature_observed, cached_input_tokens, cache_write_tokens, cache_reported_turns, cache_reported_fresh_input_tokens, cache_hit_turns, model_turns, finish_reason, created_at, started_at, completed_at, updated_at FROM runs`
 
 func nullableString(value string) any {
 	if value == "" {

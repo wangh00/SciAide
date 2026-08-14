@@ -151,3 +151,78 @@ func TestProtocolMigrationDefaultsLegacyRows(t *testing.T) {
 		t.Fatal("protocol check accepted invalid profile value")
 	}
 }
+
+func TestReasoningObservationMigrationUpgradesV13Database(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "reasoning-observation-upgrade.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	if _, err := db.ExecContext(ctx, `CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY NOT NULL, name TEXT NOT NULL, checksum TEXT NOT NULL, applied_at TEXT NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	migrations, err := loadMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range migrations {
+		if item.version > 13 {
+			break
+		}
+		if _, err := db.ExecContext(ctx, item.sql); err != nil {
+			t.Fatalf("apply migration %d: %v", item.version, err)
+		}
+		if _, err := db.ExecContext(ctx, `INSERT INTO schema_migrations(version,name,checksum,applied_at) VALUES (?,?,?,'2026-01-01T00:00:00Z')`, item.version, item.name, item.checksum); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO model_profiles(id,name,provider_type,api_protocol,base_url,model_id,secret_ref,timeout_seconds,custom_headers_json,enabled,is_default,created_at,updated_at) VALUES ('profile','preserved','openai_compatible','openai_responses','https://example.test/v1','reasoning-model','secret',60,'{}',1,1,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO model_profile_models(profile_id,model_id,owned_by,enabled,is_default,reasoning_levels_json,reasoning_capability_source,created_at,updated_at) VALUES ('profile','reasoning-model','fixture',1,1,'["low","high"]','manual','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("Open() v13 database: %v", err)
+	}
+	defer store.Close()
+
+	profile, err := NewModelProfileRepository(store.DB()).Get(ctx, "profile")
+	if err != nil {
+		t.Fatalf("read migrated profile: %v", err)
+	}
+	if profile.Name != "preserved" || profile.APIProtocol != "openai_responses" || profile.ModelID != "reasoning-model" {
+		t.Fatalf("profile was not preserved: %#v", profile)
+	}
+	if len(profile.Models) != 1 {
+		t.Fatalf("migrated models = %d, want 1", len(profile.Models))
+	}
+	model := profile.Models[0]
+	if len(model.ReasoningLevels) != 2 || model.ReasoningCapabilitySource != "manual" {
+		t.Fatalf("existing reasoning capability was not preserved: %#v", model)
+	}
+	if len(model.ReasoningVerifiedLevels) != 0 || len(model.ReasoningRejectedLevels) != 0 || model.ReasoningControlUnsupported || model.ReasoningLastRequestedLevel != "" || model.ReasoningLastResolvedLevel != "" || model.ReasoningWireMode != "" {
+		t.Fatalf("v14 defaults are invalid: %#v", model)
+	}
+	var applied int
+	if err := store.DB().QueryRowContext(ctx, `SELECT count(*) FROM schema_migrations WHERE version=14`).Scan(&applied); err != nil || applied != 1 {
+		t.Fatalf("migration 14 applied = %d, %v", applied, err)
+	}
+	if err := store.DB().QueryRowContext(ctx, `SELECT count(*) FROM schema_migrations WHERE version=15`).Scan(&applied); err != nil || applied != 1 {
+		t.Fatalf("migration 15 applied = %d, %v", applied, err)
+	}
+	if err := store.DB().QueryRowContext(ctx, `SELECT count(*) FROM schema_migrations WHERE version=16`).Scan(&applied); err != nil || applied != 1 {
+		t.Fatalf("migration 16 applied = %d, %v", applied, err)
+	}
+	var tableName string
+	if err := store.DB().QueryRowContext(ctx, `SELECT name FROM sqlite_master WHERE type='table' AND name='provider_turn_items'`).Scan(&tableName); err != nil || tableName != "provider_turn_items" {
+		t.Fatalf("provider_turn_items table = %q, %v", tableName, err)
+	}
+}

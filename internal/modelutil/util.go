@@ -179,27 +179,70 @@ func ReadErrorBody(body io.Reader) []byte {
 	return value
 }
 
-// ReasoningControlRejected reports whether a client error is specifically
-// about an optional reasoning/thinking control. OpenAI-compatible gateways
-// often accept a reasoning model but reject an unknown effort field. In that
-// case adapters may safely retry once without the optional control and let the
-// model use its native default. Other 4xx errors (invalid tools, auth, model,
-// context, and so on) must remain visible to the user.
-func ReasoningControlRejected(status int, body []byte) bool {
+type ReasoningRejectionKind int
+
+const (
+	ReasoningRejectionNone ReasoningRejectionKind = iota
+	// ReasoningRejectionValue means the control exists but this effort value
+	// is invalid. Adapters may retry the same request at the next lower tier.
+	ReasoningRejectionValue
+	// ReasoningRejectionControl means the field or thinking mode itself is
+	// unsupported. Adapters may retry once using provider-native defaults.
+	ReasoningRejectionControl
+)
+
+// ClassifyReasoningRejection only recognizes request-shape failures that are
+// safe to retry before a stream has started. Authentication, tools, context,
+// rate limits and transport errors are deliberately excluded.
+func ClassifyReasoningRejection(status int, body []byte) ReasoningRejectionKind {
 	if status != http.StatusBadRequest && status != http.StatusUnprocessableEntity {
-		return false
+		return ReasoningRejectionNone
 	}
 	detail := strings.ToLower(ProviderErrorMessage(body))
 	if detail == "" {
 		detail = strings.ToLower(string(body))
 	}
-	controls := []string{"reasoning_effort", "reasoning effort", "reasoning.effort", "thinking", "budget_tokens", "budgettokens"}
+	controls := []string{"reasoning_effort", "reasoning effort", "reasoning.effort", "output_config", "effort", "thinking", "budget_tokens", "budgettokens"}
+	mentionsControl := false
 	for _, control := range controls {
 		if strings.Contains(detail, control) {
+			mentionsControl = true
+			break
+		}
+	}
+	if !mentionsControl {
+		return ReasoningRejectionNone
+	}
+	for _, marker := range []string{"invalid value", "unsupported value", "not a valid", "must be one of", "supported values", "expected one of", "allowed values"} {
+		if strings.Contains(detail, marker) {
+			return ReasoningRejectionValue
+		}
+	}
+	if mentionsReasoningLevel(detail) && (strings.Contains(detail, "not supported") || strings.Contains(detail, "unsupported")) {
+		return ReasoningRejectionValue
+	}
+	for _, marker := range []string{"unknown parameter", "unsupported parameter", "unrecognized parameter", "extra inputs", "not supported", "is unsupported", "does not support", "unknown field", "unexpected field"} {
+		if strings.Contains(detail, marker) {
+			return ReasoningRejectionControl
+		}
+	}
+	return ReasoningRejectionNone
+}
+
+func mentionsReasoningLevel(detail string) bool {
+	for _, field := range strings.FieldsFunc(detail, func(r rune) bool {
+		return (r < 'a' || r > 'z') && (r < '0' || r > '9')
+	}) {
+		switch field {
+		case "low", "medium", "high", "xhigh", "max":
 			return true
 		}
 	}
 	return false
+}
+
+func ReasoningControlRejected(status int, body []byte) bool {
+	return ClassifyReasoningRejection(status, body) != ReasoningRejectionNone
 }
 
 type SliceStream struct {

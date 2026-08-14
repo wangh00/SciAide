@@ -25,6 +25,19 @@ func TestResolveReasoningLevelDisablesUnsupportedModels(t *testing.T) {
 	}
 }
 
+func TestReasoningAttemptsDescendOneTierAtATime(t *testing.T) {
+	want := []ReasoningLevel{ReasoningMax, ReasoningXHigh, ReasoningHigh, ReasoningMedium, ReasoningLow}
+	got := ReasoningAttempts(ReasoningMax)
+	if len(got) != len(want) {
+		t.Fatalf("attempts = %#v", got)
+	}
+	for index := range want {
+		if got[index] != want[index] {
+			t.Fatalf("attempts = %#v", got)
+		}
+	}
+}
+
 func TestProtocolReasoningInferenceMirrorsProviderVariants(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -36,7 +49,7 @@ func TestProtocolReasoningInferenceMirrorsProviderVariants(t *testing.T) {
 		{name: "Claude thinking budget maps five tiers", protocol: ProtocolAnthropic, model: "claude-sonnet-4-5", want: orderedReasoningLevels},
 		{name: "fixed reasoning uses provider default", protocol: ProtocolOpenAIChat, model: "deepseek-reasoner", want: nil},
 		{name: "DeepSeek v4 supports max", protocol: ProtocolOpenAIChat, model: "deepseek-v4-flash", want: []ReasoningLevel{ReasoningLow, ReasoningMedium, ReasoningHigh, ReasoningMax}},
-		{name: "custom compatible is optimistic", protocol: ProtocolOpenAIChat, model: "lab-model", want: []ReasoningLevel{ReasoningLow, ReasoningMedium, ReasoningHigh}},
+		{name: "custom compatible optimistically tries full ladder", protocol: ProtocolOpenAIChat, model: "lab-model", want: orderedReasoningLevels},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

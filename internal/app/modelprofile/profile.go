@@ -48,12 +48,18 @@ type Profile struct {
 }
 
 type ProfileModel struct {
-	ID                        string                    `json:"id"`
-	OwnedBy                   string                    `json:"ownedBy,omitempty"`
-	Enabled                   bool                      `json:"enabled"`
-	IsDefault                 bool                      `json:"isDefault"`
-	ReasoningLevels           []modelcap.ReasoningLevel `json:"reasoningLevels"`
-	ReasoningCapabilitySource string                    `json:"reasoningCapabilitySource"`
+	ID                          string                    `json:"id"`
+	OwnedBy                     string                    `json:"ownedBy,omitempty"`
+	Enabled                     bool                      `json:"enabled"`
+	IsDefault                   bool                      `json:"isDefault"`
+	ReasoningLevels             []modelcap.ReasoningLevel `json:"reasoningLevels"`
+	ReasoningCapabilitySource   string                    `json:"reasoningCapabilitySource"`
+	ReasoningVerifiedLevels     []modelcap.ReasoningLevel `json:"reasoningVerifiedLevels"`
+	ReasoningRejectedLevels     []modelcap.ReasoningLevel `json:"reasoningRejectedLevels"`
+	ReasoningControlUnsupported bool                      `json:"reasoningControlUnsupported"`
+	ReasoningLastRequestedLevel modelcap.ReasoningLevel   `json:"reasoningLastRequestedLevel,omitempty"`
+	ReasoningLastResolvedLevel  modelcap.ReasoningLevel   `json:"reasoningLastResolvedLevel,omitempty"`
+	ReasoningWireMode           string                    `json:"reasoningWireMode,omitempty"`
 }
 
 type SaveCommand struct {
@@ -100,8 +106,10 @@ type DiscoveryCommand struct {
 }
 
 type AvailableModel struct {
-	ID      string `json:"id"`
-	OwnedBy string `json:"ownedBy,omitempty"`
+	ID                        string                    `json:"id"`
+	OwnedBy                   string                    `json:"ownedBy,omitempty"`
+	ReasoningLevels           []modelcap.ReasoningLevel `json:"reasoningLevels,omitempty"`
+	ReasoningCapabilitySource string                    `json:"reasoningCapabilitySource,omitempty"`
 }
 
 type Service struct {
@@ -142,6 +150,11 @@ func (s *Service) Save(ctx context.Context, cmd SaveCommand) (Profile, error) {
 	value.APIProtocol = normalizedProtocol(cmd.APIProtocol)
 	value.BaseURL = strings.TrimRight(strings.TrimSpace(cmd.BaseURL), "/")
 	value.Models, value.ModelID = normalizeModels(cmd.Models, cmd.ModelID, value.APIProtocol)
+	if existing.ID != "" && existing.APIProtocol == value.APIProtocol && existing.BaseURL == value.BaseURL {
+		value.Models = preserveReasoningObservations(value.Models, existing.Models)
+	} else {
+		value.Models = resetReasoningObservations(value.Models)
+	}
 	value.TimeoutSeconds = cmd.TimeoutSeconds
 	value.Temperature = cmd.Temperature
 	value.MaxOutputTokens = cmd.MaxOutputTokens
@@ -165,6 +178,20 @@ func (s *Service) Save(ctx context.Context, cmd SaveCommand) (Profile, error) {
 		return Profile{}, fmt.Errorf("save model profile: %w", err)
 	}
 	return s.decorate(ctx, value)
+}
+
+// RecordReasoningResult is intentionally best-effort at the adapter boundary:
+// a local capability-cache write must never turn an accepted model response
+// into a failed chat request. Repositories that support runtime observations
+// implement the narrow optional interface below.
+func (s *Service) RecordReasoningResult(ctx context.Context, profileID, modelID string, result modelcap.ReasoningResult) error {
+	repository, ok := s.repository.(interface {
+		RecordReasoningResult(context.Context, string, string, modelcap.ReasoningResult) error
+	})
+	if !ok {
+		return nil
+	}
+	return repository.RecordReasoningResult(ctx, strings.TrimSpace(profileID), strings.TrimSpace(modelID), result)
 }
 
 func (s *Service) List(ctx context.Context) ([]Profile, error) {
@@ -326,12 +353,19 @@ func normalizeModels(input []ProfileModel, legacyDefault string, protocol APIPro
 	for _, item := range input {
 		item.ID = strings.TrimSpace(item.ID)
 		item.OwnedBy = strings.TrimSpace(item.OwnedBy)
-		item.ReasoningLevels = modelcap.InferredReasoningLevelsForProtocol(protocol, item.ID)
-		if len(item.ReasoningLevels) == 0 {
-			item.ReasoningCapabilitySource = "provider_default"
+		item.ReasoningCapabilitySource = strings.TrimSpace(item.ReasoningCapabilitySource)
+		if item.ReasoningCapabilitySource != "manual" && item.ReasoningCapabilitySource != "provider" && item.ReasoningCapabilitySource != "builtin" {
+			item.ReasoningLevels = modelcap.InferredReasoningLevelsForProtocol(protocol, item.ID)
+			if len(item.ReasoningLevels) == 0 {
+				item.ReasoningCapabilitySource = "unsupported"
+			} else {
+				item.ReasoningCapabilitySource = "inferred"
+			}
 		} else {
-			item.ReasoningCapabilitySource = "automatic"
+			item.ReasoningLevels = modelcap.NormalizeReasoningLevels(item.ReasoningLevels)
 		}
+		item.ReasoningVerifiedLevels = modelcap.NormalizeReasoningLevels(item.ReasoningVerifiedLevels)
+		item.ReasoningRejectedLevels = modelcap.NormalizeReasoningLevels(item.ReasoningRejectedLevels)
 		if item.ID == "" {
 			continue
 		}
@@ -376,6 +410,38 @@ func normalizeModels(input []ProfileModel, legacyDefault string, protocol APIPro
 		models[index].IsDefault = models[index].ID == defaultID
 	}
 	return models, defaultID
+}
+
+func preserveReasoningObservations(models, existing []ProfileModel) []ProfileModel {
+	byID := make(map[string]ProfileModel, len(existing))
+	for _, item := range existing {
+		byID[item.ID] = item
+	}
+	for index := range models {
+		previous, ok := byID[models[index].ID]
+		if !ok {
+			continue
+		}
+		models[index].ReasoningVerifiedLevels = append([]modelcap.ReasoningLevel(nil), previous.ReasoningVerifiedLevels...)
+		models[index].ReasoningRejectedLevels = append([]modelcap.ReasoningLevel(nil), previous.ReasoningRejectedLevels...)
+		models[index].ReasoningControlUnsupported = previous.ReasoningControlUnsupported
+		models[index].ReasoningLastRequestedLevel = previous.ReasoningLastRequestedLevel
+		models[index].ReasoningLastResolvedLevel = previous.ReasoningLastResolvedLevel
+		models[index].ReasoningWireMode = previous.ReasoningWireMode
+	}
+	return models
+}
+
+func resetReasoningObservations(models []ProfileModel) []ProfileModel {
+	for index := range models {
+		models[index].ReasoningVerifiedLevels = nil
+		models[index].ReasoningRejectedLevels = nil
+		models[index].ReasoningControlUnsupported = false
+		models[index].ReasoningLastRequestedLevel = ""
+		models[index].ReasoningLastResolvedLevel = ""
+		models[index].ReasoningWireMode = ""
+	}
+	return models
 }
 
 func validateBaseURL(value string) error {

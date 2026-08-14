@@ -20,6 +20,7 @@ import (
 	"github.com/wangh00/SciAide/internal/app/modelprofile"
 	"github.com/wangh00/SciAide/internal/apperr"
 	"github.com/wangh00/SciAide/internal/model"
+	"github.com/wangh00/SciAide/internal/modelcap"
 	"github.com/wangh00/SciAide/internal/modelutil"
 )
 
@@ -34,17 +35,22 @@ const (
 )
 
 type Client struct {
-	profile modelprofile.Profile
-	secret  []byte
-	http    *http.Client
+	profile  modelprofile.Profile
+	secret   []byte
+	http     *http.Client
+	recorder modelcap.ReasoningRecorder
 }
 
-func New(profile modelprofile.Profile, secret []byte) *Client {
+func New(profile modelprofile.Profile, secret []byte, recorders ...modelcap.ReasoningRecorder) *Client {
 	timeout := time.Duration(profile.TimeoutSeconds) * time.Second
 	if timeout <= 0 {
 		timeout = 60 * time.Second
 	}
-	return &Client{profile: profile, secret: append([]byte(nil), secret...), http: &http.Client{Timeout: timeout}}
+	var recorder modelcap.ReasoningRecorder
+	if len(recorders) > 0 {
+		recorder = recorders[0]
+	}
+	return &Client{profile: profile, secret: append([]byte(nil), secret...), http: &http.Client{Timeout: timeout}, recorder: recorder}
 }
 
 func NewWithHTTPClient(profile modelprofile.Profile, secret []byte, client *http.Client) *Client {
@@ -99,7 +105,15 @@ func (c *Client) Discover(ctx context.Context, profile modelprofile.Profile, sec
 			continue
 		}
 		seen[identifier] = struct{}{}
-		models = append(models, modelprofile.AvailableModel{ID: identifier, OwnedBy: strings.TrimSpace(item.OwnedBy)})
+		reasoningLevels := item.SupportedReasoningEfforts.levels()
+		if len(reasoningLevels) == 0 {
+			reasoningLevels = item.SupportedReasoningLevels.levels()
+		}
+		source := ""
+		if len(reasoningLevels) > 0 {
+			source = "provider"
+		}
+		models = append(models, modelprofile.AvailableModel{ID: identifier, OwnedBy: strings.TrimSpace(item.OwnedBy), ReasoningLevels: reasoningLevels, ReasoningCapabilitySource: source})
 	}
 	slices.SortFunc(models, func(a, b modelprofile.AvailableModel) int {
 		return strings.Compare(strings.ToLower(a.ID), strings.ToLower(b.ID))
@@ -110,7 +124,7 @@ func (c *Client) Discover(ctx context.Context, profile modelprofile.Profile, sec
 func (c *Client) openWithRetry(ctx context.Context, request model.ChatRequest) (model.Stream, error) {
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
-		stream, retryAfter, err := c.open(ctx, request)
+		stream, retryAfter, err := c.negotiateOpen(ctx, request)
 		if err == nil {
 			return stream, nil
 		}
@@ -132,6 +146,67 @@ func (c *Client) openWithRetry(ctx context.Context, request model.ChatRequest) (
 		}
 	}
 	return nil, lastErr
+}
+
+type reasoningRejectedError struct {
+	kind modelutil.ReasoningRejectionKind
+	err  error
+}
+
+func (e *reasoningRejectedError) Error() string { return e.err.Error() }
+func (e *reasoningRejectedError) Unwrap() error { return e.err }
+
+func (c *Client) negotiateOpen(ctx context.Context, request model.ChatRequest) (model.Stream, time.Duration, error) {
+	requested := request.RequestedReasoningLevel
+	if !requested.Valid() {
+		requested = request.ResolvedReasoningLevel
+	}
+	attempts := modelcap.ReasoningAttempts(request.ResolvedReasoningLevel)
+	if len(attempts) == 0 {
+		attempts = []modelcap.ReasoningLevel{""}
+	}
+	rejected := make([]modelcap.ReasoningLevel, 0, len(attempts))
+	controlUnsupported := false
+	for index := 0; index <= len(attempts); index++ {
+		level := modelcap.ReasoningLevel("")
+		if index < len(attempts) {
+			level = attempts[index]
+		}
+		request.ResolvedReasoningLevel = level
+		stream, retryAfter, err := c.open(ctx, request)
+		if err == nil {
+			wireMode := "openai_effort"
+			if !level.Valid() {
+				wireMode = "provider_default"
+			}
+			c.recordReasoning(ctx, modelcap.ReasoningResult{Requested: requested, Resolved: level, Rejected: rejected, ControlUnsupported: controlUnsupported, WireMode: wireMode})
+			return model.WithReasoningResolution(stream, requested, level), 0, nil
+		}
+		var rejection *reasoningRejectedError
+		if !errors.As(err, &rejection) || !level.Valid() {
+			return nil, retryAfter, err
+		}
+		if rejection.kind == modelutil.ReasoningRejectionValue {
+			rejected = append(rejected, level)
+			continue
+		}
+		if rejection.kind == modelutil.ReasoningRejectionControl {
+			// Skip the remaining values and retry exactly once without the
+			// optional field, preserving the provider's native behavior.
+			rejected = nil
+			controlUnsupported = true
+			index = len(attempts) - 1
+			continue
+		}
+		return nil, retryAfter, err
+	}
+	return nil, 0, fmt.Errorf("reasoning negotiation exhausted")
+}
+
+func (c *Client) recordReasoning(ctx context.Context, result modelcap.ReasoningResult) {
+	if c.recorder != nil && result.Requested.Valid() {
+		_ = c.recorder.RecordReasoningResult(ctx, c.profile.ID, c.profile.ModelID, result)
+	}
 }
 
 func (c *Client) open(ctx context.Context, request model.ChatRequest) (model.Stream, time.Duration, error) {
@@ -182,9 +257,11 @@ func (c *Client) open(ctx context.Context, request model.ChatRequest) (model.Str
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		responseBody, _ := io.ReadAll(io.LimitReader(response.Body, maxErrorBodyBytes))
 		response.Body.Close()
-		if request.ResolvedReasoningLevel.Valid() && modelutil.ReasoningControlRejected(response.StatusCode, responseBody) {
-			request.ResolvedReasoningLevel = ""
-			return c.open(ctx, request)
+		if request.ResolvedReasoningLevel.Valid() {
+			if kind := modelutil.ClassifyReasoningRejection(response.StatusCode, responseBody); kind != modelutil.ReasoningRejectionNone {
+				classified := classifyStatus(response.StatusCode, response.Header, responseBody)
+				return nil, 0, &reasoningRejectedError{kind: kind, err: classified}
+			}
 		}
 		return nil, parseRetryAfter(response.Header.Get("Retry-After")), classifyStatus(response.StatusCode, response.Header, responseBody)
 	}
@@ -522,10 +599,16 @@ type responseUsage struct {
 	PromptTokensDetails      *struct {
 		CachedTokens int `json:"cached_tokens"`
 	} `json:"prompt_tokens_details"`
+	CompletionTokensDetails *struct {
+		ReasoningTokens int `json:"reasoning_tokens"`
+	} `json:"completion_tokens_details"`
 }
 
 func (u responseUsage) normalized() model.Usage {
 	result := model.Usage{InputTokens: u.PromptTokens, OutputTokens: u.CompletionTokens}
+	if u.CompletionTokensDetails != nil {
+		result.ReasoningTokens = u.CompletionTokensDetails.ReasoningTokens
+	}
 	if u.PromptTokensDetails != nil {
 		result.CacheDetailsReported = true
 		result.CachedInputTokens = u.PromptTokensDetails.CachedTokens
@@ -563,9 +646,63 @@ type responseToolCall struct {
 
 type modelsResponse struct {
 	Data []struct {
-		ID      string `json:"id"`
-		OwnedBy string `json:"owned_by"`
+		ID                        string           `json:"id"`
+		OwnedBy                   string           `json:"owned_by"`
+		SupportedReasoningEfforts reasoningEfforts `json:"supported_reasoning_efforts"`
+		SupportedReasoningLevels  reasoningEfforts `json:"supported_reasoning_levels"`
 	} `json:"data"`
+}
+
+type reasoningEfforts []json.RawMessage
+
+func (values *reasoningEfforts) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		*values = nil
+		return nil
+	}
+	if trimmed[0] == '[' {
+		var result []json.RawMessage
+		if err := json.Unmarshal(trimmed, &result); err != nil {
+			// Capability metadata is optional and must never make the model list
+			// unusable when a compatible provider emits a nonstandard shape.
+			*values = nil
+			return nil
+		}
+		*values = result
+		return nil
+	}
+	if trimmed[0] == '"' {
+		*values = []json.RawMessage{append(json.RawMessage(nil), trimmed...)}
+		return nil
+	}
+	*values = nil
+	return nil
+}
+
+func (values reasoningEfforts) levels() []modelcap.ReasoningLevel {
+	levels := make([]modelcap.ReasoningLevel, 0, len(values))
+	for _, raw := range values {
+		var name string
+		if err := json.Unmarshal(raw, &name); err != nil {
+			var object struct {
+				Effort          string `json:"effort"`
+				ReasoningEffort string `json:"reasoning_effort"`
+			}
+			if json.Unmarshal(raw, &object) != nil {
+				continue
+			}
+			name = object.Effort
+			if name == "" {
+				name = object.ReasoningEffort
+			}
+		}
+		level := modelcap.ReasoningLevel(strings.ToLower(strings.TrimSpace(name)))
+		if level.Valid() {
+			levels = append(levels, level)
+		}
+	}
+	return modelcap.NormalizeReasoningLevels(levels)
 }
 
 func endpointURL(baseURL, suffix string) string {

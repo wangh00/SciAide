@@ -19,3 +19,28 @@ func TestReasoningControlRejected(t *testing.T) {
 		t.Fatal("non-client capability error must not trigger fallback")
 	}
 }
+
+func TestClassifyReasoningRejectionSeparatesValueAndControl(t *testing.T) {
+	if got := ClassifyReasoningRejection(http.StatusUnprocessableEntity, []byte(`{"error":{"message":"Invalid value for reasoning_effort: max; supported values are low, medium, high"}}`)); got != ReasoningRejectionValue {
+		t.Fatalf("value rejection = %v", got)
+	}
+	if got := ClassifyReasoningRejection(http.StatusBadRequest, []byte(`{"error":{"message":"Unknown parameter: reasoning_effort"}}`)); got != ReasoningRejectionControl {
+		t.Fatalf("control rejection = %v", got)
+	}
+	if got := ClassifyReasoningRejection(http.StatusBadRequest, []byte(`{"error":{"message":"reasoning_effort max is not supported; use high"}}`)); got != ReasoningRejectionValue {
+		t.Fatalf("named level rejection = %v", got)
+	}
+	for _, test := range []struct {
+		status int
+		body   string
+	}{
+		{http.StatusUnauthorized, `{"error":{"message":"Invalid reasoning_effort"}}`},
+		{http.StatusTooManyRequests, `{"error":{"message":"reasoning_effort rate limited"}}`},
+		{http.StatusBadRequest, `{"error":{"message":"Invalid tools schema"}}`},
+		{http.StatusBadRequest, `{"error":{"message":"context length exceeded while using reasoning_effort"}}`},
+	} {
+		if got := ClassifyReasoningRejection(test.status, []byte(test.body)); got != ReasoningRejectionNone {
+			t.Fatalf("unrelated rejection %d %s = %v", test.status, test.body, got)
+		}
+	}
+}

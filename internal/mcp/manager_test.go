@@ -1,9 +1,12 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/url"
+	"strings"
 	"testing"
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -60,6 +63,19 @@ func TestMinimalEnvironmentDoesNotInheritUnrelatedValues(t *testing.T) {
 	}
 	if seen["SCIAIDE_UNRELATED_SECRET=must-not-leak"] || !seen["LANG=C"] || !seen["TOKEN=secret"] {
 		t.Fatalf("environment = %v", values)
+	}
+}
+
+func TestMCPStderrWriterRedactsResolvedSecrets(t *testing.T) {
+	var output bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&output, nil))
+	writer := newMCPStderrWriter(logger, "server-1", map[string]string{"TOKEN": "private-token"})
+	if _, err := writer.Write([]byte("authorization=private-token\nsecond line\rwith break\n")); err != nil {
+		t.Fatal(err)
+	}
+	logged := output.String()
+	if strings.Contains(logged, "private-token") || !strings.Contains(logged, "[REDACTED]") || !strings.Contains(logged, "server-1") || strings.Contains(logged, `\r`) {
+		t.Fatalf("stderr log was not safely redacted: %s", logged)
 	}
 }
 

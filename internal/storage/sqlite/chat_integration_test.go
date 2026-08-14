@@ -15,6 +15,7 @@ import (
 	"github.com/wangh00/SciAide/internal/app/project"
 	"github.com/wangh00/SciAide/internal/app/tool"
 	"github.com/wangh00/SciAide/internal/events"
+	"github.com/wangh00/SciAide/internal/model"
 	"github.com/wangh00/SciAide/internal/modelcap"
 )
 
@@ -89,8 +90,25 @@ func TestModelProfileAndRunProtocolPersistAcrossReopen(t *testing.T) {
 	run := chat.Run{ID: "protocol-run", ConversationID: createdConversation.ID, UserMessageID: "protocol-user", AssistantMessageID: "protocol-assistant", ModelProfileID: profile.ID, ModelID: "claude", APIProtocol: modelcap.ProtocolAnthropic, Status: chat.RunQueued, CreatedAt: now, UpdatedAt: now}
 	user := conversation.Message{ID: run.UserMessageID, ConversationID: createdConversation.ID, RunID: run.ID, Role: conversation.RoleUser, Status: conversation.MessageComplete, CreatedAt: now, UpdatedAt: now, Parts: []conversation.MessagePart{{ID: "protocol-user-part", MessageID: run.UserMessageID, Type: "text", Text: "q", CreatedAt: now}}}
 	assistant := conversation.Message{ID: run.AssistantMessageID, ConversationID: createdConversation.ID, RunID: run.ID, Role: conversation.RoleAssistant, Status: conversation.MessageStreaming, CreatedAt: now, UpdatedAt: now, Parts: []conversation.MessagePart{{ID: "protocol-assistant-part", MessageID: run.AssistantMessageID, Type: "text", CreatedAt: now}}}
-	if err := NewRunRepository(store.DB()).CreateWithMessages(ctx, run, user, assistant); err != nil {
+	runs := NewRunRepository(store.DB())
+	if err := runs.CreateWithMessages(ctx, run, user, assistant); err != nil {
 		t.Fatal(err)
+	}
+	providerTurn := model.ProviderTurn{TurnIndex: 1, Protocol: modelcap.ProtocolAnthropic, Items: []model.ProviderItem{
+		{Ordinal: 0, Type: "thinking", Payload: json.RawMessage(`{"type":"thinking","thinking":"inspect","signature":"signed-state"}`)},
+		{Ordinal: 1, Type: "tool_use", CallID: "call_1", Payload: json.RawMessage(`{"type":"tool_use","id":"call_1","name":"read","input":{}}`)},
+	}}
+	if err := runs.SaveProviderTurn(ctx, run.ID, providerTurn, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := runs.SaveProviderTurn(ctx, run.ID, providerTurn, now.Add(time.Second)); err != nil {
+		t.Fatalf("idempotent provider save: %v", err)
+	}
+	conflict := providerTurn
+	conflict.Items = append([]model.ProviderItem(nil), providerTurn.Items...)
+	conflict.Items[0].Payload = json.RawMessage(`{"type":"thinking","thinking":"modified","signature":"signed-state"}`)
+	if err := runs.SaveProviderTurn(ctx, run.ID, conflict, now.Add(time.Second)); err == nil {
+		t.Fatal("provider item mutation was accepted")
 	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
@@ -107,6 +125,10 @@ func TestModelProfileAndRunProtocolPersistAcrossReopen(t *testing.T) {
 	loadedRun, err := NewRunRepository(store.DB()).Get(ctx, run.ID)
 	if err != nil || loadedRun.APIProtocol != modelcap.ProtocolAnthropic {
 		t.Fatalf("run = %#v, %v", loadedRun, err)
+	}
+	turns, err := NewRunRepository(store.DB()).ListProviderTurns(ctx, run.ID)
+	if err != nil || len(turns) != 1 || len(turns[0].Items) != 2 || turns[0].Items[0].Type != "thinking" || turns[0].Items[0].Ordinal != 0 || turns[0].Items[1].CallID != "call_1" {
+		t.Fatalf("provider turns = %#v, %v", turns, err)
 	}
 }
 
@@ -131,7 +153,7 @@ func TestRunRepositoryPersistsAndAggregatesCacheUsage(t *testing.T) {
 	if err := NewModelProfileRepository(store.DB()).Save(ctx, profile); err != nil {
 		t.Fatal(err)
 	}
-	run := chat.Run{ID: "cache-run", ConversationID: createdConversation.ID, UserMessageID: "cache-user", AssistantMessageID: "cache-assistant", ModelProfileID: profile.ID, ModelID: "fixture", Status: chat.RunRunning, InputTokens: 100, FreshInputTokens: 24, OutputTokens: 20, CachedInputTokens: 64, CacheWriteTokens: 12, CacheReportedTurns: 2, CacheReportedFreshInputTokens: 24, CacheHitTurns: 1, ModelTurns: 2, CreatedAt: now, StartedAt: &now, UpdatedAt: now}
+	run := chat.Run{ID: "cache-run", ConversationID: createdConversation.ID, UserMessageID: "cache-user", AssistantMessageID: "cache-assistant", ModelProfileID: profile.ID, ModelID: "fixture", Status: chat.RunRunning, InputTokens: 100, FreshInputTokens: 24, OutputTokens: 20, ReasoningTokens: 8, ReasoningObserved: true, CachedInputTokens: 64, CacheWriteTokens: 12, CacheReportedTurns: 2, CacheReportedFreshInputTokens: 24, CacheHitTurns: 1, ModelTurns: 2, CreatedAt: now, StartedAt: &now, UpdatedAt: now}
 	user := conversation.Message{ID: run.UserMessageID, ConversationID: createdConversation.ID, RunID: run.ID, Role: conversation.RoleUser, Status: conversation.MessageComplete, CreatedAt: now, UpdatedAt: now, Parts: []conversation.MessagePart{{ID: "cache-user-part", MessageID: run.UserMessageID, Type: "text", Text: "q", CreatedAt: now}}}
 	assistant := conversation.Message{ID: run.AssistantMessageID, ConversationID: createdConversation.ID, RunID: run.ID, Role: conversation.RoleAssistant, Status: conversation.MessageStreaming, CreatedAt: now.Add(time.Nanosecond), UpdatedAt: now, Parts: []conversation.MessagePart{{ID: "cache-assistant-part", MessageID: run.AssistantMessageID, Type: "text", CreatedAt: now}}}
 	repository := NewRunRepository(store.DB())
@@ -139,11 +161,11 @@ func TestRunRepositoryPersistsAndAggregatesCacheUsage(t *testing.T) {
 		t.Fatal(err)
 	}
 	loaded, err := repository.Get(ctx, run.ID)
-	if err != nil || loaded.CachedInputTokens != 64 || loaded.CacheReportedTurns != 2 || loaded.CacheHitTurns != 1 {
+	if err != nil || loaded.CachedInputTokens != 64 || loaded.CacheReportedTurns != 2 || loaded.CacheHitTurns != 1 || loaded.ReasoningTokens != 8 || !loaded.ReasoningObserved {
 		t.Fatalf("loaded run = %#v, err=%v", loaded, err)
 	}
 	statistics, err := repository.UsageDashboard(ctx, chat.UsageQuery{ModelProfileID: profile.ID})
-	if err != nil || statistics.Summary.RunCount != 1 || statistics.Summary.FreshInputTokens != 24 || statistics.Summary.CacheReadTokens != 64 || statistics.Summary.CacheCreationTokens != 12 || statistics.Summary.CacheHitTurns != 1 || statistics.Summary.RealTotalTokens != 120 || statistics.Summary.CacheHitRate != 0.64 {
+	if err != nil || statistics.Summary.RunCount != 1 || statistics.Summary.FreshInputTokens != 24 || statistics.Summary.ReasoningTokens != 8 || statistics.Summary.CacheReadTokens != 64 || statistics.Summary.CacheCreationTokens != 12 || statistics.Summary.CacheHitTurns != 1 || statistics.Summary.RealTotalTokens != 120 || statistics.Summary.CacheHitRate != 0.64 {
 		t.Fatalf("statistics = %#v, err=%v", statistics, err)
 	}
 }
@@ -408,6 +430,76 @@ func TestProfileStoresMultipleModelsAcrossReopen(t *testing.T) {
 	}
 	if loaded.ModelID != "model-b" || len(loaded.Models) != 2 || !loaded.Models[0].IsDefault {
 		t.Fatalf("loaded profile = %#v", loaded)
+	}
+}
+
+func TestReasoningObservationsPersistAndSuccessfulLevelClearsRejection(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "reasoning-observations.db")
+	store, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	profile := modelprofile.Profile{
+		ID: "reasoning-profile", Name: "gateway", ProviderType: modelprofile.ProviderOpenAICompatible,
+		APIProtocol: modelcap.ProtocolOpenAIChat, BaseURL: "https://example.test/v1", ModelID: "future-model",
+		Models:    []modelprofile.ProfileModel{{ID: "future-model", Enabled: true, IsDefault: true, ReasoningLevels: modelcap.AllReasoningLevels(), ReasoningCapabilitySource: "inferred"}},
+		SecretRef: "secret", TimeoutSeconds: 60, CustomHeaders: map[string]string{}, Enabled: true, CreatedAt: now, UpdatedAt: now,
+	}
+	repository := NewModelProfileRepository(store.DB())
+	if err := repository.Save(ctx, profile); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.RecordReasoningResult(ctx, profile.ID, profile.ModelID, modelcap.ReasoningResult{
+		Requested: modelcap.ReasoningMax, Resolved: modelcap.ReasoningXHigh,
+		Rejected: []modelcap.ReasoningLevel{modelcap.ReasoningMax}, WireMode: "openai_effort",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository = NewModelProfileRepository(store.DB())
+	loaded, err := repository.Get(ctx, profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	modelValue := loaded.Models[0]
+	if len(modelValue.ReasoningVerifiedLevels) != 1 || modelValue.ReasoningVerifiedLevels[0] != modelcap.ReasoningXHigh || len(modelValue.ReasoningRejectedLevels) != 1 || modelValue.ReasoningRejectedLevels[0] != modelcap.ReasoningMax || modelValue.ReasoningWireMode != "openai_effort" {
+		t.Fatalf("persisted observation = %#v", modelValue)
+	}
+	if err := repository.RecordReasoningResult(ctx, profile.ID, profile.ModelID, modelcap.ReasoningResult{Requested: modelcap.ReasoningMax, Resolved: modelcap.ReasoningMax, WireMode: "openai_effort"}); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = repository.Get(ctx, profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	modelValue = loaded.Models[0]
+	if len(modelValue.ReasoningRejectedLevels) != 0 || len(modelValue.ReasoningVerifiedLevels) != 2 || modelValue.ReasoningLastResolvedLevel != modelcap.ReasoningMax {
+		t.Fatalf("successful max did not clear rejection = %#v", modelValue)
+	}
+	if err := repository.RecordReasoningResult(ctx, profile.ID, profile.ModelID, modelcap.ReasoningResult{
+		Requested: modelcap.ReasoningMax, Resolved: modelcap.ReasoningHigh,
+		Rejected: []modelcap.ReasoningLevel{modelcap.ReasoningMax, modelcap.ReasoningXHigh}, WireMode: "openai_effort",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = repository.Get(ctx, profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	modelValue = loaded.Models[0]
+	if len(modelValue.ReasoningVerifiedLevels) != 1 || modelValue.ReasoningVerifiedLevels[0] != modelcap.ReasoningHigh || len(modelValue.ReasoningRejectedLevels) != 2 || modelValue.ReasoningRejectedLevels[0] != modelcap.ReasoningXHigh || modelValue.ReasoningRejectedLevels[1] != modelcap.ReasoningMax {
+		t.Fatalf("newer rejection did not supersede success = %#v", modelValue)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 

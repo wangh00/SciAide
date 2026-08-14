@@ -76,6 +76,58 @@ func TestStreamRetriesWithoutRejectedReasoningControl(t *testing.T) {
 	}
 }
 
+type reasoningRecorder struct {
+	profileID string
+	modelID   string
+	result    modelcap.ReasoningResult
+}
+
+func (r *reasoningRecorder) RecordReasoningResult(_ context.Context, profileID, modelID string, result modelcap.ReasoningResult) error {
+	r.profileID = profileID
+	r.modelID = modelID
+	r.result = result
+	return nil
+}
+
+func TestStreamNegotiatesMaxToXHighAndRecordsObservation(t *testing.T) {
+	var efforts []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body requestPayload
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		efforts = append(efforts, body.ReasoningEffort)
+		if body.ReasoningEffort == "max" {
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			_, _ = io.WriteString(w, `{"error":{"message":"Invalid value for reasoning_effort: max; supported values are low, medium, high, xhigh"}}`)
+			return
+		}
+		if body.ReasoningEffort != "xhigh" {
+			t.Fatalf("fallback reasoning effort = %q", body.ReasoningEffort)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+	recorder := &reasoningRecorder{}
+	client := New(modelprofile.Profile{ID: "profile", BaseURL: server.URL, ModelID: "future-model", TimeoutSeconds: 5}, nil, recorder)
+	stream, err := client.Stream(context.Background(), model.ChatRequest{RequestedReasoningLevel: modelcap.ReasoningMax, ResolvedReasoningLevel: modelcap.ReasoningMax})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	reporter, ok := stream.(model.ReasoningResolutionReporter)
+	if !ok || reporter.ReasoningResolution().Resolved != modelcap.ReasoningXHigh {
+		t.Fatalf("resolution = %#v", reporter)
+	}
+	if fmt.Sprint(efforts) != "[max xhigh]" {
+		t.Fatalf("efforts = %v", efforts)
+	}
+	if recorder.profileID != "profile" || recorder.modelID != "future-model" || recorder.result.Resolved != modelcap.ReasoningXHigh || len(recorder.result.Rejected) != 1 || recorder.result.Rejected[0] != modelcap.ReasoningMax || recorder.result.ControlUnsupported {
+		t.Fatalf("recorded observation = %#v (%s/%s)", recorder.result, recorder.profileID, recorder.modelID)
+	}
+}
+
 func TestStreamNormalizesSSE(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/chat/completions" {
@@ -93,7 +145,7 @@ func TestStreamNormalizesSSE(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"你好\"},\"finish_reason\":null}]}\n\n")
-		io.WriteString(w, "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2,\"prompt_tokens_details\":{\"cached_tokens\":2}}}\n\n")
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2,\"prompt_tokens_details\":{\"cached_tokens\":2},\"completion_tokens_details\":{\"reasoning_tokens\":1}}}\n\n")
 		io.WriteString(w, "data: [DONE]\n\n")
 	}))
 	defer server.Close()
@@ -108,7 +160,7 @@ func TestStreamNormalizesSSE(t *testing.T) {
 		t.Fatalf("text event = %#v, err=%v", textEvent, err)
 	}
 	usageEvent, err := stream.Recv()
-	if err != nil || usageEvent.Usage == nil || usageEvent.Usage.InputTokens != 3 || usageEvent.Usage.CachedInputTokens != 2 || !usageEvent.Usage.CacheDetailsReported {
+	if err != nil || usageEvent.Usage == nil || usageEvent.Usage.InputTokens != 3 || usageEvent.Usage.CachedInputTokens != 2 || usageEvent.Usage.ReasoningTokens != 1 || !usageEvent.Usage.CacheDetailsReported {
 		t.Fatalf("usage event = %#v, err=%v", usageEvent, err)
 	}
 	doneEvent, err := stream.Recv()
@@ -119,9 +171,11 @@ func TestStreamNormalizesSSE(t *testing.T) {
 
 func TestResponseUsageNormalizesCompatibleCacheFields(t *testing.T) {
 	read, created, hit, miss := 13, 5, 11, 7
-	usage := responseUsage{PromptTokens: 30, CompletionTokens: 9, CacheReadInputTokens: &read, CacheCreationInputTokens: &created, PromptCacheHitTokens: &hit, PromptCacheMissTokens: &miss}
+	usage := responseUsage{PromptTokens: 30, CompletionTokens: 9, CacheReadInputTokens: &read, CacheCreationInputTokens: &created, PromptCacheHitTokens: &hit, PromptCacheMissTokens: &miss, CompletionTokensDetails: &struct {
+		ReasoningTokens int `json:"reasoning_tokens"`
+	}{ReasoningTokens: 4}}
 	got := usage.normalized()
-	if got.InputTokens != 30 || got.FreshInputTokens != 12 || got.OutputTokens != 9 || got.CachedInputTokens != 13 || got.CacheWriteTokens != 5 || !got.CacheDetailsReported {
+	if got.InputTokens != 30 || got.FreshInputTokens != 12 || got.OutputTokens != 9 || got.ReasoningTokens != 4 || got.CachedInputTokens != 13 || got.CacheWriteTokens != 5 || !got.CacheDetailsReported {
 		t.Fatalf("normalized usage = %#v", got)
 	}
 }
@@ -301,6 +355,37 @@ func TestDiscoverModelsSortsAndDeduplicates(t *testing.T) {
 	}
 	if len(values) != 2 || values[0].ID != "a-model" || values[1].ID != "z-model" || values[1].OwnedBy != "lab" {
 		t.Fatalf("models = %#v", values)
+	}
+}
+
+func TestDiscoverModelsReadsReasoningCapabilityMetadata(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"data":[`+
+			`{"id":"string-shape","supported_reasoning_efforts":["low","high","max","invalid"]},`+
+			`{"id":"object-shape","supported_reasoning_levels":[{"effort":"medium"},{"reasoning_effort":"xhigh"}]},`+
+			`{"id":"nonstandard-shape","supported_reasoning_efforts":{"high":true}}`+
+			`]}`)
+	}))
+	defer server.Close()
+	values, err := New(modelprofile.Profile{TimeoutSeconds: 5}, nil).Discover(context.Background(), modelprofile.Profile{BaseURL: server.URL, TimeoutSeconds: 5}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(values) != 3 {
+		t.Fatalf("models = %#v", values)
+	}
+	byID := map[string]modelprofile.AvailableModel{}
+	for _, value := range values {
+		byID[value.ID] = value
+	}
+	if got := byID["string-shape"]; got.ReasoningCapabilitySource != "provider" || fmt.Sprint(got.ReasoningLevels) != "[low high max]" {
+		t.Fatalf("string capability = %#v", got)
+	}
+	if got := byID["object-shape"]; got.ReasoningCapabilitySource != "provider" || fmt.Sprint(got.ReasoningLevels) != "[medium xhigh]" {
+		t.Fatalf("object capability = %#v", got)
+	}
+	if got := byID["nonstandard-shape"]; got.ReasoningCapabilitySource != "" || len(got.ReasoningLevels) != 0 {
+		t.Fatalf("nonstandard metadata should be ignored without losing the model = %#v", got)
 	}
 }
 

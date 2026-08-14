@@ -8,6 +8,7 @@ import (
 	"fmt"
 
 	"github.com/wangh00/SciAide/internal/app/modelprofile"
+	"github.com/wangh00/SciAide/internal/modelcap"
 )
 
 type ModelProfileRepository struct{ db *sql.DB }
@@ -57,12 +58,94 @@ func (r *ModelProfileRepository) Save(ctx context.Context, value modelprofile.Pr
 		if err != nil {
 			return fmt.Errorf("encode model reasoning levels: %w", err)
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO model_profile_models(profile_id, model_id, owned_by, enabled, is_default, reasoning_levels_json, reasoning_capability_source, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			value.ID, item.ID, item.OwnedBy, item.Enabled, item.IsDefault, string(reasoningJSON), item.ReasoningCapabilitySource, formatTime(value.CreatedAt), formatTime(value.UpdatedAt)); err != nil {
+		verifiedJSON, err := json.Marshal(modelcap.NormalizeReasoningLevels(item.ReasoningVerifiedLevels))
+		if err != nil {
+			return fmt.Errorf("encode verified reasoning levels: %w", err)
+		}
+		rejectedJSON, err := json.Marshal(modelcap.NormalizeReasoningLevels(item.ReasoningRejectedLevels))
+		if err != nil {
+			return fmt.Errorf("encode rejected reasoning levels: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO model_profile_models(profile_id, model_id, owned_by, enabled, is_default, reasoning_levels_json, reasoning_capability_source, reasoning_verified_levels_json, reasoning_rejected_levels_json, reasoning_control_unsupported, reasoning_last_requested_level, reasoning_last_resolved_level, reasoning_wire_mode, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			value.ID, item.ID, item.OwnedBy, item.Enabled, item.IsDefault, string(reasoningJSON), item.ReasoningCapabilitySource,
+			string(verifiedJSON), string(rejectedJSON), item.ReasoningControlUnsupported, item.ReasoningLastRequestedLevel, item.ReasoningLastResolvedLevel,
+			item.ReasoningWireMode,
+			formatTime(value.CreatedAt), formatTime(value.UpdatedAt)); err != nil {
 			return fmt.Errorf("insert profile model: %w", err)
 		}
 	}
 	return tx.Commit()
+}
+
+func (r *ModelProfileRepository) RecordReasoningResult(ctx context.Context, profileID, modelID string, result modelcap.ReasoningResult) error {
+	if profileID == "" || modelID == "" || !result.Requested.Valid() {
+		return fmt.Errorf("invalid reasoning observation identity")
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var verifiedJSON, rejectedJSON string
+	var controlUnsupported bool
+	if err := tx.QueryRowContext(ctx, `SELECT reasoning_verified_levels_json, reasoning_rejected_levels_json, reasoning_control_unsupported FROM model_profile_models WHERE profile_id=? AND model_id=?`, profileID, modelID).Scan(&verifiedJSON, &rejectedJSON, &controlUnsupported); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("profile model not found")
+		}
+		return err
+	}
+	var verified, rejected []modelcap.ReasoningLevel
+	if err := json.Unmarshal([]byte(verifiedJSON), &verified); err != nil {
+		return fmt.Errorf("decode verified reasoning levels: %w", err)
+	}
+	if err := json.Unmarshal([]byte(rejectedJSON), &rejected); err != nil {
+		return fmt.Errorf("decode rejected reasoning levels: %w", err)
+	}
+	newlyRejected := modelcap.NormalizeReasoningLevels(result.Rejected)
+	// Runtime observations are ordered: a new rejection invalidates an older
+	// success, while a new success clears an older rejection for that tier.
+	verified = removeReasoningLevels(modelcap.NormalizeReasoningLevels(verified), newlyRejected)
+	rejected = modelcap.NormalizeReasoningLevels(append(rejected, newlyRejected...))
+	if result.Resolved.Valid() {
+		verified = modelcap.NormalizeReasoningLevels(append(verified, result.Resolved))
+		rejected = removeReasoningLevels(rejected, []modelcap.ReasoningLevel{result.Resolved})
+	}
+	verifiedBytes, _ := json.Marshal(verified)
+	rejectedBytes, _ := json.Marshal(rejected)
+	controlUnsupported = controlUnsupported || result.ControlUnsupported
+	if result.ControlUnsupported {
+		verified = []modelcap.ReasoningLevel{}
+		rejected = []modelcap.ReasoningLevel{}
+		verifiedBytes, _ = json.Marshal(verified)
+		rejectedBytes, _ = json.Marshal(rejected)
+	}
+	if result.Resolved.Valid() {
+		controlUnsupported = false
+	}
+	resolved := result.Resolved
+	wireMode := result.WireMode
+	if controlUnsupported {
+		wireMode = "provider_default"
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE model_profile_models SET reasoning_verified_levels_json=?, reasoning_rejected_levels_json=?, reasoning_control_unsupported=?, reasoning_last_requested_level=?, reasoning_last_resolved_level=?, reasoning_wire_mode=?, updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE profile_id=? AND model_id=?`,
+		string(verifiedBytes), string(rejectedBytes), controlUnsupported, result.Requested, resolved, wireMode, profileID, modelID); err != nil {
+		return fmt.Errorf("record reasoning result: %w", err)
+	}
+	return tx.Commit()
+}
+
+func removeReasoningLevels(values, removed []modelcap.ReasoningLevel) []modelcap.ReasoningLevel {
+	set := make(map[modelcap.ReasoningLevel]bool, len(removed))
+	for _, level := range removed {
+		set[level] = true
+	}
+	result := make([]modelcap.ReasoningLevel, 0, len(values))
+	for _, level := range values {
+		if !set[level] {
+			result = append(result, level)
+		}
+	}
+	return result
 }
 
 func (r *ModelProfileRepository) Get(ctx context.Context, id string) (modelprofile.Profile, error) {
@@ -123,7 +206,7 @@ func (r *ModelProfileRepository) Delete(ctx context.Context, id string) error {
 }
 
 func (r *ModelProfileRepository) listModels(ctx context.Context, profileID, legacyDefault string) ([]modelprofile.ProfileModel, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT model_id, owned_by, enabled, is_default, reasoning_levels_json, reasoning_capability_source FROM model_profile_models WHERE profile_id = ? ORDER BY is_default DESC, model_id`, profileID)
+	rows, err := r.db.QueryContext(ctx, `SELECT model_id, owned_by, enabled, is_default, reasoning_levels_json, reasoning_capability_source, reasoning_verified_levels_json, reasoning_rejected_levels_json, reasoning_control_unsupported, reasoning_last_requested_level, reasoning_last_resolved_level, reasoning_wire_mode FROM model_profile_models WHERE profile_id = ? ORDER BY is_default DESC, model_id`, profileID)
 	if err != nil {
 		return nil, fmt.Errorf("list profile models: %w", err)
 	}
@@ -131,11 +214,18 @@ func (r *ModelProfileRepository) listModels(ctx context.Context, profileID, lega
 	values := make([]modelprofile.ProfileModel, 0)
 	for rows.Next() {
 		var value modelprofile.ProfileModel
-		var reasoningJSON string
-		if err := rows.Scan(&value.ID, &value.OwnedBy, &value.Enabled, &value.IsDefault, &reasoningJSON, &value.ReasoningCapabilitySource); err != nil {
+		var reasoningJSON, verifiedJSON, rejectedJSON string
+		if err := rows.Scan(&value.ID, &value.OwnedBy, &value.Enabled, &value.IsDefault, &reasoningJSON, &value.ReasoningCapabilitySource,
+			&verifiedJSON, &rejectedJSON, &value.ReasoningControlUnsupported, &value.ReasoningLastRequestedLevel, &value.ReasoningLastResolvedLevel, &value.ReasoningWireMode); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal([]byte(reasoningJSON), &value.ReasoningLevels); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal([]byte(verifiedJSON), &value.ReasoningVerifiedLevels); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal([]byte(rejectedJSON), &value.ReasoningRejectedLevels); err != nil {
 			return nil, err
 		}
 		values = append(values, value)

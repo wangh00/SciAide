@@ -45,8 +45,19 @@ func TestResolverReturnsAutomaticModelReasoningCapabilities(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(resolved.SupportedReasoningLevels) != 3 || resolved.SupportedReasoningLevels[1] != modelcap.ReasoningMedium {
+	if len(resolved.SupportedReasoningLevels) != 5 || resolved.SupportedReasoningLevels[4] != modelcap.ReasoningMax {
 		t.Fatalf("reasoning levels = %#v", resolved.SupportedReasoningLevels)
+	}
+}
+
+func TestResolverFiltersRuntimeRejectedReasoningLevels(t *testing.T) {
+	profile := modelprofile.Profile{Enabled: true, Models: []modelprofile.ProfileModel{{ID: "future-model", Enabled: true, ReasoningCapabilitySource: "inferred", ReasoningRejectedLevels: []modelcap.ReasoningLevel{modelcap.ReasoningMax}}}}
+	resolved, err := NewResolver(loader{profile: profile}).Resolve(context.Background(), "profile", "future-model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := modelcap.ResolveReasoningLevel(modelcap.ReasoningMax, resolved.SupportedReasoningLevels); got != modelcap.ReasoningXHigh {
+		t.Fatalf("resolved max after rejection = %q", got)
 	}
 }
 

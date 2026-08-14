@@ -17,9 +17,18 @@ type ProfileLoader interface {
 	Secret(ctx context.Context, profileID string) (modelprofile.Profile, []byte, error)
 }
 
-type Resolver struct{ profiles ProfileLoader }
+type Resolver struct {
+	profiles ProfileLoader
+	recorder modelcap.ReasoningRecorder
+}
 
-func NewResolver(profiles ProfileLoader) *Resolver { return &Resolver{profiles: profiles} }
+func NewResolver(profiles ProfileLoader) *Resolver {
+	resolver := &Resolver{profiles: profiles}
+	if recorder, ok := profiles.(modelcap.ReasoningRecorder); ok {
+		resolver.recorder = recorder
+	}
+	return resolver
+}
 
 func (r *Resolver) Resolve(ctx context.Context, profileID, modelID string) (model.ResolvedChatModel, error) {
 	profile, secret, err := r.profiles.Secret(ctx, profileID)
@@ -38,7 +47,18 @@ func (r *Resolver) Resolve(ctx context.Context, profileID, modelID string) (mode
 	for _, item := range profile.Models {
 		if item.ID == modelID && item.Enabled {
 			selected = true
-			supported = modelcap.InferredReasoningLevelsForProtocol(protocol, item.ID)
+			if item.ReasoningCapabilitySource == "manual" || item.ReasoningCapabilitySource == "provider" || item.ReasoningCapabilitySource == "builtin" {
+				supported = modelcap.NormalizeReasoningLevels(item.ReasoningLevels)
+			} else {
+				// Recompute inferred capabilities on load so installing a newer
+				// SciAide immediately unlocks future tiers for existing profiles.
+				supported = modelcap.InferredReasoningLevelsForProtocol(protocol, item.ID)
+			}
+			if item.ReasoningControlUnsupported {
+				supported = nil
+			} else {
+				supported = modelcap.WithoutRejectedReasoningLevels(supported, item.ReasoningRejectedLevels)
+			}
 			break
 		}
 	}
@@ -49,11 +69,11 @@ func (r *Resolver) Resolve(ctx context.Context, profileID, modelID string) (mode
 	var chatModel model.ChatModel
 	switch protocol {
 	case modelprofile.ProtocolOpenAIChat:
-		chatModel = openai.New(profile, secret)
+		chatModel = openai.New(profile, secret, r.recorder)
 	case modelprofile.ProtocolOpenAIResponses:
-		chatModel = responses.New(profile, secret)
+		chatModel = responses.New(profile, secret, r.recorder)
 	case modelprofile.ProtocolAnthropic:
-		chatModel = anthropic.New(profile, secret)
+		chatModel = anthropic.New(profile, secret, r.recorder)
 	default:
 		return model.ResolvedChatModel{}, &apperr.Error{Code: "MODEL_PROTOCOL_UNSUPPORTED", UserMessage: "当前 API 协议不受支持，请检查模型配置。", Cause: fmt.Errorf("unsupported protocol %q", protocol)}
 	}

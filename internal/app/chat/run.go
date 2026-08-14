@@ -43,6 +43,9 @@ type Run struct {
 	InputTokens                   int                         `json:"inputTokens"`
 	FreshInputTokens              int                         `json:"freshInputTokens"`
 	OutputTokens                  int                         `json:"outputTokens"`
+	ReasoningTokens               int                         `json:"reasoningTokens"`
+	ReasoningObserved             bool                        `json:"reasoningObserved"`
+	ReasoningSignatureObserved    bool                        `json:"reasoningSignatureObserved"`
 	CachedInputTokens             int                         `json:"cachedInputTokens"`
 	CacheWriteTokens              int                         `json:"cacheWriteTokens"`
 	CacheReportedTurns            int                         `json:"cacheReportedTurns"`
@@ -85,6 +88,7 @@ type UsageSummary struct {
 	ModelTurns          int     `json:"modelTurns"`
 	FreshInputTokens    int     `json:"freshInputTokens"`
 	OutputTokens        int     `json:"outputTokens"`
+	ReasoningTokens     int     `json:"reasoningTokens"`
 	CacheReadTokens     int     `json:"cacheReadTokens"`
 	CacheCreationTokens int     `json:"cacheCreationTokens"`
 	RealTotalTokens     int     `json:"realTotalTokens"`

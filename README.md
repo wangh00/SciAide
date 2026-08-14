@@ -2,7 +2,7 @@
 
 面向科研工作者的本地优先桌面 AI Agent，支持自定义模型、工具调用、MCP、Skill、科研知识库和可信引用。
 
-当前阶段：**P3 MCP 接入**。
+当前阶段：**P3.5 模型协议完整性**。
 
 ## 当前能力
 
@@ -23,6 +23,8 @@
 - 兼容 Claude Desktop、Cursor、Codex 常见的 `mcpServers` JSON，可一次粘贴并导入多个 Server
 - MCP Tool 使用稳定的 `mcp.<namespace>.<tool>` 名称进入统一 ToolRegistry、Plan/Full Access 审批和 ToolExecutor
 - MCP stdio 仅继承最小环境；SecretEnv 明文保存在 Windows Credential Manager；Resource/Prompt 不自动注入上下文
+- Anthropic thinking/signature/redacted_thinking 与 Responses reasoning/encrypted content 按 Provider Turn 不可变持久化，并在工具结果后严格回放；原始协议状态不进入聊天 Snapshot
+- 推理证据区分“参数已接受”和“已观察到思考”，支持 reasoning token 汇总、默认折叠的安全状态卡，以及不拆分原生推理/工具协议组的上下文压缩
 - 可脚本化 `FakeChatModel`、Provider Fixture 测试、威胁模型、ADR 和 CI
 
 ## 开发

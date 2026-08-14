@@ -27,6 +27,8 @@ type Runs interface {
 	Update(ctx context.Context, value chat.Run) error
 	IncrementModelTurns(ctx context.Context, runID string, maximum int, at time.Time) (chat.Run, error)
 	ProjectIDForRun(ctx context.Context, runID string) (string, error)
+	SaveProviderTurn(ctx context.Context, runID string, turn model.ProviderTurn, at time.Time) error
+	ListProviderTurns(ctx context.Context, runID string) ([]model.ProviderTurn, error)
 }
 
 type Conversations interface {
@@ -177,6 +179,10 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 	if err != nil {
 		return OutcomeFailed, err
 	}
+	providerTurns, err := l.runs.ListProviderTurns(ctx, run.ID)
+	if err != nil {
+		return OutcomeFailed, &apperr.Error{Code: "CONTEXT_LOAD_FAILED", UserMessage: "无法加载模型协议状态。", Cause: err}
+	}
 	startedAt := run.CreatedAt
 	if run.StartedAt != nil {
 		startedAt = *run.StartedAt
@@ -209,7 +215,17 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 	} else if !run.APIProtocol.Valid() {
 		run.APIProtocol = modelcap.ProtocolOpenAIChat
 	}
-	run.ResolvedReasoningLevel = modelcap.ResolveReasoningLevel(run.RequestedReasoningLevel, resolvedModel.SupportedReasoningLevels)
+	negotiatedReasoningLevel := modelcap.ResolveReasoningLevel(run.RequestedReasoningLevel, resolvedModel.SupportedReasoningLevels)
+	reasoningNegotiated := false
+	if run.ResolvedReasoningLevel.Valid() {
+		negotiatedReasoningLevel = run.ResolvedReasoningLevel
+		reasoningNegotiated = true
+	} else if len(calls) > 0 {
+		// A resumed tool turn with an empty resolved level already completed a
+		// provider-default model request before it paused for approval.
+		negotiatedReasoningLevel = ""
+		reasoningNegotiated = true
+	}
 	if err := l.runs.Update(context.Background(), *run); err != nil {
 		return OutcomeFailed, err
 	}
@@ -226,7 +242,7 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 			return OutcomeFailed, err
 		}
 		run.ModelTurns, run.UpdatedAt = checkpoint.ModelTurns, checkpoint.UpdatedAt
-		request, contextInfo, err := l.builder.BuildWithInfo(ctx, messages, run.AssistantMessageID, definitions, calls)
+		request, contextInfo, err := l.builder.BuildWithInfo(ctx, messages, run.AssistantMessageID, definitions, calls, providerTurns...)
 		if err != nil {
 			return OutcomeFailed, err
 		}
@@ -237,10 +253,24 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 			}
 		}
 		request.RequestedReasoningLevel = run.RequestedReasoningLevel
-		request.ResolvedReasoningLevel = run.ResolvedReasoningLevel
+		request.ResolvedReasoningLevel = negotiatedReasoningLevel
 		stream, err := chatModel.Stream(ctx, request)
 		if err != nil {
 			return OutcomeFailed, err
+		}
+		actualReasoningLevel := negotiatedReasoningLevel
+		if reporter, ok := stream.(model.ReasoningResolutionReporter); ok {
+			actualReasoningLevel = reporter.ReasoningResolution().Resolved
+		}
+		if !reasoningNegotiated || run.ResolvedReasoningLevel != actualReasoningLevel {
+			run.ResolvedReasoningLevel = actualReasoningLevel
+			negotiatedReasoningLevel = actualReasoningLevel
+			reasoningNegotiated = true
+			run.UpdatedAt = l.now()
+			if err := l.runs.Update(context.Background(), *run); err != nil {
+				_ = stream.Close()
+				return OutcomeFailed, err
+			}
 		}
 		turn, err := l.receiveTurn(ctx, run, stream, &text)
 		closeErr := stream.Close()
@@ -251,6 +281,16 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 			return OutcomeFailed, closeErr
 		}
 		now := l.now()
+		if (run.APIProtocol == modelcap.ProtocolAnthropic || run.APIProtocol == modelcap.ProtocolOpenAIResponses) && len(turn.toolCalls) > 0 && len(turn.providerItems) == 0 {
+			return OutcomeFailed, &apperr.Error{Code: "MODEL_PROTOCOL_STATE_MISSING", UserMessage: "模型工具响应缺少可回放的协议状态。"}
+		}
+		if len(turn.providerItems) > 0 {
+			providerTurn := model.ProviderTurn{TurnIndex: run.ModelTurns, Protocol: run.APIProtocol, Items: turn.providerItems}
+			if err := l.runs.SaveProviderTurn(context.Background(), run.ID, providerTurn, now); err != nil {
+				return OutcomeFailed, &apperr.Error{Code: "MODEL_PROTOCOL_STATE_SAVE_FAILED", UserMessage: "无法保存模型协议状态。", Cause: err}
+			}
+			providerTurns = append(providerTurns, providerTurn)
+		}
 		if err := l.conversations.UpdateMessageText(context.Background(), run.AssistantMessageID, conversation.MessageStreaming, text, now); err != nil {
 			return OutcomeFailed, &apperr.Error{Code: "MESSAGE_SAVE_FAILED", UserMessage: "模型中间结果无法保存。", Cause: err}
 		}
@@ -344,12 +384,13 @@ func (l *Loop) processCalls(ctx context.Context, run *chat.Run, projectID string
 }
 
 type modelTurn struct {
-	toolCalls    []model.ToolCall
-	finishReason string
+	toolCalls     []model.ToolCall
+	providerItems []model.ProviderItem
+	finishReason  string
 }
 
 func (l *Loop) receiveTurn(ctx context.Context, run *chat.Run, stream model.Stream, text *string) (modelTurn, error) {
-	turn := modelTurn{toolCalls: make([]model.ToolCall, 0)}
+	turn := modelTurn{toolCalls: make([]model.ToolCall, 0), providerItems: make([]model.ProviderItem, 0)}
 	pending := ""
 	lastPersist, lastEmit := l.now(), l.now()
 	flush := func() {
@@ -376,10 +417,32 @@ func (l *Loop) receiveTurn(ctx context.Context, run *chat.Run, stream model.Stre
 		if event.Type == model.EventToolCall && event.ToolCall != nil {
 			turn.toolCalls = append(turn.toolCalls, *event.ToolCall)
 		}
+		if event.Type == model.EventProviderItem && event.ProviderItem != nil {
+			item := *event.ProviderItem
+			item.Payload = append(json.RawMessage(nil), event.ProviderItem.Payload...)
+			turn.providerItems = append(turn.providerItems, item)
+			observed, signed := run.ReasoningObserved, run.ReasoningSignatureObserved
+			switch item.Type {
+			case "thinking":
+				run.ReasoningObserved, run.ReasoningSignatureObserved = true, true
+			case "redacted_thinking", "reasoning":
+				run.ReasoningObserved = true
+			}
+			if run.ReasoningObserved != observed || run.ReasoningSignatureObserved != signed {
+				run.UpdatedAt = l.now()
+				if err := l.runs.Update(context.Background(), *run); err != nil {
+					return turn, err
+				}
+			}
+		}
 		if event.Type == model.EventUsage && event.Usage != nil {
 			run.InputTokens += event.Usage.InputTokens
 			run.FreshInputTokens += event.Usage.FreshInputTokens
 			run.OutputTokens += event.Usage.OutputTokens
+			run.ReasoningTokens += event.Usage.ReasoningTokens
+			if event.Usage.ReasoningTokens > 0 {
+				run.ReasoningObserved = true
+			}
 			run.CachedInputTokens += event.Usage.CachedInputTokens
 			run.CacheWriteTokens += event.Usage.CacheWriteTokens
 			if event.Usage.CacheDetailsReported {

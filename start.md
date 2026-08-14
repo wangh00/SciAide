@@ -1154,7 +1154,7 @@ P2.5 范围：`Plan` / `Full Access` 两档会话权限、审批卡片、ToolCal
 
 ### P3：MCP 接入（2 周）
 
-> 实施状态（2026-08-13）：P3 核心纵向闭环已实现，包括配置/状态 UI、兼容主流 `mcpServers` JSON 的批量导入、stdio 与 Streamable HTTP、initialize 与能力发现、MCP Tool 动态注册、统一权限管道、SecretEnv 原生凭据隔离、能力列表变更刷新、异常断开/重启状态恢复。导入配置默认不受信任且不自动连接；P3 不默认自动启动或无限重连，远程重连由 SDK 进行有界重试。Windows Job Object 进程树托管与统一 NetworkClient 的 DNS rebinding 防护列入发布加固，不能将当前实现表述为强沙箱。
+> 实施状态（2026-08-14）：P3 已通过退出验收。核心纵向闭环包括配置/状态 UI、兼容主流 `mcpServers` JSON 的批量导入、stdio 与 Streamable HTTP、initialize 与 Tools/Resources/Prompts 能力发现、MCP Tool 动态注册、统一权限管道、SecretEnv 原生凭据隔离、能力列表变更刷新、stderr 有界脱敏日志，以及异常断开/重启状态恢复。真实 stdio 子进程和 Streamable HTTP E2E 已覆盖发现与调用、稳定命名空间、Resource/Prompt 不注册为 Tool、正常断开注销、异常退出离线与注销；MCP Tool 固定带 `tool.invoke` 权限并进入 AgentLoop 的统一审批链。导入配置默认不受信任且不自动连接；P3 不默认自动启动或无限重连，远程重连由 SDK 进行有界重试。Windows Job Object 进程树托管与统一 NetworkClient 的 DNS rebinding 防护仍列入发布加固，不能将当前实现表述为强沙箱。
 
 **目标：** 用户能添加和可靠使用 MCP Server。
 
@@ -1174,6 +1174,28 @@ P2.5 范围：`Plan` / `Full Access` 两档会话权限、审批卡片、ToolCal
 - MCP Tool 不能绕过权限系统。
 - Tool 同名时使用稳定命名空间且不会错误路由。
 - Resource/Prompt 不会未经选择自动注入上下文。
+
+### P3.5：模型协议完整性（插入阶段）
+
+> 实施状态（2026-08-14）：P3.5.1～P3.5.3 的代码与自动化 Provider Fixture 已完成；Responses-compatible 真实接口 E2E 已通过，实测 3 个连续模型轮次中 `reasoning → message → function_call → function_call_output` 可持久化并继续调用 MCP，reasoning token 和折叠证据 UI 正常，工具拒绝后也能完成本轮。该接口返回了 reasoning summary，但 `encrypted_content` 为空字符串，因此非空 encrypted payload 仍由自动化 Fixture 覆盖；真实 Anthropic E2E 仍待配置服务后验收。内部协议新增不对前端暴露的 Provider Turn/Item；Anthropic `thinking_delta`、`signature_delta`、`redacted_thinking`、`text` 与 `tool_use` 按原 content block index 累积；OpenAI Responses 请求显式包含 `reasoning.encrypted_content`，并按 output index 保存 `reasoning`、assistant `message` 与 `function_call` 完成项。两种协议都在 ToolCall 进入审批/执行前不可变持久化，并在 ToolResult/function_call_output 前按原顺序回放。SQLite 已加入 `provider_turn_items` 与运行级推理证据；OpenAI Chat/Responses 的 reasoning token 可独立统计，且不会重复计入总 Token。界面严格区分“参数已接受”和“已观察到思考”，只显示默认折叠的证据状态，不暴露原始 thinking/signature/encrypted content。上下文压缩会先计入 system、工具定义和最新消息，再仅保留最新的完整 Provider Turn 后缀，不拆分推理、工具调用与工具结果协议组。
+
+**目标：** 文本、推理状态和工具调用在多协议、暂停审批、程序恢复与上下文裁剪后仍保持服务端要求的原始关系。
+
+交付物：
+
+- Provider 原生 Turn/Item 内部协议和不可变持久化。
+- Anthropic thinking/signature/redacted_thinking 严格回放。
+- OpenAI Responses reasoning/encrypted item 严格回放。
+- 参数接受、实际思考块、签名和 reasoning token 的分级证据。
+- Provider-safe compaction 和默认折叠的思考状态 UI。
+
+退出标准：
+
+- Anthropic 的“思考 → 工具 → ToolResult → 再思考”真实 E2E 不丢 block、signature 或顺序。
+- Responses 工具轮次不会丢失服务端要求的 reasoning item/encrypted state。
+- 审批暂停、拒绝、取消和程序恢复不会重复或修改 Provider Item。
+- 原始协议状态不进入聊天 Snapshot、日志和默认前端渲染。
+- 上下文压缩不会拆分仍需回放的推理/工具协议组。
 
 ### P4：Skill 系统（2 周）
 

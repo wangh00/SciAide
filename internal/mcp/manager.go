@@ -54,7 +54,11 @@ type connection struct {
 type pendingConnection struct{ cancel context.CancelFunc }
 
 func NewManager(registry tool.MutableRegistry, logger *slog.Logger) *Manager {
-	return &Manager{registry: registry, logger: logger, sessions: make(map[string]*connection), pending: make(map[string]*pendingConnection), transportFactory: buildTransport}
+	manager := &Manager{registry: registry, logger: logger, sessions: make(map[string]*connection), pending: make(map[string]*pendingConnection)}
+	manager.transportFactory = func(server mcpserver.Server, secretEnv map[string]string) (mcpsdk.Transport, error) {
+		return buildTransportWithLogger(server, secretEnv, logger)
+	}
+	return manager
 }
 
 func (m *Manager) SetRuntimeObserver(observer RuntimeObserver) { m.observer = observer }
@@ -286,12 +290,19 @@ func (m *Manager) refresh(serverID string) {
 }
 
 func buildTransport(server mcpserver.Server, secretEnv map[string]string) (mcpsdk.Transport, error) {
+	return buildTransportWithLogger(server, secretEnv, nil)
+}
+
+func buildTransportWithLogger(server mcpserver.Server, secretEnv map[string]string, logger *slog.Logger) (mcpsdk.Transport, error) {
 	switch server.Transport {
 	case mcpserver.TransportStdio:
 		command := exec.Command(server.Command, server.Args...)
 		configureBackgroundCommand(command)
 		command.Dir = server.WorkingDir
 		command.Env = minimalEnvironment(server.Env, secretEnv)
+		if logger != nil {
+			command.Stderr = newMCPStderrWriter(logger, server.ID, secretEnv)
+		}
 		return &mcpsdk.CommandTransport{Command: command, TerminateDuration: 3 * time.Second}, nil
 	case mcpserver.TransportStreamableHTTP:
 		baseTransport := http.DefaultTransport.(*http.Transport).Clone()
@@ -313,6 +324,55 @@ func buildTransport(server mcpserver.Server, secretEnv map[string]string) (mcpsd
 	default:
 		return nil, fmt.Errorf("unsupported MCP transport")
 	}
+}
+
+type mcpStderrWriter struct {
+	logger   *slog.Logger
+	serverID string
+	secrets  []string
+	mu       sync.Mutex
+	pending  string
+}
+
+func newMCPStderrWriter(logger *slog.Logger, serverID string, secretEnv map[string]string) *mcpStderrWriter {
+	secrets := make([]string, 0, len(secretEnv))
+	for _, value := range secretEnv {
+		if value = strings.TrimSpace(value); value != "" {
+			secrets = append(secrets, value)
+		}
+	}
+	sort.Slice(secrets, func(i, j int) bool { return len(secrets[i]) > len(secrets[j]) })
+	return &mcpStderrWriter{logger: logger, serverID: strings.TrimSpace(serverID), secrets: secrets}
+}
+
+func (w *mcpStderrWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.pending += string(p)
+	for {
+		index := strings.IndexByte(w.pending, '\n')
+		if index < 0 {
+			break
+		}
+		w.logLine(w.pending[:index])
+		w.pending = w.pending[index+1:]
+	}
+	if len(w.pending) > 4096 {
+		w.logLine(w.pending[:4096])
+		w.pending = ""
+	}
+	return len(p), nil
+}
+
+func (w *mcpStderrWriter) logLine(value string) {
+	value = strings.TrimSpace(value)
+	if value == "" || w.logger == nil {
+		return
+	}
+	for _, secret := range w.secrets {
+		value = strings.ReplaceAll(value, secret, "[REDACTED]")
+	}
+	w.logger.Warn("MCP server stderr", "server_id", w.serverID, "message", redact(value))
 }
 
 func validateRedirect(configured string, target *url.URL) error {

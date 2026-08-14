@@ -1,6 +1,9 @@
 package modelcap
 
-import "strings"
+import (
+	"context"
+	"strings"
+)
 
 // ReasoningLevel is the provider-independent reasoning preference exposed by
 // SciAide. Adapters translate the resolved value into provider-specific request
@@ -21,6 +24,13 @@ var orderedReasoningLevels = []ReasoningLevel{
 	ReasoningHigh,
 	ReasoningXHigh,
 	ReasoningMax,
+}
+
+// AllReasoningLevels returns SciAide's provider-independent effort ladder.
+// Callers receive a copy so capability negotiation cannot mutate the global
+// order shared by other conversations.
+func AllReasoningLevels() []ReasoningLevel {
+	return append([]ReasoningLevel(nil), orderedReasoningLevels...)
 }
 
 func (l ReasoningLevel) Valid() bool { return reasoningRank(l) >= 0 }
@@ -61,6 +71,56 @@ func ResolveReasoningLevel(requested ReasoningLevel, supported []ReasoningLevel)
 	return levels[0]
 }
 
+// ReasoningAttempts returns the initial effort followed by progressively
+// cheaper values. It is used only after an endpoint explicitly rejects an
+// effort value; parameter-level rejection skips directly to provider default.
+func ReasoningAttempts(initial ReasoningLevel) []ReasoningLevel {
+	if !initial.Valid() {
+		return nil
+	}
+	result := make([]ReasoningLevel, 0, len(orderedReasoningLevels))
+	for index := reasoningRank(initial); index >= 0; index-- {
+		result = append(result, orderedReasoningLevels[index])
+	}
+	return result
+}
+
+// WithoutRejectedReasoningLevels removes effort values that this exact
+// profile/protocol/model tuple has already rejected at runtime.
+func WithoutRejectedReasoningLevels(supported, rejected []ReasoningLevel) []ReasoningLevel {
+	rejectedSet := make(map[ReasoningLevel]bool, len(rejected))
+	for _, level := range rejected {
+		if level.Valid() {
+			rejectedSet[level] = true
+		}
+	}
+	result := make([]ReasoningLevel, 0, len(supported))
+	for _, level := range NormalizeReasoningLevels(supported) {
+		if !rejectedSet[level] {
+			result = append(result, level)
+		}
+	}
+	return result
+}
+
+// ReasoningResult is a successful request-time capability observation. A
+// valid Resolved value means the endpoint accepted that effort. An empty
+// Resolved value with ControlUnsupported means the endpoint rejected the
+// entire optional reasoning/thinking control and provider defaults were used.
+type ReasoningResult struct {
+	Requested          ReasoningLevel
+	Resolved           ReasoningLevel
+	Rejected           []ReasoningLevel
+	ControlUnsupported bool
+	WireMode           string
+}
+
+// ReasoningRecorder persists runtime negotiation without coupling provider
+// adapters to SQLite or the model-profile application service.
+type ReasoningRecorder interface {
+	RecordReasoningResult(ctx context.Context, profileID, modelID string, result ReasoningResult) error
+}
+
 // InferredReasoningLevels keeps the legacy OpenAI-compatible inference entry
 // point. New code should use InferredReasoningLevelsForProtocol so adapters can
 // expose one stable five-step preference while still mapping it to the subset
@@ -75,10 +135,10 @@ func InferredReasoningLevels(modelID string) []ReasoningLevel {
 // provider/model use its native default (for example a fixed-thinking model).
 //
 // /v1/models rarely publishes this metadata. These defaults deliberately
-// mirror OpenCode's provider variants: known model families get their native
-// subset, while unknown OpenAI-compatible models optimistically receive the
-// widely supported low/medium/high set. Protocol adapters retry without the
-// optional control when a compatible endpoint explicitly rejects it.
+// mirror provider variants for known model families. Unknown compatible
+// models receive the complete ladder: future models must be allowed to try
+// max instead of being permanently capped at high by an old client. Protocol
+// adapters negotiate downward only after an explicit request-time rejection.
 func InferredReasoningLevelsForProtocol(protocol APIProtocol, modelID string) []ReasoningLevel {
 	id := strings.ToLower(strings.TrimSpace(modelID))
 	if id == "" {
@@ -136,7 +196,7 @@ func InferredReasoningLevelsForProtocol(protocol APIProtocol, modelID string) []
 	case strings.Contains(id, "deepseek-v4"):
 		return []ReasoningLevel{ReasoningLow, ReasoningMedium, ReasoningHigh, ReasoningMax}
 	default:
-		return []ReasoningLevel{ReasoningLow, ReasoningMedium, ReasoningHigh}
+		return AllReasoningLevels()
 	}
 }
 

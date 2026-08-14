@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/wangh00/SciAide/internal/app/modelprofile"
@@ -21,17 +22,24 @@ import (
 const maxStreamLineBytes = 1024 * 1024
 
 type Client struct {
-	profile modelprofile.Profile
-	secret  []byte
-	http    *http.Client
+	profile  modelprofile.Profile
+	secret   []byte
+	http     *http.Client
+	recorder modelcap.ReasoningRecorder
+	modeMu   sync.RWMutex
+	mode     thinkingMode
 }
 
-func New(profile modelprofile.Profile, secret []byte) *Client {
+func New(profile modelprofile.Profile, secret []byte, recorders ...modelcap.ReasoningRecorder) *Client {
 	timeout := time.Duration(profile.TimeoutSeconds) * time.Second
 	if timeout <= 0 {
 		timeout = 60 * time.Second
 	}
-	return &Client{profile: profile, secret: append([]byte(nil), secret...), http: &http.Client{Timeout: timeout}}
+	var recorder modelcap.ReasoningRecorder
+	if len(recorders) > 0 {
+		recorder = recorders[0]
+	}
+	return &Client{profile: profile, secret: append([]byte(nil), secret...), http: &http.Client{Timeout: timeout}, recorder: recorder}
 }
 func NewWithHTTPClient(profile modelprofile.Profile, secret []byte, client *http.Client) *Client {
 	v := New(profile, secret)
@@ -67,6 +75,9 @@ func intPointer(value int) *int { return &value }
 type contentBlock struct {
 	Type      string          `json:"type"`
 	Text      string          `json:"text,omitempty"`
+	Thinking  string          `json:"thinking,omitempty"`
+	Signature string          `json:"signature,omitempty"`
+	Data      string          `json:"data,omitempty"`
 	ID        string          `json:"id,omitempty"`
 	Name      string          `json:"name,omitempty"`
 	Input     json.RawMessage `json:"input,omitempty"`
@@ -93,11 +104,133 @@ type payload struct {
 	Temperature *float64  `json:"temperature,omitempty"`
 	Thinking    *struct {
 		Type         string `json:"type"`
-		BudgetTokens int    `json:"budget_tokens"`
+		BudgetTokens int    `json:"budget_tokens,omitempty"`
 	} `json:"thinking,omitempty"`
+	OutputConfig *struct {
+		Effort string `json:"effort"`
+	} `json:"output_config,omitempty"`
 }
 
+type thinkingMode string
+
+const (
+	thinkingProviderDefault thinkingMode = "provider_default"
+	thinkingAdaptive        thinkingMode = "anthropic_adaptive"
+	thinkingLegacy          thinkingMode = "anthropic_legacy"
+)
+
+type reasoningRejectedError struct {
+	kind modelutil.ReasoningRejectionKind
+	err  error
+}
+
+func (e *reasoningRejectedError) Error() string { return e.err.Error() }
+func (e *reasoningRejectedError) Unwrap() error { return e.err }
+
 func (c *Client) Stream(ctx context.Context, request model.ChatRequest) (model.Stream, error) {
+	requested := request.RequestedReasoningLevel
+	if !requested.Valid() {
+		requested = request.ResolvedReasoningLevel
+	}
+	attempts := modelcap.ReasoningAttempts(request.ResolvedReasoningLevel)
+	if len(attempts) == 0 {
+		attempts = []modelcap.ReasoningLevel{""}
+	}
+	rejected := make([]modelcap.ReasoningLevel, 0, len(attempts))
+	mode := c.preferredThinkingMode()
+	controlUnsupported := false
+	for effortIndex := 0; effortIndex <= len(attempts); {
+		level := modelcap.ReasoningLevel("")
+		if effortIndex < len(attempts) {
+			level = attempts[effortIndex]
+		} else {
+			mode = thinkingProviderDefault
+		}
+		request.ResolvedReasoningLevel = level
+		stream, err := c.streamOnce(ctx, request, mode)
+		if err == nil {
+			c.rememberThinkingMode(mode)
+			result := modelcap.ReasoningResult{Requested: requested, Resolved: level, Rejected: rejected, ControlUnsupported: controlUnsupported, WireMode: string(mode)}
+			if c.recorder != nil && requested.Valid() {
+				_ = c.recorder.RecordReasoningResult(ctx, c.profile.ID, c.profile.ModelID, result)
+			}
+			return model.WithReasoningResolution(stream, requested, level), nil
+		}
+		var rejection *reasoningRejectedError
+		if !errors.As(err, &rejection) || !level.Valid() {
+			return nil, err
+		}
+		switch rejection.kind {
+		case modelutil.ReasoningRejectionValue:
+			rejected = append(rejected, level)
+			effortIndex++
+			mode = c.preferredThinkingMode()
+		case modelutil.ReasoningRejectionControl:
+			if mode == thinkingAdaptive {
+				// Older Claude models reject adaptive thinking but accept the
+				// budget_tokens form. Try it at the same user-selected tier.
+				mode = thinkingLegacy
+				continue
+			}
+			controlUnsupported = true
+			rejected = nil
+			effortIndex = len(attempts)
+			mode = thinkingProviderDefault
+		default:
+			return nil, err
+		}
+	}
+	return nil, fmt.Errorf("reasoning negotiation exhausted")
+}
+
+func (c *Client) preferredThinkingMode() thinkingMode {
+	c.modeMu.RLock()
+	remembered := c.mode
+	c.modeMu.RUnlock()
+	if remembered == thinkingAdaptive || remembered == thinkingLegacy {
+		return remembered
+	}
+	for _, item := range c.profile.Models {
+		if item.ID != c.profile.ModelID {
+			continue
+		}
+		switch item.ReasoningWireMode {
+		case string(thinkingAdaptive):
+			return thinkingAdaptive
+		case string(thinkingLegacy):
+			return thinkingLegacy
+		}
+	}
+	if legacyAnthropicModel(c.profile.ModelID) {
+		return thinkingLegacy
+	}
+	// Unknown future and custom aliases optimistically try the modern API.
+	return thinkingAdaptive
+}
+
+func (c *Client) rememberThinkingMode(mode thinkingMode) {
+	if mode != thinkingAdaptive && mode != thinkingLegacy {
+		return
+	}
+	c.modeMu.Lock()
+	c.mode = mode
+	c.modeMu.Unlock()
+}
+
+func legacyAnthropicModel(modelID string) bool {
+	id := strings.ToLower(strings.TrimSpace(modelID))
+	for _, prefix := range []string{"us.anthropic.", "eu.anthropic.", "anthropic."} {
+		id = strings.TrimPrefix(id, prefix)
+	}
+	for _, marker := range []string{"claude-3-", "claude-opus-4-0", "claude-opus-4-1", "claude-opus-4-5", "claude-sonnet-4-0", "claude-sonnet-4-5", "claude-haiku-4-5"} {
+		if strings.Contains(id, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *Client) streamOnce(ctx context.Context, request model.ChatRequest, mode thinkingMode) (model.Stream, error) {
 	aliases := map[string]string{}
 	providerNames := map[string]string{}
 	for _, def := range request.Tools {
@@ -116,14 +249,24 @@ func (c *Client) Stream(ctx context.Context, request model.ChatRequest) (model.S
 		maxTokens = *c.profile.MaxOutputTokens
 	}
 	value := payload{Model: c.profile.ModelID, Messages: []message{}, Tools: []toolDef{}, Stream: true, MaxTokens: maxTokens, Temperature: c.profile.Temperature}
-	if request.ResolvedReasoningLevel.Valid() {
+	if request.ResolvedReasoningLevel.Valid() && mode != thinkingProviderDefault {
 		if value.MaxTokens <= 1024 {
 			value.MaxTokens = 2048
 		}
-		value.Thinking = &struct {
-			Type         string `json:"type"`
-			BudgetTokens int    `json:"budget_tokens"`
-		}{Type: "enabled", BudgetTokens: thinkingBudget(request.ResolvedReasoningLevel, value.MaxTokens)}
+		if mode == thinkingAdaptive {
+			value.Thinking = &struct {
+				Type         string `json:"type"`
+				BudgetTokens int    `json:"budget_tokens,omitempty"`
+			}{Type: "adaptive"}
+			value.OutputConfig = &struct {
+				Effort string `json:"effort"`
+			}{Effort: string(request.ResolvedReasoningLevel)}
+		} else {
+			value.Thinking = &struct {
+				Type         string `json:"type"`
+				BudgetTokens int    `json:"budget_tokens,omitempty"`
+			}{Type: "enabled", BudgetTokens: thinkingBudget(request.ResolvedReasoningLevel, value.MaxTokens)}
+		}
 		if value.Temperature != nil && *value.Temperature != 1 {
 			// Extended thinking only accepts the default temperature.
 			value.Temperature = nil
@@ -164,6 +307,9 @@ func (c *Client) Stream(ctx context.Context, request model.ChatRequest) (model.S
 			return nil, fmt.Errorf("unsupported model message role %q", item.Role)
 		}
 	}
+	if err := appendProviderTurns(&value, request.ProviderTurns); err != nil {
+		return nil, err
+	}
 	body, err := json.Marshal(value)
 	if err != nil {
 		return nil, err
@@ -191,15 +337,68 @@ func (c *Client) Stream(ctx context.Context, request model.ChatRequest) (model.S
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		b := modelutil.ReadErrorBody(response.Body)
 		response.Body.Close()
-		if request.ResolvedReasoningLevel.Valid() && modelutil.ReasoningControlRejected(response.StatusCode, b) {
-			request.ResolvedReasoningLevel = ""
-			return c.Stream(ctx, request)
+		if request.ResolvedReasoningLevel.Valid() {
+			if kind := modelutil.ClassifyReasoningRejection(response.StatusCode, b); kind != modelutil.ReasoningRejectionNone {
+				return nil, &reasoningRejectedError{kind: kind, err: modelutil.ClassifyStatus(response.StatusCode, b)}
+			}
 		}
 		return nil, modelutil.ClassifyStatus(response.StatusCode, b)
 	}
 	scanner := bufio.NewScanner(response.Body)
 	scanner.Buffer(make([]byte, 64*1024), maxStreamLineBytes)
-	return &stream{body: response.Body, scanner: scanner, providerNames: providerNames, blocks: map[int]*toolAccumulator{}}, nil
+	return &stream{body: response.Body, scanner: scanner, providerNames: providerNames, blocks: map[int]*blockAccumulator{}, completed: map[int]struct{}{}}, nil
+}
+
+func appendProviderTurns(value *payload, turns []model.ProviderTurn) error {
+	for _, turn := range turns {
+		if turn.Protocol != modelcap.ProtocolAnthropic {
+			return fmt.Errorf("provider turn protocol %q cannot be replayed by Anthropic", turn.Protocol)
+		}
+		if len(turn.Items) == 0 {
+			return fmt.Errorf("Anthropic provider turn has no content blocks")
+		}
+		blocks := make([]contentBlock, 0, len(turn.Items))
+		previousOrdinal := -1
+		for _, item := range turn.Items {
+			if item.Ordinal <= previousOrdinal || len(item.Payload) == 0 {
+				return fmt.Errorf("Anthropic provider items are not strictly ordered")
+			}
+			previousOrdinal = item.Ordinal
+			var block contentBlock
+			if err := json.Unmarshal(item.Payload, &block); err != nil {
+				return fmt.Errorf("decode Anthropic provider item: %w", err)
+			}
+			if block.Type != item.Type {
+				return fmt.Errorf("Anthropic provider item type mismatch")
+			}
+			switch block.Type {
+			case "text":
+			case "thinking":
+				if block.Signature == "" {
+					return fmt.Errorf("Anthropic thinking block is missing its signature")
+				}
+			case "redacted_thinking":
+				if block.Data == "" {
+					return fmt.Errorf("Anthropic redacted thinking block is missing data")
+				}
+			case "tool_use":
+				if block.ID == "" || block.Name == "" || len(block.Input) == 0 || !json.Valid(block.Input) || item.CallID != block.ID {
+					return fmt.Errorf("invalid persisted Anthropic tool_use block")
+				}
+			default:
+				return fmt.Errorf("unsupported persisted Anthropic content block %q", block.Type)
+			}
+			blocks = append(blocks, block)
+		}
+		value.Messages = append(value.Messages, message{Role: "assistant", Content: blocks})
+		for _, result := range turn.ToolResults {
+			if result.Role != model.RoleTool || strings.TrimSpace(result.ToolCallID) == "" {
+				return fmt.Errorf("invalid Anthropic provider turn tool result")
+			}
+			value.Messages = appendMessage(value.Messages, "user", contentBlock{Type: "tool_result", ToolUseID: result.ToolCallID, Content: modelutil.WrapUntrusted("tool_result", result.Content)})
+		}
+	}
+	return nil
 }
 func appendMessage(messages []message, role string, block contentBlock) []message {
 	if len(messages) > 0 && messages[len(messages)-1].Role == role {
@@ -224,15 +423,27 @@ func thinkingBudget(level modelcap.ReasoningLevel, maxTokens int) int {
 	return budget
 }
 
-type toolAccumulator struct {
-	ID, Name  string
-	Arguments strings.Builder
+const (
+	maxProviderBlockBytes    = 8 * 1024 * 1024
+	maxProviderTurnBytes     = 16 * 1024 * 1024
+	maxProviderBlocksPerTurn = 128
+)
+
+type blockAccumulator struct {
+	Type, ID, Name, Data string
+	Text                 strings.Builder
+	Thinking             strings.Builder
+	Signature            strings.Builder
+	Arguments            strings.Builder
 }
 type stream struct {
 	body          io.ReadCloser
 	scanner       *bufio.Scanner
 	providerNames map[string]string
-	blocks        map[int]*toolAccumulator
+	blocks        map[int]*blockAccumulator
+	completed     map[int]struct{}
+	toolBlocks    int
+	providerBytes int
 	queue         []model.Event
 	done          bool
 	stopReason    string
@@ -246,14 +457,20 @@ type event struct {
 		Usage      usage  `json:"usage"`
 	} `json:"message"`
 	ContentBlock struct {
-		Type  string          `json:"type"`
-		ID    string          `json:"id"`
-		Name  string          `json:"name"`
-		Input json.RawMessage `json:"input"`
+		Type      string          `json:"type"`
+		Text      string          `json:"text"`
+		Thinking  string          `json:"thinking"`
+		Signature string          `json:"signature"`
+		Data      string          `json:"data"`
+		ID        string          `json:"id"`
+		Name      string          `json:"name"`
+		Input     json.RawMessage `json:"input"`
 	} `json:"content_block"`
 	Delta struct {
 		Type        string `json:"type"`
 		Text        string `json:"text"`
+		Thinking    string `json:"thinking"`
+		Signature   string `json:"signature"`
 		PartialJSON string `json:"partial_json"`
 		StopReason  string `json:"stop_reason"`
 	} `json:"delta"`
@@ -279,6 +496,57 @@ func (u usage) normalized() model.Usage {
 	}
 	return model.Usage{InputTokens: u.InputTokens + read + created, FreshInputTokens: u.InputTokens, OutputTokens: u.OutputTokens, CachedInputTokens: read, CacheWriteTokens: created, CacheDetailsReported: u.CacheReadInputTokens != nil || u.CacheCreationInputTokens != nil}
 }
+
+func (a *blockAccumulator) size() int {
+	return len(a.Data) + a.Text.Len() + a.Thinking.Len() + a.Signature.Len() + a.Arguments.Len()
+}
+
+func (s *stream) completeBlock(index int, accumulator *blockAccumulator) (model.ProviderItem, *model.ToolCall, error) {
+	block := contentBlock{Type: accumulator.Type}
+	var call *model.ToolCall
+	switch accumulator.Type {
+	case "text":
+		block.Text = accumulator.Text.String()
+	case "thinking":
+		block.Thinking = accumulator.Thinking.String()
+		block.Signature = accumulator.Signature.String()
+		if block.Signature == "" {
+			return model.ProviderItem{}, nil, modelutil.Error("MODEL_STREAM_INVALID", "Anthropic 思考块缺少签名。", false, nil)
+		}
+	case "redacted_thinking":
+		block.Data = accumulator.Data
+		if block.Data == "" {
+			return model.ProviderItem{}, nil, modelutil.Error("MODEL_STREAM_INVALID", "Anthropic 脱敏思考块缺少数据。", false, nil)
+		}
+	case "tool_use":
+		arguments := accumulator.Arguments.String()
+		if arguments == "" {
+			arguments = "{}"
+		}
+		block.ID, block.Name, block.Input = accumulator.ID, accumulator.Name, json.RawMessage(arguments)
+		name := accumulator.Name
+		if qualified := s.providerNames[name]; qualified != "" {
+			name = qualified
+		}
+		value := model.ToolCall{ID: accumulator.ID, Name: name, Arguments: json.RawMessage(arguments)}
+		if err := modelutil.ValidateToolCall(value); err != nil {
+			return model.ProviderItem{}, nil, modelutil.Error("MODEL_TOOL_CALL_INVALID", "模型返回了无效的工具调用。", false, err)
+		}
+		call = &value
+	default:
+		return model.ProviderItem{}, nil, modelutil.Error("MODEL_STREAM_INVALID", "Anthropic 返回了暂不支持的内容块。", false, nil)
+	}
+	payload, err := json.Marshal(block)
+	if err != nil {
+		return model.ProviderItem{}, nil, modelutil.Error("MODEL_STREAM_INVALID", "无法保存 Anthropic 内容块。", false, err)
+	}
+	item := model.ProviderItem{Ordinal: index, Type: accumulator.Type, Payload: payload}
+	if call != nil {
+		item.CallID = accumulator.ID
+	}
+	return item, call, nil
+}
+
 func (s *stream) Recv() (model.Event, error) {
 	if len(s.queue) > 0 {
 		return s.pop(), nil
@@ -300,48 +568,84 @@ func (s *stream) Recv() (model.Event, error) {
 		case "message_start":
 			s.usage = e.Message.Usage.normalized()
 		case "content_block_start":
-			if e.ContentBlock.Type == "tool_use" {
-				if _, exists := s.blocks[e.Index]; !exists && len(s.blocks) >= modelutil.MaxToolCalls {
+			_, completed := s.completed[e.Index]
+			if e.Index < 0 || e.Index >= maxProviderBlocksPerTurn || s.blocks[e.Index] != nil || completed {
+				return model.Event{}, modelutil.Error("MODEL_STREAM_INVALID", "Anthropic 返回了无效或重复的内容块索引。", false, nil)
+			}
+			a := &blockAccumulator{Type: e.ContentBlock.Type, ID: e.ContentBlock.ID, Name: e.ContentBlock.Name, Data: e.ContentBlock.Data}
+			switch e.ContentBlock.Type {
+			case "text":
+				a.Text.WriteString(e.ContentBlock.Text)
+				if e.ContentBlock.Text != "" {
+					s.queue = append(s.queue, model.Event{Type: model.EventTextDelta, Text: e.ContentBlock.Text})
+				}
+			case "thinking":
+				a.Thinking.WriteString(e.ContentBlock.Thinking)
+				a.Signature.WriteString(e.ContentBlock.Signature)
+			case "redacted_thinking":
+			case "tool_use":
+				s.toolBlocks++
+				if s.toolBlocks > modelutil.MaxToolCalls {
 					return model.Event{}, modelutil.Error("MODEL_TOOL_CALL_INVALID", "模型返回了过多的工具调用。", false, nil)
 				}
 				if len(e.ContentBlock.Input) > modelutil.MaxToolArgsBytes {
 					return model.Event{}, modelutil.Error("MODEL_TOOL_CALL_INVALID", "模型返回的工具参数过大。", false, nil)
 				}
-				a := &toolAccumulator{ID: e.ContentBlock.ID, Name: e.ContentBlock.Name}
 				if len(e.ContentBlock.Input) > 0 && string(e.ContentBlock.Input) != "{}" {
 					a.Arguments.Write(e.ContentBlock.Input)
 				}
-				s.blocks[e.Index] = a
+			default:
+				return model.Event{}, modelutil.Error("MODEL_STREAM_INVALID", "Anthropic 返回了暂不支持的内容块。", false, nil)
 			}
+			if a.size() > maxProviderBlockBytes {
+				return model.Event{}, modelutil.Error("MODEL_STREAM_INVALID", "Anthropic 内容块超过大小限制。", false, nil)
+			}
+			s.blocks[e.Index] = a
 		case "content_block_delta":
-			if e.Delta.Type == "text_delta" && e.Delta.Text != "" {
-				s.queue = append(s.queue, model.Event{Type: model.EventTextDelta, Text: e.Delta.Text})
+			a := s.blocks[e.Index]
+			if a == nil {
+				return model.Event{}, modelutil.Error("MODEL_STREAM_INVALID", "Anthropic 内容增量缺少起始块。", false, nil)
 			}
-			if e.Delta.Type == "input_json_delta" {
-				a := s.blocks[e.Index]
-				if a != nil {
-					if a.Arguments.Len()+len(e.Delta.PartialJSON) > modelutil.MaxToolArgsBytes {
-						return model.Event{}, fmt.Errorf("tool arguments exceed limit")
-					}
-					a.Arguments.WriteString(e.Delta.PartialJSON)
+			switch e.Delta.Type {
+			case "text_delta":
+				a.Text.WriteString(e.Delta.Text)
+				if e.Delta.Text != "" {
+					s.queue = append(s.queue, model.Event{Type: model.EventTextDelta, Text: e.Delta.Text})
 				}
+			case "thinking_delta":
+				a.Thinking.WriteString(e.Delta.Thinking)
+			case "signature_delta":
+				a.Signature.WriteString(e.Delta.Signature)
+			case "input_json_delta":
+				if a.Arguments.Len()+len(e.Delta.PartialJSON) > modelutil.MaxToolArgsBytes {
+					return model.Event{}, fmt.Errorf("tool arguments exceed limit")
+				}
+				a.Arguments.WriteString(e.Delta.PartialJSON)
+			default:
+				return model.Event{}, modelutil.Error("MODEL_STREAM_INVALID", "Anthropic 返回了暂不支持的内容增量。", false, nil)
+			}
+			if a.size() > maxProviderBlockBytes {
+				return model.Event{}, modelutil.Error("MODEL_STREAM_INVALID", "Anthropic 内容块超过大小限制。", false, nil)
 			}
 		case "content_block_stop":
-			if a := s.blocks[e.Index]; a != nil {
-				if a.Arguments.Len() == 0 {
-					a.Arguments.WriteString("{}")
-				}
-				name := a.Name
-				if q := s.providerNames[name]; q != "" {
-					name = q
-				}
-				call := model.ToolCall{ID: a.ID, Name: name, Arguments: json.RawMessage(a.Arguments.String())}
-				if err := modelutil.ValidateToolCall(call); err != nil {
-					return model.Event{}, modelutil.Error("MODEL_TOOL_CALL_INVALID", "模型返回了无效的工具调用。", false, err)
-				}
-				s.queue = append(s.queue, model.Event{Type: model.EventToolCall, ToolCall: &call})
-				delete(s.blocks, e.Index)
+			a := s.blocks[e.Index]
+			if a == nil {
+				return model.Event{}, modelutil.Error("MODEL_STREAM_INVALID", "Anthropic 内容结束事件缺少起始块。", false, nil)
 			}
+			item, call, err := s.completeBlock(e.Index, a)
+			if err != nil {
+				return model.Event{}, err
+			}
+			if s.providerBytes+len(item.Payload) > maxProviderTurnBytes {
+				return model.Event{}, modelutil.Error("MODEL_STREAM_INVALID", "Anthropic 单轮协议状态超过大小限制。", false, nil)
+			}
+			s.providerBytes += len(item.Payload)
+			if call != nil {
+				s.queue = append(s.queue, model.Event{Type: model.EventToolCall, ToolCall: call})
+			}
+			s.queue = append(s.queue, model.Event{Type: model.EventProviderItem, ProviderItem: &item})
+			delete(s.blocks, e.Index)
+			s.completed[e.Index] = struct{}{}
 		case "message_delta":
 			if e.Delta.StopReason != "" {
 				s.stopReason = e.Delta.StopReason
@@ -351,6 +655,9 @@ func (s *stream) Recv() (model.Event, error) {
 				s.usage.OutputTokens = u.OutputTokens
 			}
 		case "message_stop":
+			if len(s.blocks) > 0 {
+				return model.Event{}, modelutil.Error("MODEL_STREAM_INVALID", "Anthropic 流在内容块完成前结束。", false, nil)
+			}
 			if s.usage.InputTokens > 0 || s.usage.OutputTokens > 0 {
 				s.queue = append(s.queue, model.Event{Type: model.EventUsage, Usage: &s.usage})
 			}
