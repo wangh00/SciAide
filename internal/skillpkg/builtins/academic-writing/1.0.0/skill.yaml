@@ -1,0 +1,26 @@
+schema_version: 1
+id: academic-writing
+name: 学术写作助手
+version: 1.0.0
+description: 起草、重写、润色和审查学术文本，在保持原意和证据边界的前提下改善结构、论证与表达；适用于摘要、论文段落、方法、结果和审稿回复。
+entry: SKILL.md
+activation:
+  mode: suggest
+  triggers:
+    - 学术写作
+    - 论文写作
+    - 润色论文
+    - 修改摘要
+    - academic writing
+    - polish manuscript
+requires:
+  tools:
+    - builtin.workspace.list
+    - builtin.workspace.read_text
+  optional_tools: []
+permissions:
+  - workspace.read
+compatibility:
+  sciaide: ">=0.3.0-dev <1.0.0"
+context:
+  max_tokens: 6000

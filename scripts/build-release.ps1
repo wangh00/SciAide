@@ -68,8 +68,11 @@ if ($machine -ne 0x8664) {
 
 $item = Get-Item -LiteralPath $output
 $hash = (Get-FileHash -LiteralPath $output -Algorithm SHA256).Hash
+$hashOutput = "${output}.sha256"
+[System.IO.File]::WriteAllText($hashOutput, "$($hash.ToLowerInvariant())  $($item.Name)`n", [System.Text.UTF8Encoding]::new($false))
 Write-Host "Release build passed."
 Write-Host "Path: $($item.FullName)"
 Write-Host "Bytes: $($item.Length)"
 Write-Host ("PE Machine: 0x{0:X4}" -f $machine)
 Write-Host "SHA256: $hash"
+Write-Host "Checksum: $hashOutput"

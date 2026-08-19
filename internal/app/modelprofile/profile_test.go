@@ -29,6 +29,17 @@ func TestNormalizeModelsUsesProviderDefaultForFixedReasoningModel(t *testing.T) 
 	}
 }
 
+func TestNormalizeModelsKeepsContextSourceExplicit(t *testing.T) {
+	models, _ := normalizeModels([]ProfileModel{{ID: "catalog-model", Enabled: true, ContextWindowTokens: 128_000, AutoCompactTokenLimit: 200_000, ContextWindowSource: modelcap.ContextWindowSourceProvider}}, "catalog-model", ProtocolOpenAIResponses)
+	if len(models) != 1 || models[0].ContextWindowTokens != 128_000 || models[0].AutoCompactTokenLimit != 115_200 || models[0].ContextWindowSource != modelcap.ContextWindowSourceProvider {
+		t.Fatalf("context metadata = %#v", models)
+	}
+	fallback, _ := normalizeModels([]ProfileModel{{ID: "unknown", Enabled: true}}, "unknown", ProtocolOpenAIChat)
+	if fallback[0].ContextWindowTokens != 200_000 || fallback[0].ContextWindowSource != modelcap.ContextWindowSourceFallback {
+		t.Fatalf("fallback metadata = %#v", fallback[0])
+	}
+}
+
 func TestReasoningObservationsArePreservedOnlyForSameEndpoint(t *testing.T) {
 	existing := []ProfileModel{{
 		ID: "future-model", ReasoningVerifiedLevels: []modelcap.ReasoningLevel{modelcap.ReasoningXHigh},

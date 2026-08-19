@@ -10,15 +10,21 @@ type ConversationFacade struct {
 	service   *conversation.Service
 }
 type CreateConversationRequest struct {
-	ProjectID string `json:"projectId"`
-	Title     string `json:"title"`
+	ProjectID      string `json:"projectId"`
+	Title          string `json:"title"`
+	ModelProfileID string `json:"modelProfileId"`
+	ModelID        string `json:"modelId"`
 }
 
 func NewConversationFacade(lifecycle *LifecycleContext, service *conversation.Service) *ConversationFacade {
 	return &ConversationFacade{lifecycle: lifecycle, service: service}
 }
 func (f *ConversationFacade) CreateConversation(request CreateConversationRequest) (conversation.Conversation, error) {
-	return f.service.Create(f.lifecycle.Context(), request.ProjectID, request.Title)
+	created, err := f.service.Create(f.lifecycle.Context(), request.ProjectID, request.Title)
+	if err != nil || (request.ModelProfileID == "" && request.ModelID == "") {
+		return created, err
+	}
+	return f.service.SetModelSelection(f.lifecycle.Context(), created.ID, request.ModelProfileID, request.ModelID)
 }
 func (f *ConversationFacade) ListConversations(projectID string) ([]conversation.Conversation, error) {
 	return f.service.List(f.lifecycle.Context(), projectID)
@@ -39,4 +45,8 @@ func (f *ConversationFacade) SetPermissionMode(conversationID string, mode conve
 
 func (f *ConversationFacade) SetReasoningLevel(conversationID string, level modelcap.ReasoningLevel) (conversation.Conversation, error) {
 	return f.service.SetReasoningLevel(f.lifecycle.Context(), conversationID, level)
+}
+
+func (f *ConversationFacade) SetModelSelection(conversationID, modelProfileID, modelID string) (conversation.Conversation, error) {
+	return f.service.SetModelSelection(f.lifecycle.Context(), conversationID, modelProfileID, modelID)
 }

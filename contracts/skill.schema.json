@@ -4,22 +4,27 @@
   "title": "SciAide Skill Manifest",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "id", "name", "version", "description", "entry"],
+  "required": ["schema_version", "id", "name", "version", "description", "entry", "compatibility"],
   "properties": {
     "schema_version": { "const": 1 },
     "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{1,63}$" },
     "name": { "type": "string", "minLength": 1, "maxLength": 100 },
-    "version": { "type": "string", "minLength": 1, "maxLength": 32 },
+    "version": {
+      "type": "string",
+      "maxLength": 64,
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(?:\\.(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$"
+    },
     "description": { "type": "string", "minLength": 1, "maxLength": 500 },
     "entry": { "const": "SKILL.md" },
     "activation": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "mode": { "enum": ["explicit", "suggest"] },
+        "mode": { "enum": ["explicit", "suggest"], "default": "explicit" },
         "triggers": {
           "type": "array",
           "maxItems": 50,
+          "uniqueItems": true,
           "items": { "type": "string", "minLength": 1, "maxLength": 100 }
         }
       }
@@ -28,12 +33,13 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "tools": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
-        "optional_tools": { "type": "array", "items": { "type": "string" }, "uniqueItems": true }
+        "tools": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/toolName" }, "uniqueItems": true },
+        "optional_tools": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/toolName" }, "uniqueItems": true }
       }
     },
     "permissions": {
       "type": "array",
+      "maxItems": 7,
       "uniqueItems": true,
       "items": {
         "enum": [
@@ -50,7 +56,44 @@
     "compatibility": {
       "type": "object",
       "additionalProperties": false,
-      "properties": { "sciaide": { "type": "string", "minLength": 1 } }
+      "required": ["sciaide"],
+      "properties": { "sciaide": { "type": "string", "minLength": 1, "maxLength": 256 } }
+    },
+    "context": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_tokens": { "type": "integer", "minimum": 256, "maximum": 32000, "default": 8000 }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "activation": {
+            "properties": { "mode": { "const": "suggest" } },
+            "required": ["mode"]
+          }
+        },
+        "required": ["activation"]
+      },
+      "then": {
+        "properties": {
+          "activation": {
+            "required": ["triggers"],
+            "properties": { "triggers": { "minItems": 1 } }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "toolName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$"
     }
   }
 }

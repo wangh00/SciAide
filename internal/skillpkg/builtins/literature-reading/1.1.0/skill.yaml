@@ -1,0 +1,30 @@
+schema_version: 1
+id: literature-reading
+name: 文献阅读助手
+version: 1.1.0
+description: 结构化阅读和批判性分析科研论文，提取研究问题、方法、证据、局限与可复核结论；支持项目附件中的 PDF、DOCX、XLSX 与文本材料。
+entry: SKILL.md
+activation:
+  mode: suggest
+  triggers:
+    - 文献阅读
+    - 论文解读
+    - 阅读论文
+    - 分析论文
+    - paper analysis
+    - read paper
+requires:
+  tools:
+    - builtin.workspace.list
+    - builtin.workspace.read_text
+    - builtin.attachment.list
+    - builtin.document.inspect
+    - builtin.document.read
+    - builtin.document.search
+  optional_tools: []
+permissions:
+  - workspace.read
+compatibility:
+  sciaide: ">=0.3.0-dev <1.0.0"
+context:
+  max_tokens: 6000

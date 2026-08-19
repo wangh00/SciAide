@@ -52,6 +52,9 @@ type ProfileModel struct {
 	OwnedBy                     string                    `json:"ownedBy,omitempty"`
 	Enabled                     bool                      `json:"enabled"`
 	IsDefault                   bool                      `json:"isDefault"`
+	ContextWindowTokens         int                       `json:"contextWindowTokens"`
+	AutoCompactTokenLimit       int                       `json:"autoCompactTokenLimit"`
+	ContextWindowSource         string                    `json:"contextWindowSource"`
 	ReasoningLevels             []modelcap.ReasoningLevel `json:"reasoningLevels"`
 	ReasoningCapabilitySource   string                    `json:"reasoningCapabilitySource"`
 	ReasoningVerifiedLevels     []modelcap.ReasoningLevel `json:"reasoningVerifiedLevels"`
@@ -60,6 +63,16 @@ type ProfileModel struct {
 	ReasoningLastRequestedLevel modelcap.ReasoningLevel   `json:"reasoningLastRequestedLevel,omitempty"`
 	ReasoningLastResolvedLevel  modelcap.ReasoningLevel   `json:"reasoningLastResolvedLevel,omitempty"`
 	ReasoningWireMode           string                    `json:"reasoningWireMode,omitempty"`
+}
+
+func (p Profile) ContextBudget(modelID string) modelcap.ContextBudget {
+	modelID = strings.TrimSpace(modelID)
+	for _, item := range p.Models {
+		if item.ID == modelID {
+			return modelcap.ResolveContextBudget(item.ContextWindowTokens, item.AutoCompactTokenLimit, item.ContextWindowSource)
+		}
+	}
+	return modelcap.ResolveContextBudget(0, 0, "")
 }
 
 type SaveCommand struct {
@@ -108,6 +121,9 @@ type DiscoveryCommand struct {
 type AvailableModel struct {
 	ID                        string                    `json:"id"`
 	OwnedBy                   string                    `json:"ownedBy,omitempty"`
+	ContextWindowTokens       int                       `json:"contextWindowTokens,omitempty"`
+	AutoCompactTokenLimit     int                       `json:"autoCompactTokenLimit,omitempty"`
+	ContextWindowSource       string                    `json:"contextWindowSource,omitempty"`
 	ReasoningLevels           []modelcap.ReasoningLevel `json:"reasoningLevels,omitempty"`
 	ReasoningCapabilitySource string                    `json:"reasoningCapabilitySource,omitempty"`
 }
@@ -305,6 +321,14 @@ func (s *Service) decorate(ctx context.Context, value Profile) (Profile, error) 
 }
 
 func validateCommand(cmd SaveCommand) error {
+	for _, item := range cmd.Models {
+		if item.ContextWindowTokens != 0 && (item.ContextWindowTokens < modelcap.MinimumContextWindowTokens || item.ContextWindowTokens > modelcap.MaximumContextWindowTokens) {
+			return fmt.Errorf("model %q context window must be between %d and %d tokens", strings.TrimSpace(item.ID), modelcap.MinimumContextWindowTokens, modelcap.MaximumContextWindowTokens)
+		}
+		if item.AutoCompactTokenLimit < 0 {
+			return fmt.Errorf("model %q auto compact token limit must not be negative", strings.TrimSpace(item.ID))
+		}
+	}
 	models, _ := normalizeModels(cmd.Models, cmd.ModelID, normalizedProtocol(cmd.APIProtocol))
 	if strings.TrimSpace(cmd.Name) == "" || len(models) == 0 {
 		return fmt.Errorf("profile name and at least one model id are required")
@@ -353,6 +377,10 @@ func normalizeModels(input []ProfileModel, legacyDefault string, protocol APIPro
 	for _, item := range input {
 		item.ID = strings.TrimSpace(item.ID)
 		item.OwnedBy = strings.TrimSpace(item.OwnedBy)
+		contextBudget := modelcap.ResolveContextBudget(item.ContextWindowTokens, item.AutoCompactTokenLimit, item.ContextWindowSource)
+		item.ContextWindowTokens = contextBudget.WindowTokens
+		item.AutoCompactTokenLimit = contextBudget.AutoCompactTokens
+		item.ContextWindowSource = contextBudget.Source
 		item.ReasoningCapabilitySource = strings.TrimSpace(item.ReasoningCapabilitySource)
 		if item.ReasoningCapabilitySource != "manual" && item.ReasoningCapabilitySource != "provider" && item.ReasoningCapabilitySource != "builtin" {
 			item.ReasoningLevels = modelcap.InferredReasoningLevelsForProtocol(protocol, item.ID)
@@ -373,6 +401,9 @@ func normalizeModels(input []ProfileModel, legacyDefault string, protocol APIPro
 			models[index].OwnedBy = item.OwnedBy
 			models[index].Enabled = models[index].Enabled || item.Enabled
 			models[index].IsDefault = models[index].IsDefault || item.IsDefault
+			models[index].ContextWindowTokens = item.ContextWindowTokens
+			models[index].AutoCompactTokenLimit = item.AutoCompactTokenLimit
+			models[index].ContextWindowSource = item.ContextWindowSource
 			models[index].ReasoningLevels = item.ReasoningLevels
 			models[index].ReasoningCapabilitySource = item.ReasoningCapabilitySource
 			continue
@@ -428,6 +459,12 @@ func preserveReasoningObservations(models, existing []ProfileModel) []ProfileMod
 		models[index].ReasoningLastRequestedLevel = previous.ReasoningLastRequestedLevel
 		models[index].ReasoningLastResolvedLevel = previous.ReasoningLastResolvedLevel
 		models[index].ReasoningWireMode = previous.ReasoningWireMode
+		if models[index].ContextWindowSource == modelcap.ContextWindowSourceFallback && previous.ContextWindowSource != "" {
+			budget := modelcap.ResolveContextBudget(previous.ContextWindowTokens, previous.AutoCompactTokenLimit, previous.ContextWindowSource)
+			models[index].ContextWindowTokens = budget.WindowTokens
+			models[index].AutoCompactTokenLimit = budget.AutoCompactTokens
+			models[index].ContextWindowSource = budget.Source
+		}
 	}
 	return models
 }

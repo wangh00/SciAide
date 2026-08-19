@@ -220,6 +220,35 @@ func (e *Executor) limitResult(value Result) (Result, string, string) {
 		}
 		return value, ErrorCodeResultTooLarge, "工具结构化结果超过大小限制"
 	}
+	auxiliaryBytes := 0
+	if len(value.Artifacts) > 0 {
+		encoded, err := json.Marshal(value.Artifacts)
+		if err != nil {
+			auxiliaryBytes = e.maxJSON + 1
+		} else {
+			auxiliaryBytes += len(encoded)
+		}
+	}
+	if len(value.Citations) > 0 && auxiliaryBytes <= e.maxJSON {
+		encoded, err := json.Marshal(value.Citations)
+		if err != nil {
+			auxiliaryBytes = e.maxJSON + 1
+		} else {
+			auxiliaryBytes += len(encoded)
+		}
+	}
+	if auxiliaryBytes > e.maxJSON {
+		if int64(auxiliaryBytes) > value.Meta.OriginalBytes {
+			value.Meta.OriginalBytes = int64(auxiliaryBytes)
+		}
+		value.Artifacts = nil
+		value.Citations = nil
+		value.Truncated = true
+		if value.Status == ResultSuccess {
+			value.Status = ResultError
+		}
+		return value, ErrorCodeResultTooLarge, "工具产物或引用结果超过大小限制"
+	}
 	return value, "", ""
 }
 

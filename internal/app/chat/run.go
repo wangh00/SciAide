@@ -35,11 +35,15 @@ type Run struct {
 	RequestedReasoningLevel       modelcap.ReasoningLevel     `json:"requestedReasoningLevel"`
 	ResolvedReasoningLevel        modelcap.ReasoningLevel     `json:"resolvedReasoningLevel,omitempty"`
 	ContextWindowTokens           int                         `json:"contextWindowTokens"`
+	ContextBudgetTokens           int                         `json:"contextBudgetTokens"`
+	AutoCompactTokenLimit         int                         `json:"autoCompactTokenLimit"`
+	ContextWindowSource           string                      `json:"contextWindowSource"`
 	ContextCompacted              bool                        `json:"contextCompacted"`
 	PermissionMode                conversation.PermissionMode `json:"permissionMode"`
 	Status                        RunStatus                   `json:"status"`
 	ErrorCode                     string                      `json:"errorCode,omitempty"`
 	ErrorMessage                  string                      `json:"errorMessage,omitempty"`
+	ErrorDetails                  string                      `json:"errorDetails,omitempty"`
 	InputTokens                   int                         `json:"inputTokens"`
 	FreshInputTokens              int                         `json:"freshInputTokens"`
 	OutputTokens                  int                         `json:"outputTokens"`
@@ -119,6 +123,7 @@ type UsageDashboard struct {
 
 type ConversationRepository interface {
 	GetConversation(ctx context.Context, id string) (conversation.Conversation, error)
+	UpdateModelSelection(ctx context.Context, conversationID, modelProfileID, modelID string, updatedAt time.Time) error
 	UpdateReasoningLevel(ctx context.Context, conversationID string, level modelcap.ReasoningLevel, updatedAt time.Time) error
 	UpdateMessageText(ctx context.Context, messageID string, status conversation.MessageStatus, text string, updatedAt time.Time) error
 	ListMessages(ctx context.Context, conversationID string, limit int) ([]conversation.Message, error)

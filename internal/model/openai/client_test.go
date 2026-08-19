@@ -257,7 +257,7 @@ func TestRequestRejectionIncludesBoundedProviderDetail(t *testing.T) {
 	client := New(modelprofile.Profile{BaseURL: server.URL, ModelID: "fixture", TimeoutSeconds: 5}, nil)
 	_, err := client.Stream(context.Background(), model.ChatRequest{})
 	var appErr *apperr.Error
-	if !errors.As(err, &appErr) || appErr.Code != "MODEL_REQUEST_REJECTED" || !strings.Contains(appErr.UserMessage, "HTTP 400") || !strings.Contains(appErr.UserMessage, "Invalid tools") {
+	if !errors.As(err, &appErr) || appErr.Code != "MODEL_REQUEST_REJECTED" || !strings.Contains(appErr.UserMessage, "HTTP 400") || !strings.Contains(appErr.UserMessage, "Invalid tools") || !strings.Contains(appErr.Details, "Invalid tools") {
 		t.Fatalf("error = %#v", err)
 	}
 }
@@ -361,8 +361,8 @@ func TestDiscoverModelsSortsAndDeduplicates(t *testing.T) {
 func TestDiscoverModelsReadsReasoningCapabilityMetadata(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, `{"data":[`+
-			`{"id":"string-shape","supported_reasoning_efforts":["low","high","max","invalid"]},`+
-			`{"id":"object-shape","supported_reasoning_levels":[{"effort":"medium"},{"reasoning_effort":"xhigh"}]},`+
+			`{"id":"string-shape","context_window":272000,"auto_compact_token_limit":230000,"supported_reasoning_efforts":["low","high","max","invalid"]},`+
+			`{"id":"object-shape","max_context_tokens":128000,"supported_reasoning_levels":[{"effort":"medium"},{"reasoning_effort":"xhigh"}]},`+
 			`{"id":"nonstandard-shape","supported_reasoning_efforts":{"high":true}}`+
 			`]}`)
 	}))
@@ -381,11 +381,20 @@ func TestDiscoverModelsReadsReasoningCapabilityMetadata(t *testing.T) {
 	if got := byID["string-shape"]; got.ReasoningCapabilitySource != "provider" || fmt.Sprint(got.ReasoningLevels) != "[low high max]" {
 		t.Fatalf("string capability = %#v", got)
 	}
+	if got := byID["string-shape"]; got.ContextWindowSource != modelcap.ContextWindowSourceProvider || got.ContextWindowTokens != 272_000 || got.AutoCompactTokenLimit != 230_000 {
+		t.Fatalf("string context capability = %#v", got)
+	}
+	if got := byID["object-shape"]; got.ContextWindowTokens != 128_000 || got.AutoCompactTokenLimit != 115_200 {
+		t.Fatalf("object context capability = %#v", got)
+	}
 	if got := byID["object-shape"]; got.ReasoningCapabilitySource != "provider" || fmt.Sprint(got.ReasoningLevels) != "[medium xhigh]" {
 		t.Fatalf("object capability = %#v", got)
 	}
 	if got := byID["nonstandard-shape"]; got.ReasoningCapabilitySource != "" || len(got.ReasoningLevels) != 0 {
 		t.Fatalf("nonstandard metadata should be ignored without losing the model = %#v", got)
+	}
+	if got := byID["nonstandard-shape"]; got.ContextWindowSource != modelcap.ContextWindowSourceFallback || got.ContextWindowTokens != modelcap.DefaultContextWindowTokens {
+		t.Fatalf("missing context metadata should use an explicit fallback = %#v", got)
 	}
 }
 

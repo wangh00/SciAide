@@ -5,8 +5,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
+	"github.com/wangh00/SciAide/internal/app/citation"
 	"github.com/wangh00/SciAide/internal/app/conversation"
 	"github.com/wangh00/SciAide/internal/modelcap"
 )
@@ -21,8 +23,8 @@ func (r *ConversationRepository) CreateConversation(ctx context.Context, value c
 	if !value.ReasoningLevel.Valid() {
 		value.ReasoningLevel = modelcap.ReasoningMedium
 	}
-	_, err := r.db.ExecContext(ctx, `INSERT INTO conversations(id, project_id, title, permission_mode, reasoning_level, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		value.ID, value.ProjectID, value.Title, value.PermissionMode, value.ReasoningLevel, formatTime(value.CreatedAt), formatTime(value.UpdatedAt))
+	_, err := r.db.ExecContext(ctx, `INSERT INTO conversations(id, project_id, title, model_profile_id, model_id, permission_mode, reasoning_level, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		value.ID, value.ProjectID, value.Title, value.ModelProfileID, value.ModelID, value.PermissionMode, value.ReasoningLevel, formatTime(value.CreatedAt), formatTime(value.UpdatedAt))
 	if err != nil {
 		return fmt.Errorf("insert conversation: %w", err)
 	}
@@ -30,11 +32,11 @@ func (r *ConversationRepository) CreateConversation(ctx context.Context, value c
 }
 
 func (r *ConversationRepository) GetConversation(ctx context.Context, id string) (conversation.Conversation, error) {
-	return scanConversation(r.db.QueryRowContext(ctx, `SELECT id, project_id, title, permission_mode, reasoning_level, created_at, updated_at FROM conversations WHERE id = ?`, id))
+	return scanConversation(r.db.QueryRowContext(ctx, `SELECT id, project_id, title, model_profile_id, model_id, permission_mode, reasoning_level, created_at, updated_at FROM conversations WHERE id = ?`, id))
 }
 
 func (r *ConversationRepository) ListConversations(ctx context.Context, projectID string) ([]conversation.Conversation, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT id, project_id, title, permission_mode, reasoning_level, created_at, updated_at FROM conversations WHERE project_id = ? ORDER BY updated_at DESC, id`, projectID)
+	rows, err := r.db.QueryContext(ctx, `SELECT id, project_id, title, model_profile_id, model_id, permission_mode, reasoning_level, created_at, updated_at FROM conversations WHERE project_id = ? ORDER BY updated_at DESC, id`, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("list conversations: %w", err)
 	}
@@ -121,6 +123,20 @@ func (r *ConversationRepository) UpdateReasoningLevel(ctx context.Context, conve
 	return nil
 }
 
+func (r *ConversationRepository) UpdateModelSelection(ctx context.Context, conversationID, modelProfileID, modelID string, updatedAt time.Time) error {
+	if modelProfileID == "" || modelID == "" {
+		return fmt.Errorf("model profile and model are required")
+	}
+	result, err := r.db.ExecContext(ctx, `UPDATE conversations SET model_profile_id=?, model_id=?, updated_at=? WHERE id=?`, modelProfileID, modelID, formatTime(updatedAt), conversationID)
+	if err != nil {
+		return fmt.Errorf("update conversation model selection: %w", err)
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return fmt.Errorf("conversation not found")
+	}
+	return nil
+}
+
 func (r *ConversationRepository) CreateMessage(ctx context.Context, value conversation.Message) error {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -177,7 +193,7 @@ func (r *ConversationRepository) UpdateMessageText(ctx context.Context, messageI
 }
 
 func (r *ConversationRepository) ListMessages(ctx context.Context, conversationID string, limit int) ([]conversation.Message, error) {
-	if limit <= 0 || limit > 500 {
+	if limit <= 0 || limit > 2_000 {
 		limit = 200
 	}
 	rows, err := r.db.QueryContext(ctx, `
@@ -226,8 +242,86 @@ func (r *ConversationRepository) ListMessages(ctx context.Context, conversationI
 			return nil, err
 		}
 		values[i].Parts = parts
+		citations, err := r.listMessageCitations(ctx, values[i].ID)
+		if err != nil {
+			return nil, err
+		}
+		values[i].Citations = citations
 	}
 	return values, nil
+}
+
+func completeAssistantMessageWithCitations(ctx context.Context, tx *sql.Tx, messageID, runID, text string, values []conversation.Citation, updatedAt time.Time) error {
+	messageID, runID = strings.TrimSpace(messageID), strings.TrimSpace(runID)
+	if messageID == "" || runID == "" {
+		return fmt.Errorf("message and run ids are required")
+	}
+	if len(values) > 512 {
+		return fmt.Errorf("message citation count exceeds limit")
+	}
+	var projectID string
+	if err := tx.QueryRowContext(ctx, `
+		SELECT c.project_id
+		FROM messages m
+		JOIN runs r ON r.id=m.run_id AND r.assistant_message_id=m.id AND r.conversation_id=m.conversation_id
+		JOIN conversations c ON c.id=r.conversation_id
+		WHERE m.id=? AND m.run_id=? AND m.role='assistant' AND m.status='streaming' AND r.status='running'`, messageID, runID).Scan(&projectID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("running assistant message does not belong to run")
+		}
+		return fmt.Errorf("verify citation message: %w", err)
+	}
+	seenIDs := make(map[string]struct{}, len(values))
+	seenReferences := make(map[string]struct{}, len(values))
+	for index, value := range values {
+		quoteSHA256 := citation.QuoteSHA256(value.Quote)
+		if value.MessageID != messageID || value.RunID != runID || value.ID == "" || value.ToolCallID == "" || value.Ordinal != index || value.ProjectID != projectID || value.IndexVersionID == "" || value.DocumentID == "" || value.AttachmentID == "" || value.ChunkID == "" || value.SourceName == "" || value.Locator == "" || value.Quote == "" || value.QuoteSHA256 != quoteSHA256 || value.Reference != citation.KnowledgeReference(runID, value.IndexVersionID, value.ChunkID, quoteSHA256) || value.SourceStart < 0 || value.SourceEnd < value.SourceStart || !strings.Contains(text, value.Reference) || value.CreatedAt.IsZero() {
+			return fmt.Errorf("invalid message citation")
+		}
+		if _, exists := seenIDs[value.ID]; exists {
+			return fmt.Errorf("duplicate message citation id")
+		}
+		if _, exists := seenReferences[value.Reference]; exists {
+			return fmt.Errorf("duplicate message citation reference")
+		}
+		seenIDs[value.ID] = struct{}{}
+		seenReferences[value.Reference] = struct{}{}
+		var trustedCall int
+		if err := tx.QueryRowContext(ctx, `
+			SELECT count(*)
+			FROM tool_calls tc
+			JOIN tool_results tr ON tr.tool_call_id=tc.id
+			WHERE tc.id=? AND tc.run_id=? AND tc.tool_name=? AND tc.status='completed' AND tr.status='success'`, value.ToolCallID, runID, citation.KnowledgeToolName).Scan(&trustedCall); err != nil {
+			return fmt.Errorf("verify citation tool call: %w", err)
+		}
+		if trustedCall != 1 {
+			return fmt.Errorf("citation tool call is not a successful knowledge search")
+		}
+	}
+	messageResult, err := tx.ExecContext(ctx, `UPDATE messages SET status='complete', updated_at=? WHERE id=? AND run_id=? AND role='assistant' AND status='streaming'`, formatTime(updatedAt), messageID, runID)
+	if err != nil {
+		return fmt.Errorf("complete assistant message: %w", err)
+	}
+	if affected, _ := messageResult.RowsAffected(); affected != 1 {
+		return fmt.Errorf("assistant message completion conflict")
+	}
+	partResult, err := tx.ExecContext(ctx, `UPDATE message_parts SET text_content=? WHERE message_id=? AND ordinal=0 AND part_type='text'`, text, messageID)
+	if err != nil {
+		return fmt.Errorf("save assistant message text: %w", err)
+	}
+	if affected, _ := partResult.RowsAffected(); affected != 1 {
+		return fmt.Errorf("assistant text part not found")
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM message_citations WHERE message_id=?`, messageID); err != nil {
+		return fmt.Errorf("clear message citations: %w", err)
+	}
+	for _, value := range values {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO message_citations(id,message_id,run_id,tool_call_id,project_id,reference_key,ordinal,index_version_id,document_id,attachment_id,chunk_id,source_name,mime_type,locator,title,quote_text,quote_sha256,source_start,source_end,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			value.ID, value.MessageID, value.RunID, value.ToolCallID, value.ProjectID, value.Reference, value.Ordinal, value.IndexVersionID, value.DocumentID, value.AttachmentID, value.ChunkID, value.SourceName, value.MIMEType, value.Locator, value.Title, value.Quote, value.QuoteSHA256, value.SourceStart, value.SourceEnd, formatTime(value.CreatedAt)); err != nil {
+			return fmt.Errorf("insert message citation: %w", err)
+		}
+	}
+	return nil
 }
 
 func (r *ConversationRepository) listParts(ctx context.Context, messageID string) ([]conversation.MessagePart, error) {
@@ -255,10 +349,32 @@ func (r *ConversationRepository) listParts(ctx context.Context, messageID string
 	return parts, rows.Err()
 }
 
+func (r *ConversationRepository) listMessageCitations(ctx context.Context, messageID string) ([]conversation.Citation, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT id,message_id,run_id,tool_call_id,project_id,reference_key,ordinal,index_version_id,document_id,attachment_id,chunk_id,source_name,mime_type,locator,title,quote_text,quote_sha256,source_start,source_end,created_at FROM message_citations WHERE message_id=? ORDER BY ordinal`, messageID)
+	if err != nil {
+		return nil, fmt.Errorf("list message citations: %w", err)
+	}
+	defer rows.Close()
+	values := make([]conversation.Citation, 0)
+	for rows.Next() {
+		var value conversation.Citation
+		var createdAt string
+		if err := rows.Scan(&value.ID, &value.MessageID, &value.RunID, &value.ToolCallID, &value.ProjectID, &value.Reference, &value.Ordinal, &value.IndexVersionID, &value.DocumentID, &value.AttachmentID, &value.ChunkID, &value.SourceName, &value.MIMEType, &value.Locator, &value.Title, &value.Quote, &value.QuoteSHA256, &value.SourceStart, &value.SourceEnd, &createdAt); err != nil {
+			return nil, err
+		}
+		value.CreatedAt, err = parseTime(createdAt)
+		if err != nil {
+			return nil, err
+		}
+		values = append(values, value)
+	}
+	return values, rows.Err()
+}
+
 func scanConversation(row rowScanner) (conversation.Conversation, error) {
 	var value conversation.Conversation
 	var createdAt, updatedAt string
-	if err := row.Scan(&value.ID, &value.ProjectID, &value.Title, &value.PermissionMode, &value.ReasoningLevel, &createdAt, &updatedAt); err != nil {
+	if err := row.Scan(&value.ID, &value.ProjectID, &value.Title, &value.ModelProfileID, &value.ModelID, &value.PermissionMode, &value.ReasoningLevel, &createdAt, &updatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return conversation.Conversation{}, fmt.Errorf("conversation not found")
 		}

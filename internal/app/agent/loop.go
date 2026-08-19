@@ -10,8 +10,11 @@ import (
 	"time"
 
 	"github.com/wangh00/SciAide/internal/app/chat"
+	"github.com/wangh00/SciAide/internal/app/citation"
+	"github.com/wangh00/SciAide/internal/app/contextmemory"
 	"github.com/wangh00/SciAide/internal/app/conversation"
 	"github.com/wangh00/SciAide/internal/app/permission"
+	"github.com/wangh00/SciAide/internal/app/skill"
 	"github.com/wangh00/SciAide/internal/app/tool"
 	"github.com/wangh00/SciAide/internal/apperr"
 	"github.com/wangh00/SciAide/internal/model"
@@ -22,9 +25,14 @@ type ModelResolver interface {
 	Resolve(ctx context.Context, profileID, modelID string) (model.ResolvedChatModel, error)
 }
 
+type RunSkillContexts interface {
+	PrepareRunContext(ctx context.Context, runID, projectID, userText string, contextWindowTokens int) (skill.RunContext, error)
+}
+
 type Runs interface {
 	Get(ctx context.Context, runID string) (chat.Run, error)
 	Update(ctx context.Context, value chat.Run) error
+	Complete(ctx context.Context, value chat.Run, text string, citations []conversation.Citation) error
 	IncrementModelTurns(ctx context.Context, runID string, maximum int, at time.Time) (chat.Run, error)
 	ProjectIDForRun(ctx context.Context, runID string) (string, error)
 	SaveProviderTurn(ctx context.Context, runID string, turn model.ProviderTurn, at time.Time) error
@@ -82,7 +90,9 @@ func (NopObserver) RunCancelled(chat.Run)                              {}
 type Options struct {
 	Budget         RunBudget
 	ContextBuilder *ContextBuilder
+	Checkpoints    *contextmemory.Service
 	Terminator     *chat.Terminator
+	SkillContexts  RunSkillContexts
 }
 
 type Outcome string
@@ -106,6 +116,8 @@ type Loop struct {
 	builder       *ContextBuilder
 	budget        RunBudget
 	terminator    *chat.Terminator
+	checkpoints   *contextmemory.Service
+	skillContexts RunSkillContexts
 	now           func() time.Time
 }
 
@@ -116,7 +128,7 @@ func NewLoop(runs Runs, conversations Conversations, tools ToolCalls, registry t
 	if options.ContextBuilder == nil {
 		options.ContextBuilder = NewContextBuilder(0)
 	}
-	return &Loop{runs: runs, conversations: conversations, tools: tools, registry: registry, approvals: approvals, executor: executor, models: models, observer: observer, builder: options.ContextBuilder, budget: normalizeBudget(options.Budget), terminator: options.Terminator, now: func() time.Time { return time.Now().UTC() }}
+	return &Loop{runs: runs, conversations: conversations, tools: tools, registry: registry, approvals: approvals, executor: executor, models: models, observer: observer, builder: options.ContextBuilder, budget: normalizeBudget(options.Budget), terminator: options.Terminator, checkpoints: options.Checkpoints, skillContexts: options.SkillContexts, now: func() time.Time { return time.Now().UTC() }}
 }
 
 func (l *Loop) Run(ctx context.Context, runID string) Outcome {
@@ -137,7 +149,7 @@ func (l *Loop) Run(ctx context.Context, runID string) Outcome {
 		l.observer.ContentStarted(run)
 	}
 	if run.Status == chat.RunRunning {
-		run.ErrorCode, run.ErrorMessage, run.CompletedAt = "", "", nil
+		run.ErrorCode, run.ErrorMessage, run.ErrorDetails, run.CompletedAt = "", "", "", nil
 		run.FinishReason = ""
 	}
 	outcome, err := l.execute(ctx, &run)
@@ -155,6 +167,10 @@ func (l *Loop) Run(ctx context.Context, runID string) Outcome {
 		return OutcomeFailed
 	}
 	public := apperr.Public(err)
+	run.ErrorDetails = public.Details
+	if run.ErrorDetails != "" {
+		_ = l.runs.Update(context.Background(), run)
+	}
 	l.fail(&run, public.Code, public.Message)
 	return OutcomeFailed
 }
@@ -167,9 +183,51 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 	if err != nil {
 		return OutcomeFailed, err
 	}
-	messages, err := l.conversations.ListMessages(ctx, run.ConversationID, 200)
+	messages, err := l.conversations.ListMessages(ctx, run.ConversationID, 2_000)
 	if err != nil {
 		return OutcomeFailed, &apperr.Error{Code: "CONTEXT_LOAD_FAILED", UserMessage: "无法加载会话上下文。", Cause: err}
+	}
+	resolvedModel, err := l.models.Resolve(ctx, run.ModelProfileID, run.ModelID)
+	if err != nil {
+		return OutcomeFailed, err
+	}
+	if run.ModelTurns == 0 {
+		contextBudget := resolvedModel.ContextBudget
+		if contextBudget.WindowTokens <= 0 {
+			contextBudget = modelcap.ResolveContextBudget(0, 0, "")
+		}
+		run.ContextWindowTokens = contextBudget.WindowTokens
+		run.ContextBudgetTokens = contextBudget.EffectiveTokens
+		run.AutoCompactTokenLimit = contextBudget.AutoCompactTokens
+		run.ContextWindowSource = contextBudget.Source
+	}
+	chatModel := resolvedModel.Model
+	if resolvedModel.APIProtocol.Valid() {
+		run.APIProtocol = resolvedModel.APIProtocol
+	} else if !run.APIProtocol.Valid() {
+		run.APIProtocol = modelcap.ProtocolOpenAIChat
+	}
+	var contextCheckpoint contextmemory.Checkpoint
+	if l.checkpoints != nil {
+		var exists bool
+		contextCheckpoint, exists, err = l.checkpoints.Latest(ctx, run.ConversationID)
+		if err != nil {
+			return OutcomeFailed, &apperr.Error{Code: "CONTEXT_CHECKPOINT_LOAD_FAILED", UserMessage: "无法校验会话上下文检查点。", Cause: err}
+		}
+		if !exists {
+			contextCheckpoint = contextmemory.Checkpoint{}
+		}
+	}
+	var runSkillContext skill.RunContext
+	if l.skillContexts != nil {
+		userText, textErr := runUserText(messages, run.UserMessageID)
+		if textErr != nil {
+			return OutcomeFailed, &apperr.Error{Code: "CONTEXT_LOAD_FAILED", UserMessage: "无法定位本次对话的用户消息。", Cause: textErr}
+		}
+		runSkillContext, err = l.skillContexts.PrepareRunContext(ctx, run.ID, projectID, userText, run.ContextWindowTokens)
+		if err != nil {
+			return OutcomeFailed, &apperr.Error{Code: "SKILL_CONTEXT_FAILED", UserMessage: "无法准备本次对话的 Skill 上下文，请检查项目 Skill 配置。", Cause: err}
+		}
 	}
 	definitions, err := l.registry.Definitions(ctx)
 	if err != nil {
@@ -205,16 +263,6 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 	if blocked := firstUnresolvedToolCall(calls); blocked != nil {
 		return OutcomeFailed, &apperr.Error{Code: "TOOL_STATE_INVALID", UserMessage: "仍有未完成的工具调用，无法继续请求模型。"}
 	}
-	resolvedModel, err := l.models.Resolve(ctx, run.ModelProfileID, run.ModelID)
-	if err != nil {
-		return OutcomeFailed, err
-	}
-	chatModel := resolvedModel.Model
-	if resolvedModel.APIProtocol.Valid() {
-		run.APIProtocol = resolvedModel.APIProtocol
-	} else if !run.APIProtocol.Valid() {
-		run.APIProtocol = modelcap.ProtocolOpenAIChat
-	}
 	negotiatedReasoningLevel := modelcap.ResolveReasoningLevel(run.RequestedReasoningLevel, resolvedModel.SupportedReasoningLevels)
 	reasoningNegotiated := false
 	if run.ResolvedReasoningLevel.Valid() {
@@ -230,6 +278,7 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 		return OutcomeFailed, err
 	}
 
+	checkpointPasses := 0
 	for {
 		if err := budget.checkDuration(); err != nil {
 			return OutcomeFailed, budgetError(err)
@@ -242,9 +291,20 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 			return OutcomeFailed, err
 		}
 		run.ModelTurns, run.UpdatedAt = checkpoint.ModelTurns, checkpoint.UpdatedAt
-		request, contextInfo, err := l.builder.BuildWithInfo(ctx, messages, run.AssistantMessageID, definitions, calls, providerTurns...)
+		request, contextInfo, err := l.builder.BuildWithRuntimeContext(ctx, messages, run.AssistantMessageID, run.UserMessageID, definitions, calls, runSkillContext, ContextLimits{EffectiveTokens: run.ContextBudgetTokens, AutoCompactTokens: run.AutoCompactTokenLimit}, contextCheckpoint, providerTurns...)
 		if err != nil {
 			return OutcomeFailed, err
+		}
+		if contextInfo.CompactedThroughMessageID != "" && l.checkpoints != nil {
+			if checkpointPasses >= maxCheckpointPassesPerRun {
+				return OutcomeFailed, &apperr.Error{Code: "CONTEXT_COMPACTION_INCOMPLETE", UserMessage: "会话历史过长，无法在单次运行的安全压缩次数内完成检查点更新。请重试本条消息。"}
+			}
+			contextCheckpoint, err = l.compactConversation(ctx, run, chatModel, contextCheckpoint, messages, contextInfo.CompactedThroughMessageID)
+			if err != nil {
+				return OutcomeFailed, &apperr.Error{Code: "CONTEXT_COMPACTION_FAILED", UserMessage: "无法安全压缩会话上下文，已停止本次请求以避免静默丢失历史。", Cause: err}
+			}
+			checkpointPasses++
+			continue
 		}
 		if contextInfo.Compacted && !run.ContextCompacted {
 			run.ContextCompacted = true
@@ -436,27 +496,9 @@ func (l *Loop) receiveTurn(ctx context.Context, run *chat.Run, stream model.Stre
 			}
 		}
 		if event.Type == model.EventUsage && event.Usage != nil {
-			run.InputTokens += event.Usage.InputTokens
-			run.FreshInputTokens += event.Usage.FreshInputTokens
-			run.OutputTokens += event.Usage.OutputTokens
-			run.ReasoningTokens += event.Usage.ReasoningTokens
-			if event.Usage.ReasoningTokens > 0 {
-				run.ReasoningObserved = true
-			}
-			run.CachedInputTokens += event.Usage.CachedInputTokens
-			run.CacheWriteTokens += event.Usage.CacheWriteTokens
-			if event.Usage.CacheDetailsReported {
-				run.CacheReportedTurns++
-				run.CacheReportedFreshInputTokens += event.Usage.FreshInputTokens
-				if event.Usage.CachedInputTokens > 0 {
-					run.CacheHitTurns++
-				}
-			}
-			run.UpdatedAt = l.now()
-			if err := l.runs.Update(context.Background(), *run); err != nil {
+			if err := l.recordUsage(run, *event.Usage); err != nil {
 				return turn, err
 			}
-			l.observer.UsageUpdated(*run, *event.Usage)
 		}
 		if event.FinishReason != "" {
 			turn.finishReason = event.FinishReason
@@ -477,12 +519,14 @@ func (l *Loop) receiveTurn(ctx context.Context, run *chat.Run, stream model.Stre
 
 func (l *Loop) complete(run *chat.Run, text, finishReason string) (Outcome, error) {
 	now := l.now()
-	if err := l.conversations.UpdateMessageText(context.Background(), run.AssistantMessageID, conversation.MessageComplete, text, now); err != nil {
-		return OutcomeFailed, &apperr.Error{Code: "MESSAGE_SAVE_FAILED", UserMessage: "回答已生成，但保存失败。", Cause: err}
+	calls, err := l.tools.ListByRun(context.Background(), run.ID)
+	if err != nil {
+		return OutcomeFailed, &apperr.Error{Code: "CITATION_LOAD_FAILED", UserMessage: "回答已生成，但无法校验知识引用。", Cause: err}
 	}
-	run.Status, run.FinishReason, run.ErrorCode, run.ErrorMessage, run.UpdatedAt, run.CompletedAt = chat.RunCompleted, finishReason, "", "", now, &now
-	if err := l.runs.Update(context.Background(), *run); err != nil {
-		return OutcomeFailed, err
+	citations := citation.Resolve(run.ID, run.AssistantMessageID, text, calls, now)
+	run.Status, run.FinishReason, run.ErrorCode, run.ErrorMessage, run.ErrorDetails, run.UpdatedAt, run.CompletedAt = chat.RunCompleted, finishReason, "", "", "", now, &now
+	if err := l.runs.Complete(context.Background(), *run, text, citations); err != nil {
+		return OutcomeFailed, &apperr.Error{Code: "RUN_COMPLETION_SAVE_FAILED", UserMessage: "回答已生成，但正文、引用与运行状态无法完整保存。", Cause: err}
 	}
 	l.observer.RunCompleted(*run, text)
 	return OutcomeCompleted, nil
@@ -545,6 +589,23 @@ func assistantText(messages []conversation.Message, messageID string) string {
 		}
 	}
 	return ""
+}
+
+func runUserText(messages []conversation.Message, messageID string) (string, error) {
+	if messageID != "" {
+		for _, message := range messages {
+			if message.ID == messageID && message.Role == conversation.RoleUser {
+				return conversationText(message), nil
+			}
+		}
+		return "", fmt.Errorf("Run user message %q is missing", messageID)
+	}
+	for index := len(messages) - 1; index >= 0; index-- {
+		if messages[index].Role == conversation.RoleUser {
+			return conversationText(messages[index]), nil
+		}
+	}
+	return "", nil
 }
 
 func budgetError(err error) error {

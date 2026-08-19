@@ -135,6 +135,7 @@ func TestExecutorLimitsTextAndRejectsOversizedStructuredResult(t *testing.T) {
 	}{
 		{"text", Result{Status: ResultSuccess, Text: "研究结果很长"}, "", CallCompleted},
 		{"json", Result{Status: ResultSuccess, Structured: json.RawMessage(`{"veryLong":"value"}`)}, ErrorCodeResultTooLarge, CallFailed},
+		{"citations", Result{Status: ResultSuccess, Citations: []CitationRef{{Quote: strings.Repeat("evidence", 4)}}}, ErrorCodeResultTooLarge, CallFailed},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			implementation := executorFixtureTool{definition: executorDefinition(), invoke: func(context.Context, Invocation) (Result, error) { return test.result, nil }}

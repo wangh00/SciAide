@@ -15,5 +15,5 @@ func NewSystemFacade(version string) *SystemFacade {
 }
 
 func (f *SystemFacade) GetSystemInfo() SystemInfo {
-	return SystemInfo{Name: "SciAide", Version: f.version, Phase: "P1"}
+	return SystemInfo{Name: "SciAide", Version: f.version, Phase: "P5"}
 }

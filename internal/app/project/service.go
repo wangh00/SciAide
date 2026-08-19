@@ -62,7 +62,8 @@ func (s *Service) CreateWithWorkspace(ctx context.Context, cmd CreateCommand) (P
 	if err := os.MkdirAll(value.WorkspacePath, 0o700); err != nil {
 		return Project{}, fmt.Errorf("create workspace directory: %w", err)
 	}
-	if err := writeMarker(value.WorkspacePath, projectID); err != nil {
+	privateCreated, err := ensurePrivateLayout(value.WorkspacePath, projectID)
+	if err != nil {
 		if value.WorkspaceKind == WorkspaceManaged {
 			_ = os.RemoveAll(value.WorkspacePath)
 		}
@@ -71,6 +72,8 @@ func (s *Service) CreateWithWorkspace(ctx context.Context, cmd CreateCommand) (P
 	if err := s.repository.Create(ctx, value); err != nil {
 		if value.WorkspaceKind == WorkspaceManaged {
 			_ = os.RemoveAll(value.WorkspacePath)
+		} else if privateCreated {
+			_ = os.RemoveAll(PrivateDataPath(value))
 		}
 		return Project{}, fmt.Errorf("create project: %w", err)
 	}
@@ -87,7 +90,7 @@ func (s *Service) Remove(ctx context.Context, projectID string) (RemoveResult, e
 		if err := s.verifyManagedPath(value.WorkspacePath); err != nil {
 			return RemoveResult{}, err
 		}
-		if err := verifyMarker(value.WorkspacePath, value.ID); err != nil {
+		if err := verifyProjectMarker(value.WorkspacePath, value.ID); err != nil {
 			return RemoveResult{}, err
 		}
 		trash := filepath.Join(s.trashRoot, s.now().Format("20060102T150405.000000000Z")+"-"+value.ID)
@@ -123,54 +126,35 @@ func (s *Service) ReconcileWorkspacePaths(ctx context.Context) error {
 		return fmt.Errorf("list projects for workspace reconciliation: %w", err)
 	}
 	for _, value := range values {
-		if strings.TrimSpace(value.WorkspacePath) != "" {
+		if strings.TrimSpace(value.WorkspacePath) == "" {
+			path := filepath.Join(s.managedRoot, value.ID)
+			if err := os.MkdirAll(path, 0o700); err != nil {
+				return fmt.Errorf("create legacy project workspace: %w", err)
+			}
+			value.WorkspacePath = filepath.Clean(path)
+			value.WorkspaceKind = WorkspaceManaged
+			if err := s.repository.UpdateWorkspace(ctx, value.ID, value.WorkspacePath, value.WorkspaceKind, s.now()); err != nil {
+				return fmt.Errorf("save reconciled workspace path: %w", err)
+			}
+		} else if info, err := os.Stat(value.WorkspacePath); os.IsNotExist(err) {
+			// External drives and network folders may be temporarily unavailable.
+			// Keep the project record and reconcile its private layout when the
+			// workspace is available again.
 			continue
+		} else if err != nil {
+			return fmt.Errorf("inspect project workspace %q: %w", value.ID, err)
+		} else if !info.IsDir() {
+			return fmt.Errorf("project workspace %q is not a directory", value.ID)
 		}
-		path := filepath.Join(s.managedRoot, value.ID)
-		if err := os.MkdirAll(path, 0o700); err != nil {
-			return fmt.Errorf("create legacy project workspace: %w", err)
+		if _, err := ensurePrivateLayout(value.WorkspacePath, value.ID); err != nil {
+			if value.WorkspaceKind == WorkspaceExternal {
+				// A read-only or user-managed external workspace must not prevent
+				// SciAide from starting. Attachment import will report the same
+				// layout error when the user tries to write project-local data.
+				continue
+			}
+			return fmt.Errorf("reconcile project data layout for %q: %w", value.ID, err)
 		}
-		if err := writeMarker(path, value.ID); err != nil {
-			return err
-		}
-		if err := s.repository.UpdateWorkspace(ctx, value.ID, filepath.Clean(path), WorkspaceManaged, s.now()); err != nil {
-			return fmt.Errorf("save reconciled workspace path: %w", err)
-		}
-	}
-	return nil
-}
-
-func writeMarker(workspacePath, projectID string) error {
-	marker := filepath.Join(workspacePath, ".sciaide-workspace.json")
-	if _, err := os.Stat(marker); err == nil {
-		return nil
-	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("inspect workspace marker: %w", err)
-	}
-	contents := []byte(fmt.Sprintf("{\"version\":1,\"projectId\":%q}\n", projectID))
-	if err := os.WriteFile(marker, contents, 0o600); err != nil {
-		return fmt.Errorf("write workspace marker: %w", err)
-	}
-	return nil
-}
-
-func verifyMarker(workspacePath, projectID string) error {
-	marker := filepath.Join(workspacePath, ".sciaide-workspace.json")
-	contents, err := os.ReadFile(marker)
-	if os.IsNotExist(err) {
-		// A missing workspace is harmless: the database record may outlive a
-		// directory the user removed manually.
-		if _, statErr := os.Stat(workspacePath); os.IsNotExist(statErr) {
-			return nil
-		}
-		return fmt.Errorf("managed workspace marker is missing; refusing to move directory")
-	}
-	if err != nil {
-		return fmt.Errorf("read managed workspace marker: %w", err)
-	}
-	want := fmt.Sprintf("\"projectId\":%q", projectID)
-	if !strings.Contains(string(contents), want) {
-		return fmt.Errorf("managed workspace marker does not match project; refusing to move directory")
 	}
 	return nil
 }

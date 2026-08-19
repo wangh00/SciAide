@@ -90,6 +90,12 @@ func (r *ProjectRepository) Delete(ctx context.Context, projectID string) error 
 	if active > 0 {
 		return fmt.Errorf("project has an active chat run; stop it before removing the project")
 	}
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM knowledge_import_jobs WHERE project_id = ? AND status IN ('queued', 'running')`, projectID).Scan(&active); err != nil {
+		return fmt.Errorf("check active project knowledge jobs: %w", err)
+	}
+	if active > 0 {
+		return fmt.Errorf("project has active knowledge indexing; wait for it to finish before removing the project")
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM run_events WHERE aggregate_id IN (SELECT id FROM runs WHERE conversation_id IN (SELECT id FROM conversations WHERE project_id = ?))`, projectID); err != nil {
 		return fmt.Errorf("delete project run events: %w", err)
 	}

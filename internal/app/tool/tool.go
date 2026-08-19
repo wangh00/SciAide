@@ -124,8 +124,22 @@ type ArtifactRef struct {
 }
 
 type CitationRef struct {
-	ID      string `json:"id"`
-	Locator string `json:"locator,omitempty"`
+	ID             string `json:"id"`
+	Kind           string `json:"kind,omitempty"`
+	Reference      string `json:"reference,omitempty"`
+	ProjectID      string `json:"projectId,omitempty"`
+	IndexVersionID string `json:"indexVersionId,omitempty"`
+	DocumentID     string `json:"documentId,omitempty"`
+	AttachmentID   string `json:"attachmentId,omitempty"`
+	ChunkID        string `json:"chunkId,omitempty"`
+	SourceName     string `json:"sourceName,omitempty"`
+	MIMEType       string `json:"mimeType,omitempty"`
+	Locator        string `json:"locator,omitempty"`
+	Title          string `json:"title,omitempty"`
+	Quote          string `json:"quote,omitempty"`
+	QuoteSHA256    string `json:"quoteSha256,omitempty"`
+	SourceStart    int    `json:"sourceStart,omitempty"`
+	SourceEnd      int    `json:"sourceEnd,omitempty"`
 }
 
 type ResultMeta struct {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -71,6 +72,13 @@ func TestP2MigrationPreservesExistingRuns(t *testing.T) {
 	}
 	if status != "running" || modelID != "model" {
 		t.Fatalf("preserved run = (%q,%q)", status, modelID)
+	}
+	var conversationProfileID, conversationModelID string
+	if err := db.QueryRowContext(ctx, `SELECT model_profile_id, model_id FROM conversations WHERE id='conversation'`).Scan(&conversationProfileID, &conversationModelID); err != nil {
+		t.Fatal(err)
+	}
+	if conversationProfileID != "profile" || conversationModelID != "model" {
+		t.Fatalf("backfilled conversation model selection = (%q,%q)", conversationProfileID, conversationModelID)
 	}
 	var modelTurns int
 	if err := db.QueryRowContext(ctx, `SELECT model_turns FROM runs WHERE id='run'`).Scan(&modelTurns); err != nil || modelTurns != 0 {
@@ -152,6 +160,57 @@ func TestProtocolMigrationDefaultsLegacyRows(t *testing.T) {
 	}
 }
 
+func TestBuiltinSkillSourceMigrationPreservesExistingProvenance(t *testing.T) {
+	ctx := context.Background()
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "skill-source-upgrade.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	if _, err := db.ExecContext(ctx, `PRAGMA foreign_keys=ON; CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY NOT NULL, name TEXT NOT NULL, checksum TEXT NOT NULL, applied_at TEXT NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	migrations, err := loadMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range migrations {
+		if item.version > 19 {
+			break
+		}
+		if _, err := db.ExecContext(ctx, item.sql); err != nil {
+			t.Fatalf("apply migration %d: %v", item.version, err)
+		}
+		if _, err := db.ExecContext(ctx, `INSERT INTO schema_migrations(version,name,checksum,applied_at) VALUES (?,?,?,'2026-01-01T00:00:00Z')`, item.version, item.name, item.checksum); err != nil {
+			t.Fatal(err)
+		}
+	}
+	hash := strings.Repeat("a", 64)
+	if _, err := db.ExecContext(ctx, `INSERT INTO installed_skills(skill_id,skill_version,manifest_json,package_rel_path,manifest_hash,content_hash,package_hash,integrity_status,integrity_error,installed_at,updated_at) VALUES ('fixture-skill','1.0.0','{}','fixture-skill/1.0.0',?,?,?,'valid','','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`, hash, hash, hash); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO skill_package_sources(skill_id,skill_version,source_kind,source_name,source_hash,archive_rel_path,installed_at,updated_at) VALUES ('fixture-skill','1.0.0','folder','fixture',?,'packages/fixture-skill/1.0.0/source.zip','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`, hash); err != nil {
+		t.Fatal(err)
+	}
+	if err := Migrate(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	var kind, name, storedHash string
+	if err := db.QueryRowContext(ctx, `SELECT source_kind,source_name,source_hash FROM skill_package_sources WHERE skill_id='fixture-skill'`).Scan(&kind, &name, &storedHash); err != nil {
+		t.Fatal(err)
+	}
+	if kind != "folder" || name != "fixture" || storedHash != hash {
+		t.Fatalf("migrated source = (%q,%q,%q)", kind, name, storedHash)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE skill_package_sources SET source_kind='builtin' WHERE skill_id='fixture-skill'`); err != nil {
+		t.Fatalf("builtin source kind was rejected: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE skill_package_sources SET source_kind='invalid' WHERE skill_id='fixture-skill'`); err == nil {
+		t.Fatal("invalid source kind was accepted")
+	}
+}
+
 func TestReasoningObservationMigrationUpgradesV13Database(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "reasoning-observation-upgrade.db")
@@ -221,8 +280,69 @@ func TestReasoningObservationMigrationUpgradesV13Database(t *testing.T) {
 	if err := store.DB().QueryRowContext(ctx, `SELECT count(*) FROM schema_migrations WHERE version=16`).Scan(&applied); err != nil || applied != 1 {
 		t.Fatalf("migration 16 applied = %d, %v", applied, err)
 	}
+	if err := store.DB().QueryRowContext(ctx, `SELECT count(*) FROM schema_migrations WHERE version=17`).Scan(&applied); err != nil || applied != 1 {
+		t.Fatalf("migration 17 applied = %d, %v", applied, err)
+	}
+	if err := store.DB().QueryRowContext(ctx, `SELECT count(*) FROM schema_migrations WHERE version=18`).Scan(&applied); err != nil || applied != 1 {
+		t.Fatalf("migration 18 applied = %d, %v", applied, err)
+	}
+	if err := store.DB().QueryRowContext(ctx, `SELECT count(*) FROM schema_migrations WHERE version=19`).Scan(&applied); err != nil || applied != 1 {
+		t.Fatalf("migration 19 applied = %d, %v", applied, err)
+	}
+	if err := store.DB().QueryRowContext(ctx, `SELECT count(*) FROM schema_migrations WHERE version=20`).Scan(&applied); err != nil || applied != 1 {
+		t.Fatalf("migration 20 applied = %d, %v", applied, err)
+	}
 	var tableName string
 	if err := store.DB().QueryRowContext(ctx, `SELECT name FROM sqlite_master WHERE type='table' AND name='provider_turn_items'`).Scan(&tableName); err != nil || tableName != "provider_turn_items" {
 		t.Fatalf("provider_turn_items table = %q, %v", tableName, err)
+	}
+}
+
+func TestP52MigrationPreservesP51IndexVersion(t *testing.T) {
+	ctx := context.Background()
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "p5-2-upgrade.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	if _, err := db.ExecContext(ctx, `PRAGMA foreign_keys=ON; CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY NOT NULL, name TEXT NOT NULL, checksum TEXT NOT NULL, applied_at TEXT NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	migrations, err := loadMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range migrations {
+		if item.version > 24 {
+			break
+		}
+		if _, err := db.ExecContext(ctx, item.sql); err != nil {
+			t.Fatalf("apply migration %d: %v", item.version, err)
+		}
+		if _, err := db.ExecContext(ctx, `INSERT INTO schema_migrations(version,name,checksum,applied_at) VALUES (?,?,?,'2026-08-19T00:00:00Z')`, item.version, item.name, item.checksum); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO projects(id,name,description,workspace_path,workspace_kind,created_at,updated_at) VALUES ('project','P5.1','','C:/fixture','external','2026-08-19T00:00:00Z','2026-08-19T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO knowledge_index_versions(id,project_id,version_number,schema_version,parser_schema_version,chunking_version,search_kind,storage_relative_path,status,error_message,created_at,activated_at,updated_at) VALUES ('index-v1','project',1,1,1,'unit-v1','lexical_v1','cache/knowledge/index-v1.db','ready','','2026-08-19T00:00:00Z','2026-08-19T00:00:00Z','2026-08-19T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := Migrate(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	var engine, status, embeddingModel, fingerprint, hybridStrategy string
+	var dimensions int
+	if err := db.QueryRowContext(ctx, `SELECT retrieval_engine,status,embedding_model,embedding_dimensions,embedding_config_fingerprint,hybrid_strategy FROM knowledge_index_versions WHERE id='index-v1'`).Scan(&engine, &status, &embeddingModel, &dimensions, &fingerprint, &hybridStrategy); err != nil {
+		t.Fatal(err)
+	}
+	if engine != "lexical_scan_v1" || status != "ready" || embeddingModel != "" || dimensions != 0 || fingerprint != "" || hybridStrategy != "bm25_only_v1" {
+		t.Fatalf("migrated P5.1 index = engine %q, status %q, embedding %q/%d, strategy %q", engine, status, embeddingModel, dimensions, hybridStrategy)
+	}
+	var embeddingEnabled int
+	if err := db.QueryRowContext(ctx, `SELECT enabled FROM knowledge_embedding_config WHERE id=1`).Scan(&embeddingEnabled); err != nil || embeddingEnabled != 0 {
+		t.Fatalf("default Embedding config = %d, %v", embeddingEnabled, err)
 	}
 }

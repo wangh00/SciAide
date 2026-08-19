@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wangh00/SciAide/internal/app/attachment"
 	"github.com/wangh00/SciAide/internal/app/conversation"
 	"github.com/wangh00/SciAide/internal/app/tool"
 	"github.com/wangh00/SciAide/internal/events"
@@ -27,10 +28,11 @@ type StartCommand struct {
 	ModelID        string                  `json:"modelId"`
 	ReasoningLevel modelcap.ReasoningLevel `json:"reasoningLevel"`
 	Text           string                  `json:"text"`
+	AttachmentIDs  []string                `json:"attachmentIds,omitempty"`
 }
 
 const maxUserMessageChars = 100_000
-const defaultContextWindowTokens = 200_000
+const defaultContextWindowTokens = modelcap.DefaultContextWindowTokens
 
 // Snapshot is the durable UI recovery view. Events improve latency, but this
 // snapshot remains the source of truth after lost or out-of-order UI events.
@@ -44,6 +46,10 @@ type ToolCallReader interface {
 	ListByRun(ctx context.Context, runID string) ([]tool.Call, error)
 }
 
+type AttachmentResolver interface {
+	Resolve(ctx context.Context, projectID string, ids []string) ([]attachment.MessageReference, error)
+}
+
 type Service struct {
 	runs          Repository
 	conversations ConversationRepository
@@ -51,6 +57,7 @@ type Service struct {
 	publisher     Publisher
 	terminator    *Terminator
 	toolCalls     ToolCallReader
+	attachments   AttachmentResolver
 	now           func() time.Time
 
 	mu            sync.Mutex
@@ -60,6 +67,19 @@ type Service struct {
 	lastResumeKey map[string]string
 	closing       bool
 	wg            sync.WaitGroup
+}
+
+func (s *Service) SetAttachmentResolver(resolver AttachmentResolver) error {
+	if resolver == nil {
+		return fmt.Errorf("chat attachment resolver is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.attachments != nil {
+		return fmt.Errorf("chat attachment resolver is already configured")
+	}
+	s.attachments = resolver
+	return nil
 }
 
 func (s *Service) SetSnapshotToolCalls(toolCalls ToolCallReader) error {
@@ -121,8 +141,8 @@ func (s *Service) start(ctx context.Context, cmd StartCommand, replacedRunID str
 	cmd.ModelProfileID = strings.TrimSpace(cmd.ModelProfileID)
 	cmd.ModelID = strings.TrimSpace(cmd.ModelID)
 	cmd.Text = strings.TrimSpace(cmd.Text)
-	if cmd.ConversationID == "" || cmd.ModelProfileID == "" || cmd.ModelID == "" || cmd.Text == "" {
-		return Run{}, fmt.Errorf("conversation, model profile, model and message text are required")
+	if cmd.ConversationID == "" || cmd.ModelProfileID == "" || cmd.ModelID == "" || (cmd.Text == "" && len(cmd.AttachmentIDs) == 0) {
+		return Run{}, fmt.Errorf("conversation, model profile, model and message content are required")
 	}
 	if len([]rune(cmd.Text)) > maxUserMessageChars {
 		return Run{}, fmt.Errorf("message is too long")
@@ -136,6 +156,26 @@ func (s *Service) start(ctx context.Context, cmd StartCommand, replacedRunID str
 	}
 	if !selectedConversation.PermissionMode.Valid() {
 		return Run{}, fmt.Errorf("conversation has an invalid permission mode")
+	}
+	if selectedConversation.ModelProfileID != cmd.ModelProfileID || selectedConversation.ModelID != cmd.ModelID {
+		if err := s.conversations.UpdateModelSelection(ctx, selectedConversation.ID, cmd.ModelProfileID, cmd.ModelID, s.now()); err != nil {
+			return Run{}, fmt.Errorf("persist conversation model selection: %w", err)
+		}
+		selectedConversation.ModelProfileID = cmd.ModelProfileID
+		selectedConversation.ModelID = cmd.ModelID
+	}
+	var attachmentReferences []attachment.MessageReference
+	if len(cmd.AttachmentIDs) > 0 {
+		s.mu.Lock()
+		resolver := s.attachments
+		s.mu.Unlock()
+		if resolver == nil {
+			return Run{}, fmt.Errorf("chat attachments are not configured")
+		}
+		attachmentReferences, err = resolver.Resolve(ctx, selectedConversation.ProjectID, cmd.AttachmentIDs)
+		if err != nil {
+			return Run{}, err
+		}
 	}
 	if !cmd.ReasoningLevel.Valid() {
 		cmd.ReasoningLevel = selectedConversation.ReasoningLevel
@@ -169,10 +209,6 @@ func (s *Service) start(ctx context.Context, cmd StartCommand, replacedRunID str
 	if err != nil {
 		return Run{}, err
 	}
-	userPartID, err := id.New()
-	if err != nil {
-		return Run{}, err
-	}
 	assistantID, err := id.New()
 	if err != nil {
 		return Run{}, err
@@ -182,11 +218,30 @@ func (s *Service) start(ctx context.Context, cmd StartCommand, replacedRunID str
 		return Run{}, err
 	}
 	now := s.now()
-	user := conversation.Message{ID: userID, ConversationID: cmd.ConversationID, RunID: runID, Role: conversation.RoleUser, Status: conversation.MessageComplete, CreatedAt: now, UpdatedAt: now,
-		Parts: []conversation.MessagePart{{ID: userPartID, MessageID: userID, Ordinal: 0, Type: "text", Text: cmd.Text, CreatedAt: now}}}
+	userParts := make([]conversation.MessagePart, 0, 1+len(attachmentReferences))
+	if cmd.Text != "" {
+		userPartID, err := id.New()
+		if err != nil {
+			return Run{}, err
+		}
+		userParts = append(userParts, conversation.MessagePart{ID: userPartID, MessageID: userID, Ordinal: len(userParts), Type: "text", Text: cmd.Text, CreatedAt: now})
+	}
+	for _, reference := range attachmentReferences {
+		partID, err := id.New()
+		if err != nil {
+			return Run{}, err
+		}
+		payload, err := json.Marshal(reference)
+		if err != nil {
+			return Run{}, err
+		}
+		userParts = append(userParts, conversation.MessagePart{ID: partID, MessageID: userID, Ordinal: len(userParts), Type: "media", Payload: payload, CreatedAt: now})
+	}
+	user := conversation.Message{ID: userID, ConversationID: cmd.ConversationID, RunID: runID, Role: conversation.RoleUser, Status: conversation.MessageComplete, CreatedAt: now, UpdatedAt: now, Parts: userParts}
 	assistant := conversation.Message{ID: assistantID, ConversationID: cmd.ConversationID, RunID: runID, Role: conversation.RoleAssistant, Status: conversation.MessageStreaming, CreatedAt: now.Add(time.Nanosecond), UpdatedAt: now,
 		Parts: []conversation.MessagePart{{ID: assistantPartID, MessageID: assistantID, Ordinal: 0, Type: "text", CreatedAt: now.Add(time.Nanosecond)}}}
-	run := Run{ID: runID, ConversationID: cmd.ConversationID, UserMessageID: userID, AssistantMessageID: assistantID, ModelProfileID: cmd.ModelProfileID, ModelID: cmd.ModelID, RequestedReasoningLevel: cmd.ReasoningLevel, ContextWindowTokens: defaultContextWindowTokens, PermissionMode: selectedConversation.PermissionMode, Status: RunQueued, CreatedAt: now, UpdatedAt: now}
+	defaultContextBudget := modelcap.ResolveContextBudget(defaultContextWindowTokens, 0, modelcap.ContextWindowSourceFallback)
+	run := Run{ID: runID, ConversationID: cmd.ConversationID, UserMessageID: userID, AssistantMessageID: assistantID, ModelProfileID: cmd.ModelProfileID, ModelID: cmd.ModelID, RequestedReasoningLevel: cmd.ReasoningLevel, ContextWindowTokens: defaultContextBudget.WindowTokens, ContextBudgetTokens: defaultContextBudget.EffectiveTokens, AutoCompactTokenLimit: defaultContextBudget.AutoCompactTokens, ContextWindowSource: defaultContextBudget.Source, PermissionMode: selectedConversation.PermissionMode, Status: RunQueued, CreatedAt: now, UpdatedAt: now}
 	if err := s.runs.CreateWithMessages(ctx, run, user, assistant); err != nil {
 		return Run{}, fmt.Errorf("create chat run: %w", err)
 	}

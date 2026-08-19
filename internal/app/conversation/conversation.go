@@ -15,6 +15,8 @@ type Conversation struct {
 	ID             string                  `json:"id"`
 	ProjectID      string                  `json:"projectId"`
 	Title          string                  `json:"title"`
+	ModelProfileID string                  `json:"modelProfileId"`
+	ModelID        string                  `json:"modelId"`
 	PermissionMode PermissionMode          `json:"permissionMode"`
 	ReasoningLevel modelcap.ReasoningLevel `json:"reasoningLevel"`
 	CreatedAt      time.Time               `json:"createdAt"`
@@ -62,8 +64,32 @@ type Message struct {
 	Role           Role          `json:"role"`
 	Status         MessageStatus `json:"status"`
 	Parts          []MessagePart `json:"parts"`
+	Citations      []Citation    `json:"citations"`
 	CreatedAt      time.Time     `json:"createdAt"`
 	UpdatedAt      time.Time     `json:"updatedAt"`
+}
+
+type Citation struct {
+	ID             string    `json:"id"`
+	MessageID      string    `json:"messageId"`
+	RunID          string    `json:"runId"`
+	ToolCallID     string    `json:"toolCallId"`
+	ProjectID      string    `json:"projectId"`
+	Reference      string    `json:"reference"`
+	Ordinal        int       `json:"ordinal"`
+	IndexVersionID string    `json:"indexVersionId"`
+	DocumentID     string    `json:"documentId"`
+	AttachmentID   string    `json:"attachmentId"`
+	ChunkID        string    `json:"chunkId"`
+	SourceName     string    `json:"sourceName"`
+	MIMEType       string    `json:"mimeType,omitempty"`
+	Locator        string    `json:"locator"`
+	Title          string    `json:"title,omitempty"`
+	Quote          string    `json:"quote"`
+	QuoteSHA256    string    `json:"quoteSha256"`
+	SourceStart    int       `json:"sourceStart"`
+	SourceEnd      int       `json:"sourceEnd"`
+	CreatedAt      time.Time `json:"createdAt"`
 }
 
 type MessagePart struct {
@@ -83,6 +109,7 @@ type Repository interface {
 	CreateMessage(ctx context.Context, value Message) error
 	UpdateMessageText(ctx context.Context, messageID string, status MessageStatus, text string, updatedAt time.Time) error
 	ListMessages(ctx context.Context, conversationID string, limit int) ([]Message, error)
+	UpdateModelSelection(ctx context.Context, conversationID, modelProfileID, modelID string, updatedAt time.Time) error
 	UpdatePermissionMode(ctx context.Context, conversationID string, mode PermissionMode, updatedAt time.Time) error
 	UpdateReasoningLevel(ctx context.Context, conversationID string, level modelcap.ReasoningLevel, updatedAt time.Time) error
 	DeleteConversation(ctx context.Context, id string) error
@@ -134,6 +161,20 @@ func (s *Service) SetReasoningLevel(ctx context.Context, conversationID string, 
 	now := s.now()
 	if err := s.repository.UpdateReasoningLevel(ctx, conversationID, level, now); err != nil {
 		return Conversation{}, fmt.Errorf("update conversation reasoning level: %w", err)
+	}
+	return s.repository.GetConversation(ctx, conversationID)
+}
+
+func (s *Service) SetModelSelection(ctx context.Context, conversationID, modelProfileID, modelID string) (Conversation, error) {
+	conversationID = strings.TrimSpace(conversationID)
+	modelProfileID = strings.TrimSpace(modelProfileID)
+	modelID = strings.TrimSpace(modelID)
+	if conversationID == "" || modelProfileID == "" || modelID == "" {
+		return Conversation{}, fmt.Errorf("conversation, model profile and model are required")
+	}
+	now := s.now()
+	if err := s.repository.UpdateModelSelection(ctx, conversationID, modelProfileID, modelID, now); err != nil {
+		return Conversation{}, fmt.Errorf("update conversation model selection: %w", err)
 	}
 	return s.repository.GetConversation(ctx, conversationID)
 }

@@ -135,9 +135,13 @@ func (r *RunRepository) CreateWithMessages(ctx context.Context, value chat.Run, 
 	if !value.RequestedReasoningLevel.Valid() {
 		value.RequestedReasoningLevel = "medium"
 	}
-	if value.ContextWindowTokens <= 0 {
-		value.ContextWindowTokens = 200_000
+	contextBudget := modelcap.ResolveContextBudget(value.ContextWindowTokens, value.AutoCompactTokenLimit, value.ContextWindowSource)
+	value.ContextWindowTokens = contextBudget.WindowTokens
+	if value.ContextBudgetTokens <= 0 || value.ContextBudgetTokens > contextBudget.EffectiveTokens {
+		value.ContextBudgetTokens = contextBudget.EffectiveTokens
 	}
+	value.AutoCompactTokenLimit = min(contextBudget.AutoCompactTokens, value.ContextBudgetTokens)
+	value.ContextWindowSource = contextBudget.Source
 	if !value.APIProtocol.Valid() {
 		value.APIProtocol = modelprofile.ProtocolOpenAIChat
 	}
@@ -152,8 +156,8 @@ func (r *RunRepository) CreateWithMessages(ctx context.Context, value chat.Run, 
 	if err := insertMessage(ctx, tx, assistantMessage); err != nil {
 		return err
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO runs(id, conversation_id, user_message_id, assistant_message_id, model_profile_id, model_id, api_protocol, requested_reasoning_level, resolved_reasoning_level, context_window_tokens, context_compacted, permission_mode, status, error_code, error_message, input_tokens, fresh_input_tokens, output_tokens, reasoning_tokens, reasoning_observed, reasoning_signature_observed, cached_input_tokens, cache_write_tokens, cache_reported_turns, cache_reported_fresh_input_tokens, cache_hit_turns, model_turns, finish_reason, created_at, started_at, completed_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		value.ID, value.ConversationID, value.UserMessageID, nullableString(value.AssistantMessageID), value.ModelProfileID, value.ModelID, value.APIProtocol, value.RequestedReasoningLevel, value.ResolvedReasoningLevel, value.ContextWindowTokens, value.ContextCompacted, value.PermissionMode, value.Status, value.ErrorCode, value.ErrorMessage, value.InputTokens, value.FreshInputTokens, value.OutputTokens, value.ReasoningTokens, value.ReasoningObserved, value.ReasoningSignatureObserved, value.CachedInputTokens, value.CacheWriteTokens, value.CacheReportedTurns, value.CacheReportedFreshInputTokens, value.CacheHitTurns, value.ModelTurns, value.FinishReason, formatTime(value.CreatedAt), nullableTime(value.StartedAt), nullableTime(value.CompletedAt), formatTime(value.UpdatedAt))
+	_, err = tx.ExecContext(ctx, `INSERT INTO runs(id, conversation_id, user_message_id, assistant_message_id, model_profile_id, model_id, api_protocol, requested_reasoning_level, resolved_reasoning_level, context_window_tokens, context_budget_tokens, auto_compact_token_limit, context_window_source, context_compacted, permission_mode, status, error_code, error_message, error_details, input_tokens, fresh_input_tokens, output_tokens, reasoning_tokens, reasoning_observed, reasoning_signature_observed, cached_input_tokens, cache_write_tokens, cache_reported_turns, cache_reported_fresh_input_tokens, cache_hit_turns, model_turns, finish_reason, created_at, started_at, completed_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		value.ID, value.ConversationID, value.UserMessageID, nullableString(value.AssistantMessageID), value.ModelProfileID, value.ModelID, value.APIProtocol, value.RequestedReasoningLevel, value.ResolvedReasoningLevel, value.ContextWindowTokens, value.ContextBudgetTokens, value.AutoCompactTokenLimit, value.ContextWindowSource, value.ContextCompacted, value.PermissionMode, value.Status, value.ErrorCode, value.ErrorMessage, value.ErrorDetails, value.InputTokens, value.FreshInputTokens, value.OutputTokens, value.ReasoningTokens, value.ReasoningObserved, value.ReasoningSignatureObserved, value.CachedInputTokens, value.CacheWriteTokens, value.CacheReportedTurns, value.CacheReportedFreshInputTokens, value.CacheHitTurns, value.ModelTurns, value.FinishReason, formatTime(value.CreatedAt), nullableTime(value.StartedAt), nullableTime(value.CompletedAt), formatTime(value.UpdatedAt))
 	if err != nil {
 		return fmt.Errorf("insert run: %w", err)
 	}
@@ -208,17 +212,49 @@ func (r *RunRepository) IncrementModelTurns(ctx context.Context, runID string, m
 }
 
 func (r *RunRepository) Update(ctx context.Context, value chat.Run) error {
+	return updateRun(ctx, r.db, value)
+}
+
+func (r *RunRepository) Complete(ctx context.Context, value chat.Run, text string, citations []conversation.Citation) error {
+	if value.ID == "" || value.AssistantMessageID == "" || value.Status != chat.RunCompleted || value.CompletedAt == nil || value.ErrorCode != "" || value.ErrorMessage != "" || value.ErrorDetails != "" {
+		return fmt.Errorf("invalid completed run")
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin run completion: %w", err)
+	}
+	defer tx.Rollback()
+	if err := completeAssistantMessageWithCitations(ctx, tx, value.AssistantMessageID, value.ID, text, citations, value.UpdatedAt); err != nil {
+		return err
+	}
+	if err := updateRun(ctx, tx, value); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit run completion: %w", err)
+	}
+	return nil
+}
+
+func updateRun(ctx context.Context, executor runUpdateExecutor, value chat.Run) error {
 	if !value.APIProtocol.Valid() {
 		value.APIProtocol = modelprofile.ProtocolOpenAIChat
 	}
-	result, err := r.db.ExecContext(ctx, `UPDATE runs SET assistant_message_id=?, api_protocol=?, resolved_reasoning_level=?, context_compacted=?, status=?, error_code=?, error_message=?, input_tokens=?, fresh_input_tokens=?, output_tokens=?, reasoning_tokens=?, reasoning_observed=?, reasoning_signature_observed=?, cached_input_tokens=?, cache_write_tokens=?, cache_reported_turns=?, cache_reported_fresh_input_tokens=?, cache_hit_turns=?, finish_reason=?, started_at=?, completed_at=?, updated_at=? WHERE id=? AND status NOT IN ('completed','failed','cancelled','interrupted')`,
-		nullableString(value.AssistantMessageID), value.APIProtocol, value.ResolvedReasoningLevel, value.ContextCompacted, value.Status, value.ErrorCode, value.ErrorMessage, value.InputTokens, value.FreshInputTokens, value.OutputTokens, value.ReasoningTokens, value.ReasoningObserved, value.ReasoningSignatureObserved, value.CachedInputTokens, value.CacheWriteTokens, value.CacheReportedTurns, value.CacheReportedFreshInputTokens, value.CacheHitTurns, value.FinishReason, nullableTime(value.StartedAt), nullableTime(value.CompletedAt), formatTime(value.UpdatedAt), value.ID)
+	contextBudget := modelcap.ResolveContextBudget(value.ContextWindowTokens, value.AutoCompactTokenLimit, value.ContextWindowSource)
+	value.ContextWindowTokens = contextBudget.WindowTokens
+	if value.ContextBudgetTokens <= 0 || value.ContextBudgetTokens > contextBudget.EffectiveTokens {
+		value.ContextBudgetTokens = contextBudget.EffectiveTokens
+	}
+	value.AutoCompactTokenLimit = min(contextBudget.AutoCompactTokens, value.ContextBudgetTokens)
+	value.ContextWindowSource = contextBudget.Source
+	result, err := executor.ExecContext(ctx, `UPDATE runs SET assistant_message_id=?, api_protocol=?, resolved_reasoning_level=?, context_window_tokens=?, context_budget_tokens=?, auto_compact_token_limit=?, context_window_source=?, context_compacted=?, status=?, error_code=?, error_message=?, error_details=?, input_tokens=?, fresh_input_tokens=?, output_tokens=?, reasoning_tokens=?, reasoning_observed=?, reasoning_signature_observed=?, cached_input_tokens=?, cache_write_tokens=?, cache_reported_turns=?, cache_reported_fresh_input_tokens=?, cache_hit_turns=?, finish_reason=?, started_at=?, completed_at=?, updated_at=? WHERE id=? AND status NOT IN ('completed','failed','cancelled','interrupted')`,
+		nullableString(value.AssistantMessageID), value.APIProtocol, value.ResolvedReasoningLevel, value.ContextWindowTokens, value.ContextBudgetTokens, value.AutoCompactTokenLimit, value.ContextWindowSource, value.ContextCompacted, value.Status, value.ErrorCode, value.ErrorMessage, value.ErrorDetails, value.InputTokens, value.FreshInputTokens, value.OutputTokens, value.ReasoningTokens, value.ReasoningObserved, value.ReasoningSignatureObserved, value.CachedInputTokens, value.CacheWriteTokens, value.CacheReportedTurns, value.CacheReportedFreshInputTokens, value.CacheHitTurns, value.FinishReason, nullableTime(value.StartedAt), nullableTime(value.CompletedAt), formatTime(value.UpdatedAt), value.ID)
 	if err != nil {
 		return fmt.Errorf("update run: %w", err)
 	}
 	if affected, _ := result.RowsAffected(); affected == 0 {
 		var exists int
-		if err := r.db.QueryRowContext(ctx, `SELECT count(*) FROM runs WHERE id=?`, value.ID).Scan(&exists); err != nil {
+		if err := executor.QueryRowContext(ctx, `SELECT count(*) FROM runs WHERE id=?`, value.ID).Scan(&exists); err != nil {
 			return err
 		}
 		if exists == 0 {
@@ -552,6 +588,11 @@ type sqlExecer interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
 }
 
+type runUpdateExecutor interface {
+	sqlExecer
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
 func insertMessage(ctx context.Context, tx sqlExecer, value conversation.Message) error {
 	if _, err := tx.ExecContext(ctx, `INSERT INTO messages(id, conversation_id, run_id, role, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		value.ID, value.ConversationID, nullableString(value.RunID), value.Role, value.Status, formatTime(value.CreatedAt), formatTime(value.UpdatedAt)); err != nil {
@@ -574,8 +615,8 @@ func scanRun(row rowScanner) (chat.Run, error) {
 	var value chat.Run
 	var createdAt, updatedAt string
 	var startedAt, completedAt sql.NullString
-	if err := row.Scan(&value.ID, &value.ConversationID, &value.UserMessageID, &value.AssistantMessageID, &value.ModelProfileID, &value.ModelID, &value.APIProtocol, &value.RequestedReasoningLevel, &value.ResolvedReasoningLevel, &value.ContextWindowTokens, &value.ContextCompacted, &value.PermissionMode, &value.Status,
-		&value.ErrorCode, &value.ErrorMessage, &value.InputTokens, &value.FreshInputTokens, &value.OutputTokens, &value.ReasoningTokens, &value.ReasoningObserved, &value.ReasoningSignatureObserved, &value.CachedInputTokens, &value.CacheWriteTokens, &value.CacheReportedTurns, &value.CacheReportedFreshInputTokens, &value.CacheHitTurns, &value.ModelTurns, &value.FinishReason, &createdAt, &startedAt, &completedAt, &updatedAt); err != nil {
+	if err := row.Scan(&value.ID, &value.ConversationID, &value.UserMessageID, &value.AssistantMessageID, &value.ModelProfileID, &value.ModelID, &value.APIProtocol, &value.RequestedReasoningLevel, &value.ResolvedReasoningLevel, &value.ContextWindowTokens, &value.ContextBudgetTokens, &value.AutoCompactTokenLimit, &value.ContextWindowSource, &value.ContextCompacted, &value.PermissionMode, &value.Status,
+		&value.ErrorCode, &value.ErrorMessage, &value.ErrorDetails, &value.InputTokens, &value.FreshInputTokens, &value.OutputTokens, &value.ReasoningTokens, &value.ReasoningObserved, &value.ReasoningSignatureObserved, &value.CachedInputTokens, &value.CacheWriteTokens, &value.CacheReportedTurns, &value.CacheReportedFreshInputTokens, &value.CacheHitTurns, &value.ModelTurns, &value.FinishReason, &createdAt, &startedAt, &completedAt, &updatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return chat.Run{}, fmt.Errorf("run not found: %w", sql.ErrNoRows)
 		}
@@ -607,7 +648,7 @@ func scanRun(row rowScanner) (chat.Run, error) {
 	return value, nil
 }
 
-const runSelect = `SELECT id, conversation_id, user_message_id, COALESCE(assistant_message_id, ''), model_profile_id, model_id, api_protocol, requested_reasoning_level, resolved_reasoning_level, context_window_tokens, context_compacted, permission_mode, status, error_code, error_message, input_tokens, fresh_input_tokens, output_tokens, reasoning_tokens, reasoning_observed, reasoning_signature_observed, cached_input_tokens, cache_write_tokens, cache_reported_turns, cache_reported_fresh_input_tokens, cache_hit_turns, model_turns, finish_reason, created_at, started_at, completed_at, updated_at FROM runs`
+const runSelect = `SELECT id, conversation_id, user_message_id, COALESCE(assistant_message_id, ''), model_profile_id, model_id, api_protocol, requested_reasoning_level, resolved_reasoning_level, context_window_tokens, context_budget_tokens, auto_compact_token_limit, context_window_source, context_compacted, permission_mode, status, error_code, error_message, error_details, input_tokens, fresh_input_tokens, output_tokens, reasoning_tokens, reasoning_observed, reasoning_signature_observed, cached_input_tokens, cache_write_tokens, cache_reported_turns, cache_reported_fresh_input_tokens, cache_hit_turns, model_turns, finish_reason, created_at, started_at, completed_at, updated_at FROM runs`
 
 func nullableString(value string) any {
 	if value == "" {

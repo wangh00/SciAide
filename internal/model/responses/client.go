@@ -44,7 +44,7 @@ func NewWithHTTPClient(profile modelprofile.Profile, secret []byte, client *http
 	return value
 }
 func (c *Client) Capabilities(context.Context) (model.Capabilities, error) {
-	return model.Capabilities{Streaming: true, ToolCalling: true, Reasoning: true, MaxContextTokens: 200_000}, nil
+	return model.Capabilities{Streaming: true, ToolCalling: true, Reasoning: true, MaxContextTokens: c.profile.ContextBudget(c.profile.ModelID).WindowTokens}, nil
 }
 
 type inputItem struct {
@@ -321,14 +321,23 @@ type eventPayload struct {
 	Item        json.RawMessage `json:"item"`
 	ItemID      string          `json:"item_id"`
 	OutputIndex *int            `json:"output_index"`
-	Response    struct {
+	Error       *struct {
+		Type    string `json:"type"`
+		Code    string `json:"code"`
+		Message string `json:"message"`
+		Param   string `json:"param"`
+	} `json:"error"`
+	Response struct {
 		Status            string        `json:"status"`
 		Usage             responseUsage `json:"usage"`
 		IncompleteDetails *struct {
 			Reason string `json:"reason"`
 		} `json:"incomplete_details"`
 		Error *struct {
+			Type    string `json:"type"`
+			Code    string `json:"code"`
 			Message string `json:"message"`
+			Param   string `json:"param"`
 		} `json:"error"`
 	} `json:"response"`
 }
@@ -469,7 +478,7 @@ func (s *stream) Recv() (model.Event, error) {
 		}
 		var event eventPayload
 		if err := json.Unmarshal([]byte(data), &event); err != nil {
-			return model.Event{}, modelutil.Error("MODEL_STREAM_INVALID", "模型返回了无法解析的 Responses 流数据。", false, err)
+			return model.Event{}, modelutil.ErrorWithDetails("MODEL_STREAM_INVALID", "模型返回了无法解析的 Responses 流数据。", modelutil.ProviderErrorDetails("Responses stream event", 0, []byte(data)), false, err)
 		}
 		switch event.Type {
 		case "response.output_text.delta":
@@ -570,14 +579,18 @@ func (s *stream) Recv() (model.Event, error) {
 			}
 			s.queue = append(s.queue, model.Event{Type: model.EventDone, FinishReason: reason})
 			s.done = true
-		case "response.failed", "error":
+		case "response.failed", "response.error", "error":
 			message := "Responses 请求未完成。"
 			if event.Message != "" {
 				message = event.Message
+			} else if event.Error != nil && event.Error.Message != "" {
+				message = event.Error.Message
 			} else if event.Response.Error != nil && event.Response.Error.Message != "" {
 				message = event.Response.Error.Message
+			} else if providerMessage := modelutil.ProviderErrorMessage([]byte(data)); providerMessage != "" {
+				message = providerMessage
 			}
-			return model.Event{}, modelutil.Error("MODEL_REQUEST_REJECTED", message, false, nil)
+			return model.Event{}, modelutil.ErrorWithDetails("MODEL_REQUEST_REJECTED", message, modelutil.ProviderErrorDetails("Responses stream event", 0, []byte(data)), false, nil)
 		}
 		if len(s.queue) > 0 {
 			return s.pop(), nil

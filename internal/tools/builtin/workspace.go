@@ -74,6 +74,9 @@ func (t *ListWorkspace) Invoke(ctx context.Context, invocation tool.Invocation) 
 		return tool.Result{}, err
 	}
 	defer guard.Close()
+	if err := rejectPrivateProjectPath(guard, args.Path); err != nil {
+		return tool.Result{}, err
+	}
 	directory, clean, err := guard.OpenFile(args.Path)
 	if err != nil {
 		return tool.Result{}, err
@@ -83,9 +86,18 @@ func (t *ListWorkspace) Invoke(ctx context.Context, invocation tool.Invocation) 
 	if err != nil || !info.IsDir() {
 		return tool.Result{}, fmt.Errorf("workspace path is not a directory")
 	}
-	entries, err := directory.ReadDir(args.Limit + 1)
+	entries, err := directory.ReadDir(args.Limit + 2)
 	if err != nil && !errors.Is(err, io.EOF) {
 		return tool.Result{}, err
+	}
+	if clean == "." {
+		visible := entries[:0]
+		for _, entry := range entries {
+			if !strings.EqualFold(entry.Name(), project.PrivateDirectoryName) {
+				visible = append(visible, entry)
+			}
+		}
+		entries = visible
 	}
 	truncated := len(entries) > args.Limit
 	if truncated {
@@ -180,6 +192,9 @@ func (t *ReadText) Invoke(ctx context.Context, invocation tool.Invocation) (tool
 		return tool.Result{}, err
 	}
 	defer guard.Close()
+	if err := rejectPrivateProjectPath(guard, args.Path); err != nil {
+		return tool.Result{}, err
+	}
 	file, clean, err := guard.OpenFile(args.Path)
 	if err != nil {
 		return tool.Result{}, err
@@ -222,6 +237,21 @@ func (t *ReadText) Invoke(ctx context.Context, invocation tool.Invocation) (tool
 		return tool.Result{}, err
 	}
 	return tool.Result{Status: tool.ResultSuccess, Text: string(contents), Structured: structured, Truncated: truncated, Meta: tool.ResultMeta{OriginalBytes: info.Size()}}, nil
+}
+
+func rejectPrivateProjectPath(guard *pathguard.Guard, value string) error {
+	clean, err := guard.Relative(value)
+	if err != nil {
+		return err
+	}
+	first := clean
+	if separator := strings.IndexRune(clean, os.PathSeparator); separator >= 0 {
+		first = clean[:separator]
+	}
+	if strings.EqualFold(first, project.PrivateDirectoryName) {
+		return fmt.Errorf("SciAide project data is available only through project-scoped tools")
+	}
+	return nil
 }
 
 func guardForProject(ctx context.Context, projects ProjectLoader, projectID string) (*pathguard.Guard, error) {

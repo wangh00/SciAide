@@ -149,4 +149,5 @@ type ResolvedChatModel struct {
 	Model                    ChatModel
 	SupportedReasoningLevels []modelcap.ReasoningLevel
 	APIProtocol              modelcap.APIProtocol
+	ContextBudget            modelcap.ContextBudget
 }

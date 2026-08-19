@@ -11,7 +11,6 @@ import (
 	"io"
 	"math/rand/v2"
 	"net/http"
-	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -60,7 +59,7 @@ func NewWithHTTPClient(profile modelprofile.Profile, secret []byte, client *http
 }
 
 func (c *Client) Capabilities(context.Context) (model.Capabilities, error) {
-	return model.Capabilities{Streaming: true, ToolCalling: true, Reasoning: true, MaxContextTokens: 200_000}, nil
+	return model.Capabilities{Streaming: true, ToolCalling: true, Reasoning: true, MaxContextTokens: c.profile.ContextBudget(c.profile.ModelID).WindowTokens}, nil
 }
 
 func (c *Client) Stream(ctx context.Context, request model.ChatRequest) (model.Stream, error) {
@@ -113,7 +112,21 @@ func (c *Client) Discover(ctx context.Context, profile modelprofile.Profile, sec
 		if len(reasoningLevels) > 0 {
 			source = "provider"
 		}
-		models = append(models, modelprofile.AvailableModel{ID: identifier, OwnedBy: strings.TrimSpace(item.OwnedBy), ReasoningLevels: reasoningLevels, ReasoningCapabilitySource: source})
+		contextWindow := firstPositiveInt(int(item.ContextWindow), int(item.MaxContextWindow), int(item.ContextLength), int(item.MaxContextTokens))
+		contextSource := ""
+		if contextWindow > 0 {
+			contextSource = modelcap.ContextWindowSourceProvider
+		}
+		contextBudget := modelcap.ResolveContextBudget(contextWindow, int(item.AutoCompactTokenLimit), contextSource)
+		models = append(models, modelprofile.AvailableModel{
+			ID:                        identifier,
+			OwnedBy:                   strings.TrimSpace(item.OwnedBy),
+			ContextWindowTokens:       contextBudget.WindowTokens,
+			AutoCompactTokenLimit:     contextBudget.AutoCompactTokens,
+			ContextWindowSource:       contextBudget.Source,
+			ReasoningLevels:           reasoningLevels,
+			ReasoningCapabilitySource: source,
+		})
 	}
 	slices.SortFunc(models, func(a, b modelprofile.AvailableModel) int {
 		return strings.Compare(strings.ToLower(a.ID), strings.ToLower(b.ID))
@@ -453,7 +466,14 @@ func (s *stream) Recv() (model.Event, error) {
 		}
 		var chunk responseChunk
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-			return model.Event{}, modelError("MODEL_STREAM_INVALID", "模型返回了无法解析的流数据。", false, err)
+			return model.Event{}, modelutil.ErrorWithDetails("MODEL_STREAM_INVALID", "模型返回了无法解析的流数据。", modelutil.ProviderErrorDetails("Chat Completions stream event", 0, []byte(data)), false, err)
+		}
+		if chunk.Error != nil {
+			message := strings.TrimSpace(chunk.Error.Message)
+			if message == "" {
+				message = "Chat Completions 请求未完成。"
+			}
+			return model.Event{}, modelutil.ErrorWithDetails("MODEL_REQUEST_REJECTED", message, modelutil.ProviderErrorDetails("Chat Completions stream event", 0, []byte(data)), false, nil)
 		}
 		for _, choice := range chunk.Choices {
 			if choice.Delta.Content != "" {
@@ -579,6 +599,12 @@ func wrapUntrusted(label, value string) string {
 func (s *stream) Close() error { s.done = true; return s.body.Close() }
 
 type responseChunk struct {
+	Error *struct {
+		Type    string `json:"type"`
+		Code    string `json:"code"`
+		Message string `json:"message"`
+		Param   string `json:"param"`
+	} `json:"error"`
 	Choices []struct {
 		Delta struct {
 			Content   string             `json:"content"`
@@ -646,11 +672,43 @@ type responseToolCall struct {
 
 type modelsResponse struct {
 	Data []struct {
-		ID                        string           `json:"id"`
-		OwnedBy                   string           `json:"owned_by"`
-		SupportedReasoningEfforts reasoningEfforts `json:"supported_reasoning_efforts"`
-		SupportedReasoningLevels  reasoningEfforts `json:"supported_reasoning_levels"`
+		ID                        string              `json:"id"`
+		OwnedBy                   string              `json:"owned_by"`
+		ContextWindow             optionalPositiveInt `json:"context_window"`
+		MaxContextWindow          optionalPositiveInt `json:"max_context_window"`
+		ContextLength             optionalPositiveInt `json:"context_length"`
+		MaxContextTokens          optionalPositiveInt `json:"max_context_tokens"`
+		AutoCompactTokenLimit     optionalPositiveInt `json:"auto_compact_token_limit"`
+		SupportedReasoningEfforts reasoningEfforts    `json:"supported_reasoning_efforts"`
+		SupportedReasoningLevels  reasoningEfforts    `json:"supported_reasoning_levels"`
 	} `json:"data"`
+}
+
+type optionalPositiveInt int
+
+func (value *optionalPositiveInt) UnmarshalJSON(data []byte) error {
+	trimmed := strings.TrimSpace(string(data))
+	if trimmed == "" || trimmed == "null" {
+		*value = 0
+		return nil
+	}
+	trimmed = strings.Trim(trimmed, `"`)
+	parsed, err := strconv.Atoi(trimmed)
+	if err != nil || parsed <= 0 {
+		*value = 0
+		return nil
+	}
+	*value = optionalPositiveInt(parsed)
+	return nil
+}
+
+func firstPositiveInt(values ...int) int {
+	for _, value := range values {
+		if value > 0 {
+			return value
+		}
+	}
+	return 0
 }
 
 type reasoningEfforts []json.RawMessage
@@ -717,55 +775,11 @@ func endpointURL(baseURL, suffix string) string {
 }
 
 func classifyNetwork(err error) error {
-	if errors.Is(err, context.DeadlineExceeded) {
-		return modelError("MODEL_TIMEOUT", "模型请求超时，请检查网络或增大超时时间。", false, err)
-	}
-	var urlErr *url.Error
-	if errors.As(err, &urlErr) && urlErr.Timeout() {
-		return modelError("MODEL_TIMEOUT", "模型请求超时，请检查网络或增大超时时间。", false, err)
-	}
-	return modelError("MODEL_UNAVAILABLE", "暂时无法连接模型服务。", true, err)
+	return modelutil.ClassifyNetwork(err)
 }
 
 func classifyStatus(status int, _ http.Header, responseBody []byte) error {
-	switch status {
-	case http.StatusUnauthorized, http.StatusForbidden:
-		return modelError("MODEL_AUTH_FAILED", "模型服务拒绝了密钥，请重新设置 API Key。", false, nil)
-	case http.StatusNotFound:
-		return modelError("MODEL_NOT_FOUND", "模型或 API 地址不存在，请检查 Base URL 和 Model ID。", false, nil)
-	case http.StatusTooManyRequests:
-		return modelError("MODEL_RATE_LIMITED", "模型服务繁忙或已达到限额，请稍后重试。", true, nil)
-	default:
-		if status >= 500 {
-			return modelError("MODEL_UNAVAILABLE", "模型服务暂时不可用。", true, fmt.Errorf("HTTP %d", status))
-		}
-		message := "模型服务拒绝了请求，请检查模型配置。"
-		if detail := providerErrorMessage(responseBody); detail != "" {
-			message = fmt.Sprintf("模型服务拒绝了请求（HTTP %d）：%s", status, detail)
-		}
-		return modelError("MODEL_REQUEST_REJECTED", message, false, fmt.Errorf("HTTP %d", status))
-	}
-}
-
-func providerErrorMessage(body []byte) string {
-	var payload struct {
-		Error struct {
-			Message string `json:"message"`
-		} `json:"error"`
-		Message string `json:"message"`
-	}
-	if len(body) == 0 || json.Unmarshal(body, &payload) != nil {
-		return ""
-	}
-	value := strings.TrimSpace(payload.Error.Message)
-	if value == "" {
-		value = strings.TrimSpace(payload.Message)
-	}
-	value = strings.Join(strings.Fields(value), " ")
-	if len([]rune(value)) > 300 {
-		value = string([]rune(value)[:300]) + "…"
-	}
-	return value
+	return modelutil.ClassifyStatus(status, responseBody)
 }
 
 func modelError(code, message string, retryable bool, cause error) error {

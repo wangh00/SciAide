@@ -394,12 +394,16 @@ func TestFailRunAtomicallyInterruptsPendingToolCalls(t *testing.T) {
 	failEvent := events.New("fail-run-event", run.ID, "run", "run.failed", 0, json.RawMessage(`{}`))
 	failAt := now.Add(time.Second)
 	failEvent.Timestamp = failAt
+	run.ErrorDetails = "HTTP status: 400\nProvider payload: fixture"
+	if err := runs.Update(ctx, run); err != nil {
+		t.Fatal(err)
+	}
 	if _, _, err := runs.FailRun(ctx, run.ID, "TOOL_CALL_REJECTED", "failed", failAt, failEvent); err != nil {
 		t.Fatal(err)
 	}
 	loadedRun, _ := runs.Get(ctx, run.ID)
 	loadedCall, _ := NewToolRepository(store.DB()).Get(ctx, call.ID)
-	if loadedRun.Status != chat.RunFailed || loadedCall.Status != tool.CallInterrupted || loadedCall.Result == nil || loadedCall.Result.Status != tool.ResultError {
+	if loadedRun.Status != chat.RunFailed || loadedRun.ErrorDetails != run.ErrorDetails || loadedCall.Status != tool.CallInterrupted || loadedCall.Result == nil || loadedCall.Result.Status != tool.ResultError {
 		t.Fatalf("failed state run=%#v call=%#v", loadedRun, loadedCall)
 	}
 }

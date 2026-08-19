@@ -43,10 +43,12 @@ func (r *Resolver) Resolve(ctx context.Context, profileID, modelID string) (mode
 		protocol = modelprofile.ProtocolOpenAIChat
 	}
 	supported := []modelcap.ReasoningLevel{}
+	contextBudget := modelcap.ResolveContextBudget(0, 0, "")
 	selected := false
 	for _, item := range profile.Models {
 		if item.ID == modelID && item.Enabled {
 			selected = true
+			contextBudget = modelcap.ResolveContextBudget(item.ContextWindowTokens, item.AutoCompactTokenLimit, item.ContextWindowSource)
 			if item.ReasoningCapabilitySource == "manual" || item.ReasoningCapabilitySource == "provider" || item.ReasoningCapabilitySource == "builtin" {
 				supported = modelcap.NormalizeReasoningLevels(item.ReasoningLevels)
 			} else {
@@ -77,5 +79,5 @@ func (r *Resolver) Resolve(ctx context.Context, profileID, modelID string) (mode
 	default:
 		return model.ResolvedChatModel{}, &apperr.Error{Code: "MODEL_PROTOCOL_UNSUPPORTED", UserMessage: "当前 API 协议不受支持，请检查模型配置。", Cause: fmt.Errorf("unsupported protocol %q", protocol)}
 	}
-	return model.ResolvedChatModel{Model: chatModel, SupportedReasoningLevels: supported, APIProtocol: protocol}, nil
+	return model.ResolvedChatModel{Model: chatModel, SupportedReasoningLevels: supported, APIProtocol: protocol, ContextBudget: contextBudget}, nil
 }

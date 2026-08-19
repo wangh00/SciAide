@@ -3,6 +3,7 @@ package responses
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/wangh00/SciAide/internal/app/modelprofile"
+	"github.com/wangh00/SciAide/internal/apperr"
 	"github.com/wangh00/SciAide/internal/model"
 	"github.com/wangh00/SciAide/internal/modelcap"
 	"github.com/wangh00/SciAide/internal/modelutil"
@@ -103,6 +105,24 @@ func TestStreamIncompleteIsTerminal(t *testing.T) {
 	event, err := stream.Recv()
 	if err != nil || event.Type != model.EventDone || event.FinishReason != "length" {
 		t.Fatalf("event = %#v, %v", event, err)
+	}
+}
+
+func TestStreamFailurePreservesNestedProviderDetails(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, `data: {"type":"response.failed","response":{"status":"failed","error":{"code":"context_length_exceeded","message":"Input exceeds the model context window","param":"input"}},"request_id":"req-fixture"}`+"\n\n")
+	}))
+	defer server.Close()
+	stream, err := New(modelprofile.Profile{BaseURL: server.URL, ModelID: "fixture", TimeoutSeconds: 5}, nil).Stream(context.Background(), model.ChatRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	_, err = stream.Recv()
+	var appErr *apperr.Error
+	if !errors.As(err, &appErr) || appErr.UserMessage != "Input exceeds the model context window" || !strings.Contains(appErr.Details, "context_length_exceeded") || !strings.Contains(appErr.Details, "req-fixture") {
+		t.Fatalf("error = %#v", err)
 	}
 }
 

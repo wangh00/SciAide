@@ -2,12 +2,15 @@ package chat
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/wangh00/SciAide/internal/app/attachment"
 	"github.com/wangh00/SciAide/internal/app/conversation"
+	"github.com/wangh00/SciAide/internal/document"
 	"github.com/wangh00/SciAide/internal/events"
 	"github.com/wangh00/SciAide/internal/model"
 	"github.com/wangh00/SciAide/internal/model/fake"
@@ -20,6 +23,8 @@ type memoryRepo struct {
 	messages         []conversation.Message
 	envelopes        []events.Envelope
 	conversationMode conversation.PermissionMode
+	modelProfileID   string
+	modelID          string
 }
 
 func (m *memoryRepo) CreateWithMessages(_ context.Context, run Run, user, assistant conversation.Message) error {
@@ -118,12 +123,19 @@ func (m *memoryRepo) GetConversation(context.Context, string) (conversation.Conv
 	if !mode.Valid() {
 		mode = conversation.PermissionPlan
 	}
-	return conversation.Conversation{ID: "conversation", PermissionMode: mode}, nil
+	return conversation.Conversation{ID: "conversation", ProjectID: "project", PermissionMode: mode}, nil
 }
 
 func (m *memoryRepo) UpdateReasoningLevel(_ context.Context, _ string, level modelcap.ReasoningLevel, _ time.Time) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return nil
+}
+func (m *memoryRepo) UpdateModelSelection(_ context.Context, _ string, modelProfileID, modelID string, _ time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.modelProfileID = modelProfileID
+	m.modelID = modelID
 	return nil
 }
 func (m *memoryRepo) AppendNext(_ context.Context, event events.Envelope) (events.Envelope, error) {
@@ -185,6 +197,20 @@ type blockingRunner struct {
 	count   int
 }
 
+type noopRunner struct{}
+
+func (noopRunner) Execute(context.Context, string)       {}
+func (noopRunner) ResumeExecute(context.Context, string) {}
+
+type attachmentResolverFixture struct{}
+
+func (attachmentResolverFixture) Resolve(_ context.Context, projectID string, ids []string) ([]attachment.MessageReference, error) {
+	if projectID != "project" || len(ids) != 1 || ids[0] != "paper" {
+		return nil, fmt.Errorf("unexpected attachment resolution")
+	}
+	return []attachment.MessageReference{{AttachmentID: "paper", OriginalName: "paper.pdf", MIMEType: "application/pdf", Format: document.FormatPDF, SizeBytes: 42, UnitCount: 2}}, nil
+}
+
 func (r *blockingRunner) Execute(context.Context, string) {
 	close(r.started)
 	<-r.release
@@ -211,6 +237,12 @@ func TestServiceCompletesAndPersistsBeforeTerminalEvent(t *testing.T) {
 	if run.ModelID != "fixture" {
 		t.Fatalf("run model snapshot=%q", run.ModelID)
 	}
+	repo.mu.Lock()
+	persistedProfileID, persistedModelID := repo.modelProfileID, repo.modelID
+	repo.mu.Unlock()
+	if persistedProfileID != "profile" || persistedModelID != "fixture" {
+		t.Fatalf("conversation model selection=(%q,%q)", persistedProfileID, persistedModelID)
+	}
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		snapshot, _ := service.Snapshot(context.Background(), run.ID)
@@ -226,6 +258,30 @@ func TestServiceCompletesAndPersistsBeforeTerminalEvent(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("run did not complete")
+}
+
+func TestServicePersistsAttachmentMediaPartWithoutMessageText(t *testing.T) {
+	repo := &memoryRepo{}
+	service := NewService(repo, repo, repo, nil)
+	if err := service.SetRunner(noopRunner{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.SetAttachmentResolver(attachmentResolverFixture{}); err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	if _, err := service.Start(context.Background(), StartCommand{ConversationID: "conversation", ModelProfileID: "profile", ModelID: "fixture", AttachmentIDs: []string{"paper"}}); err != nil {
+		t.Fatal(err)
+	}
+	repo.mu.Lock()
+	defer repo.mu.Unlock()
+	if len(repo.messages) != 2 || len(repo.messages[0].Parts) != 1 || repo.messages[0].Parts[0].Type != "media" {
+		t.Fatalf("messages = %#v", repo.messages)
+	}
+	var reference attachment.MessageReference
+	if err := json.Unmarshal(repo.messages[0].Parts[0].Payload, &reference); err != nil || reference.AttachmentID != "paper" {
+		t.Fatalf("media payload = %#v, %v", reference, err)
+	}
 }
 
 func TestBuildRequestKeepsNewestMessagesWithinBudget(t *testing.T) {

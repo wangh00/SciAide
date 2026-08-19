@@ -77,6 +77,28 @@ func TestReadTextRejectsBinaryAndTraversal(t *testing.T) {
 	}
 }
 
+func TestWorkspaceToolsHideAndRejectPrivateProjectData(t *testing.T) {
+	workspace := t.TempDir()
+	private := filepath.Join(workspace, project.PrivateDirectoryName)
+	if err := os.MkdirAll(private, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(private, "secret.txt"), []byte("internal"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fixture := projectFixture{value: project.Project{ID: "project", WorkspacePath: workspace}}
+	listed, err := NewListWorkspace(fixture).Invoke(context.Background(), tool.Invocation{ProjectID: "project", Arguments: json.RawMessage(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(listed.Structured), project.PrivateDirectoryName) {
+		t.Fatalf("private project data leaked in listing: %s", listed.Structured)
+	}
+	if _, err := NewReadText(fixture).Invoke(context.Background(), tool.Invocation{ProjectID: "project", Arguments: json.RawMessage(`{"path":".sciaide/secret.txt"}`)}); err == nil {
+		t.Fatal("private project data path was readable through workspace tool")
+	}
+}
+
 func TestReadTextRejectsEscapingSymlink(t *testing.T) {
 	parent := t.TempDir()
 	workspace := filepath.Join(parent, "workspace")

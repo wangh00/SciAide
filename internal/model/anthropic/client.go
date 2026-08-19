@@ -47,7 +47,7 @@ func NewWithHTTPClient(profile modelprofile.Profile, secret []byte, client *http
 	return v
 }
 func (c *Client) Capabilities(context.Context) (model.Capabilities, error) {
-	return model.Capabilities{Streaming: true, ToolCalling: true, Reasoning: true, MaxContextTokens: 200_000}, nil
+	return model.Capabilities{Streaming: true, ToolCalling: true, Reasoning: true, MaxContextTokens: c.profile.ContextBudget(c.profile.ModelID).WindowTokens}, nil
 }
 func TestConnection(ctx context.Context, profile modelprofile.Profile, secret []byte) error {
 	probe := profile
@@ -562,7 +562,7 @@ func (s *stream) Recv() (model.Event, error) {
 		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 		var e event
 		if err := json.Unmarshal([]byte(data), &e); err != nil {
-			return model.Event{}, modelutil.Error("MODEL_STREAM_INVALID", "模型返回了无法解析的 Anthropic 流数据。", false, err)
+			return model.Event{}, modelutil.ErrorWithDetails("MODEL_STREAM_INVALID", "模型返回了无法解析的 Anthropic 流数据。", modelutil.ProviderErrorDetails("Anthropic stream event", 0, []byte(data)), false, err)
 		}
 		switch e.Type {
 		case "message_start":
@@ -668,7 +668,11 @@ func (s *stream) Recv() (model.Event, error) {
 			s.queue = append(s.queue, model.Event{Type: model.EventDone, FinishReason: reason})
 			s.done = true
 		case "error":
-			return model.Event{}, modelutil.Error("MODEL_REQUEST_REJECTED", e.Error.Message, false, nil)
+			message := strings.TrimSpace(e.Error.Message)
+			if message == "" {
+				message = "Anthropic 请求未完成。"
+			}
+			return model.Event{}, modelutil.ErrorWithDetails("MODEL_REQUEST_REJECTED", message, modelutil.ProviderErrorDetails("Anthropic stream event", 0, []byte(data)), false, nil)
 		}
 		if len(s.queue) > 0 {
 			return s.pop(), nil

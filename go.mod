@@ -3,8 +3,10 @@ module github.com/wangh00/SciAide
 go 1.25.0
 
 require (
+	github.com/ledongthuc/pdf v0.0.0-20250511090121-5959a4027728
 	github.com/modelcontextprotocol/go-sdk v1.7.0
 	github.com/wailsapp/wails/v2 v2.14.0
+	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.39.1
 )
 

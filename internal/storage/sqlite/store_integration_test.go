@@ -46,8 +46,8 @@ func TestProjectRepositoryPersistsAcrossReopen(t *testing.T) {
 	if err := reopened.DB().QueryRowContext(ctx, "SELECT count(*) FROM schema_migrations").Scan(&migrations); err != nil {
 		t.Fatalf("count migrations: %v", err)
 	}
-	if migrations != 16 {
-		t.Fatalf("migration count = %d, want 16", migrations)
+	if migrations != 29 {
+		t.Fatalf("migration count = %d, want 29", migrations)
 	}
 }
 
@@ -87,9 +87,15 @@ func TestConversationPermissionModePersistsAndCannotChangeDuringRun(t *testing.T
 	if err := conversations.UpdatePermissionMode(ctx, value.ID, conversation.PermissionFullAccess, now.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
+	if err := conversations.UpdateModelSelection(ctx, value.ID, "profile", "model", now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
 	loaded, err := conversations.GetConversation(ctx, value.ID)
 	if err != nil || loaded.PermissionMode != conversation.PermissionFullAccess {
 		t.Fatalf("loaded mode = %#v, %v", loaded, err)
+	}
+	if loaded.ModelProfileID != "profile" || loaded.ModelID != "model" {
+		t.Fatalf("loaded model selection = (%q,%q)", loaded.ModelProfileID, loaded.ModelID)
 	}
 	if _, err := store.DB().ExecContext(ctx, `INSERT INTO model_profiles(id,name,provider_type,base_url,model_id,secret_ref,timeout_seconds,custom_headers_json,enabled,is_default,created_at,updated_at) VALUES ('profile','fixture','openai_compatible','https://example.test/v1','model','secret',60,'{}',1,1,?,?)`, formatTime(now), formatTime(now)); err != nil {
 		t.Fatal(err)

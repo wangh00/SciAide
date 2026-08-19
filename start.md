@@ -224,7 +224,7 @@ type RunBudget struct {
 ```text
 1. SciAide 固定系统规则和安全策略
 2. 当前项目明确配置的项目指令
-3. 用户显式启用的 Skill 指令
+3. 当前 Run 的有界 Skill catalog，以及本轮显式/确定性触发选中的 Skill 指令
 4. 经裁剪的会话历史或摘要
 5. 经检索得到的文献片段（标记为不可信资料）
 6. 当前用户消息与附件说明
@@ -235,7 +235,7 @@ type RunBudget struct {
 
 - 文献、网页、MCP Resource 和 ToolResult 均用明确边界包裹，注明“数据而非指令”。
 - Skill 指令不得覆盖系统安全规则或扩大权限。
-- 记录实际启用的 Skill、检索片段 ID、模型 Profile 和工具定义版本，保证运行可审计。
+- 记录本 Run 实际注入的 Skill、选择原因、版本、内容/全包哈希、检索片段 ID、模型 Profile 和工具定义版本，保证运行可审计。
 - 超出上下文窗口时按预算裁剪，不允许简单截掉最新用户消息或关键 ToolResult。
 
 ### 6.5 核心接口建议
@@ -536,14 +536,16 @@ ready → stopping → disconnected
 ### 10.1 Skill 包结构
 
 ```text
-literature-review/
-├── skill.yaml
-├── SKILL.md
-├── references/
-├── assets/
-├── scripts/
-└── workflows/
-    └── review.yaml
+~/.sciaide/skills/
+└── literature-review/
+    └── 1.0.0/
+        ├── skill.yaml
+        ├── SKILL.md
+        ├── references/
+        ├── assets/
+        ├── scripts/
+        └── workflows/
+            └── review.yaml
 ```
 
 `SKILL.md` 保存领域指令；`skill.yaml` 保存机器可验证的元数据、依赖和权限；脚本和 Workflow 都是可选内容。
@@ -576,6 +578,9 @@ permissions:
 
 compatibility:
   sciaide: ">=0.1.0 <1.0.0"
+
+context:
+  max_tokens: 8000
 ```
 
 ### 10.3 安装和激活规则
@@ -583,8 +588,8 @@ compatibility:
 - MVP 仅支持本地文件夹或压缩包安装，不提供在线市场自动执行。
 - 安装前校验路径穿越、压缩炸弹、文件数量、单文件大小和 Manifest Schema。
 - 原始包、安装副本和生成缓存分离保存。
-- 记录来源、包哈希、安装时间、版本和用户授予权限。
-- Skill 默认不自动激活；用户可以按项目启用，触发建议必须可见且可撤销。
+- 记录来源、包哈希、安装时间、版本和权限声明；权限声明本身不构成授权。
+- 项目启用只使 Skill 进入有界 catalog；正文默认不自动注入，只能由本轮 `$skill-id` 或 Manifest 中可审计的 suggest trigger 选择。
 - Skill 脚本不能因安装或加载自动运行，只能注册为受权限控制的 Tool。
 - 缺少所需 Tool、MCP Server 或版本不兼容时，Skill 进入 `unavailable`，不得部分静默运行。
 - Skill 升级先在暂存目录校验，保留上一版本用于回滚。
@@ -594,7 +599,8 @@ compatibility:
 - 固定系统安全规则优先于项目指令和 Skill。
 - Skill 之间按用户启用顺序和显式优先级组合；发生同名资源或互斥声明时要求用户选择。
 - 每个 Skill 声明或计算最大上下文预算，防止大量说明挤掉科研资料和用户消息。
-- 记录每次 Run 实际加载的 Skill ID、版本和内容哈希。
+- catalog 使用上下文窗口的 2%；每次 Run 记录实际加载的 Skill ID、版本、选择原因、内容哈希和全包哈希。
+- 同一 Run 的工具循环与审批恢复使用首次模型请求前保存的不可变 Skill 快照，不按当前项目配置重新选择。
 
 ---
 
@@ -690,6 +696,7 @@ Approval
 ModelProfile
 MCPServer
 InstalledSkill
+RunSkillContext
 Source
 DocumentChunk
 EmbeddingRecord
@@ -737,6 +744,8 @@ model_profile_models
 mcp_servers
 installed_skills
 project_skills
+run_skill_contexts
+run_skills
 
 sources
 document_chunks
@@ -773,20 +782,29 @@ PRAGMA busy_timeout = 5000;
 ├── config/        # 非敏感配置
 ├── data/          # SQLite 与默认托管 Workspace
 │   └── workspaces/<project-id>/
-├── cache/         # 可重建缓存和模型临时数据
+├── cache/         # 仅跨项目的小型可重建缓存
+│   └── skill-staging/ # Skill 随机暂存目录，成功/失败后清理
 ├── logs/          # 脱敏日志
 ├── skills/        # 已安装 Skill
 ├── mcp/           # MCP 运行元数据，不存明文密钥
 └── backups/
-    └── trash/     # 被移除的托管 Workspace
+    ├── trash/     # 被移除的托管 Workspace
+    └── skills/
+        ├── packages/    # 按来源 SHA256 保存的原始 ZIP/文件夹快照
+        ├── replaced/    # 显式同版本替换前的安装副本
+        └── uninstalled/ # 可恢复卸载副本
 
 用户选择的 Workspace/
 ├── sources/
-├── artifacts/
-└── .sciaide-workspace.json
+└── .sciaide/              # SciAide 唯一保留的项目私有目录
+    ├── project.json
+    ├── attachments/       # SHA256 去重的持久附件原件
+    ├── cache/             # 解析、OCR、索引和 Run 临时派生数据
+    ├── artifacts/         # 可追溯的正式科研产物
+    └── tmp/               # 同卷原子写暂存，结束后清理
 ```
 
-配置目录、数据目录、缓存目录和 Workspace 必须分开，以支持清缓存而不丢数据。
+全局配置与项目大体积数据必须分开。清理项目 `cache` 不能删除附件原件或 Artifact；普通 Workspace 工具不能直接遍历 `.sciaide`，只能通过项目作用域的附件/Artifact 服务访问。
 
 ---
 
@@ -825,7 +843,7 @@ type EventEnvelope struct {
 
 - 启动时检测未完成 Run 并标记 `interrupted`。
 - 展示最后成功步骤、未完成 ToolCall 和可恢复性。
-- 恢复前重新确认模型 Profile、Skill 版本、MCP 工具定义和权限是否变化。
+- 同一 Run 若支持恢复，只能复用其不可变 Skill 快照；模型 Profile、MCP 工具定义和权限变化需要单独重新确认，不能用当前项目 Skill 覆盖历史快照。
 - 已完成且有副作用的调用只复用其持久化结果，不再次执行。
 - 临时文件使用 Run ID 命名，启动时清理过期且无引用的临时目录。
 
@@ -1199,6 +1217,8 @@ P2.5 范围：`Plan` / `Full Access` 两档会话权限、审批卡片、ToolCal
 
 ### P4：Skill 系统（2 周）
 
+> 实施状态（2026-08-19）：P4.1～P4.6 功能流程及首轮上下文加固已完成。P4.1～P4.3 已按 `codex-rs/ext/skills` 再审计，当前具备严格 Manifest/SKILL.md 解析、Codex 风格 `SKILL.md` 安全兼容导入、全局版本化目录、三类 SHA256、完整性状态、项目级具体版本启用关系、版本/Tool 依赖状态，以及文件夹/ZIP 的随机暂存、安全解压、原包归档、原子安装、显式同版本替换、可恢复卸载和项目低版本回滚。P4.3 以 Run 为边界构建 2% 有界 catalog，仅为 `$skill-id` 或确定性 suggest trigger 选中的 Skill 完整读取正文；正文作为当前 Turn contextual fragment 放在历史之后、本轮用户消息之前。首次模型请求前原子保存不可变 `run_skill_contexts` 与 `run_skills`，同一 Run 的工具循环和审批恢复只复用该快照。P4.4 已增加 Skill 管理界面；P4.5 已内置科研 Skill；P4.6 新增项目本地附件、PDF/DOCX/XLSX/文本兜底解析、附件消息 part 和文档读取工具。首轮加固新增每模型上下文窗口与来源、95% 有效预算、90% 自动压缩阈值，以及带消息边界、revision、来源计数和 SHA256 的会话 checkpoint。超限时先执行无工具的结构化科研摘要，再以 checkpoint 和最近完整 Run 组继续；压缩失败不会静默删除历史。原聊天、Provider Turn 和 Tool 状态仍是审计事实源，摘要不包含隐藏推理载荷且不能扩大权限。下一阶段进入 P5 检索与可信引用索引。
+
 **目标：** Skill 能安全安装、按项目启用并影响 Agent 行为。
 
 交付物：
@@ -1217,13 +1237,27 @@ P2.5 范围：`Plan` / `Full Access` 两档会话权限、审批卡片、ToolCal
 - 禁用 Skill 后不会残留指令或注册工具。
 - Skill 不能扩大用户未授予的权限。
 
+### P4.6：项目附件与本地文档读取基线
+
+已实现文件选择/拖放、项目本地 SHA256 去重、消息附件恢复、PDF 分页、DOCX 段落/表格、XLSX Sheet/行/公式以及 UTF-8 文本解析。模型通过统一的附件列表、检查、读取和搜索工具获取有界内容；解析缓存删除后从项目附件原件重建。扫描件 OCR 不内置到当前客户端；跨文档 FTS/Embedding 和引用持久化由 P5 完成。
+
 ### P5：科研知识库与可信引用（3 周）
+
+> P5.1 实施状态（2026-08-19）：已建立项目作用域的 Document、ImportJob 和 IndexVersion 元数据、可恢复队列、既有附件补建、缓存重建及 `builtin.knowledge.search` 跨文献基线。
+>
+> P5.2 实施状态（2026-08-19）：已实现 `bounded-unit-v2`、中英文确定性词项、项目本地 contentless FTS5/BM25、标题/短语加权、跨文档结果配额和 8,000 rune 模型输出预算。迁移 25 保留 P5.1 数据，v2 以独立索引影子构建，全部显式 Knowledge Document 完成并校验后才原子替换 v1；Structured 不再重复 snippet。聊天附件与知识库现已拆分，顶部知识库窗口支持显式导入、状态查看和移出索引。当前仍不包含 OCR、Embedding/向量检索和正式 Citation 持久化。
+>
+> P5.3 实施状态（2026-08-19）：已增加默认关闭的 OpenAI 兼容 `/v1/embeddings` 配置；启用时先验证实际维度，再以独立 IndexVersion 影子构建项目本地 float32 向量。查询使用 BM25 + 余弦相似度 RRF，支持 Document ID/格式过滤、跨结果重叠去重和既有上下文预算；Embedding 查询失败自动回退 BM25。相同查询向量按项目和 IndexVersion 缓存到 `index-vN.db`，只保存查询 SHA256，并以 512 条 LRU 控制空间。当前不内置本地模型运行时，仍不包含 OCR 和正式 Citation 持久化。
+>
+> P5.4 实施状态（2026-08-19）：`builtin.knowledge.search@3` 为检索片段生成绑定 Run、IndexVersion、Chunk 与原文 SHA256 的稳定 `[K-...]` 标记。同一 Chunk 的不同检索片段使用不同标记，回答完成时只接受当前 Run 成功知识工具结果中存在且证据快照有效的实际使用标记。Assistant Message 正文、不可变 Citation 快照与 Run 完成状态在同一事务提交。前端将已验证引用显示为可点击编号，可查看来源、页码/段落/Sheet 定位、原文和哈希；伪造、变形、跨 Run 或冲突标记不会显示为可信引用。历史引用不依赖可重建索引继续存在。当前仍不包含 OCR、原生 PDF 页跳转和固定语料召回评测。
+>
+> P5.5 实施状态（2026-08-19）：文档解析缓存升级为 schema v2。PDF 在稳定页码边界内保守合并碎片行、恢复英文断词、识别章节，并跨页清除重复页眉页脚及页码；分析文本受 8.25M rune 上限约束。DOCX 解析真实段落样式、大纲标题、章节路径、列表、表格行和核心 OpenXML 元数据，DOCX/XLSX 共用元数据读取。旧缓存从附件 SHA256 原件懒重建，知识库按 ParserSchemaVersion 构建影子索引后切换。同页多章节对模型保留标题上下文，但 Citation locator 去重。当前决策是不在 SciAide 内置 OCR 运行时。
 
 **目标：** 基于项目文献回答并定位引用来源。
 
 交付物：
 
-- PDF/TXT/Markdown 导入队列、哈希去重、解析状态。
+- 在 P4.6 附件与解析基线上增加异步导入队列、结构解析质量检查和失败重试；OCR 仅保留未来可选外部插件接口，不作为内置依赖。
 - 文本分块、FTS5、Embedding 和索引版本。
 - 混合检索、元数据过滤、上下文裁剪。
 - Citation 结构化保存和原文定位。

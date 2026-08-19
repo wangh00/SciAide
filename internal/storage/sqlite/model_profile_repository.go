@@ -51,6 +51,7 @@ func (r *ModelProfileRepository) Save(ctx context.Context, value modelprofile.Pr
 		return fmt.Errorf("replace profile models: %w", err)
 	}
 	for _, item := range value.Models {
+		contextBudget := modelcap.ResolveContextBudget(item.ContextWindowTokens, item.AutoCompactTokenLimit, item.ContextWindowSource)
 		if item.ReasoningCapabilitySource == "" {
 			item.ReasoningCapabilitySource = "unsupported"
 		}
@@ -66,8 +67,8 @@ func (r *ModelProfileRepository) Save(ctx context.Context, value modelprofile.Pr
 		if err != nil {
 			return fmt.Errorf("encode rejected reasoning levels: %w", err)
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO model_profile_models(profile_id, model_id, owned_by, enabled, is_default, reasoning_levels_json, reasoning_capability_source, reasoning_verified_levels_json, reasoning_rejected_levels_json, reasoning_control_unsupported, reasoning_last_requested_level, reasoning_last_resolved_level, reasoning_wire_mode, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			value.ID, item.ID, item.OwnedBy, item.Enabled, item.IsDefault, string(reasoningJSON), item.ReasoningCapabilitySource,
+		if _, err := tx.ExecContext(ctx, `INSERT INTO model_profile_models(profile_id, model_id, owned_by, enabled, is_default, context_window_tokens, auto_compact_token_limit, context_window_source, reasoning_levels_json, reasoning_capability_source, reasoning_verified_levels_json, reasoning_rejected_levels_json, reasoning_control_unsupported, reasoning_last_requested_level, reasoning_last_resolved_level, reasoning_wire_mode, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			value.ID, item.ID, item.OwnedBy, item.Enabled, item.IsDefault, contextBudget.WindowTokens, contextBudget.AutoCompactTokens, contextBudget.Source, string(reasoningJSON), item.ReasoningCapabilitySource,
 			string(verifiedJSON), string(rejectedJSON), item.ReasoningControlUnsupported, item.ReasoningLastRequestedLevel, item.ReasoningLastResolvedLevel,
 			item.ReasoningWireMode,
 			formatTime(value.CreatedAt), formatTime(value.UpdatedAt)); err != nil {
@@ -206,7 +207,7 @@ func (r *ModelProfileRepository) Delete(ctx context.Context, id string) error {
 }
 
 func (r *ModelProfileRepository) listModels(ctx context.Context, profileID, legacyDefault string) ([]modelprofile.ProfileModel, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT model_id, owned_by, enabled, is_default, reasoning_levels_json, reasoning_capability_source, reasoning_verified_levels_json, reasoning_rejected_levels_json, reasoning_control_unsupported, reasoning_last_requested_level, reasoning_last_resolved_level, reasoning_wire_mode FROM model_profile_models WHERE profile_id = ? ORDER BY is_default DESC, model_id`, profileID)
+	rows, err := r.db.QueryContext(ctx, `SELECT model_id, owned_by, enabled, is_default, context_window_tokens, auto_compact_token_limit, context_window_source, reasoning_levels_json, reasoning_capability_source, reasoning_verified_levels_json, reasoning_rejected_levels_json, reasoning_control_unsupported, reasoning_last_requested_level, reasoning_last_resolved_level, reasoning_wire_mode FROM model_profile_models WHERE profile_id = ? ORDER BY is_default DESC, model_id`, profileID)
 	if err != nil {
 		return nil, fmt.Errorf("list profile models: %w", err)
 	}
@@ -215,7 +216,7 @@ func (r *ModelProfileRepository) listModels(ctx context.Context, profileID, lega
 	for rows.Next() {
 		var value modelprofile.ProfileModel
 		var reasoningJSON, verifiedJSON, rejectedJSON string
-		if err := rows.Scan(&value.ID, &value.OwnedBy, &value.Enabled, &value.IsDefault, &reasoningJSON, &value.ReasoningCapabilitySource,
+		if err := rows.Scan(&value.ID, &value.OwnedBy, &value.Enabled, &value.IsDefault, &value.ContextWindowTokens, &value.AutoCompactTokenLimit, &value.ContextWindowSource, &reasoningJSON, &value.ReasoningCapabilitySource,
 			&verifiedJSON, &rejectedJSON, &value.ReasoningControlUnsupported, &value.ReasoningLastRequestedLevel, &value.ReasoningLastResolvedLevel, &value.ReasoningWireMode); err != nil {
 			return nil, err
 		}
