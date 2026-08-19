@@ -340,8 +340,12 @@ func (s *Service) parseAndPersistLocked(ctx context.Context, selectedProject pro
 	if !insidePath(rootPath, original) {
 		return document.Parsed{}, fmt.Errorf("attachment storage path is invalid")
 	}
+	resolvedRoot, err := filepath.EvalSymlinks(rootPath)
+	if err != nil {
+		return document.Parsed{}, fmt.Errorf("project attachment root is unavailable: %w", err)
+	}
 	resolved, err := filepath.EvalSymlinks(original)
-	if err != nil || !insidePath(rootPath, resolved) {
+	if err != nil || !insidePath(resolvedRoot, resolved) {
 		return document.Parsed{}, fmt.Errorf("attachment storage path is unavailable or escapes the project data root")
 	}
 	if err := verifyStoredObject(resolved, value.SizeBytes, value.SHA256); err != nil {
