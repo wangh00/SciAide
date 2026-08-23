@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -40,6 +41,86 @@ func TestStreamSendsResolvedReasoningEffort(t *testing.T) {
 	defer stream.Close()
 }
 
+func TestStreamMapsUserImageToChatCompletionsContentParts(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Messages []struct {
+				Content json.RawMessage `json:"content"`
+			} `json:"messages"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if len(body.Messages) != 1 {
+			t.Fatalf("messages = %#v", body.Messages)
+		}
+		var parts []requestContentPart
+		if err := json.Unmarshal(body.Messages[0].Content, &parts); err != nil {
+			t.Fatalf("content parts: %v (%s)", err, body.Messages[0].Content)
+		}
+		if len(parts) != 2 || parts[0].Type != "text" || !strings.Contains(parts[0].Text, "<untrusted_conversation_content>") || parts[1].Type != "image_url" || parts[1].ImageURL == nil || parts[1].ImageURL.URL != "data:image/png;base64,AQID" {
+			t.Fatalf("content parts = %#v", parts)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+	stream, err := New(modelprofile.Profile{BaseURL: server.URL, ModelID: "fixture", TimeoutSeconds: 5}, nil).Stream(context.Background(), model.ChatRequest{Messages: []model.Message{{Role: model.RoleUser, Content: "描述图片", Parts: []model.ContentPart{{Type: "input_image", MediaType: "image/png", Data: "AQID", AttachmentID: "private-id"}}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+}
+
+func TestStreamCanUseBufferedChatCompletionsResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Accept") != "application/json" {
+			t.Fatalf("Accept = %q", r.Header.Get("Accept"))
+		}
+		var body struct {
+			Stream        bool            `json:"stream"`
+			StreamOptions json.RawMessage `json:"stream_options"`
+			Messages      []struct {
+				Content json.RawMessage `json:"content"`
+			} `json:"messages"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body.Stream || len(body.StreamOptions) != 0 {
+			t.Fatalf("streaming fields = stream:%v options:%#v", body.Stream, body.StreamOptions)
+		}
+		if len(body.Messages) != 1 || !bytes.Contains(body.Messages[0].Content, []byte(`"type":"image_url"`)) {
+			t.Fatalf("image content = %s", body.Messages[0].Content)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"pixels available"},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":2}}`)
+	}))
+	defer server.Close()
+
+	client := New(modelprofile.Profile{BaseURL: server.URL, ModelID: "vision", TimeoutSeconds: 5}, nil)
+	stream, err := client.Stream(context.Background(), model.ChatRequest{
+		DisableStreaming: true,
+		Messages:         []model.Message{{Role: model.RoleUser, Content: "describe", Parts: []model.ContentPart{{Type: "input_image", MediaType: "image/png", Data: "AQID"}}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	textEvent, err := stream.Recv()
+	if err != nil || textEvent.Type != model.EventTextDelta || textEvent.Text != "pixels available" {
+		t.Fatalf("text event = %#v, %v", textEvent, err)
+	}
+	usageEvent, err := stream.Recv()
+	if err != nil || usageEvent.Usage == nil || usageEvent.Usage.InputTokens != 9 || usageEvent.Usage.OutputTokens != 2 {
+		t.Fatalf("usage event = %#v, %v", usageEvent, err)
+	}
+	doneEvent, err := stream.Recv()
+	if err != nil || doneEvent.Type != model.EventDone || doneEvent.FinishReason != "stop" {
+		t.Fatalf("done event = %#v, %v", doneEvent, err)
+	}
+}
+
 func TestStreamRetriesWithoutRejectedReasoningControl(t *testing.T) {
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -60,6 +141,7 @@ func TestStreamRetriesWithoutRejectedReasoningControl(t *testing.T) {
 			t.Fatalf("fallback reasoning effort = %q", body.ReasoningEffort)
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n")
 		_, _ = io.WriteString(w, "data: [DONE]\n\n")
 	}))
 	defer server.Close()
@@ -166,6 +248,41 @@ func TestStreamNormalizesSSE(t *testing.T) {
 	doneEvent, err := stream.Recv()
 	if err != nil || doneEvent.Type != model.EventDone || doneEvent.FinishReason != "stop" {
 		t.Fatalf("done event = %#v, err=%v", doneEvent, err)
+	}
+}
+
+func TestStreamUsesFinalCumulativeUsageSnapshot(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":8372,\"completion_tokens\":20,\"prompt_cache_miss_tokens\":8372}}\n\n")
+		_, _ = io.WriteString(w, "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":8372,\"completion_tokens\":20,\"prompt_tokens_details\":{\"cached_tokens\":8192}}}\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	stream, err := New(modelprofile.Profile{BaseURL: server.URL, ModelID: "fixture", TimeoutSeconds: 5}, nil).Stream(context.Background(), model.ChatRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	usageEvents := 0
+	for {
+		event, err := stream.Recv()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if event.Usage != nil {
+			usageEvents++
+			if event.Usage.InputTokens != 8372 || event.Usage.FreshInputTokens != 180 || event.Usage.CachedInputTokens != 8192 {
+				t.Fatalf("usage = %#v", event.Usage)
+			}
+		}
+		if event.Type == model.EventDone {
+			break
+		}
+	}
+	if usageEvents != 1 {
+		t.Fatalf("usage events = %d", usageEvents)
 	}
 }
 
@@ -281,25 +398,39 @@ func TestStreamRejectsInvalidToolCallArguments(t *testing.T) {
 	}
 }
 
-func TestStreamRetriesBeforeContent(t *testing.T) {
+func TestStreamReturnsRetryableOpeningErrorToAgent(t *testing.T) {
 	var attempts atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		if attempts.Add(1) < 2 {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			return
-		}
-		w.Header().Set("Content-Type", "text/event-stream")
-		io.WriteString(w, "data: [DONE]\n\n")
+		attempts.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
 	}))
 	defer server.Close()
 	client := NewWithHTTPClient(modelprofile.Profile{BaseURL: server.URL, ModelID: "fixture"}, nil, &http.Client{Timeout: 3 * time.Second})
-	stream, err := client.Stream(context.Background(), model.ChatRequest{})
-	if err != nil {
-		t.Fatalf("Stream() error = %v", err)
+	_, err := client.Stream(context.Background(), model.ChatRequest{})
+	var appErr *apperr.Error
+	if !errors.As(err, &appErr) || !appErr.Retryable {
+		t.Fatalf("Stream() error = %#v, want retryable", err)
 	}
-	stream.Close()
-	if got := attempts.Load(); got != 2 {
-		t.Fatalf("attempts = %d, want 2", got)
+	if got := attempts.Load(); got != 1 {
+		t.Fatalf("attempts = %d, want Agent layer to own retries", got)
+	}
+}
+
+func TestStreamMarksPrematureEOFAsRetryable(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	stream, err := New(modelprofile.Profile{BaseURL: server.URL, ModelID: "fixture", TimeoutSeconds: 5}, nil).Stream(context.Background(), model.ChatRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	_, err = stream.Recv()
+	var appErr *apperr.Error
+	if !errors.As(err, &appErr) || appErr.Code != "MODEL_STREAM_INTERRUPTED" || !appErr.Retryable {
+		t.Fatalf("Recv() error = %#v", err)
 	}
 }
 
@@ -334,6 +465,64 @@ func TestStreamAcceptsFinishReasonWithoutDoneSentinel(t *testing.T) {
 	}
 	if event, err := stream.Recv(); err != nil || event.Type != model.EventDone || event.FinishReason != "stop" {
 		t.Fatalf("second Recv() = %#v, %v", event, err)
+	}
+}
+
+func TestStreamInfersStopWhenDoneOmitsFinishReason(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+	stream, err := New(modelprofile.Profile{BaseURL: server.URL, ModelID: "fixture", TimeoutSeconds: 5}, nil).Stream(context.Background(), model.ChatRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	if event, recvErr := stream.Recv(); recvErr != nil || event.Text != "ok" {
+		t.Fatalf("first Recv() = %#v, %v", event, recvErr)
+	}
+	if event, recvErr := stream.Recv(); recvErr != nil || event.Type != model.EventDone || event.FinishReason != "stop" {
+		t.Fatalf("second Recv() = %#v, %v", event, recvErr)
+	}
+}
+
+func TestStreamInfersToolCallsWhenDoneOmitsFinishReason(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call","function":{"name":"fixture","arguments":"{}"}}]},"finish_reason":null}]}`+"\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+	stream, err := New(modelprofile.Profile{BaseURL: server.URL, ModelID: "fixture", TimeoutSeconds: 5}, nil).Stream(context.Background(), model.ChatRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	if event, recvErr := stream.Recv(); recvErr != nil || event.Type != model.EventToolCall || event.ToolCall == nil || event.ToolCall.ID != "call" {
+		t.Fatalf("first Recv() = %#v, %v", event, recvErr)
+	}
+	if event, recvErr := stream.Recv(); recvErr != nil || event.Type != model.EventDone || event.FinishReason != "tool_calls" {
+		t.Fatalf("second Recv() = %#v, %v", event, recvErr)
+	}
+}
+
+func TestStreamRetriesEmptyDoneResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+	stream, err := New(modelprofile.Profile{BaseURL: server.URL, ModelID: "fixture", TimeoutSeconds: 5}, nil).Stream(context.Background(), model.ChatRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	_, err = stream.Recv()
+	var appErr *apperr.Error
+	if !errors.As(err, &appErr) || appErr.Code != "MODEL_RESPONSE_EMPTY" || !appErr.Retryable || appErr.Details == "" {
+		t.Fatalf("Recv() error = %#v", err)
 	}
 }
 

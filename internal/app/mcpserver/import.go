@@ -177,7 +177,7 @@ func compatibleSaveCommand(name string, input compatibleServer, occupied map[str
 		Enabled:        enabled,
 		AutoStart:      false,
 		Trust:          TrustUntrusted,
-		TimeoutSeconds: 30,
+		TimeoutSeconds: DefaultToolTimeoutSeconds,
 		Headers:        map[string]string{},
 		Env:            map[string]string{},
 		SecretValues:   map[string]string{},

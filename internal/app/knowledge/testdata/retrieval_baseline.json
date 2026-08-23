@@ -1,0 +1,26 @@
+{
+  "documents": [
+    {
+      "name": "protein-expression.txt",
+      "content": "BRCA1 protein expression increased after kinase inhibition in cultured epithelial cells. The result was replicated across three batches."
+    },
+    {
+      "name": "ocean-warming.txt",
+      "content": "Ocean surface temperature rose during the marine heatwave, while deep-water salinity remained stable across sampling stations."
+    },
+    {
+      "name": "clinical-trial.txt",
+      "content": "The randomized double-blind clinical trial compared the intervention with placebo and reported the prespecified primary endpoint."
+    },
+    {
+      "name": "bayesian-analysis.txt",
+      "content": "贝叶斯模型使用后验概率评估参数不确定性，并通过先验敏感性分析验证结论的稳健性。"
+    }
+  ],
+  "cases": [
+    {"id": "protein", "query": "BRCA1 protein expression", "relevantSources": ["protein-expression.txt"]},
+    {"id": "climate", "query": "ocean temperature marine heatwave", "relevantSources": ["ocean-warming.txt"]},
+    {"id": "trial", "query": "randomized double blind clinical trial", "relevantSources": ["clinical-trial.txt"]},
+    {"id": "bayesian", "query": "贝叶斯 后验概率", "relevantSources": ["bayesian-analysis.txt"]}
+  ]
+}

@@ -16,10 +16,10 @@ func NewAttachmentFacade(lifecycle *LifecycleContext, service *attachment.Servic
 
 func (f *AttachmentFacade) ChooseAndImportDocuments(projectID string) (attachment.ImportBatch, error) {
 	paths, err := runtime.OpenMultipleFilesDialog(f.lifecycle.Context(), runtime.OpenDialogOptions{
-		Title: "选择科研文档",
+		Title: "选择科研文档或图片",
 		Filters: []runtime.FileFilter{{
-			DisplayName: "科研文档 (*.pdf;*.docx;*.xlsx;*.txt;*.md;*.csv;*.tsv)",
-			Pattern:     "*.pdf;*.docx;*.xlsx;*.txt;*.md;*.markdown;*.csv;*.tsv",
+			DisplayName: "科研文档与图片 (*.pdf;*.docx;*.xlsx;*.txt;*.md;*.csv;*.tsv;*.jpg;*.png;*.webp)",
+			Pattern:     "*.pdf;*.docx;*.xlsx;*.txt;*.md;*.markdown;*.csv;*.tsv;*.jpg;*.jpeg;*.png;*.webp",
 		}},
 	})
 	if err != nil || len(paths) == 0 {

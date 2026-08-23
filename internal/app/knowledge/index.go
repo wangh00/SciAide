@@ -232,7 +232,7 @@ func (i *projectIndex) HasAttachment(ctx context.Context, attachmentID, sha256 s
 	return found == 1, err
 }
 
-func (i *projectIndex) ReplaceDocument(ctx context.Context, value attachment.Attachment, documentValue Document, chunks []Chunk, vectors [][]float32, at string) error {
+func (i *projectIndex) ReplaceDocument(ctx context.Context, value attachment.Attachment, documentValue Document, chunks []Chunk, vectors [][]float32, at string, beforeCommit func() error) error {
 	if value.ProjectID != documentValue.ProjectID || value.ID != documentValue.AttachmentID || documentValue.IndexVersionID != i.version.ID {
 		return fmt.Errorf("knowledge document identity is inconsistent")
 	}
@@ -306,6 +306,14 @@ func (i *projectIndex) ReplaceDocument(ctx context.Context, value attachment.Att
 			if _, err := statement.ExecContext(ctx, chunk.ID, len(vectors[index]), encodeVector(vectors[index])); err != nil {
 				return fmt.Errorf("insert project embedding: %w", err)
 			}
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if beforeCommit != nil {
+		if err := beforeCommit(); err != nil {
+			return err
 		}
 	}
 	if err := tx.Commit(); err != nil {

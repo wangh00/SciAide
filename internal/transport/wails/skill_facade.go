@@ -43,6 +43,10 @@ func (f *SkillFacade) ListProjectSkills(projectID string) ([]skill.ProjectSkillV
 	return f.service.ListProjectSkills(f.lifecycle.Context(), projectID)
 }
 
+func (f *SkillFacade) EnableAllProjectSkills(projectID string) (skill.EnableAllProjectSkillsResult, error) {
+	return f.service.EnableAllProjectSkills(f.lifecycle.Context(), projectID)
+}
+
 func (f *SkillFacade) InstallSkill(request skill.InstallCommand) (skill.InstallResult, error) {
 	return f.service.Install(f.lifecycle.Context(), request)
 }

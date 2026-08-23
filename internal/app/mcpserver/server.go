@@ -19,8 +19,9 @@ import (
 type Transport string
 
 const (
-	TransportStdio          Transport = "stdio"
-	TransportStreamableHTTP Transport = "streamable_http"
+	TransportStdio            Transport = "stdio"
+	TransportStreamableHTTP   Transport = "streamable_http"
+	DefaultToolTimeoutSeconds           = 300
 )
 
 type Status string
@@ -357,6 +358,9 @@ func (s *Service) RuntimeChanged(serverID string, snapshot CapabilitySnapshot, e
 	status, message := StatusReady, ""
 	if err != nil {
 		status, message = StatusFailed, publicError(err)
+		if snapshot.ProtocolVersion != "" || len(snapshot.Tools) > 0 || len(snapshot.Resources) > 0 || len(snapshot.Prompts) > 0 {
+			status = StatusDegraded
+		}
 	}
 	_ = s.repository.UpdateRuntime(ctx, serverID, status, snapshot.ProtocolVersion, snapshot.ServerVersion, len(snapshot.Tools), len(snapshot.Resources), len(snapshot.Prompts), message, value.LastConnectedAt, s.now())
 }
@@ -368,7 +372,7 @@ func (s *Service) Starting(serverID string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	value, err := s.repository.Get(ctx, serverID)
-	if err != nil || value.Status != StatusStarting {
+	if err != nil || !value.Enabled || value.Status == StatusDisabled || value.Status == StatusStopping {
 		return
 	}
 	_ = s.repository.UpdateRuntime(ctx, serverID, StatusInitializing, "", "", 0, 0, 0, "", value.LastConnectedAt, s.now())
@@ -453,7 +457,7 @@ func normalizeSave(cmd SaveCommand) SaveCommand {
 	cmd.SecretValues = cloneMap(cmd.SecretValues)
 	cmd.ClearSecrets = cloneStrings(cmd.ClearSecrets)
 	if cmd.TimeoutSeconds == 0 {
-		cmd.TimeoutSeconds = 30
+		cmd.TimeoutSeconds = DefaultToolTimeoutSeconds
 	}
 	return cmd
 }

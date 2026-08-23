@@ -49,9 +49,56 @@ type connection struct {
 	server       mcpserver.Server
 	session      *mcpsdk.ClientSession
 	capabilities mcpserver.CapabilitySnapshot
+	runtime      *sessionRuntime
+	recovering   bool
+	refreshing   bool
+	refreshAgain bool
 }
 
 type pendingConnection struct{ cancel context.CancelFunc }
+
+const mcpStartupTimeout = 30 * time.Second
+
+// sessionRuntime is shared by every tool adapter from one MCP session. Some
+// MCP servers expose many tools over a single stateful browser/process and do
+// not safely execute those tools concurrently, even though JSON-RPC permits
+// concurrent requests.
+type sessionRuntime struct {
+	manager *Manager
+	server  mcpserver.Server
+	session *mcpsdk.ClientSession
+	gate    chan struct{}
+	invalid chan struct{}
+	once    sync.Once
+}
+
+var errMCPSessionRestarting = fmt.Errorf("MCP session is restarting")
+
+func (r *sessionRuntime) acquire(ctx context.Context) (func(), error) {
+	if r == nil || r.session == nil {
+		return nil, fmt.Errorf("MCP session is unavailable")
+	}
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-r.invalid:
+		return nil, errMCPSessionRestarting
+	case r.gate <- struct{}{}:
+	}
+	select {
+	case <-r.invalid:
+		<-r.gate
+		return nil, errMCPSessionRestarting
+	default:
+	}
+	return func() { <-r.gate }, nil
+}
+
+func (r *sessionRuntime) invalidate() {
+	if r != nil {
+		r.once.Do(func() { close(r.invalid) })
+	}
+}
 
 func NewManager(registry tool.MutableRegistry, logger *slog.Logger) *Manager {
 	manager := &Manager{registry: registry, logger: logger, sessions: make(map[string]*connection), pending: make(map[string]*pendingConnection)}
@@ -74,7 +121,7 @@ func (m *Manager) Connect(ctx context.Context, server mcpserver.Server) (mcpserv
 	if m.transportFactory == nil {
 		return mcpserver.CapabilitySnapshot{}, fmt.Errorf("MCP transport factory is not configured")
 	}
-	connectCtx, cancel := context.WithTimeout(ctx, time.Duration(server.TimeoutSeconds)*time.Second)
+	connectCtx, cancel := context.WithTimeout(ctx, mcpStartupTimeout)
 	pending := &pendingConnection{cancel: cancel}
 	m.mu.Lock()
 	if m.closing {
@@ -102,7 +149,7 @@ func (m *Manager) Connect(ctx context.Context, server mcpserver.Server) (mcpserv
 	if m.observer != nil {
 		m.observer.Starting(server.ID)
 	}
-	client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "sciaide", Title: "SciAide", Version: "0.3.0"}, &mcpsdk.ClientOptions{
+	client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "sciaide", Title: "SciAide", Version: "0.4.0"}, &mcpsdk.ClientOptions{
 		Capabilities: &mcpsdk.ClientCapabilities{},
 		KeepAlive:    30 * time.Second,
 		ToolListChangedHandler: func(context.Context, *mcpsdk.ToolListChangedRequest) {
@@ -140,7 +187,8 @@ func (m *Manager) Connect(ctx context.Context, server mcpserver.Server) (mcpserv
 			_ = session.Close()
 		}
 	}()
-	snapshot, adapters, err := discover(connectCtx, server, session)
+	runtime := &sessionRuntime{manager: m, server: server, session: session, gate: make(chan struct{}, 1), invalid: make(chan struct{})}
+	snapshot, adapters, err := discover(connectCtx, server, runtime)
 	if err != nil {
 		return mcpserver.CapabilitySnapshot{}, err
 	}
@@ -154,7 +202,7 @@ func (m *Manager) Connect(ctx context.Context, server mcpserver.Server) (mcpserv
 		return mcpserver.CapabilitySnapshot{}, fmt.Errorf("MCP connection was cancelled: %w", context.Canceled)
 	}
 	delete(m.pending, server.ID)
-	m.sessions[server.ID] = &connection{server: server, session: session, capabilities: snapshot}
+	m.sessions[server.ID] = &connection{server: server, session: session, capabilities: snapshot, runtime: runtime}
 	m.mu.Unlock()
 	closeOnError = false
 	go m.monitor(server.ID, session)
@@ -174,6 +222,7 @@ func (m *Manager) Disconnect(_ context.Context, serverID string) error {
 	if value == nil {
 		return nil
 	}
+	value.runtime.invalidate()
 	_ = m.registry.ReplaceNamespace(context.Background(), namespacePrefix(value.server.Namespace), nil)
 	return value.session.Close()
 }
@@ -213,6 +262,7 @@ func (m *Manager) Close() error {
 	m.mu.Unlock()
 	var first error
 	for _, value := range values {
+		value.runtime.invalidate()
 		_ = m.registry.ReplaceNamespace(context.Background(), namespacePrefix(value.server.Namespace), nil)
 		if err := value.session.Close(); err != nil && first == nil {
 			first = err
@@ -225,11 +275,14 @@ func (m *Manager) monitor(serverID string, session *mcpsdk.ClientSession) {
 	err := session.Wait()
 	m.mu.Lock()
 	value := m.sessions[serverID]
-	if value != nil && value.session == session {
+	owned := value != nil && value.session == session
+	recovering := owned && value.recovering
+	if owned && !recovering {
+		value.runtime.invalidate()
 		delete(m.sessions, serverID)
 	}
 	m.mu.Unlock()
-	if value != nil && value.session == session {
+	if owned && !recovering {
 		_ = m.registry.ReplaceNamespace(context.Background(), namespacePrefix(value.server.Namespace), nil)
 		if m.observer != nil {
 			endedErr := err
@@ -244,16 +297,101 @@ func (m *Manager) monitor(serverID string, session *mcpsdk.ClientSession) {
 	}
 }
 
-func (m *Manager) refresh(serverID string) {
-	m.mu.RLock()
-	value := m.sessions[serverID]
-	m.mu.RUnlock()
-	if value == nil {
+// recoverCancelledSession replaces a stdio session after an in-flight call is
+// cancelled. MCP cancellation is advisory: a child process may ignore it and
+// keep its own serial execution lane occupied, so reusing that session can
+// make every later tool appear permanently stuck.
+func (m *Manager) recoverCancelledSession(runtime *sessionRuntime) {
+	if runtime == nil || runtime.server.Transport != mcpserver.TransportStdio {
 		return
 	}
+	m.mu.Lock()
+	value := m.sessions[runtime.server.ID]
+	if value == nil || value.runtime != runtime || value.recovering || m.closing {
+		m.mu.Unlock()
+		return
+	}
+	value.recovering = true
+	runtime.invalidate()
+	m.mu.Unlock()
+
+	go func() {
+		if m.observer != nil {
+			m.observer.Starting(runtime.server.ID)
+		}
+		_ = m.registry.ReplaceNamespace(context.Background(), namespacePrefix(runtime.server.Namespace), nil)
+		closeErr := runtime.session.Close()
+
+		m.mu.Lock()
+		current := m.sessions[runtime.server.ID]
+		restart := current == value && !m.closing
+		if current == value {
+			delete(m.sessions, runtime.server.ID)
+		}
+		m.mu.Unlock()
+		if !restart {
+			return
+		}
+		if closeErr != nil && m.logger != nil {
+			m.logger.Debug("close cancelled MCP session", "server_id", runtime.server.ID, "error", redact(closeErr.Error()))
+		}
+		snapshot, err := m.Connect(context.Background(), runtime.server)
+		m.mu.RLock()
+		closing := m.closing
+		m.mu.RUnlock()
+		if closing {
+			return
+		}
+		if m.observer != nil {
+			m.observer.RuntimeChanged(runtime.server.ID, snapshot, err)
+		}
+		if err != nil && m.logger != nil {
+			m.logger.Warn("restart cancelled MCP session", "server_id", runtime.server.ID, "error", redact(err.Error()))
+		}
+	}()
+}
+
+func (m *Manager) refresh(serverID string) {
+	m.mu.Lock()
+	value := m.sessions[serverID]
+	if value == nil || value.recovering {
+		m.mu.Unlock()
+		return
+	}
+	if value.refreshing {
+		value.refreshAgain = true
+		m.mu.Unlock()
+		return
+	}
+	value.refreshing = true
+	m.mu.Unlock()
+	for {
+		m.refreshOnce(serverID, value)
+		m.mu.Lock()
+		if m.sessions[serverID] != value || value.recovering {
+			m.mu.Unlock()
+			return
+		}
+		if value.refreshAgain {
+			value.refreshAgain = false
+			m.mu.Unlock()
+			continue
+		}
+		value.refreshing = false
+		m.mu.Unlock()
+		return
+	}
+}
+
+func (m *Manager) refreshOnce(serverID string, value *connection) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(value.server.TimeoutSeconds)*time.Second)
 	defer cancel()
-	snapshot, adapters, err := discover(ctx, value.server, value.session)
+	release, err := value.runtime.acquire(ctx)
+	if err != nil {
+		return
+	}
+	defer release()
+	snapshot, adapters, err := discover(ctx, value.server, value.runtime)
 	if err == nil {
 		m.mu.Lock()
 		current := m.sessions[serverID]
@@ -275,7 +413,6 @@ func (m *Manager) refresh(serverID string) {
 		if current != value {
 			return
 		}
-		_ = m.registry.ReplaceNamespace(context.Background(), namespacePrefix(value.server.Namespace), nil)
 		if m.logger != nil {
 			m.logger.Warn("refresh MCP capabilities", "server_id", serverID, "error", redact(err.Error()))
 		}
@@ -386,9 +523,13 @@ func validateRedirect(configured string, target *url.URL) error {
 	return nil
 }
 
-func discover(ctx context.Context, server mcpserver.Server, session *mcpsdk.ClientSession) (mcpserver.CapabilitySnapshot, []tool.Tool, error) {
+func discover(ctx context.Context, server mcpserver.Server, runtime *sessionRuntime) (mcpserver.CapabilitySnapshot, []tool.Tool, error) {
 	snapshot := mcpserver.CapabilitySnapshot{Tools: []mcpserver.ToolInfo{}, Resources: []string{}, Prompts: []string{}}
 	adapters := []tool.Tool{}
+	if runtime == nil || runtime.session == nil {
+		return snapshot, nil, fmt.Errorf("MCP session runtime is missing")
+	}
+	session := runtime.session
 	initialized := session.InitializeResult()
 	if initialized == nil {
 		return snapshot, nil, fmt.Errorf("MCP initialize result is missing")
@@ -403,7 +544,7 @@ func discover(ctx context.Context, server mcpserver.Server, session *mcpsdk.Clie
 			if err != nil {
 				return snapshot, nil, fmt.Errorf("list MCP tools: %w", err)
 			}
-			adapter, info, err := newToolAdapter(server, native, session)
+			adapter, info, err := newToolAdapter(server, native, runtime)
 			if err != nil {
 				return snapshot, nil, err
 			}
@@ -438,11 +579,11 @@ func discover(ctx context.Context, server mcpserver.Server, session *mcpsdk.Clie
 type toolAdapter struct {
 	serverID string
 	original string
-	session  *mcpsdk.ClientSession
+	runtime  *sessionRuntime
 	def      tool.Definition
 }
 
-func newToolAdapter(server mcpserver.Server, native *mcpsdk.Tool, session *mcpsdk.ClientSession) (*toolAdapter, mcpserver.ToolInfo, error) {
+func newToolAdapter(server mcpserver.Server, native *mcpsdk.Tool, runtime *sessionRuntime) (*toolAdapter, mcpserver.ToolInfo, error) {
 	if native == nil || strings.TrimSpace(native.Name) == "" {
 		return nil, mcpserver.ToolInfo{}, fmt.Errorf("MCP returned a tool without a name")
 	}
@@ -470,7 +611,7 @@ func newToolAdapter(server mcpserver.Server, native *mcpsdk.Tool, session *mcpsd
 	if err := tool.ValidateDefinition(def); err != nil {
 		return nil, mcpserver.ToolInfo{}, fmt.Errorf("invalid MCP tool %q: %w", native.Name, err)
 	}
-	adapter := &toolAdapter{serverID: server.ID, original: native.Name, session: session, def: tool.SnapshotDefinition(def)}
+	adapter := &toolAdapter{serverID: server.ID, original: native.Name, runtime: runtime, def: tool.SnapshotDefinition(def)}
 	return adapter, mcpserver.ToolInfo{OriginalName: native.Name, QualifiedName: qualified, Description: description, InputSchema: input, OutputSchema: output, Version: version}, nil
 }
 
@@ -479,12 +620,33 @@ func (t *toolAdapter) Definition(context.Context) (tool.Definition, error) {
 }
 
 func (t *toolAdapter) Invoke(ctx context.Context, invocation tool.Invocation) (tool.Result, error) {
+	if t.runtime == nil || t.runtime.session == nil {
+		return tool.Result{}, fmt.Errorf("MCP session is unavailable")
+	}
+	callCtx := ctx
+	cancel := func() {}
+	if t.runtime.server.TimeoutSeconds > 0 {
+		callCtx, cancel = context.WithTimeout(ctx, time.Duration(t.runtime.server.TimeoutSeconds)*time.Second)
+	}
+	defer cancel()
 	var arguments map[string]any
 	if err := json.Unmarshal(invocation.Arguments, &arguments); err != nil {
 		return tool.Result{}, err
 	}
-	result, err := t.session.CallTool(ctx, &mcpsdk.CallToolParams{Name: t.original, Arguments: arguments})
+	release, err := t.runtime.acquire(callCtx)
 	if err != nil {
+		return tool.Result{}, err
+	}
+	defer release()
+	params := &mcpsdk.CallToolParams{Name: t.original, Arguments: arguments}
+	if invocation.CallID != "" {
+		params.SetProgressToken(invocation.CallID)
+	}
+	result, err := t.runtime.session.CallTool(callCtx, params)
+	if err != nil {
+		if callCtx.Err() != nil && t.runtime.manager != nil {
+			t.runtime.manager.recoverCancelledSession(t.runtime)
+		}
 		return tool.Result{}, fmt.Errorf("MCP tool call failed: %w", err)
 	}
 	if result == nil {
@@ -610,9 +772,9 @@ func cloneMap(values map[string]string) map[string]string {
 	return result
 }
 func cloneSnapshot(value mcpserver.CapabilitySnapshot) mcpserver.CapabilitySnapshot {
-	value.Tools = append([]mcpserver.ToolInfo(nil), value.Tools...)
-	value.Resources = append([]string(nil), value.Resources...)
-	value.Prompts = append([]string(nil), value.Prompts...)
+	value.Tools = append(make([]mcpserver.ToolInfo, 0, len(value.Tools)), value.Tools...)
+	value.Resources = append(make([]string, 0, len(value.Resources)), value.Resources...)
+	value.Prompts = append(make([]string, 0, len(value.Prompts)), value.Prompts...)
 	return value
 }
 func decodedSize(value []byte) int {

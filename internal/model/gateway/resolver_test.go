@@ -39,6 +39,22 @@ func TestResolverRoutesAllSupportedProtocols(t *testing.T) {
 	}
 }
 
+func TestResolverReusesProtocolClientForStableProfile(t *testing.T) {
+	profile := modelprofile.Profile{ID: "profile", Enabled: true, APIProtocol: modelprofile.ProtocolAnthropic, BaseURL: "https://example.test/v1", Models: []modelprofile.ProfileModel{{ID: "model", Enabled: true}}}
+	resolver := NewResolver(loader{profile: profile})
+	first, err := resolver.Resolve(context.Background(), profile.ID, "model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := resolver.Resolve(context.Background(), profile.ID, "model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Model != second.Model {
+		t.Fatal("stable profile did not reuse its protocol capability state")
+	}
+}
+
 func TestResolverReturnsAutomaticModelReasoningCapabilities(t *testing.T) {
 	resolver := NewResolver(loader{profile: modelprofile.Profile{Enabled: true, Models: []modelprofile.ProfileModel{{ID: "reasoning", Enabled: true, ReasoningLevels: []modelcap.ReasoningLevel{modelcap.ReasoningHigh, modelcap.ReasoningXHigh}}}}})
 	resolved, err := resolver.Resolve(context.Background(), "profile", "reasoning")

@@ -169,6 +169,12 @@ type SetProjectSkillCommand struct {
 	Priority  int    `json:"priority"`
 }
 
+type EnableAllProjectSkillsResult struct {
+	Enabled        int `json:"enabled"`
+	AlreadyEnabled int `json:"alreadyEnabled"`
+	Skipped        int `json:"skipped"`
+}
+
 type InstallCommand struct {
 	SourcePath      string     `json:"sourcePath"`
 	SourceKind      SourceKind `json:"sourceKind"`
@@ -321,6 +327,69 @@ func (s *Service) SetProjectSkill(ctx context.Context, command SetProjectSkillCo
 	s.operationMu.Lock()
 	defer s.operationMu.Unlock()
 	return s.setProjectSkill(ctx, command)
+}
+
+func (s *Service) EnableAllProjectSkills(ctx context.Context, projectID string) (EnableAllProjectSkillsResult, error) {
+	s.operationMu.Lock()
+	defer s.operationMu.Unlock()
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return EnableAllProjectSkillsResult{}, fmt.Errorf("project id is required")
+	}
+	installed, err := s.repository.ListInstalled(ctx)
+	if err != nil {
+		return EnableAllProjectSkillsResult{}, err
+	}
+	available, err := s.availableTools(ctx)
+	if err != nil {
+		return EnableAllProjectSkillsResult{}, err
+	}
+	links, err := s.repository.ListProjectSkills(ctx, projectID)
+	if err != nil {
+		return EnableAllProjectSkillsResult{}, err
+	}
+	linked := make(map[string]ProjectSkill, len(links))
+	for _, value := range links {
+		linked[value.SkillID] = value
+	}
+	latest := make(map[string]InstalledSkill)
+	for _, value := range installed {
+		evaluateAvailability(&value, s.version, available)
+		if value.Availability != AvailabilityAvailable {
+			continue
+		}
+		current, exists := latest[value.Manifest.ID]
+		if !exists || compareVersionMust(value.Manifest.Version, current.Manifest.Version) > 0 {
+			latest[value.Manifest.ID] = value
+		}
+	}
+	result := EnableAllProjectSkillsResult{}
+	for skillID, candidate := range latest {
+		link, exists := linked[skillID]
+		if exists && link.Enabled {
+			result.AlreadyEnabled++
+			continue
+		}
+		version, priority := candidate.Manifest.Version, 100
+		if exists {
+			version, priority = link.Version, link.Priority
+			if selected, loadErr := s.repository.GetInstalled(ctx, skillID, version); loadErr != nil {
+				version = candidate.Manifest.Version
+			} else {
+				evaluateAvailability(&selected, s.version, available)
+				if selected.Availability != AvailabilityAvailable {
+					version = candidate.Manifest.Version
+				}
+			}
+		}
+		if _, setErr := s.setProjectSkill(ctx, SetProjectSkillCommand{ProjectID: projectID, SkillID: skillID, Version: version, Enabled: true, Priority: priority}); setErr != nil {
+			result.Skipped++
+			continue
+		}
+		result.Enabled++
+	}
+	result.Skipped += len(installed) - len(latest)
+	return result, nil
 }
 
 func (s *Service) setProjectSkill(ctx context.Context, command SetProjectSkillCommand) (ProjectSkillView, error) {
@@ -488,6 +557,12 @@ func (s *Service) RollbackProjectSkill(ctx context.Context, command RollbackProj
 }
 
 func (s *Service) ListProjectSkills(ctx context.Context, projectID string) ([]ProjectSkillView, error) {
+	s.operationMu.Lock()
+	defer s.operationMu.Unlock()
+	return s.listProjectSkills(ctx, projectID)
+}
+
+func (s *Service) listProjectSkills(ctx context.Context, projectID string) ([]ProjectSkillView, error) {
 	projectID = strings.TrimSpace(projectID)
 	if projectID == "" {
 		return nil, fmt.Errorf("project id is required")
@@ -515,7 +590,7 @@ func (s *Service) ListProjectSkills(ctx context.Context, projectID string) ([]Pr
 func (s *Service) LoadEnabled(ctx context.Context, projectID string) ([]Package, error) {
 	s.operationMu.Lock()
 	defer s.operationMu.Unlock()
-	links, err := s.ListProjectSkills(ctx, projectID)
+	links, err := s.listProjectSkills(ctx, projectID)
 	if err != nil {
 		return nil, err
 	}

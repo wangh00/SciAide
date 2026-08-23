@@ -108,10 +108,20 @@ func TestApplicationSeedsBuiltinResearchSkills(t *testing.T) {
 			t.Fatalf("invalid built-in Skill provenance: %#v", value)
 		}
 	}
+	channels, err := application.ModelFacade.ListVisionFallbackChannels()
+	if err != nil || len(channels) != 0 {
+		_ = application.Close()
+		t.Fatalf("new application vision fallback channels = %#v, %v", channels, err)
+	}
 	projectValue, err := application.ProjectFacade.CreateProject(wailstransport.CreateProjectRequest{Name: "Built-in Skills"})
 	if err != nil {
 		_ = application.Close()
 		t.Fatal(err)
+	}
+	defaultLinks, err := application.SkillFacade.ListProjectSkills(projectValue.ID)
+	if err != nil || len(defaultLinks) != 0 {
+		_ = application.Close()
+		t.Fatalf("default project Skills = %#v, %v", defaultLinks, err)
 	}
 	selection, err := application.SkillFacade.SetProjectSkill(skill.SetProjectSkillCommand{ProjectID: projectValue.ID, SkillID: "literature-reading", Version: "1.1.0", Enabled: true, Priority: 10})
 	if err != nil || !selection.Enabled || selection.Skill.Manifest.Activation.Mode != skill.ActivationSuggest {
@@ -159,8 +169,18 @@ func TestApplicationSeedsBuiltinResearchSkills(t *testing.T) {
 		t.Fatalf("built-in Skills after restart = %#v, %v", installed, err)
 	}
 	links, err := restarted.SkillFacade.ListProjectSkills(projectValue.ID)
-	if err != nil || len(links) != 1 || !links[0].Enabled || links[0].Skill.Source.Kind != skill.SourceBuiltin {
+	if err != nil || len(links) != 1 {
 		t.Fatalf("built-in project selection after restart = %#v, %v", links, err)
+	}
+	linkState := map[string]bool{}
+	for _, link := range links {
+		if link.Skill.Source.Kind != skill.SourceBuiltin {
+			t.Fatalf("non-built-in project selection after restart: %#v", link)
+		}
+		linkState[link.SkillID] = link.Enabled
+	}
+	if !linkState["literature-reading"] {
+		t.Fatalf("project Skill enable state changed after restart: %#v", linkState)
 	}
 }
 
@@ -172,19 +192,22 @@ func TestBuiltinSeedPreservesExistingUserPackageAtSameVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer application.Close()
 	contents, err := os.ReadFile(filepath.Join(destination, "SKILL.md"))
 	if err != nil || string(contents) != "user-owned instructions" {
 		t.Fatalf("existing user package was changed: %q, %v", contents, err)
 	}
 	installed, err := application.SkillFacade.ListInstalledSkills()
 	if err != nil || len(installed) != 2 {
+		_ = application.Close()
 		t.Fatalf("installed Skills = %#v, %v", installed, err)
 	}
 	for _, value := range installed {
 		if value.Manifest.ID == "literature-reading" && (value.Manifest.Name != "Installed Skill" || value.Source.Kind == skill.SourceBuiltin) {
 			t.Fatalf("user package was reclassified as built-in: %#v", value)
 		}
+	}
+	if err := application.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -2,15 +2,12 @@ package chat
 
 import (
 	"context"
-	"errors"
 	"time"
 
 	"github.com/wangh00/SciAide/internal/app/conversation"
 	"github.com/wangh00/SciAide/internal/events"
 	"github.com/wangh00/SciAide/internal/modelcap"
 )
-
-var ErrModelTurnBudgetExceeded = errors.New("model turn budget exceeded")
 
 type RunStatus string
 
@@ -50,6 +47,7 @@ type Run struct {
 	ReasoningTokens               int                         `json:"reasoningTokens"`
 	ReasoningObserved             bool                        `json:"reasoningObserved"`
 	ReasoningSignatureObserved    bool                        `json:"reasoningSignatureObserved"`
+	ReasoningSummary              string                      `json:"reasoningSummary,omitempty"`
 	CachedInputTokens             int                         `json:"cachedInputTokens"`
 	CacheWriteTokens              int                         `json:"cacheWriteTokens"`
 	CacheReportedTurns            int                         `json:"cacheReportedTurns"`
@@ -63,15 +61,55 @@ type Run struct {
 	UpdatedAt                     time.Time                   `json:"updatedAt"`
 }
 
+// RunStep is a model-turn activity record. It deliberately lives outside the
+// assistant message so commentary emitted before a tool call can never become
+// part of the final answer.
+type RunStep struct {
+	RunID                      string    `json:"runId"`
+	TurnIndex                  int       `json:"turnIndex"`
+	Commentary                 string    `json:"commentary,omitempty"`
+	ReasoningSummary           string    `json:"reasoningSummary,omitempty"`
+	ReasoningObserved          bool      `json:"reasoningObserved"`
+	ReasoningSignatureObserved bool      `json:"reasoningSignatureObserved"`
+	CreatedAt                  time.Time `json:"createdAt"`
+	CompletedAt                time.Time `json:"completedAt"`
+}
+
+type ModelTurnStatus string
+
+const (
+	ModelTurnStreaming   ModelTurnStatus = "streaming"
+	ModelTurnCompleted   ModelTurnStatus = "completed"
+	ModelTurnInterrupted ModelTurnStatus = "interrupted"
+	ModelTurnFailed      ModelTurnStatus = "failed"
+)
+
+// ModelTurnJournal is the durable, non-UI record of one provider request
+// step. DraftText contains only provider-visible answer/commentary text, never
+// hidden reasoning payloads.
+type ModelTurnJournal struct {
+	RunID             string          `json:"runId"`
+	TurnIndex         int             `json:"turnIndex"`
+	Status            ModelTurnStatus `json:"status"`
+	DraftText         string          `json:"draftText,omitempty"`
+	FinishReason      string          `json:"finishReason,omitempty"`
+	ProviderItemCount int             `json:"providerItemCount"`
+	StartedAt         time.Time       `json:"startedAt"`
+	CompletedAt       *time.Time      `json:"completedAt,omitempty"`
+	UpdatedAt         time.Time       `json:"updatedAt"`
+}
+
 type Repository interface {
 	CreateWithMessages(ctx context.Context, value Run, userMessage, assistantMessage conversation.Message) error
 	Get(ctx context.Context, id string) (Run, error)
 	LatestForConversation(ctx context.Context, conversationID string) (Run, bool, error)
 	Update(ctx context.Context, value Run) error
-	IncrementModelTurns(ctx context.Context, runID string, maximum int, at time.Time) (Run, error)
+	IncrementModelTurns(ctx context.Context, runID string, at time.Time) (Run, error)
 	CancelRun(ctx context.Context, runID, errorCode, errorMessage string, at time.Time, event events.Envelope) (Run, bool, error)
 	InterruptActive(ctx context.Context, at time.Time) (int64, error)
+	RecordModelUsage(ctx context.Context, value RequestUsage) (Run, bool, error)
 	UsageDashboard(ctx context.Context, query UsageQuery) (UsageDashboard, error)
+	UsageRequests(ctx context.Context, query UsageRequestQuery) (UsageRequestPage, error)
 }
 
 // UsageQuery uses local calendar dates (YYYY-MM-DD). Empty dimensions mean
@@ -80,8 +118,56 @@ type Repository interface {
 type UsageQuery struct {
 	StartDate      string `json:"startDate,omitempty"`
 	EndDate        string `json:"endDate,omitempty"`
+	StartTime      string `json:"startTime,omitempty"`
+	EndTime        string `json:"endTime,omitempty"`
 	ModelProfileID string `json:"modelProfileId,omitempty"`
 	ModelID        string `json:"modelId,omitempty"`
+}
+
+type RequestUsage struct {
+	ID                   string               `json:"id"`
+	RunID                string               `json:"runId"`
+	TurnIndex            int                  `json:"turnIndex"`
+	RequestKind          string               `json:"requestKind"`
+	ModelProfileID       string               `json:"modelProfileId"`
+	ProfileName          string               `json:"profileName,omitempty"`
+	ModelID              string               `json:"modelId"`
+	APIProtocol          modelcap.APIProtocol `json:"apiProtocol"`
+	InputTokens          int                  `json:"inputTokens"`
+	FreshInputTokens     int                  `json:"freshInputTokens"`
+	OutputTokens         int                  `json:"outputTokens"`
+	ReasoningTokens      int                  `json:"reasoningTokens"`
+	CachedInputTokens    int                  `json:"cachedInputTokens"`
+	CacheWriteTokens     int                  `json:"cacheWriteTokens"`
+	CacheDetailsReported bool                 `json:"cacheDetailsReported"`
+	StatusCode           int                  `json:"statusCode"`
+	ErrorCode            string               `json:"errorCode,omitempty"`
+	ErrorMessage         string               `json:"errorMessage,omitempty"`
+	FirstTokenMillis     *int64               `json:"firstTokenMillis,omitempty"`
+	IsStreaming          bool                 `json:"isStreaming"`
+	StartedAt            time.Time            `json:"startedAt"`
+	CompletedAt          time.Time            `json:"completedAt"`
+	DurationMillis       int64                `json:"durationMillis"`
+}
+
+type UsageRequestQuery struct {
+	StartDate      string `json:"startDate,omitempty"`
+	EndDate        string `json:"endDate,omitempty"`
+	StartTime      string `json:"startTime,omitempty"`
+	EndTime        string `json:"endTime,omitempty"`
+	ModelProfileID string `json:"modelProfileId,omitempty"`
+	ModelID        string `json:"modelId,omitempty"`
+	StatusCode     int    `json:"statusCode,omitempty"`
+	Offset         int    `json:"offset,omitempty"`
+	Limit          int    `json:"limit,omitempty"`
+}
+
+type UsageRequestPage struct {
+	Items  []RequestUsage    `json:"items"`
+	Total  int               `json:"total"`
+	Offset int               `json:"offset"`
+	Limit  int               `json:"limit"`
+	Query  UsageRequestQuery `json:"query"`
 }
 
 // UsageSummary is cache-normalized into four mutually exclusive buckets.
@@ -90,6 +176,10 @@ type UsageQuery struct {
 type UsageSummary struct {
 	RunCount            int     `json:"runCount"`
 	ModelTurns          int     `json:"modelTurns"`
+	RequestCount        int     `json:"requestCount"`
+	SuccessfulRequests  int     `json:"successfulRequests"`
+	FailedRequests      int     `json:"failedRequests"`
+	SuccessRate         float64 `json:"successRate"`
 	FreshInputTokens    int     `json:"freshInputTokens"`
 	OutputTokens        int     `json:"outputTokens"`
 	ReasoningTokens     int     `json:"reasoningTokens"`

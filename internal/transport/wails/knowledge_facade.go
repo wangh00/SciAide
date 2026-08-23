@@ -68,3 +68,15 @@ func (f *KnowledgeFacade) ChooseAndImportDocuments(projectID string) (attachment
 func (f *KnowledgeFacade) RemoveDocument(projectID, documentID string) (knowledge.Document, error) {
 	return f.service.RemoveDocument(f.lifecycle.Context(), projectID, documentID)
 }
+
+func (f *KnowledgeFacade) CancelDocument(projectID, documentID string) (knowledge.ImportJob, error) {
+	return f.service.CancelDocument(f.lifecycle.Context(), projectID, documentID)
+}
+
+func (f *KnowledgeFacade) RetryDocument(projectID, documentID string) (knowledge.ImportJob, error) {
+	return f.service.RetryDocument(f.lifecycle.Context(), projectID, documentID)
+}
+
+func (f *KnowledgeFacade) RebuildDocument(projectID, documentID string) (knowledge.ImportJob, error) {
+	return f.service.RebuildDocument(f.lifecycle.Context(), projectID, documentID)
+}

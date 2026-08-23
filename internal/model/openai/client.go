@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math/rand/v2"
 	"net/http"
 	"slices"
 	"strconv"
@@ -31,6 +30,7 @@ const (
 	maxToolArgumentsBytes = 256 * 1024
 	maxProviderToolName   = 64
 	maxErrorBodyBytes     = 16 * 1024
+	maxResponseBodyBytes  = 4 * 1024 * 1024
 )
 
 type Client struct {
@@ -49,7 +49,7 @@ func New(profile modelprofile.Profile, secret []byte, recorders ...modelcap.Reas
 	if len(recorders) > 0 {
 		recorder = recorders[0]
 	}
-	return &Client{profile: profile, secret: append([]byte(nil), secret...), http: &http.Client{Timeout: timeout}, recorder: recorder}
+	return &Client{profile: profile, secret: append([]byte(nil), secret...), http: modelutil.NewStreamingHTTPClient(timeout), recorder: recorder}
 }
 
 func NewWithHTTPClient(profile modelprofile.Profile, secret []byte, client *http.Client) *Client {
@@ -63,7 +63,8 @@ func (c *Client) Capabilities(context.Context) (model.Capabilities, error) {
 }
 
 func (c *Client) Stream(ctx context.Context, request model.ChatRequest) (model.Stream, error) {
-	return c.openWithRetry(ctx, request)
+	stream, _, err := c.negotiateOpen(ctx, request)
+	return stream, err
 }
 
 func (c *Client) Test(ctx context.Context, profile modelprofile.Profile, secret []byte) error {
@@ -134,33 +135,6 @@ func (c *Client) Discover(ctx context.Context, profile modelprofile.Profile, sec
 	return models, nil
 }
 
-func (c *Client) openWithRetry(ctx context.Context, request model.ChatRequest) (model.Stream, error) {
-	var lastErr error
-	for attempt := 0; attempt < 3; attempt++ {
-		stream, retryAfter, err := c.negotiateOpen(ctx, request)
-		if err == nil {
-			return stream, nil
-		}
-		lastErr = err
-		var public *apperr.Error
-		if !errors.As(err, &public) || !public.Retryable || attempt == 2 {
-			break
-		}
-		delay := time.Duration(250*(1<<attempt))*time.Millisecond + time.Duration(rand.IntN(150))*time.Millisecond
-		if retryAfter > delay {
-			delay = retryAfter
-		}
-		timer := time.NewTimer(delay)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return nil, ctx.Err()
-		case <-timer.C:
-		}
-	}
-	return nil, lastErr
-}
-
 type reasoningRejectedError struct {
 	kind modelutil.ReasoningRejectionKind
 	err  error
@@ -223,7 +197,11 @@ func (c *Client) recordReasoning(ctx context.Context, result modelcap.ReasoningR
 }
 
 func (c *Client) open(ctx context.Context, request model.ChatRequest) (model.Stream, time.Duration, error) {
-	payload := requestPayload{Model: c.profile.ModelID, Stream: true, StreamOptions: &streamOptions{IncludeUsage: true}, Temperature: c.profile.Temperature, MaxTokens: c.profile.MaxOutputTokens}
+	streaming := !request.DisableStreaming
+	payload := requestPayload{Model: c.profile.ModelID, Stream: streaming, Temperature: c.profile.Temperature, MaxTokens: c.profile.MaxOutputTokens}
+	if streaming {
+		payload.StreamOptions = &streamOptions{IncludeUsage: true}
+	}
 	if request.ResolvedReasoningLevel.Valid() {
 		payload.ReasoningEffort = string(request.ResolvedReasoningLevel)
 	}
@@ -261,7 +239,11 @@ func (c *Client) open(ctx context.Context, request model.ChatRequest) (model.Str
 		return nil, 0, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "text/event-stream")
+	if streaming {
+		req.Header.Set("Accept", "text/event-stream")
+	} else {
+		req.Header.Set("Accept", "application/json")
+	}
 	c.applyHeaders(req)
 	response, err := c.http.Do(req)
 	if err != nil {
@@ -278,9 +260,82 @@ func (c *Client) open(ctx context.Context, request model.ChatRequest) (model.Str
 		}
 		return nil, parseRetryAfter(response.Header.Get("Retry-After")), classifyStatus(response.StatusCode, response.Header, responseBody)
 	}
+	if !streaming {
+		stream, err := openBufferedResponse(response, providerNames)
+		return stream, 0, err
+	}
 	scanner := bufio.NewScanner(response.Body)
 	scanner.Buffer(make([]byte, 64*1024), maxStreamLineBytes)
 	return &stream{body: response.Body, scanner: scanner, toolCalls: make(map[int]*toolCallAccumulator), providerNames: providerNames}, 0, nil
+}
+
+func openBufferedResponse(response *http.Response, providerNames map[string]string) (model.Stream, error) {
+	defer response.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBodyBytes+1))
+	if err != nil {
+		return nil, modelutil.Error("MODEL_UNAVAILABLE", "模型响应读取失败，SciAide 将自动重试。", true, err)
+	}
+	if len(body) > maxResponseBodyBytes {
+		return nil, modelError("MODEL_RESPONSE_INVALID", "模型返回内容过大，无法安全处理。", false, nil)
+	}
+	var payload bufferedResponse
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, modelutil.ErrorWithDetails("MODEL_RESPONSE_INVALID", "模型返回了无法解析的数据。", modelutil.ProviderErrorDetails("Chat Completions response", response.StatusCode, body), false, err)
+	}
+	if payload.Error != nil {
+		message := strings.TrimSpace(payload.Error.Message)
+		if message == "" {
+			message = "Chat Completions 请求未完成。"
+		}
+		retryable := modelutil.StreamErrorRetryable(payload.Error.Type, payload.Error.Code)
+		code := "MODEL_REQUEST_REJECTED"
+		if retryable {
+			code = "MODEL_UNAVAILABLE"
+		}
+		return nil, modelutil.ErrorWithDetails(code, message, modelutil.ProviderErrorDetails("Chat Completions response", response.StatusCode, body), retryable, nil)
+	}
+
+	events := make([]model.Event, 0, len(payload.Choices)+2)
+	finishReason := ""
+	textObserved := false
+	toolObserved := false
+	for _, choice := range payload.Choices {
+		if choice.Message.Content != "" {
+			events = append(events, model.Event{Type: model.EventTextDelta, Text: choice.Message.Content})
+			textObserved = textObserved || strings.TrimSpace(choice.Message.Content) != ""
+		}
+		for _, call := range choice.Message.ToolCalls {
+			name := call.Function.Name
+			if qualified := providerNames[name]; qualified != "" {
+				name = qualified
+			}
+			mapped := model.ToolCall{ID: call.ID, Name: name, Arguments: json.RawMessage(call.Function.Arguments)}
+			if err := validateCompleteToolCall(mapped); err != nil {
+				return nil, modelError("MODEL_TOOL_CALL_INVALID", "模型返回了不完整或无效的工具调用。", false, err)
+			}
+			events = append(events, model.Event{Type: model.EventToolCall, ToolCall: &mapped})
+			toolObserved = true
+		}
+		if choice.FinishReason != nil {
+			finishReason = *choice.FinishReason
+		}
+	}
+	if finishReason == "" {
+		switch {
+		case toolObserved:
+			finishReason = "tool_calls"
+		case textObserved:
+			finishReason = "stop"
+		default:
+			return nil, modelError("MODEL_RESPONSE_EMPTY", "模型服务返回了空响应，SciAide 将自动重试。", true, nil)
+		}
+	}
+	if payload.Usage != nil {
+		usage := payload.Usage.normalized()
+		events = append(events, model.Event{Type: model.EventUsage, Usage: &usage})
+	}
+	events = append(events, model.Event{Type: model.EventDone, FinishReason: finishReason})
+	return &bufferedStream{events: events}, nil
 }
 
 func mapRequestMessage(message model.Message, qualifiedNames map[string]string) (requestMessage, error) {
@@ -290,6 +345,21 @@ func mapRequestMessage(message model.Message, qualifiedNames map[string]string) 
 	case model.RoleSystem:
 	case model.RoleUser:
 		content = wrapUntrusted("conversation_content", message.Content)
+		images, err := openAIImageParts(message.Parts)
+		if err != nil {
+			return requestMessage{}, err
+		}
+		if len(images) > 0 {
+			parts := make([]requestContentPart, 0, len(images)+1)
+			if content != "" {
+				parts = append(parts, requestContentPart{Type: "text", Text: content})
+			}
+			parts = append(parts, images...)
+			mapped.Content = nil
+			mapped.ContentParts = parts
+		} else {
+			mapped.Content = &content
+		}
 	case model.RoleAssistant:
 		if len(message.ToolCalls) > maxToolCallsPerTurn {
 			return requestMessage{}, fmt.Errorf("too many assistant tool calls")
@@ -317,7 +387,25 @@ func mapRequestMessage(message model.Message, qualifiedNames map[string]string) 
 	default:
 		return requestMessage{}, fmt.Errorf("unsupported model message role %q", message.Role)
 	}
+	if message.Role != model.RoleUser && !(message.Role == model.RoleAssistant && len(mapped.ToolCalls) > 0 && content == "") {
+		mapped.Content = &content
+	}
 	return mapped, nil
+}
+
+func openAIImageParts(parts []model.ContentPart) ([]requestContentPart, error) {
+	result := make([]requestContentPart, 0)
+	for _, part := range parts {
+		if part.Type != "input_image" {
+			continue
+		}
+		dataURL, err := model.ImageDataURL(part)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, requestContentPart{Type: "image_url", ImageURL: &requestImageURL{URL: dataURL, Detail: "auto"}})
+	}
+	return result, nil
 }
 
 // providerToolName maps SciAide's qualified names (which intentionally use
@@ -392,10 +480,36 @@ type requestPayload struct {
 }
 
 type requestMessage struct {
-	Role       string            `json:"role"`
-	Content    *string           `json:"content"`
-	ToolCalls  []requestToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string            `json:"tool_call_id,omitempty"`
+	Role         string               `json:"role"`
+	Content      *string              `json:"content"`
+	ContentParts []requestContentPart `json:"-"`
+	ToolCalls    []requestToolCall    `json:"tool_calls,omitempty"`
+	ToolCallID   string               `json:"tool_call_id,omitempty"`
+}
+
+func (m requestMessage) MarshalJSON() ([]byte, error) {
+	content := any(m.Content)
+	if len(m.ContentParts) > 0 {
+		content = m.ContentParts
+	}
+	type wireMessage struct {
+		Role       string            `json:"role"`
+		Content    any               `json:"content"`
+		ToolCalls  []requestToolCall `json:"tool_calls,omitempty"`
+		ToolCallID string            `json:"tool_call_id,omitempty"`
+	}
+	return json.Marshal(wireMessage{Role: m.Role, Content: content, ToolCalls: m.ToolCalls, ToolCallID: m.ToolCallID})
+}
+
+type requestContentPart struct {
+	Type     string           `json:"type"`
+	Text     string           `json:"text,omitempty"`
+	ImageURL *requestImageURL `json:"image_url,omitempty"`
+}
+
+type requestImageURL struct {
+	URL    string `json:"url"`
+	Detail string `json:"detail,omitempty"`
 }
 
 type requestTool struct {
@@ -436,8 +550,30 @@ type stream struct {
 	queue         []model.Event
 	done          bool
 	finishReason  string
+	textObserved  bool
+	usage         *responseUsage
 	toolCalls     map[int]*toolCallAccumulator
 	providerNames map[string]string
+}
+
+type bufferedStream struct {
+	events []model.Event
+	closed bool
+}
+
+func (s *bufferedStream) Recv() (model.Event, error) {
+	if s.closed || len(s.events) == 0 {
+		return model.Event{}, io.EOF
+	}
+	event := s.events[0]
+	s.events = s.events[1:]
+	return event, nil
+}
+
+func (s *bufferedStream) Close() error {
+	s.closed = true
+	s.events = nil
+	return nil
 }
 
 func (s *stream) Recv() (model.Event, error) {
@@ -457,9 +593,26 @@ func (s *stream) Recv() (model.Event, error) {
 		}
 		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 		if data == "[DONE]" {
+			if s.finishReason == "" {
+				switch {
+				case len(s.toolCalls) > 0:
+					s.finishReason = "tool_calls"
+				case s.textObserved:
+					s.finishReason = "stop"
+				default:
+					return model.Event{}, modelutil.ErrorWithDetails(
+						"MODEL_RESPONSE_EMPTY",
+						"模型服务返回了空响应，SciAide 将自动重试。",
+						"Chat Completions stream received [DONE] without content, tool calls, or finish_reason.",
+						true,
+						nil,
+					)
+				}
+			}
 			if err := s.finalizeToolCalls(); err != nil {
 				return model.Event{}, err
 			}
+			s.emitUsage()
 			s.done = true
 			s.queue = append(s.queue, model.Event{Type: model.EventDone, FinishReason: s.finishReason})
 			return s.pop(), nil
@@ -473,11 +626,19 @@ func (s *stream) Recv() (model.Event, error) {
 			if message == "" {
 				message = "Chat Completions 请求未完成。"
 			}
-			return model.Event{}, modelutil.ErrorWithDetails("MODEL_REQUEST_REJECTED", message, modelutil.ProviderErrorDetails("Chat Completions stream event", 0, []byte(data)), false, nil)
+			retryable := modelutil.StreamErrorRetryable(chunk.Error.Type, chunk.Error.Code)
+			code := "MODEL_REQUEST_REJECTED"
+			if retryable {
+				code = "MODEL_UNAVAILABLE"
+			}
+			return model.Event{}, modelutil.ErrorWithDetails(code, message, modelutil.ProviderErrorDetails("Chat Completions stream event", 0, []byte(data)), retryable, nil)
 		}
 		for _, choice := range chunk.Choices {
 			if choice.Delta.Content != "" {
 				s.queue = append(s.queue, model.Event{Type: model.EventTextDelta, Text: choice.Delta.Content})
+				if strings.TrimSpace(choice.Delta.Content) != "" {
+					s.textObserved = true
+				}
 			}
 			for _, fragment := range choice.Delta.ToolCalls {
 				if err := s.appendToolCall(fragment); err != nil {
@@ -494,31 +655,73 @@ func (s *stream) Recv() (model.Event, error) {
 			}
 		}
 		if chunk.Usage != nil {
-			usage := chunk.Usage.normalized()
-			s.queue = append(s.queue, model.Event{Type: model.EventUsage, Usage: &usage})
+			s.usage = mergeResponseUsage(s.usage, *chunk.Usage)
 		}
 		if len(s.queue) > 0 {
 			return s.pop(), nil
 		}
 	}
 	if err := s.scanner.Err(); err != nil {
-		return model.Event{}, modelError("MODEL_UNAVAILABLE", "模型连接意外中断。", false, err)
+		return model.Event{}, modelutil.Error("MODEL_UNAVAILABLE", "模型连接意外中断，SciAide 将自动重连。", true, err)
 	}
 	if s.finishReason != "" {
 		if err := s.finalizeToolCalls(); err != nil {
 			return model.Event{}, err
 		}
+		s.emitUsage()
 		s.done = true
 		s.queue = append(s.queue, model.Event{Type: model.EventDone, FinishReason: s.finishReason})
 		return s.pop(), nil
 	}
-	return model.Event{}, modelError("MODEL_STREAM_INVALID", "模型流在完成标记前结束。", false, io.ErrUnexpectedEOF)
+	return model.Event{}, modelutil.Error("MODEL_STREAM_INTERRUPTED", "模型流在完成标记前中断，SciAide 将自动重连。", true, io.ErrUnexpectedEOF)
 }
 
 func (s *stream) pop() model.Event {
 	event := s.queue[0]
 	s.queue = s.queue[1:]
 	return event
+}
+
+func mergeResponseUsage(current *responseUsage, next responseUsage) *responseUsage {
+	if current == nil {
+		result := next
+		return &result
+	}
+	result := *current
+	if next.PromptTokens > 0 || result.PromptTokens == 0 {
+		result.PromptTokens = next.PromptTokens
+	}
+	if next.CompletionTokens > 0 || result.CompletionTokens == 0 {
+		result.CompletionTokens = next.CompletionTokens
+	}
+	if next.PromptCacheHitTokens != nil {
+		result.PromptCacheHitTokens = next.PromptCacheHitTokens
+	}
+	if next.PromptCacheMissTokens != nil {
+		result.PromptCacheMissTokens = next.PromptCacheMissTokens
+	}
+	if next.CacheReadInputTokens != nil {
+		result.CacheReadInputTokens = next.CacheReadInputTokens
+	}
+	if next.CacheCreationInputTokens != nil {
+		result.CacheCreationInputTokens = next.CacheCreationInputTokens
+	}
+	if next.PromptTokensDetails != nil {
+		result.PromptTokensDetails = next.PromptTokensDetails
+	}
+	if next.CompletionTokensDetails != nil {
+		result.CompletionTokensDetails = next.CompletionTokensDetails
+	}
+	return &result
+}
+
+func (s *stream) emitUsage() {
+	if s.usage == nil {
+		return
+	}
+	usage := s.usage.normalized()
+	s.usage = nil
+	s.queue = append(s.queue, model.Event{Type: model.EventUsage, Usage: &usage})
 }
 
 func (s *stream) appendToolCall(fragment responseToolCall) error {
@@ -598,18 +801,38 @@ func wrapUntrusted(label, value string) string {
 
 func (s *stream) Close() error { s.done = true; return s.body.Close() }
 
+type responseError struct {
+	Type    string `json:"type"`
+	Code    string `json:"code"`
+	Message string `json:"message"`
+	Param   string `json:"param"`
+}
+
 type responseChunk struct {
-	Error *struct {
-		Type    string `json:"type"`
-		Code    string `json:"code"`
-		Message string `json:"message"`
-		Param   string `json:"param"`
-	} `json:"error"`
+	Error   *responseError `json:"error"`
 	Choices []struct {
 		Delta struct {
 			Content   string             `json:"content"`
 			ToolCalls []responseToolCall `json:"tool_calls"`
 		} `json:"delta"`
+		FinishReason *string `json:"finish_reason"`
+	} `json:"choices"`
+	Usage *responseUsage `json:"usage"`
+}
+
+type bufferedResponse struct {
+	Error   *responseError `json:"error"`
+	Choices []struct {
+		Message struct {
+			Content   string `json:"content"`
+			ToolCalls []struct {
+				ID       string `json:"id"`
+				Function struct {
+					Name      string `json:"name"`
+					Arguments string `json:"arguments"`
+				} `json:"function"`
+			} `json:"tool_calls"`
+		} `json:"message"`
 		FinishReason *string `json:"finish_reason"`
 	} `json:"choices"`
 	Usage *responseUsage `json:"usage"`
@@ -778,18 +1001,12 @@ func classifyNetwork(err error) error {
 	return modelutil.ClassifyNetwork(err)
 }
 
-func classifyStatus(status int, _ http.Header, responseBody []byte) error {
-	return modelutil.ClassifyStatus(status, responseBody)
+func classifyStatus(status int, header http.Header, responseBody []byte) error {
+	return modelutil.ClassifyStatusWithHeaders(status, header, responseBody)
 }
 
 func modelError(code, message string, retryable bool, cause error) error {
 	return &apperr.Error{Code: code, UserMessage: message, Retryable: retryable, Cause: cause}
 }
 
-func parseRetryAfter(value string) time.Duration {
-	seconds, err := strconv.Atoi(strings.TrimSpace(value))
-	if err == nil && seconds > 0 && seconds <= 60 {
-		return time.Duration(seconds) * time.Second
-	}
-	return 0
-}
+func parseRetryAfter(value string) time.Duration { return modelutil.ParseRetryAfter(value) }

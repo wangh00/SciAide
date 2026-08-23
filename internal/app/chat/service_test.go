@@ -27,6 +27,26 @@ type memoryRepo struct {
 	modelID          string
 }
 
+func TestNormalizeUsageQueryValidatesSingleDayTimeRange(t *testing.T) {
+	valid := UsageQuery{StartDate: "2026-08-20", EndDate: "2026-08-20", StartTime: "15:50", EndTime: "17:30"}
+	if err := normalizeUsageQuery(&valid); err != nil {
+		t.Fatalf("valid time range: %v", err)
+	}
+	defaultStart := UsageQuery{StartDate: "2026-08-20", EndDate: "2026-08-20", EndTime: "17:30"}
+	if err := normalizeUsageQuery(&defaultStart); err != nil || defaultStart.StartTime != "00:00" {
+		t.Fatalf("defaulted time range = %#v, %v", defaultStart, err)
+	}
+	for _, invalid := range []UsageQuery{
+		{StartDate: "2026-08-20", EndDate: "2026-08-21", StartTime: "15:50", EndTime: "17:30"},
+		{StartDate: "2026-08-20", EndDate: "2026-08-20", StartTime: "17:31", EndTime: "17:30"},
+		{StartDate: "2026-08-20", EndDate: "2026-08-20", StartTime: "25:00", EndTime: "26:00"},
+	} {
+		if err := normalizeUsageQuery(&invalid); err == nil {
+			t.Fatalf("invalid time range accepted: %#v", invalid)
+		}
+	}
+}
+
 func (m *memoryRepo) CreateWithMessages(_ context.Context, run Run, user, assistant conversation.Message) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -50,19 +70,25 @@ func (m *memoryRepo) Update(_ context.Context, run Run) error {
 	m.run = run
 	return nil
 }
-func (m *memoryRepo) IncrementModelTurns(_ context.Context, _ string, maximum int, at time.Time) (Run, error) {
+func (m *memoryRepo) IncrementModelTurns(_ context.Context, _ string, at time.Time) (Run, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.run.Status != RunRunning || m.run.ModelTurns >= maximum {
-		return Run{}, ErrModelTurnBudgetExceeded
+	if m.run.Status != RunRunning {
+		return Run{}, fmt.Errorf("run is not running")
 	}
 	m.run.ModelTurns++
 	m.run.UpdatedAt = at
 	return m.run, nil
 }
 func (m *memoryRepo) InterruptActive(context.Context, time.Time) (int64, error) { return 0, nil }
+func (m *memoryRepo) RecordModelUsage(context.Context, RequestUsage) (Run, bool, error) {
+	return m.run, true, nil
+}
 func (m *memoryRepo) UsageDashboard(context.Context, UsageQuery) (UsageDashboard, error) {
 	return UsageDashboard{}, nil
+}
+func (m *memoryRepo) UsageRequests(context.Context, UsageRequestQuery) (UsageRequestPage, error) {
+	return UsageRequestPage{}, nil
 }
 func (m *memoryRepo) CancelRun(_ context.Context, runID, code, message string, at time.Time, event events.Envelope) (Run, bool, error) {
 	m.mu.Lock()

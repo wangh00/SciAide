@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -16,8 +17,12 @@ func NewAttachmentRepository(db *sql.DB) *AttachmentRepository {
 }
 
 func (r *AttachmentRepository) Create(ctx context.Context, value attachment.Attachment) error {
-	_, err := r.db.ExecContext(ctx, `INSERT INTO attachments(id,project_id,original_name,mime_type,document_format,size_bytes,sha256,storage_relative_path,cache_relative_path,status,unit_count,extracted_runes,truncated,error_message,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		value.ID, value.ProjectID, value.OriginalName, value.MIMEType, value.Format, value.SizeBytes, value.SHA256, value.StorageRelativePath, value.CacheRelativePath, value.Status, value.UnitCount, value.ExtractedRunes, value.Truncated, value.ErrorMessage, formatTime(value.CreatedAt), formatTime(value.UpdatedAt))
+	metadata, err := json.Marshal(normalizeParseMetadata(value.ParseMetadata))
+	if err != nil {
+		return fmt.Errorf("encode attachment parse metadata: %w", err)
+	}
+	_, err = r.db.ExecContext(ctx, `INSERT INTO attachments(id,project_id,original_name,mime_type,document_format,size_bytes,sha256,storage_relative_path,cache_relative_path,status,unit_count,extracted_runes,truncated,parse_metadata_json,error_message,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		value.ID, value.ProjectID, value.OriginalName, value.MIMEType, value.Format, value.SizeBytes, value.SHA256, value.StorageRelativePath, value.CacheRelativePath, value.Status, value.UnitCount, value.ExtractedRunes, value.Truncated, string(metadata), value.ErrorMessage, formatTime(value.CreatedAt), formatTime(value.UpdatedAt))
 	if err != nil {
 		return fmt.Errorf("insert attachment: %w", err)
 	}
@@ -54,8 +59,12 @@ func (r *AttachmentRepository) ListByProject(ctx context.Context, projectID stri
 }
 
 func (r *AttachmentRepository) UpdateParse(ctx context.Context, value attachment.Attachment) error {
-	result, err := r.db.ExecContext(ctx, `UPDATE attachments SET status=?,unit_count=?,extracted_runes=?,truncated=?,error_message=?,updated_at=? WHERE id=? AND project_id=?`,
-		value.Status, value.UnitCount, value.ExtractedRunes, value.Truncated, value.ErrorMessage, formatTime(value.UpdatedAt), value.ID, value.ProjectID)
+	metadata, err := json.Marshal(normalizeParseMetadata(value.ParseMetadata))
+	if err != nil {
+		return fmt.Errorf("encode attachment parse metadata: %w", err)
+	}
+	result, err := r.db.ExecContext(ctx, `UPDATE attachments SET status=?,unit_count=?,extracted_runes=?,truncated=?,parse_metadata_json=?,error_message=?,updated_at=? WHERE id=? AND project_id=?`,
+		value.Status, value.UnitCount, value.ExtractedRunes, value.Truncated, string(metadata), value.ErrorMessage, formatTime(value.UpdatedAt), value.ID, value.ProjectID)
 	if err != nil {
 		return fmt.Errorf("update attachment parse state: %w", err)
 	}
@@ -65,14 +74,18 @@ func (r *AttachmentRepository) UpdateParse(ctx context.Context, value attachment
 	return nil
 }
 
-const attachmentSelect = `SELECT id,project_id,original_name,mime_type,document_format,size_bytes,sha256,storage_relative_path,cache_relative_path,status,unit_count,extracted_runes,truncated,error_message,created_at,updated_at FROM attachments`
+const attachmentSelect = `SELECT id,project_id,original_name,mime_type,document_format,size_bytes,sha256,storage_relative_path,cache_relative_path,status,unit_count,extracted_runes,truncated,parse_metadata_json,error_message,created_at,updated_at FROM attachments`
 
 func scanAttachment(row rowScanner) (attachment.Attachment, error) {
 	var value attachment.Attachment
-	var createdAt, updatedAt string
-	if err := row.Scan(&value.ID, &value.ProjectID, &value.OriginalName, &value.MIMEType, &value.Format, &value.SizeBytes, &value.SHA256, &value.StorageRelativePath, &value.CacheRelativePath, &value.Status, &value.UnitCount, &value.ExtractedRunes, &value.Truncated, &value.ErrorMessage, &createdAt, &updatedAt); err != nil {
+	var createdAt, updatedAt, metadataJSON string
+	if err := row.Scan(&value.ID, &value.ProjectID, &value.OriginalName, &value.MIMEType, &value.Format, &value.SizeBytes, &value.SHA256, &value.StorageRelativePath, &value.CacheRelativePath, &value.Status, &value.UnitCount, &value.ExtractedRunes, &value.Truncated, &metadataJSON, &value.ErrorMessage, &createdAt, &updatedAt); err != nil {
 		return attachment.Attachment{}, err
 	}
+	if err := json.Unmarshal([]byte(metadataJSON), &value.ParseMetadata); err != nil {
+		return attachment.Attachment{}, fmt.Errorf("decode attachment parse metadata: %w", err)
+	}
+	value.ParseMetadata = normalizeParseMetadata(value.ParseMetadata)
 	var err error
 	value.CreatedAt, err = parseTime(createdAt)
 	if err != nil {
@@ -80,4 +93,11 @@ func scanAttachment(row rowScanner) (attachment.Attachment, error) {
 	}
 	value.UpdatedAt, err = parseTime(updatedAt)
 	return value, err
+}
+
+func normalizeParseMetadata(value map[string]string) map[string]string {
+	if value == nil {
+		return map[string]string{}
+	}
+	return value
 }

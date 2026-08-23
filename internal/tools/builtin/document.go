@@ -54,7 +54,7 @@ func documentReadDefinition(name, description string, input, output json.RawMess
 
 func (*ListAttachments) Definition(context.Context) (tool.Definition, error) {
 	return documentReadDefinition(ListAttachmentsName,
-		"List documents attached to the current research project, including stable attachment IDs and local parse status.",
+		"List documents and images attached to the current research project, including stable attachment IDs, format, and local status. Items with format=image are supplied directly through model image input and must not be passed to builtin.document.* tools.",
 		json.RawMessage(`{"type":"object","additionalProperties":false}`),
 		json.RawMessage(`{"type":"object","required":["attachments"],"properties":{"attachments":{"type":"array","items":{"type":"object"}}}}`)), nil
 }
@@ -92,7 +92,7 @@ func (t *ListAttachments) Invoke(ctx context.Context, invocation tool.Invocation
 
 func (*InspectDocument) Definition(context.Context) (tool.Definition, error) {
 	return documentReadDefinition(InspectDocumentName,
-		"Inspect one locally parsed project document and list its page, paragraph, sheet, row, or line locators before reading it.",
+		"Inspect one locally parsed PDF, DOCX, XLSX, TXT, Markdown, CSV, or TSV document and list its locators before reading it. This tool does not accept image attachments; images arrive through model image input or the host vision fallback.",
 		json.RawMessage(`{"type":"object","additionalProperties":false,"required":["attachmentId"],"properties":{"attachmentId":{"type":"string","minLength":1,"maxLength":128}}}`),
 		json.RawMessage(`{"type":"object","required":["attachment","units","totalUnits","truncated"],"properties":{"attachment":{"type":"object"},"units":{"type":"array","items":{"type":"object"}},"totalUnits":{"type":"integer"},"truncated":{"type":"boolean"}}}`)), nil
 }
@@ -136,7 +136,7 @@ func (t *InspectDocument) Invoke(ctx context.Context, invocation tool.Invocation
 
 func (*ReadDocument) Definition(context.Context) (tool.Definition, error) {
 	return documentReadDefinition(ReadDocumentName,
-		"Read bounded locally extracted content from an attached PDF, DOCX, XLSX, TXT, Markdown, or CSV document. Use inspect first to discover precise locators.",
+		"Read bounded locally extracted content from an attached PDF, DOCX, XLSX, TXT, Markdown, CSV, or TSV document. Do not use this tool for image attachments. Use inspect first to discover precise locators.",
 		json.RawMessage(`{"type":"object","additionalProperties":false,"required":["attachmentId"],"properties":{"attachmentId":{"type":"string","minLength":1,"maxLength":128},"locator":{"type":"string","maxLength":512},"offset":{"type":"integer","minimum":0,"maximum":8000000},"maxChars":{"type":"integer","minimum":1,"maximum":180000}}}`),
 		json.RawMessage(`{"type":"object","required":["attachmentId","name","content","locators","offset","characters","truncated"],"properties":{"attachmentId":{"type":"string"},"name":{"type":"string"},"content":{"type":"string"},"locators":{"type":"array","items":{"type":"string"}},"offset":{"type":"integer"},"characters":{"type":"integer"},"truncated":{"type":"boolean"}}}`)), nil
 }
@@ -209,7 +209,7 @@ func (t *ReadDocument) Invoke(ctx context.Context, invocation tool.Invocation) (
 
 func (*SearchDocument) Definition(context.Context) (tool.Definition, error) {
 	return documentReadDefinition(SearchDocumentName,
-		"Search the local parsed content of one project attachment and return bounded snippets with exact source locators.",
+		"Search the local parsed content of one PDF, DOCX, XLSX, TXT, Markdown, CSV, or TSV attachment and return bounded snippets with exact source locators. This tool does not accept image attachments.",
 		json.RawMessage(`{"type":"object","additionalProperties":false,"required":["attachmentId","query"],"properties":{"attachmentId":{"type":"string","minLength":1,"maxLength":128},"query":{"type":"string","minLength":1,"maxLength":200},"limit":{"type":"integer","minimum":1,"maximum":20}}}`),
 		json.RawMessage(`{"type":"object","required":["attachmentId","query","matches"],"properties":{"attachmentId":{"type":"string"},"query":{"type":"string"},"matches":{"type":"array","items":{"type":"object"}}}}`)), nil
 }

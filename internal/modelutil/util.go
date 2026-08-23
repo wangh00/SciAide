@@ -3,10 +3,13 @@ package modelutil
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -26,6 +29,21 @@ const (
 	MaxProviderName    = 64
 	MaxErrorBodyBytes  = 16 * 1024
 )
+
+// NewStreamingHTTPClient limits how long a model endpoint may take to begin
+// its response without imposing a deadline on the full SSE body. A total
+// http.Client.Timeout would abort healthy long-running reasoning and tool
+// turns even while the provider is still streaming data.
+func NewStreamingHTTPClient(responseTimeout time.Duration) *http.Client {
+	if responseTimeout <= 0 {
+		responseTimeout = 60 * time.Second
+	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DialContext = (&net.Dialer{Timeout: responseTimeout, KeepAlive: 30 * time.Second}).DialContext
+	transport.TLSHandshakeTimeout = responseTimeout
+	transport.ResponseHeaderTimeout = responseTimeout
+	return &http.Client{Transport: transport}
+}
 
 func ProviderToolName(qualified string) string {
 	qualified = strings.TrimSpace(qualified)
@@ -112,35 +130,91 @@ func ApplyBearerAndCustomHeaders(req *http.Request, secret []byte, headers map[s
 }
 
 func ClassifyNetwork(err error) error {
+	if errors.Is(err, context.Canceled) {
+		return context.Canceled
+	}
+	if permanentTLSError(err) {
+		return ErrorWithDetails("MODEL_TLS_INVALID", "无法验证模型服务的 TLS 证书，请检查 Base URL、系统时间或证书链。", "TLS certificate verification failed.\n"+err.Error(), false, err)
+	}
 	if errors.Is(err, context.DeadlineExceeded) {
-		return Error("MODEL_TIMEOUT", "模型请求超时，请检查网络或增大超时时间。", false, err)
+		return ErrorWithDetails("MODEL_TIMEOUT", "模型请求暂时超时，SciAide 将自动重试。", "超时阶段：等待模型连接、TLS 握手或响应头。\n服务端未返回 HTTP 错误载荷。", true, err)
 	}
 	var u *url.Error
 	if errors.As(err, &u) && u.Timeout() {
-		return Error("MODEL_TIMEOUT", "模型请求超时，请检查网络或增大超时时间。", false, err)
+		return ErrorWithDetails("MODEL_TIMEOUT", "模型请求暂时超时，SciAide 将自动重试。", "超时阶段：等待模型连接、TLS 握手或响应头。\n服务端未返回 HTTP 错误载荷。", true, err)
 	}
 	return Error("MODEL_UNAVAILABLE", "暂时无法连接模型服务。", true, err)
 }
 
+func permanentTLSError(err error) bool {
+	var verification *tls.CertificateVerificationError
+	var unknownAuthority x509.UnknownAuthorityError
+	var hostname x509.HostnameError
+	var invalid x509.CertificateInvalidError
+	var recordHeader tls.RecordHeaderError
+	return errors.As(err, &verification) || errors.As(err, &unknownAuthority) || errors.As(err, &hostname) || errors.As(err, &invalid) || errors.As(err, &recordHeader)
+}
+
 func ClassifyStatus(status int, body []byte) error {
 	details := ProviderErrorDetails("HTTP response", status, body)
+	var err error
 	switch status {
 	case http.StatusUnauthorized, http.StatusForbidden:
-		return ErrorWithDetails("MODEL_AUTH_FAILED", "模型服务拒绝了密钥，请重新设置 API Key。", details, false, nil)
+		err = ErrorWithDetails("MODEL_AUTH_FAILED", "模型服务拒绝了密钥，请重新设置 API Key。", details, false, nil)
 	case http.StatusNotFound:
-		return ErrorWithDetails("MODEL_NOT_FOUND", "模型或 API 地址不存在，请检查 Base URL、接口协议和 Model ID。", details, false, nil)
+		err = ErrorWithDetails("MODEL_NOT_FOUND", "模型或 API 地址不存在，请检查 Base URL、接口协议和 Model ID。", details, false, nil)
+	case http.StatusRequestTimeout:
+		err = ErrorWithDetails("MODEL_TIMEOUT", "模型服务请求暂时超时，SciAide 将自动重试。", details, true, nil)
 	case http.StatusTooManyRequests:
-		return ErrorWithDetails("MODEL_RATE_LIMITED", "模型服务繁忙或已达到限额，请稍后重试。", details, true, nil)
+		err = ErrorWithDetails("MODEL_RATE_LIMITED", "模型服务繁忙或已达到限额，请稍后重试。", details, true, nil)
 	default:
 		if status >= 500 {
-			return ErrorWithDetails("MODEL_UNAVAILABLE", "模型服务暂时不可用。", details, true, fmt.Errorf("HTTP %d", status))
+			err = ErrorWithDetails("MODEL_UNAVAILABLE", "模型服务暂时不可用。", details, true, fmt.Errorf("HTTP %d", status))
+			break
 		}
 		message := fmt.Sprintf("模型服务拒绝了请求（HTTP %d）。", status)
 		if detail := ProviderErrorMessage(body); detail != "" {
 			message = fmt.Sprintf("模型服务拒绝了请求（HTTP %d）：%s", status, detail)
 		}
-		return ErrorWithDetails("MODEL_REQUEST_REJECTED", message, details, false, fmt.Errorf("HTTP %d", status))
+		err = ErrorWithDetails("MODEL_REQUEST_REJECTED", message, details, false, fmt.Errorf("HTTP %d", status))
 	}
+	var appErr *apperr.Error
+	if errors.As(err, &appErr) {
+		appErr.HTTPStatus = status
+	}
+	return err
+}
+
+func ClassifyStatusWithHeaders(status int, headers http.Header, body []byte) error {
+	err := ClassifyStatus(status, body)
+	var appErr *apperr.Error
+	if errors.As(err, &appErr) && appErr.Retryable {
+		appErr.RetryAfter = ParseRetryAfter(headers.Get("Retry-After"))
+	}
+	return err
+}
+
+func IsRetryable(err error) bool {
+	var appErr *apperr.Error
+	return errors.As(err, &appErr) && appErr.Retryable
+}
+
+func RetryAfter(err error) time.Duration {
+	var appErr *apperr.Error
+	if errors.As(err, &appErr) {
+		return appErr.RetryAfter
+	}
+	return 0
+}
+
+func StreamErrorRetryable(errorType, code string) bool {
+	value := strings.ToLower(strings.TrimSpace(errorType + " " + code))
+	for _, marker := range []string{"overloaded", "rate_limit", "server_error", "internal_error", "service_unavailable", "temporarily_unavailable", "timeout_error"} {
+		if strings.Contains(value, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func ProviderErrorMessage(body []byte) string {
@@ -261,9 +335,16 @@ func ErrorWithDetails(code, message, details string, retryable bool, cause error
 }
 
 func ParseRetryAfter(value string) time.Duration {
-	seconds, err := strconv.Atoi(strings.TrimSpace(value))
+	value = strings.TrimSpace(value)
+	seconds, err := strconv.Atoi(value)
 	if err == nil && seconds > 0 && seconds <= 60 {
 		return time.Duration(seconds) * time.Second
+	}
+	if at, parseErr := http.ParseTime(value); parseErr == nil {
+		delay := time.Until(at)
+		if delay > 0 {
+			return min(delay, 60*time.Second)
+		}
 	}
 	return 0
 }

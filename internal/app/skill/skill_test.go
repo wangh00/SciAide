@@ -140,7 +140,7 @@ func (r *memoryRepository) SetProjectSkill(_ context.Context, value ProjectSkill
 func (r *memoryRepository) GetProjectSkill(_ context.Context, projectID, skillID string) (ProjectSkill, error) {
 	value, exists := r.projects[projectID+"/"+skillID]
 	if !exists {
-		return ProjectSkill{}, fmt.Errorf("not found")
+		return ProjectSkill{}, ErrProjectSkillNotFound
 	}
 	return value, nil
 }
@@ -226,6 +226,32 @@ func TestServiceBlocksUnavailableSkillAndLoadsOnlyEnabledIntegrityMatch(t *testi
 	loaded, err := service.LoadEnabled(context.Background(), "project")
 	if err != nil || len(loaded) != 1 || loaded[0].Instructions == "" || loaded[0].Skill.Availability != AvailabilityAvailable {
 		t.Fatalf("LoadEnabled() = %#v, %v", loaded, err)
+	}
+}
+
+func TestEnableAllProjectSkillsEnablesAvailablePackages(t *testing.T) {
+	firstManifest := validManifest()
+	secondManifest := firstManifest
+	secondManifest.ID, secondManifest.Name, secondManifest.Version = "academic-writing", "Academic writing", "2.0.0"
+	secondManifest.Requires = Requirements{}
+	first := InstalledSkill{Manifest: firstManifest, Integrity: IntegrityValid}
+	second := InstalledSkill{Manifest: secondManifest, Integrity: IntegrityValid}
+	repository := &memoryRepository{
+		installed: map[string]InstalledSkill{skillKey(firstManifest.ID, firstManifest.Version): first, skillKey(secondManifest.ID, secondManifest.Version): second},
+		projects:  map[string]ProjectSkill{"project/" + firstManifest.ID: {ProjectID: "project", SkillID: firstManifest.ID, Version: firstManifest.Version, Enabled: false, Priority: 25}},
+	}
+	service := NewService(repository, fixedCatalog{}, fixedTools{"builtin.workspace.read_text"}, "0.3.0-dev")
+	result, err := service.EnableAllProjectSkills(context.Background(), "project")
+	if err != nil || result.Enabled != 2 || result.AlreadyEnabled != 0 || result.Skipped != 0 {
+		t.Fatalf("EnableAllProjectSkills() = %#v, %v", result, err)
+	}
+	links, err := service.ListProjectSkills(context.Background(), "project")
+	if err != nil || len(links) != 2 || !links[0].Enabled || !links[1].Enabled {
+		t.Fatalf("enabled project Skills = %#v, %v", links, err)
+	}
+	result, err = service.EnableAllProjectSkills(context.Background(), "project")
+	if err != nil || result.Enabled != 0 || result.AlreadyEnabled != 2 || result.Skipped != 0 {
+		t.Fatalf("idempotent EnableAllProjectSkills() = %#v, %v", result, err)
 	}
 }
 

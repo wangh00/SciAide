@@ -41,8 +41,11 @@ func TestToolRepositoryPersistsResultAndUsesOptimisticTransition(t *testing.T) {
 		t.Fatal(err)
 	}
 	loaded, err := repository.Get(ctx, call.ID)
-	if err != nil || loaded.Status != tool.CallCompleted || loaded.Result == nil || len(loaded.Result.Artifacts) != 1 || string(loaded.Result.Structured) != `{"bytes":5}` || !loaded.Idempotent || len(loaded.Permissions) != 1 {
+	if err != nil || loaded.Status != tool.CallCompleted || loaded.Result == nil || len(loaded.Result.Artifacts) != 1 || string(loaded.Result.Structured) != `{"bytes":5}` || !loaded.Idempotent || len(loaded.Permissions) != 1 || loaded.ModelContextVersion != tool.ModelContextSnapshotVersion || loaded.ModelContext == "" {
 		t.Fatalf("loaded = %#v, %v", loaded, err)
+	}
+	if loaded.ModelContext != tool.BuildModelContextSnapshot(call.ID, "", result) {
+		t.Fatalf("model context snapshot changed: %q", loaded.ModelContext)
 	}
 	if err := repository.Finish(ctx, call.ID, tool.CallRunning, tool.CallCompleted, result, "", "", result.CreatedAt); !errors.Is(err, tool.ErrTransitionConflict) {
 		t.Fatalf("duplicate finish = %v", err)

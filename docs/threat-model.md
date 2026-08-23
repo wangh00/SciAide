@@ -147,6 +147,8 @@ React WebView
 - checkpoint 请求不提供 Tool Definitions，历史消息以 JSON 不可信数据输入；摘要不能扩大权限、改变系统规则或证明历史内容真实。
 - checkpoint 保存精确消息边界和 SHA256。加载时哈希不一致会中止请求，原始消息和 Tool/Provider 状态不会被 checkpoint 覆盖或删除。
 - Provider 原生 Turn 仍按不可拆分组进入最近上下文；checkpoint 不保存 thinking、signature、encrypted reasoning 等隐藏协议载荷。
+- 聊天界面只接受 Provider 明确标记的 Responses `summary_text` 作为可展示推理摘要。Anthropic 原始 `thinking`、签名、redacted thinking 和加密推理载荷不得进入 UI；摘要按普通不可信文本渲染。
+- 推理摘要是 Run 到 Assistant Message 的只读查询投影，不属于 MessagePart，不进入后续模型上下文，也不会触发额外模型请求。没有安全摘要时只展示思考档位、观察状态和推理 Token。
 
 残余风险：模型生成的摘要是有损且可能遗漏细节，SHA256 只能证明本地摘要未被修改，不能证明摘要语义完整。超长会话和多次压缩仍可能降低回答准确性，关键科研数据与引用必须回到原始文献、Workspace 文件和聊天记录复核。
 
@@ -159,6 +161,25 @@ React WebView
 - 向量只写入当前项目私有缓存，并通过 Chunk 外键级联删除；模型不能指定索引路径、向量维度或项目 ID。
 - 查询向量缓存不保存搜索词明文，只保存绑定 Embedding 配置指纹的 SHA256；缓存限定在当前项目 IndexVersion，最多 512 条并按最近最少使用清理。
 - Embedding 服务失败不能关闭知识检索：查询降级为 FTS5/BM25，构建失败不替换上一版 ready 索引。
+
+## P5.6 知识库运维与质量诊断控制
+
+- 解析质量由已持久化的解析器元数据确定，只用于提示文本覆盖率、结构数量、截断和空内容风险；它不证明论文结论、表格数值或提取文本在语义上正确。
+- 扫描件或无可提取文本的 PDF 标记为文本不足，并明确当前不内置 OCR；客户端不会因此隐式下载模型、上传原件或请求第三方识别服务。
+- 用户显式取消的排队/运行任务进入 `cancelled`，文档保持待处理且不会被普通搜索或项目刷新自动重新排队；只有显式重试或新的 IndexVersion 迁移可以重新提交。
+- 应用退出导致的上下文取消与用户取消分离：前者重新排队以便启动恢复，后者保持取消。任务提交索引事务后使用独立有界上下文完成元数据，避免“索引已替换但任务被记为取消”。
+- 单文档重建在项目本地 SQLite 事务中删除旧 Chunk 并插入新 Chunk；提交前上一份 ready 索引继续可查询，失败或取消不能暴露半成品。
+- 固定语料评测不接触用户文档或外部网络；语料、查询和确定性向量均在仓库内，分别约束 BM25 与混合检索的命中、召回、排序和可定位性。
+
+## P6.0 斜杠命令与手动压缩控制
+
+- 只有输入框完整内容精确匹配已注册 `/command` 时才执行本地动作；未知名称、带空格参数、路径和普通斜杠文本不被解释为特权命令。
+- 本地命令不创建 Message、Run 或 ToolCall，不进入模型上下文，也不接受模型、文档、Skill 或 MCP 返回内容动态注册命令。
+- `/mcp` 二级面板只读取脱敏后的 Server 与 CapabilitySnapshot；开启状态来自 `ready/degraded` 运行态而不是配置文本，Tools/Resources/Prompts 仍视为不可信显示数据，面板不读取 SecretEnv 明文。
+- MCP 启动/关闭继续调用既有 Service 生命周期接口，不能绕过 enabled、trust、SecretStore、Transport 或 ToolRegistry 边界。Skill 二级列表只允许把当前项目已启用且完整可用的 `$skill-id` 插入输入框，不能在面板内暗中启用 Skill。
+- `/compact` 仅允许最新 Run 处于终态时执行，固定该 Run 的消息边界并复核操作期间会话未切换；已有 checkpoint 必须先通过 SHA256 完整性校验。
+- 手动压缩继续使用无 Tool Definition 的科研摘要请求，历史以不可信 JSON 数据输入。每轮保存独立 revision 和精确边界，原始消息、Provider Turn、ToolCall 与 Citation 均不删除。
+- 前端只接收 revision、边界和来源计数，不接收 checkpoint 摘要正文；模型调用 Token 继续计入最近 Run 的用量统计。
 
 | Prompt 注入诱导工具执行 | P2 | JSON Schema、PolicyEngine、Approval、预算 |
 | 路径穿越和 junction/symlink | P2 | 已实现 PathGuard、`os.Root`、Workspace 根和安全回归测试；写路径仍在 P2.6 |

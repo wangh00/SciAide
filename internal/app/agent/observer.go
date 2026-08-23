@@ -25,8 +25,20 @@ func (o *EventObserver) ContentStarted(run chat.Run) {
 func (o *EventObserver) ContentDelta(run chat.Run, delta string) {
 	o.sink.PublishRunEvent(run.ID, "content.delta", map[string]any{"messageId": run.AssistantMessageID, "delta": delta})
 }
+func (o *EventObserver) ActivityCompleted(run chat.Run, step chat.RunStep) {
+	o.sink.PublishRunEvent(run.ID, "activity.completed", map[string]any{"step": step})
+}
+func (o *EventObserver) ReasoningUpdated(run chat.Run) {
+	o.sink.PublishRunEvent(run.ID, "run.reasoning", map[string]any{"run": run})
+}
 func (o *EventObserver) UsageUpdated(run chat.Run, usage model.Usage) {
 	o.sink.PublishRunEvent(run.ID, "usage.updated", usage)
+}
+func (o *EventObserver) Retrying(run chat.Run, retry RetryStatus) {
+	o.sink.PublishRunEvent(run.ID, "run.retrying", map[string]any{"messageId": run.AssistantMessageID, "retry": retry})
+}
+func (o *EventObserver) RetryRecovered(run chat.Run) {
+	o.sink.PublishRunEvent(run.ID, "run.retry.recovered", map[string]any{"runId": run.ID})
 }
 func (o *EventObserver) ApprovalRequired(run chat.Run, coordination permission.Coordination) {
 	o.sink.PublishRunEvent(run.ID, "approval.required", coordination)

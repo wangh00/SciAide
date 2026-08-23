@@ -33,6 +33,13 @@ func TestValidateSaveTransportBoundaries(t *testing.T) {
 	}
 }
 
+func TestNormalizeSaveUsesCodexToolTimeoutDefault(t *testing.T) {
+	value := normalizeSave(SaveCommand{})
+	if value.TimeoutSeconds != DefaultToolTimeoutSeconds {
+		t.Fatalf("default tool timeout = %d", value.TimeoutSeconds)
+	}
+}
+
 type memoryRepository struct{ values map[string]Server }
 
 func (r *memoryRepository) Save(_ context.Context, value Server) error {
@@ -144,5 +151,32 @@ func TestRecoverRuntimeClearsStaleOnlineState(t *testing.T) {
 	}
 	if repository.values["ready"].Status != StatusDisconnected || repository.values["disabled"].Status != StatusDisabled {
 		t.Fatalf("values = %#v", repository.values)
+	}
+}
+
+func TestRuntimeChangedKeepsLastCapabilitiesInDegradedState(t *testing.T) {
+	repository := &memoryRepository{values: map[string]Server{
+		"browser": {ID: "browser", Enabled: true, Status: StatusReady},
+	}}
+	service := NewService(repository, nil)
+	service.RuntimeChanged("browser", CapabilitySnapshot{
+		ProtocolVersion: "2025-11-25",
+		Tools:           []ToolInfo{{QualifiedName: "mcp.browser.list_pages"}},
+	}, fmt.Errorf("temporary tools/list failure"))
+	value := repository.values["browser"]
+	if value.Status != StatusDegraded || value.ToolCount != 1 || value.LastError == "" {
+		t.Fatalf("degraded runtime = %#v", value)
+	}
+}
+
+func TestStartingMarksAnOnlineSessionAsReinitializing(t *testing.T) {
+	repository := &memoryRepository{values: map[string]Server{
+		"browser": {ID: "browser", Enabled: true, Status: StatusReady, ToolCount: 12},
+	}}
+	service := NewService(repository, nil)
+	service.Starting("browser")
+	value := repository.values["browser"]
+	if value.Status != StatusInitializing || value.ToolCount != 0 {
+		t.Fatalf("reinitializing runtime = %#v", value)
 	}
 }

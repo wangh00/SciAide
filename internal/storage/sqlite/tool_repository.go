@@ -41,7 +41,7 @@ func (r *ToolRepository) Get(ctx context.Context, id string) (tool.Call, error) 
 	if err != nil {
 		return value, err
 	}
-	value.Result, err = r.getResult(ctx, value.ID)
+	value.Result, value.ModelContext, value.ModelContextVersion, err = r.getResult(ctx, value.ID)
 	return value, err
 }
 
@@ -67,7 +67,7 @@ func (r *ToolRepository) ListByRun(ctx context.Context, runID string) ([]tool.Ca
 		return nil, err
 	}
 	for index := range values {
-		values[index].Result, err = r.getResult(ctx, values[index].ID)
+		values[index].Result, values[index].ModelContext, values[index].ModelContextVersion, err = r.getResult(ctx, values[index].ID)
 		if err != nil {
 			return nil, err
 		}
@@ -140,8 +140,9 @@ func finishToolCall(ctx context.Context, tx *sql.Tx, id string, expected, next t
 	if affected, _ := result.RowsAffected(); affected != 1 {
 		return tool.ErrTransitionConflict
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO tool_results(tool_call_id, status, text_content, structured_json, artifacts_json, citations_json, truncated, meta_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, value.Status, value.Text, structured, string(artifacts), string(citations), value.Truncated, string(meta), formatTime(value.CreatedAt)); err != nil {
+	modelContext := tool.BuildModelContextSnapshot(id, errorCode, value)
+	if _, err := tx.ExecContext(ctx, `INSERT INTO tool_results(tool_call_id, status, text_content, structured_json, artifacts_json, citations_json, truncated, meta_json, created_at, model_context_text, model_context_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, value.Status, value.Text, structured, string(artifacts), string(citations), value.Truncated, string(meta), formatTime(value.CreatedAt), modelContext, tool.ModelContextSnapshotVersion); err != nil {
 		return fmt.Errorf("insert tool result: %w", err)
 	}
 	return nil
@@ -246,32 +247,33 @@ func scanToolCall(row rowScanner) (tool.Call, error) {
 	return value, nil
 }
 
-func (r *ToolRepository) getResult(ctx context.Context, callID string) (*tool.Result, error) {
+func (r *ToolRepository) getResult(ctx context.Context, callID string) (*tool.Result, string, int, error) {
 	var value tool.Result
 	var structured sql.NullString
-	var artifacts, citations, meta, createdAt string
-	err := r.db.QueryRowContext(ctx, `SELECT status, text_content, structured_json, artifacts_json, citations_json, truncated, meta_json, created_at FROM tool_results WHERE tool_call_id = ?`, callID).Scan(&value.Status, &value.Text, &structured, &artifacts, &citations, &value.Truncated, &meta, &createdAt)
+	var artifacts, citations, meta, createdAt, modelContext string
+	var modelContextVersion int
+	err := r.db.QueryRowContext(ctx, `SELECT status, text_content, structured_json, artifacts_json, citations_json, truncated, meta_json, created_at, model_context_text, model_context_version FROM tool_results WHERE tool_call_id = ?`, callID).Scan(&value.Status, &value.Text, &structured, &artifacts, &citations, &value.Truncated, &meta, &createdAt, &modelContext, &modelContextVersion)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
+		return nil, "", 0, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, "", 0, err
 	}
 	if structured.Valid {
 		value.Structured = json.RawMessage(structured.String)
 	}
 	if err := json.Unmarshal([]byte(artifacts), &value.Artifacts); err != nil {
-		return nil, err
+		return nil, "", 0, err
 	}
 	if err := json.Unmarshal([]byte(citations), &value.Citations); err != nil {
-		return nil, err
+		return nil, "", 0, err
 	}
 	if err := json.Unmarshal([]byte(meta), &value.Meta); err != nil {
-		return nil, err
+		return nil, "", 0, err
 	}
 	value.CreatedAt, err = parseTime(createdAt)
 	if err != nil {
-		return nil, err
+		return nil, "", 0, err
 	}
-	return &value, nil
+	return &value, modelContext, modelContextVersion, nil
 }

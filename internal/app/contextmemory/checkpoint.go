@@ -30,6 +30,15 @@ type Checkpoint struct {
 	CreatedAt             time.Time            `json:"createdAt"`
 }
 
+type CompactionResult struct {
+	Revision              int    `json:"revision"`
+	ThroughMessageID      string `json:"throughMessageId"`
+	SourceMessageCount    int    `json:"sourceMessageCount"`
+	SourceEstimatedTokens int    `json:"sourceEstimatedTokens"`
+	Passes                int    `json:"passes"`
+	Complete              bool   `json:"complete"`
+}
+
 type Repository interface {
 	Latest(ctx context.Context, conversationID string) (Checkpoint, bool, error)
 	Save(ctx context.Context, value Checkpoint) (Checkpoint, error)

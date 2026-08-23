@@ -4,13 +4,16 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 type Error struct {
 	Code          string
 	UserMessage   string
 	Details       string
+	HTTPStatus    int
 	Retryable     bool
+	RetryAfter    time.Duration
 	CorrelationID string
 	Cause         error
 }

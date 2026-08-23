@@ -25,6 +25,89 @@ type semanticProvider struct {
 	calls int
 }
 
+type blockingEmbeddingProvider struct {
+	started    chan struct{}
+	cancelled  chan struct{}
+	once       sync.Once
+	cancelOnce sync.Once
+}
+
+type blockingCompleteRepository struct {
+	knowledge.Repository
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+type rebuildAttachmentLoader struct {
+	delegate    knowledge.AttachmentLoader
+	mu          sync.Mutex
+	armed       bool
+	intercepted bool
+	started     chan struct{}
+	release     chan struct{}
+	replacement string
+}
+
+func (l *rebuildAttachmentLoader) List(ctx context.Context, projectID string) ([]attachment.Attachment, error) {
+	return l.delegate.List(ctx, projectID)
+}
+
+func (l *rebuildAttachmentLoader) Parsed(ctx context.Context, projectID, attachmentID string) (attachment.Attachment, document.Parsed, error) {
+	value, parsed, err := l.delegate.Parsed(ctx, projectID, attachmentID)
+	if err != nil {
+		return value, parsed, err
+	}
+	l.mu.Lock()
+	intercept := l.armed && !l.intercepted
+	if intercept {
+		l.intercepted = true
+		close(l.started)
+	}
+	l.mu.Unlock()
+	if !intercept {
+		return value, parsed, nil
+	}
+	select {
+	case <-ctx.Done():
+		return attachment.Attachment{}, document.Parsed{}, ctx.Err()
+	case <-l.release:
+	}
+	parsed.Units = []document.Unit{{Index: 1, Kind: "paragraph", Locator: "lines:1-1", Content: l.replacement}}
+	parsed.ExtractedRunes = len([]rune(l.replacement))
+	parsed.Truncated = false
+	return value, parsed, nil
+}
+
+func (l *rebuildAttachmentLoader) arm() {
+	l.mu.Lock()
+	l.armed = true
+	l.mu.Unlock()
+}
+
+func (*blockingEmbeddingProvider) Current(context.Context) (embedding.Identity, bool, error) {
+	return embedding.Identity{ModelID: "blocking", Dimensions: 2, Fingerprint: "blocking-fixture"}, true, nil
+}
+
+func (p *blockingEmbeddingProvider) Embed(ctx context.Context, _ embedding.Identity, _ []string) ([][]float32, error) {
+	p.once.Do(func() { close(p.started) })
+	<-ctx.Done()
+	if p.cancelled != nil {
+		p.cancelOnce.Do(func() { close(p.cancelled) })
+	}
+	return nil, ctx.Err()
+}
+
+func (r *blockingCompleteRepository) Complete(ctx context.Context, work knowledge.Work, chunkCount int, at time.Time) error {
+	r.once.Do(func() { close(r.started) })
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-r.release:
+		return r.Repository.Complete(ctx, work, chunkCount, at)
+	}
+}
+
 func (*semanticProvider) Current(context.Context) (embedding.Identity, bool, error) {
 	return embedding.Identity{ModelID: "fixture-embedding", Dimensions: 2, Fingerprint: "fixture-fingerprint"}, true, nil
 }
@@ -284,5 +367,274 @@ func TestHybridSearchFindsSemanticEvidenceAndFallsBackToBM25(t *testing.T) {
 	}
 	if cacheEntries != 1 || cacheHits != 2 || hashLength != 64 || plaintextMatches != 0 {
 		t.Fatalf("query cache = entries %d, hits %d, hash length %d, plaintext matches %d", cacheEntries, cacheHits, hashLength, plaintextMatches)
+	}
+}
+
+func TestCancelledKnowledgeJobStaysCancelledUntilExplicitRetry(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	store, err := sqlite.Open(ctx, filepath.Join(root, "cancel-retry.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	projects := project.NewService(sqlite.NewProjectRepository(store.DB()), filepath.Join(root, "workspaces"), filepath.Join(root, "trash"))
+	selectedProject, err := projects.Create(ctx, "Cancel", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	attachments := attachment.NewService(sqlite.NewAttachmentRepository(store.DB()), projects)
+	service := knowledge.NewService(sqlite.NewKnowledgeRepository(store.DB()), projects, attachments)
+	source := filepath.Join(root, "paper.txt")
+	if err := os.WriteFile(source, []byte("Reproducible kinase evidence."), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	batch, err := attachments.ImportPaths(ctx, selectedProject.ID, []string{source})
+	if err != nil || len(batch.Errors) != 0 || len(batch.Attachments) != 1 {
+		t.Fatalf("import = %#v, %v", batch, err)
+	}
+	if err := service.Enqueue(ctx, batch.Attachments[0]); err != nil {
+		t.Fatal(err)
+	}
+	documents, err := service.ListDocuments(ctx, selectedProject.ID)
+	if err != nil || len(documents) != 1 || documents[0].Job == nil || documents[0].Job.Status != knowledge.JobQueued || documents[0].Progress != 5 {
+		t.Fatalf("queued documents = %#v, %v", documents, err)
+	}
+	if _, err := service.CancelDocument(ctx, selectedProject.ID, documents[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.RefreshProject(ctx, selectedProject.ID); err != nil {
+		t.Fatal(err)
+	}
+	documents, err = service.ListDocuments(ctx, selectedProject.ID)
+	if err != nil || documents[0].Job == nil || documents[0].Job.Status != knowledge.JobCancelled {
+		t.Fatalf("cancelled task was auto-requeued = %#v, %v", documents, err)
+	}
+	if _, err := service.RetryDocument(ctx, selectedProject.ID, documents[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	result, err := service.Search(ctx, selectedProject.ID, "kinase evidence", 5)
+	if err != nil || len(result.Matches) != 1 || result.Matches[0].Name != "paper.txt" {
+		t.Fatalf("retried search = %#v, %v", result, err)
+	}
+}
+
+func TestRunningKnowledgeJobCanBeExplicitlyCancelled(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	store, err := sqlite.Open(ctx, filepath.Join(root, "running-cancel.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	projects := project.NewService(sqlite.NewProjectRepository(store.DB()), filepath.Join(root, "workspaces"), filepath.Join(root, "trash"))
+	selectedProject, err := projects.Create(ctx, "Running cancel", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	attachments := attachment.NewService(sqlite.NewAttachmentRepository(store.DB()), projects)
+	provider := &blockingEmbeddingProvider{started: make(chan struct{}), cancelled: make(chan struct{})}
+	service := knowledge.NewService(sqlite.NewKnowledgeRepository(store.DB()), projects, attachments)
+	if err := service.SetEmbeddingProvider(provider); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	source := filepath.Join(root, "blocking.txt")
+	if err := os.WriteFile(source, []byte("Blocking semantic evidence."), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	batch, err := attachments.ImportPaths(ctx, selectedProject.ID, []string{source})
+	if err != nil || len(batch.Attachments) != 1 {
+		t.Fatalf("import = %#v, %v", batch, err)
+	}
+	if err := service.Enqueue(ctx, batch.Attachments[0]); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-provider.started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Embedding stage did not start")
+	}
+	documents, err := service.ListDocuments(ctx, selectedProject.ID)
+	if err != nil || len(documents) != 1 || documents[0].Job == nil || documents[0].Job.Status != knowledge.JobRunning {
+		t.Fatalf("running documents = %#v, %v", documents, err)
+	}
+	otherProject, err := projects.Create(ctx, "Other project", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.CancelDocument(ctx, otherProject.ID, documents[0].ID); err == nil {
+		t.Fatal("cross-project cancellation was accepted")
+	}
+	select {
+	case <-provider.cancelled:
+		t.Fatal("cross-project cancellation reached the running task")
+	case <-time.After(50 * time.Millisecond):
+	}
+	if _, err := service.CancelDocument(ctx, selectedProject.ID, documents[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		documents, err = service.ListDocuments(ctx, selectedProject.ID)
+		if err == nil && documents[0].Job != nil && documents[0].Job.Status == knowledge.JobCancelled && documents[0].Status == knowledge.DocumentPending {
+			if documents[0].ChunkCount != 0 {
+				t.Fatalf("cancelled running document retained chunks = %#v", documents[0])
+			}
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("running task was not cancelled: %#v, %v", documents, err)
+}
+
+func TestKnowledgeJobCannotBeCancelledAfterCompletionCommitStarts(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	store, err := sqlite.Open(ctx, filepath.Join(root, "commit-handoff.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	projects := project.NewService(sqlite.NewProjectRepository(store.DB()), filepath.Join(root, "workspaces"), filepath.Join(root, "trash"))
+	selectedProject, err := projects.Create(ctx, "Commit handoff", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	attachments := attachment.NewService(sqlite.NewAttachmentRepository(store.DB()), projects)
+	repository := &blockingCompleteRepository{Repository: sqlite.NewKnowledgeRepository(store.DB()), started: make(chan struct{}), release: make(chan struct{})}
+	service := knowledge.NewService(repository, projects, attachments)
+	if _, err := service.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	released := false
+	defer func() {
+		if !released {
+			close(repository.release)
+		}
+	}()
+	source := filepath.Join(root, "commit.txt")
+	if err := os.WriteFile(source, []byte("Committed knowledge evidence."), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	batch, err := attachments.ImportPaths(ctx, selectedProject.ID, []string{source})
+	if err != nil || len(batch.Attachments) != 1 {
+		t.Fatalf("import = %#v, %v", batch, err)
+	}
+	if err := service.Enqueue(ctx, batch.Attachments[0]); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-repository.started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("knowledge completion did not reach the commit handoff")
+	}
+	documents, err := service.ListDocuments(ctx, selectedProject.ID)
+	if err != nil || len(documents) != 1 {
+		t.Fatalf("committing documents = %#v, %v", documents, err)
+	}
+	if _, err := service.CancelDocument(ctx, selectedProject.ID, documents[0].ID); err == nil || !strings.Contains(err.Error(), "no longer cancellable") {
+		t.Fatalf("late cancellation error = %v", err)
+	}
+	close(repository.release)
+	released = true
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		documents, err = service.ListDocuments(ctx, selectedProject.ID)
+		if err == nil && len(documents) == 1 && documents[0].Job != nil && documents[0].Job.Status == knowledge.JobCompleted {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("committing task did not complete: %#v, %v", documents, err)
+}
+
+func TestRebuildKeepsReadyIndexSearchableUntilAtomicReplacement(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	store, err := sqlite.Open(ctx, filepath.Join(root, "rebuild.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	projects := project.NewService(sqlite.NewProjectRepository(store.DB()), filepath.Join(root, "workspaces"), filepath.Join(root, "trash"))
+	selectedProject, err := projects.Create(ctx, "Rebuild", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	attachments := attachment.NewService(sqlite.NewAttachmentRepository(store.DB()), projects)
+	loader := &rebuildAttachmentLoader{
+		delegate: attachments, started: make(chan struct{}), release: make(chan struct{}),
+		replacement: "Replacementbiomarker is now authoritative.",
+	}
+	service := knowledge.NewService(sqlite.NewKnowledgeRepository(store.DB()), projects, loader)
+	if _, err := service.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+
+	source := filepath.Join(root, "rebuild.txt")
+	if err := os.WriteFile(source, []byte("Legacykinase remains searchable."), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	batch, err := attachments.ImportPaths(ctx, selectedProject.ID, []string{source})
+	if err != nil || len(batch.Errors) != 0 || len(batch.Attachments) != 1 {
+		t.Fatalf("import = %#v, %v", batch, err)
+	}
+	if err := service.Enqueue(ctx, batch.Attachments[0]); err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := service.Search(ctx, selectedProject.ID, "legacykinase", 5)
+	if err != nil || len(legacy.Matches) != 1 {
+		t.Fatalf("initial search = %#v, %v", legacy, err)
+	}
+	documents, err := service.ListDocuments(ctx, selectedProject.ID)
+	if err != nil || len(documents) != 1 {
+		t.Fatalf("documents = %#v, %v", documents, err)
+	}
+	loader.arm()
+	if _, err := service.RebuildDocument(ctx, selectedProject.ID, documents[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-loader.started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("rebuild did not enter the controlled parsing stage")
+	}
+
+	searchContext, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	legacy, err = service.Search(searchContext, selectedProject.ID, "legacykinase", 5)
+	if err != nil || len(legacy.Matches) != 1 {
+		t.Fatalf("ready index was unavailable during rebuild = %#v, %v", legacy, err)
+	}
+	close(loader.release)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		documents, err = service.ListDocuments(ctx, selectedProject.ID)
+		if err == nil && len(documents) == 1 && documents[0].Job != nil && documents[0].Job.Status == knowledge.JobCompleted {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err != nil || len(documents) != 1 || documents[0].Job == nil || documents[0].Job.Status != knowledge.JobCompleted {
+		t.Fatalf("rebuild did not complete = %#v, %v", documents, err)
+	}
+	legacy, err = service.Search(ctx, selectedProject.ID, "legacykinase", 5)
+	if err != nil || len(legacy.Matches) != 0 {
+		t.Fatalf("legacy content remained after replacement = %#v, %v", legacy, err)
+	}
+	replacement, err := service.Search(ctx, selectedProject.ID, "replacementbiomarker", 5)
+	if err != nil || len(replacement.Matches) != 1 {
+		t.Fatalf("replacement search = %#v, %v", replacement, err)
 	}
 }

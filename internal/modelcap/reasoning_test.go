@@ -48,7 +48,7 @@ func TestProtocolReasoningInferenceMirrorsProviderVariants(t *testing.T) {
 		{name: "new GPT supports xhigh", protocol: ProtocolOpenAIResponses, model: "gpt-5.4", want: []ReasoningLevel{ReasoningLow, ReasoningMedium, ReasoningHigh, ReasoningXHigh}},
 		{name: "Claude thinking budget maps five tiers", protocol: ProtocolAnthropic, model: "claude-sonnet-4-5", want: orderedReasoningLevels},
 		{name: "fixed reasoning uses provider default", protocol: ProtocolOpenAIChat, model: "deepseek-reasoner", want: nil},
-		{name: "DeepSeek v4 supports max", protocol: ProtocolOpenAIChat, model: "deepseek-v4-flash", want: []ReasoningLevel{ReasoningLow, ReasoningMedium, ReasoningHigh, ReasoningMax}},
+		{name: "DeepSeek v4 supports xhigh and max", protocol: ProtocolOpenAIChat, model: "deepseek-v4-flash", want: orderedReasoningLevels},
 		{name: "custom compatible optimistically tries full ladder", protocol: ProtocolOpenAIChat, model: "lab-model", want: orderedReasoningLevels},
 	}
 	for _, tt := range tests {

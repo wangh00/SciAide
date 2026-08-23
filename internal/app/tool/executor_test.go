@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -72,6 +73,34 @@ func TestExecutorCompletesAndPersistsBoundedResult(t *testing.T) {
 	}
 }
 
+func TestExecutorMarksOutcomeUnknownWhenResultCannotBePersisted(t *testing.T) {
+	invoked := false
+	implementation := executorFixtureTool{definition: executorDefinition(), invoke: func(context.Context, Invocation) (Result, error) {
+		invoked = true
+		return Result{Status: ResultSuccess, Text: "side effect may have happened"}, nil
+	}}
+	executor, repository, call := readyExecutor(t, implementation, ExecutorOptions{})
+	repository.finishErr = errors.New("fixture persistence failure")
+	_, err := executor.Execute(context.Background(), "project", call.ID)
+	if err == nil || !strings.Contains(err.Error(), "outcome may be unknown") {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	loaded := repository.calls[call.ID]
+	if !invoked || loaded.Status != CallInterrupted || loaded.ErrorCode != ErrorCodeOutcomeUnknown || loaded.Result != nil {
+		t.Fatalf("unknown outcome call = %#v", loaded)
+	}
+}
+
+func TestExecutorDefaultInvocationHasNoGlobalDeadline(t *testing.T) {
+	implementation := executorFixtureTool{definition: executorDefinition(), invoke: func(context.Context, Invocation) (Result, error) {
+		return Result{Status: ResultSuccess}, nil
+	}}
+	executor, _, _ := readyExecutor(t, implementation, ExecutorOptions{})
+	if executor.timeout != 0 {
+		t.Fatalf("default invocation timeout = %s", executor.timeout)
+	}
+}
+
 func TestExecutorContainsPanicAndDoesNotLeakDetails(t *testing.T) {
 	implementation := executorFixtureTool{definition: executorDefinition(), invoke: func(context.Context, Invocation) (Result, error) {
 		panic("secret panic details")
@@ -123,6 +152,17 @@ func TestExecutorTimeoutAndExplicitCancellation(t *testing.T) {
 				t.Fatalf("result = %#v, %v; call=%#v", result.value, result.err, repository.calls[call.ID])
 			}
 		})
+	}
+}
+
+func TestExecutorClassifiesImplementationDeadlineAsTimeout(t *testing.T) {
+	implementation := executorFixtureTool{definition: executorDefinition(), invoke: func(context.Context, Invocation) (Result, error) {
+		return Result{}, fmt.Errorf("MCP tool call failed: %w", context.DeadlineExceeded)
+	}}
+	executor, repository, call := readyExecutor(t, implementation, ExecutorOptions{})
+	execution, err := executor.Execute(context.Background(), "project", call.ID)
+	if err != nil || execution.ErrorCode != ErrorCodeTimeout || repository.calls[call.ID].Status != CallFailed {
+		t.Fatalf("Execute(deadline) = %#v, %v; call=%#v", execution, err, repository.calls[call.ID])
 	}
 }
 

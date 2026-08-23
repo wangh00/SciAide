@@ -1,8 +1,13 @@
 package attachment
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"fmt"
+	"image"
+	"image/color"
+	"image/png"
 	"os"
 	"path/filepath"
 	"testing"
@@ -159,6 +164,90 @@ func TestParsedRejectsReplacedProjectMarker(t *testing.T) {
 	}
 	if _, _, err := service.Parsed(context.Background(), "project", batch.Attachments[0].ID); err == nil {
 		t.Fatal("replaced project marker was trusted")
+	}
+}
+
+func TestImportAndResolvePNGImage(t *testing.T) {
+	workspace := t.TempDir()
+	createPrivateFixture(t, workspace)
+	imageValue := image.NewNRGBA(image.Rect(0, 0, 2, 1))
+	imageValue.Set(0, 0, color.NRGBA{R: 10, G: 20, B: 30, A: 255})
+	imageValue.Set(1, 0, color.NRGBA{R: 200, G: 210, B: 220, A: 255})
+	var encoded bytes.Buffer
+	if err := png.Encode(&encoded, imageValue); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(workspace, "figure.png")
+	if err := os.WriteFile(source, encoded.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	repository := &attachmentMemoryRepository{values: map[string]Attachment{}}
+	service := NewService(repository, attachmentProjectLoader{value: project.Project{ID: "project", WorkspacePath: workspace}})
+	batch, err := service.ImportPaths(context.Background(), "project", []string{source})
+	if err != nil || len(batch.Errors) != 0 || len(batch.Attachments) != 1 {
+		t.Fatalf("image import = %#v, %v", batch, err)
+	}
+	value := batch.Attachments[0]
+	if value.Status != StatusReady || value.Format != document.FormatImage || value.MIMEType != "image/png" || value.UnitCount != 0 || value.ParseMetadata["width"] != "2" || value.ParseMetadata["height"] != "1" {
+		t.Fatalf("image attachment = %#v", value)
+	}
+	part, err := service.ResolveImage(context.Background(), "project", value.ID)
+	if err != nil || part.Type != "input_image" || part.MediaType != "image/png" || part.AttachmentID != value.ID || part.Name != "figure.png" {
+		t.Fatalf("resolved image = %#v, %v", part, err)
+	}
+	if _, _, err := service.Parsed(context.Background(), "project", value.ID); err == nil {
+		t.Fatal("image was accepted by the parsed-document path")
+	}
+	if storedValue := repository.values[value.ID]; storedValue.Status != StatusReady || storedValue.ErrorMessage != "" {
+		t.Fatalf("document inspection changed image status = %#v", storedValue)
+	}
+	failed := repository.values[value.ID]
+	failed.Status = StatusFailed
+	failed.ErrorMessage = `unsupported document format "image"`
+	repository.values[value.ID] = failed
+	reimported, err := service.ImportPaths(context.Background(), "project", []string{source})
+	if err != nil || len(reimported.Errors) != 0 || len(reimported.Attachments) != 1 || reimported.Attachments[0].Status != StatusReady || reimported.Attachments[0].ErrorMessage != "" {
+		t.Fatalf("image reimport repair = %#v, %v", reimported, err)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(part.Data)
+	if err != nil || !bytes.Equal(decoded, encoded.Bytes()) {
+		t.Fatalf("resolved image bytes changed: %v", err)
+	}
+	stored := filepath.Join(workspace, project.PrivateDirectoryName, filepath.FromSlash(value.StorageRelativePath))
+	if err := os.WriteFile(stored, append([]byte(nil), encoded.Bytes()[:encoded.Len()-1]...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.ResolveImage(context.Background(), "project", value.ID); err == nil {
+		t.Fatal("tampered image object was resolved")
+	}
+}
+
+func TestImportUsesVerifiedImageContentInsteadOfExtension(t *testing.T) {
+	workspace := t.TempDir()
+	createPrivateFixture(t, workspace)
+	// A VP8X WebP header for a 1100x688 canvas, deliberately named .jpg.
+	encoded := []byte{
+		'R', 'I', 'F', 'F', 22, 0, 0, 0, 'W', 'E', 'B', 'P',
+		'V', 'P', '8', 'X', 10, 0, 0, 0, 0, 0, 0, 0,
+		0x4b, 0x04, 0, 0xaf, 0x02, 0,
+	}
+	source := filepath.Join(workspace, "downloaded.jpg")
+	if err := os.WriteFile(source, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	repository := &attachmentMemoryRepository{values: map[string]Attachment{}}
+	service := NewService(repository, attachmentProjectLoader{value: project.Project{ID: "project", WorkspacePath: workspace}})
+	batch, err := service.ImportPaths(context.Background(), "project", []string{source})
+	if err != nil || len(batch.Errors) != 0 || len(batch.Attachments) != 1 {
+		t.Fatalf("renamed WebP import = %#v, %v", batch, err)
+	}
+	value := batch.Attachments[0]
+	if value.OriginalName != "downloaded.jpg" || value.MIMEType != "image/webp" || value.ParseMetadata["width"] != "1100" || value.ParseMetadata["height"] != "688" {
+		t.Fatalf("renamed WebP attachment = %#v", value)
+	}
+	part, err := service.ResolveImage(context.Background(), "project", value.ID)
+	if err != nil || part.MediaType != "image/webp" || part.Name != "downloaded.jpg" {
+		t.Fatalf("resolved renamed WebP = %#v, %v", part, err)
 	}
 }
 

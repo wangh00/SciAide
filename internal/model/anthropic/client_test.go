@@ -3,6 +3,7 @@ package anthropic
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/wangh00/SciAide/internal/app/modelprofile"
+	"github.com/wangh00/SciAide/internal/apperr"
 	"github.com/wangh00/SciAide/internal/model"
 	"github.com/wangh00/SciAide/internal/modelcap"
 	"github.com/wangh00/SciAide/internal/modelutil"
@@ -89,6 +91,82 @@ func TestStreamMapsMessagesToolsThinkingAndUsage(t *testing.T) {
 	done, err := stream.Recv()
 	if err != nil || done.FinishReason != "tool_calls" {
 		t.Fatalf("done = %#v, %v", done, err)
+	}
+}
+
+func TestStreamMapsUserImageToAnthropicBase64Source(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body payload
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if len(body.Messages) != 1 || body.Messages[0].Role != "user" || len(body.Messages[0].Content) != 2 {
+			t.Fatalf("messages = %#v", body.Messages)
+		}
+		textBlock, imageBlock := body.Messages[0].Content[0], body.Messages[0].Content[1]
+		if textBlock.Type != "text" || !strings.Contains(textBlock.Text, "<untrusted_conversation_content>") || imageBlock.Type != "image" || imageBlock.Source == nil || imageBlock.Source.Type != "base64" || imageBlock.Source.MediaType != "image/jpeg" || imageBlock.Source.Data != "AQID" {
+			t.Fatalf("content = %#v", body.Messages[0].Content)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"type\":\"message_stop\"}\n\n")
+	}))
+	defer server.Close()
+	stream, err := New(modelprofile.Profile{BaseURL: server.URL, ModelID: "fixture", TimeoutSeconds: 5}, nil).Stream(context.Background(), model.ChatRequest{Messages: []model.Message{{Role: model.RoleUser, Content: "inspect", Parts: []model.ContentPart{{Type: "input_image", MediaType: "image/jpeg", Data: "AQID"}}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+}
+
+func TestStreamClassifiesOversizedToolArguments(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, `data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call","name":"fixture","input":{}}}`+"\n\n")
+		payload, _ := json.Marshal(map[string]any{"type": "content_block_delta", "index": 0, "delta": map[string]any{"type": "input_json_delta", "partial_json": strings.Repeat("x", modelutil.MaxToolArgsBytes+1)}})
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", payload)
+	}))
+	defer server.Close()
+	stream, err := New(modelprofile.Profile{BaseURL: server.URL, ModelID: "fixture", TimeoutSeconds: 5}, nil).Stream(context.Background(), model.ChatRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	_, err = stream.Recv()
+	var appErr *apperr.Error
+	if !errors.As(err, &appErr) || appErr.Code != "MODEL_TOOL_CALL_INVALID" || appErr.Retryable {
+		t.Fatalf("error = %#v", err)
+	}
+}
+
+func TestStreamMapsAnthropicStopReasonsWithoutInventingCompletion(t *testing.T) {
+	tests := []struct {
+		stopReason string
+		want       string
+	}{
+		{stopReason: "end_turn", want: "stop"},
+		{stopReason: "stop_sequence", want: "stop"},
+		{stopReason: "max_tokens", want: "length"},
+		{stopReason: "pause_turn", want: "incomplete"},
+		{stopReason: "refusal", want: "refusal"},
+	}
+	for _, test := range tests {
+		t.Run(test.stopReason, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = fmt.Fprintf(w, "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":%q}}\n\n", test.stopReason)
+				_, _ = io.WriteString(w, "data: {\"type\":\"message_stop\"}\n\n")
+			}))
+			defer server.Close()
+			stream, err := New(modelprofile.Profile{BaseURL: server.URL, ModelID: "fixture", TimeoutSeconds: 5}, nil).Stream(context.Background(), model.ChatRequest{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer stream.Close()
+			done, err := stream.Recv()
+			if err != nil || done.Type != model.EventDone || done.FinishReason != test.want {
+				t.Fatalf("done = %#v, %v", done, err)
+			}
+		})
 	}
 }
 
@@ -254,6 +332,45 @@ func TestClientReusesNegotiatedLegacyModeWithinRun(t *testing.T) {
 	}
 }
 
+func TestClientRetriesWithoutRejectedCacheControlAndRemembersCapability(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		var body payload
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		latest := body.Messages[len(body.Messages)-1].Content
+		hasCacheControl := len(latest) > 0 && latest[len(latest)-1].CacheControl != nil
+		if requests == 1 {
+			if !hasCacheControl || latest[len(latest)-1].CacheControl.Type != "ephemeral" {
+				t.Fatalf("cache breakpoint = %#v", latest)
+			}
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `{"error":{"message":"Unknown field: cache_control"}}`)
+			return
+		}
+		if hasCacheControl {
+			t.Fatalf("unsupported cache control was retried on request %d", requests)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"type\":\"message_stop\"}\n\n")
+	}))
+	defer server.Close()
+	client := New(modelprofile.Profile{BaseURL: server.URL, ModelID: "custom", TimeoutSeconds: 5}, nil)
+	request := model.ChatRequest{PromptCacheKey: "conversation", Messages: []model.Message{{Role: model.RoleUser, Content: "read"}}}
+	for range 2 {
+		stream, err := client.Stream(context.Background(), request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = stream.Close()
+	}
+	if requests != 3 {
+		t.Fatalf("requests = %d", requests)
+	}
+}
+
 func TestStreamHonorsContextCancellation(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -274,5 +391,23 @@ func TestStreamHonorsContextCancellation(t *testing.T) {
 	_, err = stream.Recv()
 	if err == nil || ctx.Err() == nil {
 		t.Fatalf("Recv() error = %v, context = %v", err, ctx.Err())
+	}
+}
+
+func TestStreamMarksPrematureEOFAsRetryable(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	stream, err := New(modelprofile.Profile{BaseURL: server.URL, ModelID: "fixture", TimeoutSeconds: 5}, nil).Stream(context.Background(), model.ChatRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	_, err = stream.Recv()
+	var appErr *apperr.Error
+	if !errors.As(err, &appErr) || appErr.Code != "MODEL_STREAM_INTERRUPTED" || !appErr.Retryable {
+		t.Fatalf("Recv() error = %#v", err)
 	}
 }

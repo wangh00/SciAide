@@ -11,7 +11,6 @@ import (
 )
 
 const (
-	defaultInvocationTimeout  = 30 * time.Second
 	defaultMaxTextBytes       = 256 * 1024
 	defaultMaxStructuredBytes = 256 * 1024
 )
@@ -48,8 +47,8 @@ type Executor struct {
 
 func NewExecutor(registry Registry, service *Service, projects RunProjectResolver, options ExecutorOptions) *Executor {
 	timeout := options.InvocationTimeout
-	if timeout <= 0 {
-		timeout = defaultInvocationTimeout
+	if timeout < 0 {
+		timeout = 0
 	}
 	maxText := options.MaxTextBytes
 	if maxText <= 0 {
@@ -95,7 +94,10 @@ func (e *Executor) Execute(ctx context.Context, projectID, callID string) (Execu
 	if err != nil {
 		return e.finishFailure(ctx, call, ErrorCodeInvocationFailed, "工具当前不可用。", e.now(), nil)
 	}
-	invokeCtx, cancel := context.WithTimeout(ctx, e.timeout)
+	invokeCtx, cancel := context.WithCancel(ctx)
+	if e.timeout > 0 {
+		invokeCtx, cancel = context.WithTimeout(ctx, e.timeout)
+	}
 	if !e.register(call.ID, cancel) {
 		cancel()
 		return Execution{}, fmt.Errorf("tool call is already executing")
@@ -126,7 +128,7 @@ func (e *Executor) Execute(ctx context.Context, projectID, callID string) (Execu
 	switch {
 	case panicOccurred:
 		return e.finishFailure(ctx, call, ErrorCodePanic, "工具执行异常。", started, &duration)
-	case errors.Is(invokeCtx.Err(), context.DeadlineExceeded):
+	case errors.Is(invokeCtx.Err(), context.DeadlineExceeded) || errors.Is(invokeErr, context.DeadlineExceeded):
 		return e.finishFailure(ctx, call, ErrorCodeTimeout, "工具执行超时。", started, &duration)
 	case errors.Is(invokeCtx.Err(), context.Canceled) || errors.Is(invokeErr, context.Canceled):
 		return e.finishCancelled(call, duration)
@@ -146,7 +148,7 @@ func (e *Executor) Execute(ctx context.Context, projectID, callID string) (Execu
 	}
 	updated, err := e.service.Finish(context.Background(), call.ID, result, code, message)
 	if err != nil {
-		return Execution{}, err
+		return Execution{}, e.outcomeUnknown(call.ID, err)
 	}
 	return Execution{CallID: updated.ID, Result: *updated.Result, ErrorCode: code, DurationMillis: duration.Milliseconds()}, nil
 }
@@ -182,7 +184,7 @@ func (e *Executor) finishCancelled(call Call, duration time.Duration) (Execution
 	result := Result{Status: ResultCancelled, Text: "工具执行已取消。", Meta: ResultMeta{DurationMillis: duration.Milliseconds()}}
 	updated, err := e.service.Finish(context.Background(), call.ID, result, ErrorCodeCancelled, "工具执行已取消")
 	if err != nil {
-		return Execution{}, err
+		return Execution{}, e.outcomeUnknown(call.ID, err)
 	}
 	return Execution{CallID: updated.ID, Result: *updated.Result, ErrorCode: ErrorCodeCancelled, DurationMillis: duration.Milliseconds()}, nil
 }
@@ -198,9 +200,20 @@ func (e *Executor) finishFailure(_ context.Context, call Call, code, publicMessa
 	result := Result{Status: ResultError, Text: publicMessage, Meta: ResultMeta{DurationMillis: elapsed.Milliseconds()}}
 	updated, err := e.service.Finish(context.Background(), call.ID, result, code, strings.TrimSuffix(publicMessage, "。"))
 	if err != nil {
-		return Execution{}, err
+		return Execution{}, e.outcomeUnknown(call.ID, err)
 	}
 	return Execution{CallID: updated.ID, Result: *updated.Result, ErrorCode: code, DurationMillis: elapsed.Milliseconds()}, nil
+}
+
+func (e *Executor) outcomeUnknown(callID string, persistErr error) error {
+	current, getErr := e.service.Get(context.Background(), callID)
+	if getErr == nil && current.Status.Terminal() {
+		return persistErr
+	}
+	if _, markErr := e.service.MarkOutcomeUnknown(context.Background(), callID); markErr != nil {
+		return fmt.Errorf("tool outcome may be unknown; persist result: %v; mark outcome: %w", persistErr, markErr)
+	}
+	return fmt.Errorf("tool outcome may be unknown: %w", persistErr)
 }
 
 func (e *Executor) limitResult(value Result) (Result, string, string) {

@@ -1,8 +1,10 @@
 # SciAide 开发环境
 
-> 当前阶段：P2 Agent Loop、内置工具与权限系统。开发/验证仍使用 P0 建立的统一门禁脚本。
+> 当前阶段：P6.0 已完成，正在进行 P6 前的对话稳定性与模型请求诊断加固。真实进度见 [`CURRENT_STATE.md`](CURRENT_STATE.md)，开发/验证仍使用 P0 建立的统一门禁脚本。
 
 前端不得直接导入被忽略的 `frontend/wailsjs`。Wails 运行时调用通过已提交的 `frontend/src/lib/wailsRuntime.ts` Bridge，后端 Facade 通过 `window.go` 动态边界访问，从而保证 GitHub Actions 的干净检出也能独立完成 TypeScript/Vite 构建。
+
+识图兜底不携带编译期模型配置、端点或 API Key，也不依赖根目录 `config.json`。用户在“模型与 API → 识图兜底”中维护自定义视觉渠道；元数据进入 SQLite，API Key 只进入 Windows Credential Manager。`scripts/p0-check.ps1` 和 `scripts/build-release.ps1` 可在没有任何识图渠道的干净源码树直接运行。不要把裸 `go test`、`go build` 或 `wails build` 当作正式发布入口，也不得在日志和提交中包含密钥内容。
 
 ## 基线
 
@@ -57,7 +59,12 @@ npm --version
 
 # P0 质量门禁
 .\scripts\p0-check.ps1
+
+# Windows x64 生产构建（包含 PE 架构与 SHA256 校验）
+.\scripts\build-release.ps1
 ```
+
+不要直接运行裸 `wails build` 生成发布文件；当前机器的 Go 默认目标是 `386`，发布脚本会在不修改用户全局环境的前提下强制使用 `windows/amd64`。
 
 为验证不会意外联网，可在依赖安装完成后执行离线检查：
 

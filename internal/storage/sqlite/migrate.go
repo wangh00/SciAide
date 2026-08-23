@@ -54,31 +54,115 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 				if item.version == 1 && legacyBaselineChecksum(existingChecksum) && legacyBaselineChecksum(item.checksum) {
 					continue
 				}
+				// An early local 0.3.0 build applied migration 43 before its
+				// retired-Skill predicate was narrowed to builtin sources. Both
+				// forms create the same schema; accept only this exact checksum
+				// pair so those databases can start without weakening validation.
+				if item.version == 43 && visionFallbackMigrationChecksum(existingChecksum) && visionFallbackMigrationChecksum(item.checksum) {
+					continue
+				}
 				return fmt.Errorf("migration %d checksum changed", item.version)
 			}
 			continue
 		case err != sql.ErrNoRows:
 			return fmt.Errorf("read migration %d: %w", item.version, err)
 		}
+		if migrationNeedsForeignKeysDisabled(item) {
+			if err := applyMigrationWithForeignKeysDisabled(ctx, db, item); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := applyMigrationTransaction(ctx, db, item, false); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
-		tx, err := db.BeginTx(ctx, nil)
+type transactionBeginner interface {
+	BeginTx(context.Context, *sql.TxOptions) (*sql.Tx, error)
+}
+
+func migrationNeedsForeignKeysDisabled(item migration) bool {
+	return strings.Contains(item.sql, "-- sciaide:foreign_keys_off")
+}
+
+func applyMigrationWithForeignKeysDisabled(ctx context.Context, db *sql.DB, item migration) error {
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("open migration %d connection: %w", item.version, err)
+	}
+	defer conn.Close()
+	var foreignKeys int
+	if err := conn.QueryRowContext(ctx, "PRAGMA foreign_keys").Scan(&foreignKeys); err != nil {
+		return fmt.Errorf("read migration %d foreign key state: %w", item.version, err)
+	}
+	if _, err := conn.ExecContext(ctx, "PRAGMA foreign_keys=OFF"); err != nil {
+		return fmt.Errorf("disable foreign keys for migration %d: %w", item.version, err)
+	}
+	applyErr := applyMigrationTransaction(ctx, conn, item, true)
+	restoreValue := "OFF"
+	if foreignKeys != 0 {
+		restoreValue = "ON"
+	}
+	_, restoreErr := conn.ExecContext(ctx, "PRAGMA foreign_keys="+restoreValue)
+	if applyErr != nil {
+		return applyErr
+	}
+	if restoreErr != nil {
+		return fmt.Errorf("restore foreign keys after migration %d: %w", item.version, restoreErr)
+	}
+	var restored int
+	if err := conn.QueryRowContext(ctx, "PRAGMA foreign_keys").Scan(&restored); err != nil || restored != foreignKeys {
+		return fmt.Errorf("foreign key state was not restored after migration %d", item.version)
+	}
+	return nil
+}
+
+func applyMigrationTransaction(ctx context.Context, beginner transactionBeginner, item migration, validateForeignKeys bool) error {
+	tx, err := beginner.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin migration %d: %w", item.version, err)
+	}
+	if _, err := tx.ExecContext(ctx, item.sql); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("apply migration %d: %w", item.version, err)
+	}
+	if validateForeignKeys {
+		rows, err := tx.QueryContext(ctx, "PRAGMA foreign_key_check")
 		if err != nil {
-			return fmt.Errorf("begin migration %d: %w", item.version, err)
-		}
-		if _, err := tx.ExecContext(ctx, item.sql); err != nil {
 			_ = tx.Rollback()
-			return fmt.Errorf("apply migration %d: %w", item.version, err)
+			return fmt.Errorf("validate migration %d foreign keys: %w", item.version, err)
 		}
-		if _, err := tx.ExecContext(ctx,
-			"INSERT INTO schema_migrations(version, name, checksum, applied_at) VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
-			item.version, item.name, item.checksum,
-		); err != nil {
+		if rows.Next() {
+			var table, parent string
+			var rowID sql.NullInt64
+			var foreignKeyID int
+			scanErr := rows.Scan(&table, &rowID, &parent, &foreignKeyID)
+			_ = rows.Close()
 			_ = tx.Rollback()
-			return fmt.Errorf("record migration %d: %w", item.version, err)
+			if scanErr != nil {
+				return fmt.Errorf("read migration %d foreign key violation: %w", item.version, scanErr)
+			}
+			return fmt.Errorf("migration %d violates foreign key %s[%d] -> %s", item.version, table, foreignKeyID, parent)
 		}
-		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("commit migration %d: %w", item.version, err)
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			_ = tx.Rollback()
+			return fmt.Errorf("validate migration %d foreign keys: %w", item.version, err)
 		}
+		_ = rows.Close()
+	}
+	if _, err := tx.ExecContext(ctx,
+		"INSERT INTO schema_migrations(version, name, checksum, applied_at) VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+		item.version, item.name, item.checksum,
+	); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("record migration %d: %w", item.version, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit migration %d: %w", item.version, err)
 	}
 	return nil
 }
@@ -87,6 +171,16 @@ func legacyBaselineChecksum(value string) bool {
 	switch value {
 	case "e9a66fd9fe954e369fb43f68be6a764ed35cbdbbc142bb6c5ec490954e69f3db",
 		"ef8938a8fc66c530015ada08c0db37f3300abc1bdcd4166e8142021345287c7f":
+		return true
+	default:
+		return false
+	}
+}
+
+func visionFallbackMigrationChecksum(value string) bool {
+	switch value {
+	case "c5fe0fa7881cf9100223617b2e3b41f9eaca65f86cd92deef770993bdd72a13e",
+		"c66f00f44c6a5f3fdcec62b9c52491a63b7a17b885c23c585aac014c6ede63f6":
 		return true
 	default:
 		return false

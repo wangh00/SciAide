@@ -2,6 +2,7 @@ package bootstrap
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"log/slog"
 	"os"
@@ -18,6 +19,7 @@ import (
 	"github.com/wangh00/SciAide/internal/app/knowledge"
 	"github.com/wangh00/SciAide/internal/app/mcpserver"
 	"github.com/wangh00/SciAide/internal/app/modelprofile"
+	"github.com/wangh00/SciAide/internal/app/multimodal"
 	"github.com/wangh00/SciAide/internal/app/permission"
 	"github.com/wangh00/SciAide/internal/app/project"
 	"github.com/wangh00/SciAide/internal/app/skill"
@@ -33,7 +35,7 @@ import (
 	wailstransport "github.com/wangh00/SciAide/internal/transport/wails"
 )
 
-const Version = "0.3.0"
+const Version = "0.4.0"
 
 type Options struct {
 	RootDir              string
@@ -111,6 +113,12 @@ func New(options Options) (*Application, error) {
 	store, err := sqlite.Open(context.Background(), filepath.Join(dirs.Data, "sciaide.db"))
 	if err != nil {
 		return fail(fmt.Errorf("open storage: %w", err))
+	}
+	if retired, err := retireBuiltinSkillPackages(context.Background(), store.DB(), dirs.Skills, filepath.Join(dirs.Backups, "skills")); err != nil {
+		_ = store.Close()
+		return fail(fmt.Errorf("retire legacy built-in Skills: %w", err))
+	} else if retired > 0 {
+		logger.Info("archived retired built-in Skill packages", "count", retired)
 	}
 	lifecycle := wailstransport.NewLifecycleContext()
 	projectService := project.NewService(sqlite.NewProjectRepository(store.DB()), dirs.Workspaces, dirs.Trash)
@@ -206,7 +214,13 @@ func New(options Options) (*Application, error) {
 		_ = store.Close()
 		return fail(fmt.Errorf("configure chat snapshot: %w", err))
 	}
-	agentLoop := agent.NewLoop(runRepository, conversationRepository, toolService, toolRegistry, approvalCoordinator, toolExecutor, gateway.NewResolver(profileService), agent.NewEventObserver(chatService), agent.Options{Terminator: terminator, Checkpoints: contextCheckpointService, SkillContexts: skillService})
+	if err := chatService.SetSnapshotRunSteps(runRepository); err != nil {
+		_ = store.Close()
+		return fail(fmt.Errorf("configure chat run steps: %w", err))
+	}
+	modelResolver := gateway.NewResolver(profileService)
+	multimodalService := multimodal.NewService(sqlite.NewVisionFallbackRepository(store.DB()), secrets, multimodal.NewProtocolResolver())
+	agentLoop := agent.NewLoop(runRepository, conversationRepository, toolService, toolRegistry, approvalCoordinator, toolExecutor, modelResolver, agent.NewEventObserver(chatService), agent.Options{Terminator: terminator, Checkpoints: contextCheckpointService, SkillContexts: skillService, Images: attachmentService, Multimodal: multimodalService})
 	if err := chatService.SetRunner(agent.NewRunner(agentLoop)); err != nil {
 		_ = store.Close()
 		return fail(fmt.Errorf("configure agent loop: %w", err))
@@ -241,8 +255,8 @@ func New(options Options) (*Application, error) {
 		SystemFacade:       wailstransport.NewSystemFacade(Version),
 		ProjectFacade:      wailstransport.NewProjectFacade(lifecycle, projectService),
 		ConversationFacade: wailstransport.NewConversationFacade(lifecycle, conversationService),
-		ModelFacade:        wailstransport.NewModelFacade(lifecycle, profileService),
-		ChatFacade:         wailstransport.NewChatFacade(lifecycle, chatService, permissionEngine),
+		ModelFacade:        wailstransport.NewModelFacade(lifecycle, profileService, multimodalService),
+		ChatFacade:         wailstransport.NewChatFacade(lifecycle, chatService, permissionEngine, agentLoop),
 		PermissionFacade:   wailstransport.NewPermissionFacade(lifecycle, permissionEngine, approvalCoordinator, chatService),
 		ToolFacade:         wailstransport.NewToolFacade(lifecycle, toolExecutor, toolRegistry),
 		MCPFacade:          wailstransport.NewMCPFacade(lifecycle, mcpService),
@@ -258,6 +272,39 @@ func New(options Options) (*Application, error) {
 		store:              store,
 		transientRoot:      transientRoot,
 	}, nil
+}
+
+func retireBuiltinSkillPackages(ctx context.Context, db *sql.DB, skillsRoot, backupRoot string) (int, error) {
+	rows, err := db.QueryContext(ctx, `SELECT package_rel_path FROM retired_builtin_skill_packages ORDER BY package_rel_path`)
+	if err != nil {
+		return 0, err
+	}
+	paths := make([]string, 0)
+	for rows.Next() {
+		var value string
+		if err := rows.Scan(&value); err != nil {
+			_ = rows.Close()
+			return 0, err
+		}
+		paths = append(paths, value)
+	}
+	if err := rows.Close(); err != nil {
+		return 0, err
+	}
+	archived := 0
+	for _, value := range paths {
+		moved, err := skillpkg.ArchiveRetiredPackage(skillsRoot, backupRoot, value)
+		if err != nil {
+			return archived, err
+		}
+		if moved {
+			archived++
+		}
+		if _, err := db.ExecContext(ctx, `DELETE FROM retired_builtin_skill_packages WHERE package_rel_path=?`, value); err != nil {
+			return archived, err
+		}
+	}
+	return archived, nil
 }
 
 type registryToolAvailability struct{ registry *tool.MemoryRegistry }

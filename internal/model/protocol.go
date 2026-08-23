@@ -2,7 +2,10 @@ package model
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
+	"strings"
 
 	"github.com/wangh00/SciAide/internal/modelcap"
 )
@@ -25,9 +28,30 @@ type Message struct {
 }
 
 type ContentPart struct {
-	Type    string          `json:"type"`
-	Text    string          `json:"text,omitempty"`
-	Payload json.RawMessage `json:"payload,omitempty"`
+	Type         string          `json:"type"`
+	Text         string          `json:"text,omitempty"`
+	MediaType    string          `json:"mediaType,omitempty"`
+	Data         string          `json:"data,omitempty"`
+	Name         string          `json:"name,omitempty"`
+	AttachmentID string          `json:"attachmentId,omitempty"`
+	Payload      json.RawMessage `json:"payload,omitempty"`
+}
+
+func ImageDataURL(part ContentPart) (string, error) {
+	if part.Type != "input_image" {
+		return "", fmt.Errorf("content part is not an input image")
+	}
+	mediaType := strings.ToLower(strings.TrimSpace(part.MediaType))
+	if mediaType != "image/jpeg" && mediaType != "image/png" && mediaType != "image/webp" {
+		return "", fmt.Errorf("unsupported image media type %q", part.MediaType)
+	}
+	if part.Data == "" || base64.StdEncoding.DecodedLen(len(part.Data)) > 20<<20 {
+		return "", fmt.Errorf("image data is empty or exceeds 20 MiB")
+	}
+	if _, err := base64.StdEncoding.DecodeString(part.Data); err != nil {
+		return "", fmt.Errorf("image data is not valid base64")
+	}
+	return "data:" + mediaType + ";base64," + part.Data, nil
 }
 
 type ToolDefinition struct {
@@ -40,6 +64,8 @@ type ChatRequest struct {
 	Messages                []Message               `json:"messages"`
 	Tools                   []ToolDefinition        `json:"tools,omitempty"`
 	ProviderTurns           []ProviderTurn          `json:"providerTurns,omitempty"`
+	PromptCacheKey          string                  `json:"promptCacheKey,omitempty"`
+	DisableStreaming        bool                    `json:"disableStreaming,omitempty"`
 	RequestedReasoningLevel modelcap.ReasoningLevel `json:"requestedReasoningLevel,omitempty"`
 	ResolvedReasoningLevel  modelcap.ReasoningLevel `json:"resolvedReasoningLevel,omitempty"`
 }
@@ -50,7 +76,9 @@ type ChatRequest struct {
 // replayed byte-for-byte in meaning, but must not be exposed by chat snapshots.
 type ProviderItem struct {
 	Ordinal int             `json:"ordinal"`
+	ItemID  string          `json:"itemId,omitempty"`
 	Type    string          `json:"type"`
+	Phase   string          `json:"phase,omitempty"`
 	CallID  string          `json:"callId,omitempty"`
 	Payload json.RawMessage `json:"payload"`
 }
@@ -87,6 +115,9 @@ const (
 type Event struct {
 	Type         EventType       `json:"type"`
 	Text         string          `json:"text,omitempty"`
+	ItemID       string          `json:"itemId,omitempty"`
+	Ordinal      int             `json:"ordinal,omitempty"`
+	Phase        string          `json:"phase,omitempty"`
 	FinishReason string          `json:"finishReason,omitempty"`
 	ToolCall     *ToolCall       `json:"toolCall,omitempty"`
 	ProviderItem *ProviderItem   `json:"providerItem,omitempty"`

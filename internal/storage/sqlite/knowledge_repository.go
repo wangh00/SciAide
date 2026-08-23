@@ -279,6 +279,76 @@ func (r *KnowledgeRepository) ListDocuments(ctx context.Context, projectID strin
 	return values, nil
 }
 
+func (r *KnowledgeRepository) ListLatestJobs(ctx context.Context, projectID string) ([]knowledge.ImportJob, error) {
+	rows, err := r.db.QueryContext(ctx, knowledgeJobSelect+` j WHERE j.project_id=? AND NOT EXISTS (
+		SELECT 1 FROM knowledge_import_jobs newer
+		WHERE newer.document_id=j.document_id AND (newer.created_at>j.created_at OR (newer.created_at=j.created_at AND newer.id>j.id))
+	) ORDER BY j.created_at DESC,j.id`, strings.TrimSpace(projectID))
+	if err != nil {
+		return nil, fmt.Errorf("list latest knowledge jobs: %w", err)
+	}
+	defer rows.Close()
+	values := []knowledge.ImportJob{}
+	for rows.Next() {
+		value, err := scanKnowledgeJob(rows)
+		if err != nil {
+			return nil, err
+		}
+		values = append(values, value)
+	}
+	return values, rows.Err()
+}
+
+func (r *KnowledgeRepository) CancelQueued(ctx context.Context, projectID, documentID string, at time.Time) (knowledge.ImportJob, bool, error) {
+	projectID, documentID = strings.TrimSpace(projectID), strings.TrimSpace(documentID)
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return knowledge.ImportJob{}, false, fmt.Errorf("begin queued knowledge cancellation: %w", err)
+	}
+	defer tx.Rollback()
+	job, err := scanKnowledgeJob(tx.QueryRowContext(ctx, knowledgeJobSelect+` WHERE project_id=? AND document_id=? AND status='queued' ORDER BY created_at DESC,id DESC LIMIT 1`, projectID, documentID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return knowledge.ImportJob{}, false, nil
+	}
+	if err != nil {
+		return knowledge.ImportJob{}, false, fmt.Errorf("read queued knowledge job: %w", err)
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE knowledge_import_jobs SET status='cancelled',stage='cancelled',error_message='',completed_at=?,updated_at=? WHERE id=? AND project_id=? AND status='queued'`, formatTime(at), formatTime(at), job.ID, projectID)
+	if err != nil {
+		return knowledge.ImportJob{}, false, fmt.Errorf("cancel queued knowledge job: %w", err)
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return knowledge.ImportJob{}, false, nil
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE knowledge_documents SET status='pending',error_message='',updated_at=? WHERE id=? AND project_id=?`, formatTime(at), documentID, projectID); err != nil {
+		return knowledge.ImportJob{}, false, fmt.Errorf("mark cancelled knowledge document pending: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return knowledge.ImportJob{}, false, err
+	}
+	job.Status, job.Stage, job.CompletedAt, job.UpdatedAt = knowledge.JobCancelled, "cancelled", &at, at
+	return job, true, nil
+}
+
+func (r *KnowledgeRepository) CancelRunning(ctx context.Context, work knowledge.Work, at time.Time) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin running knowledge cancellation: %w", err)
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `UPDATE knowledge_import_jobs SET status='cancelled',stage='cancelled',error_message='',completed_at=?,updated_at=? WHERE id=? AND project_id=? AND status='running'`, formatTime(at), formatTime(at), work.Job.ID, work.Job.ProjectID)
+	if err != nil {
+		return fmt.Errorf("cancel running knowledge job: %w", err)
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return fmt.Errorf("running knowledge cancellation conflict")
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE knowledge_documents SET status='pending',error_message='',updated_at=? WHERE id=? AND project_id=?`, formatTime(at), work.Document.ID, work.Document.ProjectID); err != nil {
+		return fmt.Errorf("mark cancelled knowledge document pending: %w", err)
+	}
+	return tx.Commit()
+}
+
 func (r *KnowledgeRepository) GetDocument(ctx context.Context, projectID, documentID string) (knowledge.Document, bool, error) {
 	value, err := scanKnowledgeDocument(r.db.QueryRowContext(ctx, knowledgeDocumentSelect+` WHERE project_id=? AND id=?`, strings.TrimSpace(projectID), strings.TrimSpace(documentID)))
 	if errors.Is(err, sql.ErrNoRows) {

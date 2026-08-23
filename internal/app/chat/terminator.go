@@ -17,6 +17,10 @@ type TerminationRepository interface {
 	ListToolCallIDs(ctx context.Context, runID string) ([]string, error)
 }
 
+type terminationEventReader interface {
+	EventByID(ctx context.Context, eventID string) (events.Envelope, error)
+}
+
 // Terminator owns the durable, cross-aggregate cancellation boundary. It is
 // deliberately separate from the runner scheduler so a waiting-approval Run
 // can be cancelled even when no goroutine is active.
@@ -59,7 +63,7 @@ func (t *Terminator) Cancel(ctx context.Context, runID string) (Run, error) {
 	event.Timestamp = at
 	run, changed, err := t.repository.CancelRun(ctx, runID, "RUN_CANCELLED", "已停止生成", at, event)
 	if err == nil && changed && t.publisher != nil {
-		t.publisher.Publish(ctx, event)
+		t.publisher.Publish(ctx, t.persistedEvent(ctx, event))
 	}
 	return run, err
 }
@@ -86,9 +90,21 @@ func (t *Terminator) Fail(ctx context.Context, runID, errorCode, errorMessage st
 	event.Timestamp = at
 	run, changed, err := t.repository.FailRun(ctx, runID, errorCode, errorMessage, at, event)
 	if err == nil && changed && t.publisher != nil {
-		t.publisher.Publish(ctx, event)
+		t.publisher.Publish(ctx, t.persistedEvent(ctx, event))
 	}
 	return run, err
+}
+
+func (t *Terminator) persistedEvent(ctx context.Context, fallback events.Envelope) events.Envelope {
+	reader, ok := t.repository.(terminationEventReader)
+	if !ok {
+		return fallback
+	}
+	persisted, err := reader.EventByID(ctx, fallback.EventID)
+	if err != nil {
+		return fallback
+	}
+	return persisted
 }
 
 func (t *Terminator) cancelActiveTools(ctx context.Context, runID string) {

@@ -34,6 +34,16 @@ type Service struct {
 	cancel    context.CancelFunc
 	wg        sync.WaitGroup
 	processMu sync.Mutex
+	jobMu     sync.Mutex
+	running   map[string]*runningKnowledgeJob
+}
+
+type runningKnowledgeJob struct {
+	projectID     string
+	documentID    string
+	cancel        context.CancelFunc
+	userCancelled bool
+	committing    bool
 }
 
 func (s *Service) SetEmbeddingProvider(provider EmbeddingProvider) error {
@@ -52,7 +62,7 @@ func (s *Service) SetEmbeddingProvider(provider EmbeddingProvider) error {
 func NewService(repository Repository, projects ProjectLoader, attachments AttachmentLoader) *Service {
 	return &Service{
 		repository: repository, projects: projects, attachments: attachments,
-		now: func() time.Time { return time.Now().UTC() }, wake: make(chan struct{}, 1),
+		now: func() time.Time { return time.Now().UTC() }, wake: make(chan struct{}, 1), running: map[string]*runningKnowledgeJob{},
 	}
 }
 
@@ -144,7 +154,39 @@ func (s *Service) ListDocuments(ctx context.Context, projectID string) ([]Docume
 	if _, err := s.projects.Get(ctx, projectID); err != nil {
 		return nil, err
 	}
-	return s.repository.ListDocuments(ctx, projectID)
+	documents, err := s.repository.ListDocuments(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	jobs, err := s.repository.ListLatestJobs(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	attachments, err := s.attachments.List(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	jobsByDocument := make(map[string]ImportJob, len(jobs))
+	for _, value := range jobs {
+		jobsByDocument[value.DocumentID] = value
+	}
+	attachmentsByID := make(map[string]attachment.Attachment, len(attachments))
+	for _, value := range attachments {
+		attachmentsByID[value.ID] = value
+	}
+	for index := range documents {
+		if value, found := jobsByDocument[documents[index].ID]; found {
+			job := value
+			documents[index].Job = &job
+		}
+		documents[index].Progress = jobProgress(documents[index].Status, documents[index].Job)
+		if value, found := attachmentsByID[documents[index].AttachmentID]; found {
+			documents[index].Diagnostic = buildParseDiagnostic(value)
+		} else {
+			documents[index].Diagnostic = ParseDiagnostic{Quality: ParseQualityUnavailable, Summary: "附件原件不可用", Warnings: []string{"知识库记录对应的附件已不可用。"}}
+		}
+	}
+	return documents, nil
 }
 
 func (s *Service) RefreshProject(ctx context.Context, projectID string) error {
@@ -159,6 +201,94 @@ func (s *Service) RefreshProject(ctx context.Context, projectID string) error {
 	}
 	s.signal()
 	return nil
+}
+
+func (s *Service) CancelDocument(ctx context.Context, projectID, documentID string) (ImportJob, error) {
+	projectID, documentID = strings.TrimSpace(projectID), strings.TrimSpace(documentID)
+	if projectID == "" || documentID == "" {
+		return ImportJob{}, fmt.Errorf("project and knowledge document id are required")
+	}
+	if _, err := s.projects.Get(ctx, projectID); err != nil {
+		return ImportJob{}, err
+	}
+	if job, found, cancelErr := s.requestRunningCancellation(projectID, documentID); found {
+		return job, cancelErr
+	}
+	job, cancelled, err := s.repository.CancelQueued(ctx, projectID, documentID, s.now())
+	if err != nil {
+		return ImportJob{}, err
+	}
+	if cancelled {
+		return job, nil
+	}
+	if job, found, cancelErr := s.requestRunningCancellation(projectID, documentID); found {
+		return job, cancelErr
+	}
+	return ImportJob{}, fmt.Errorf("knowledge task is no longer cancellable")
+}
+
+func (s *Service) RetryDocument(ctx context.Context, projectID, documentID string) (ImportJob, error) {
+	documents, err := s.ListDocuments(ctx, projectID)
+	if err != nil {
+		return ImportJob{}, err
+	}
+	for _, value := range documents {
+		if value.ID != strings.TrimSpace(documentID) {
+			continue
+		}
+		if value.Status != DocumentFailed && (value.Job == nil || (value.Job.Status != JobFailed && value.Job.Status != JobCancelled)) {
+			return ImportJob{}, fmt.Errorf("only a failed or cancelled knowledge task can be retried")
+		}
+		return s.enqueueDocument(ctx, value, true)
+	}
+	return ImportJob{}, fmt.Errorf("knowledge document was not found")
+}
+
+func (s *Service) RebuildDocument(ctx context.Context, projectID, documentID string) (ImportJob, error) {
+	value, found, err := s.repository.GetDocument(ctx, strings.TrimSpace(projectID), strings.TrimSpace(documentID))
+	if err != nil {
+		return ImportJob{}, err
+	}
+	if !found {
+		return ImportJob{}, fmt.Errorf("knowledge document was not found")
+	}
+	return s.enqueueDocument(ctx, value, true)
+}
+
+func (s *Service) enqueueDocument(ctx context.Context, value Document, force bool) (ImportJob, error) {
+	selectedProject, version, err := s.ensureProjectVersion(ctx, value.ProjectID)
+	if err != nil {
+		return ImportJob{}, err
+	}
+	attachments, err := s.attachments.List(ctx, value.ProjectID)
+	if err != nil {
+		return ImportJob{}, err
+	}
+	for _, item := range attachments {
+		if item.ID != value.AttachmentID {
+			continue
+		}
+		if item.Status != attachment.StatusReady {
+			return ImportJob{}, fmt.Errorf("attachment %q is not ready: %s", item.OriginalName, item.ErrorMessage)
+		}
+		job, queued, err := s.repository.Enqueue(ctx, item, version, force, s.now())
+		if err != nil {
+			return ImportJob{}, err
+		}
+		if queued {
+			s.signal()
+		}
+		if version.Status == IndexBuilding {
+			if err := s.queueMissingProjectDocuments(ctx, selectedProject, version); err != nil {
+				return ImportJob{}, err
+			}
+		}
+		if job.ID == "" {
+			return ImportJob{}, fmt.Errorf("knowledge document is already current")
+		}
+		return job, nil
+	}
+	return ImportJob{}, fmt.Errorf("knowledge attachment is unavailable")
 }
 
 func (s *Service) RemoveDocument(ctx context.Context, projectID, documentID string) (Document, error) {
@@ -260,15 +390,30 @@ func (s *Service) SearchWithOptions(ctx context.Context, projectID string, optio
 	if err := s.queueMissingProjectDocuments(ctx, selectedProject, version); err != nil {
 		return SearchResult{}, err
 	}
-	if err := s.drainProject(ctx, projectID); err != nil {
-		return SearchResult{}, err
-	}
-	if _, err := s.tryActivate(ctx, selectedProject, version); err != nil {
-		return SearchResult{}, err
-	}
 	searchVersion, found, err := s.repository.ReadyVersion(ctx, projectID)
 	if err != nil {
 		return SearchResult{}, err
+	}
+	if found {
+		found, err = s.readyVersionSearchable(ctx, selectedProject, searchVersion)
+		if err != nil {
+			return SearchResult{}, err
+		}
+	}
+	// Keep the last ready index searchable while a replacement version or an
+	// explicit document rebuild is running. Only the first project index must
+	// block the caller until enough work has completed to activate it.
+	if !found {
+		if err := s.drainProject(ctx, projectID); err != nil {
+			return SearchResult{}, err
+		}
+		if _, err := s.tryActivate(ctx, selectedProject, version); err != nil {
+			return SearchResult{}, err
+		}
+		searchVersion, found, err = s.repository.ReadyVersion(ctx, projectID)
+		if err != nil {
+			return SearchResult{}, err
+		}
 	}
 	if !found {
 		return SearchResult{}, fmt.Errorf("project knowledge index is still building")
@@ -358,6 +503,16 @@ func (s *Service) queueMissingProjectDocuments(ctx context.Context, selectedProj
 	if err != nil {
 		return fmt.Errorf("list project attachments for indexing: %w", err)
 	}
+	jobs, err := s.repository.ListLatestJobs(ctx, selectedProject.ID)
+	if err != nil {
+		return fmt.Errorf("list project knowledge jobs: %w", err)
+	}
+	blocked := make(map[string]struct{}, len(jobs))
+	for _, job := range jobs {
+		if job.IndexVersionID == version.ID && (job.Status == JobFailed || job.Status == JobCancelled) {
+			blocked[job.DocumentID] = struct{}{}
+		}
+	}
 	byID := make(map[string]attachment.Attachment, len(attachments))
 	for _, value := range attachments {
 		byID[value.ID] = value
@@ -373,6 +528,9 @@ func (s *Service) queueMissingProjectDocuments(ctx context.Context, selectedProj
 			return err
 		}
 		value, found := byID[documentValue.AttachmentID]
+		if _, skip := blocked[documentValue.ID]; skip {
+			continue
+		}
 		if !found {
 			return fmt.Errorf("knowledge attachment %q is unavailable", documentValue.Title)
 		}
@@ -425,6 +583,34 @@ func (s *Service) ensureProjectVersion(ctx context.Context, projectID string) (p
 		return project.Project{}, IndexVersion{}, err
 	}
 	return selectedProject, version, nil
+}
+
+func (s *Service) readyVersionSearchable(ctx context.Context, selectedProject project.Project, version IndexVersion) (bool, error) {
+	documents, err := s.repository.ListDocuments(ctx, selectedProject.ID)
+	if err != nil {
+		return false, fmt.Errorf("list ready knowledge documents: %w", err)
+	}
+	index, err := openProjectIndex(ctx, selectedProject, version)
+	if err != nil {
+		return false, err
+	}
+	defer index.Close()
+	for _, value := range documents {
+		// Documents assigned to a newer building version do not invalidate the
+		// previous ready snapshot. Documents assigned to this version must still
+		// exist, otherwise its derived cache was deleted or is incomplete.
+		if value.IndexVersionID != version.ID {
+			continue
+		}
+		present, err := index.HasAttachment(ctx, value.AttachmentID, value.AttachmentSHA256)
+		if err != nil {
+			return false, err
+		}
+		if !present {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func (s *Service) tryActivate(ctx context.Context, selectedProject project.Project, version IndexVersion) (bool, error) {
@@ -521,7 +707,13 @@ func (s *Service) processNext(ctx context.Context, projectID string) (bool, erro
 	if err != nil || !found {
 		return false, err
 	}
-	value, parsed, processErr := s.attachments.Parsed(ctx, work.ProjectID(), work.Job.AttachmentID)
+	jobCtx, cancel := context.WithCancel(ctx)
+	s.registerRunning(work, cancel)
+	defer func() {
+		cancel()
+		s.unregisterRunning(work.Job.ID)
+	}()
+	value, parsed, processErr := s.attachments.Parsed(jobCtx, work.ProjectID(), work.Job.AttachmentID)
 	if processErr == nil {
 		if value.ID != work.Job.AttachmentID || value.ProjectID != work.Job.ProjectID || value.SHA256 != work.Document.AttachmentSHA256 || value.Status != attachment.StatusReady {
 			processErr = fmt.Errorf("attachment changed before knowledge indexing")
@@ -530,7 +722,7 @@ func (s *Service) processNext(ctx context.Context, projectID string) (bool, erro
 	var chunks []Chunk
 	var vectors [][]float32
 	if processErr == nil {
-		processErr = s.repository.UpdateStage(ctx, work, "chunking", s.now())
+		processErr = s.repository.UpdateStage(jobCtx, work, "chunking", s.now())
 	}
 	if processErr == nil {
 		chunks, processErr = buildChunks(work.Document, parsed)
@@ -544,11 +736,11 @@ func (s *Service) processNext(ctx context.Context, projectID string) (bool, erro
 				inputs[index] = strings.TrimSpace(chunk.Title + "\n" + chunk.Content)
 			}
 			identity := embedding.Identity{ModelID: work.Version.EmbeddingModel, Dimensions: work.Version.EmbeddingDimensions, Fingerprint: work.Version.EmbeddingFingerprint}
-			vectors, processErr = s.embeddings.Embed(ctx, identity, inputs)
+			vectors, processErr = s.embeddings.Embed(jobCtx, identity, inputs)
 		}
 	}
 	if processErr == nil {
-		processErr = s.repository.UpdateStage(ctx, work, "indexing", s.now())
+		processErr = s.repository.UpdateStage(jobCtx, work, "indexing", s.now())
 	}
 	if processErr == nil {
 		selectedProject, loadErr := s.projects.Get(ctx, work.Job.ProjectID)
@@ -559,7 +751,15 @@ func (s *Service) processNext(ctx context.Context, projectID string) (bool, erro
 			if openErr != nil {
 				processErr = openErr
 			} else {
-				processErr = index.ReplaceDocument(ctx, value, work.Document, chunks, vectors, s.now().Format(time.RFC3339Nano))
+				processErr = index.ReplaceDocument(jobCtx, value, work.Document, chunks, vectors, s.now().Format(time.RFC3339Nano), func() error {
+					if err := jobCtx.Err(); err != nil {
+						return err
+					}
+					if !s.beginRunningCompletion(work.Job.ID) {
+						return context.Canceled
+					}
+					return nil
+				})
 				if closeErr := index.Close(); processErr == nil {
 					processErr = closeErr
 				}
@@ -567,21 +767,29 @@ func (s *Service) processNext(ctx context.Context, projectID string) (bool, erro
 		}
 	}
 	if processErr == nil {
-		if err := s.repository.Complete(ctx, work, len(chunks), s.now()); err != nil {
+		finishCtx, finishCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer finishCancel()
+		if err := s.repository.Complete(finishCtx, work, len(chunks), s.now()); err != nil {
 			return true, err
 		}
-		selectedProject, err := s.projects.Get(ctx, work.Job.ProjectID)
+		selectedProject, err := s.projects.Get(finishCtx, work.Job.ProjectID)
 		if err != nil {
 			return true, err
 		}
-		if _, err := s.tryActivate(ctx, selectedProject, work.Version); err != nil {
+		if _, err := s.tryActivate(finishCtx, selectedProject, work.Version); err != nil {
 			return true, err
 		}
 		return true, nil
 	}
-	if errors.Is(processErr, context.Canceled) || errors.Is(processErr, context.DeadlineExceeded) || ctx.Err() != nil {
+	if errors.Is(processErr, context.Canceled) || errors.Is(processErr, context.DeadlineExceeded) || jobCtx.Err() != nil {
 		requeueContext, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
+		if s.wasUserCancelled(work.Job.ID) {
+			if err := s.repository.CancelRunning(requeueContext, work, s.now()); err != nil {
+				return true, err
+			}
+			return true, nil
+		}
 		if err := s.repository.Requeue(requeueContext, work, s.now()); err != nil {
 			return true, err
 		}
@@ -591,6 +799,54 @@ func (s *Service) processNext(ctx context.Context, projectID string) (bool, erro
 		return true, err
 	}
 	return true, nil
+}
+
+func (s *Service) registerRunning(work Work, cancel context.CancelFunc) {
+	s.jobMu.Lock()
+	defer s.jobMu.Unlock()
+	s.running[work.Job.ID] = &runningKnowledgeJob{projectID: work.Job.ProjectID, documentID: work.Document.ID, cancel: cancel}
+}
+
+func (s *Service) unregisterRunning(jobID string) {
+	s.jobMu.Lock()
+	delete(s.running, jobID)
+	s.jobMu.Unlock()
+}
+
+func (s *Service) requestRunningCancellation(projectID, documentID string) (ImportJob, bool, error) {
+	s.jobMu.Lock()
+	defer s.jobMu.Unlock()
+	for jobID, value := range s.running {
+		if value.projectID != projectID || value.documentID != documentID {
+			continue
+		}
+		job := ImportJob{ID: jobID, ProjectID: projectID, DocumentID: documentID, Status: JobRunning}
+		if value.committing {
+			return job, true, fmt.Errorf("knowledge task is already committing and is no longer cancellable")
+		}
+		value.userCancelled = true
+		value.cancel()
+		return job, true, nil
+	}
+	return ImportJob{}, false, nil
+}
+
+func (s *Service) beginRunningCompletion(jobID string) bool {
+	s.jobMu.Lock()
+	defer s.jobMu.Unlock()
+	value := s.running[jobID]
+	if value == nil || value.userCancelled {
+		return false
+	}
+	value.committing = true
+	return true
+}
+
+func (s *Service) wasUserCancelled(jobID string) bool {
+	s.jobMu.Lock()
+	defer s.jobMu.Unlock()
+	value := s.running[jobID]
+	return value != nil && value.userCancelled
 }
 
 func (w Work) ProjectID() string { return w.Job.ProjectID }

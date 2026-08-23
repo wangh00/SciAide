@@ -37,13 +37,23 @@ const defaultContextWindowTokens = modelcap.DefaultContextWindowTokens
 // Snapshot is the durable UI recovery view. Events improve latency, but this
 // snapshot remains the source of truth after lost or out-of-order UI events.
 type Snapshot struct {
+	Sequence  int64                  `json:"sequence"`
 	Run       Run                    `json:"run"`
 	Messages  []conversation.Message `json:"messages"`
 	ToolCalls []tool.Call            `json:"toolCalls"`
+	RunSteps  []RunStep              `json:"runSteps"`
+}
+
+type eventSequenceReader interface {
+	LatestEventSequence(ctx context.Context, runID string) (int64, error)
 }
 
 type ToolCallReader interface {
 	ListByRun(ctx context.Context, runID string) ([]tool.Call, error)
+}
+
+type RunStepReader interface {
+	ListRunSteps(ctx context.Context, runID string) ([]RunStep, error)
 }
 
 type AttachmentResolver interface {
@@ -57,6 +67,7 @@ type Service struct {
 	publisher     Publisher
 	terminator    *Terminator
 	toolCalls     ToolCallReader
+	runSteps      RunStepReader
 	attachments   AttachmentResolver
 	now           func() time.Time
 
@@ -92,6 +103,19 @@ func (s *Service) SetSnapshotToolCalls(toolCalls ToolCallReader) error {
 		return fmt.Errorf("chat snapshot tool call reader is already configured")
 	}
 	s.toolCalls = toolCalls
+	return nil
+}
+
+func (s *Service) SetSnapshotRunSteps(runSteps RunStepReader) error {
+	if runSteps == nil {
+		return fmt.Errorf("chat snapshot run step reader is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.runSteps != nil {
+		return fmt.Errorf("chat snapshot run step reader is already configured")
+	}
+	s.runSteps = runSteps
 	return nil
 }
 
@@ -349,24 +373,28 @@ func (s *Service) Cancel(ctx context.Context, runID string) error {
 	cancel := s.active[runID]
 	terminator := s.terminator
 	s.mu.Unlock()
-	if cancel != nil {
-		cancel()
-	}
 	run, err := s.runs.Get(ctx, runID)
 	if err != nil {
 		return err
 	}
 	if isTerminal(run.Status) {
+		if cancel != nil {
+			cancel()
+		}
 		return nil
 	}
 	if terminator == nil {
 		if cancel != nil {
+			cancel()
 			return nil
 		}
 		return fmt.Errorf("run is not active")
 	}
 	if _, err = terminator.Cancel(ctx, run.ID); err != nil {
 		return err
+	}
+	if cancel != nil {
+		cancel()
 	}
 	return nil
 }
@@ -380,12 +408,25 @@ func (s *Service) Snapshot(ctx context.Context, runID string) (Snapshot, error) 
 	if err != nil {
 		return Snapshot{}, err
 	}
-	snapshot := Snapshot{Run: run, Messages: messages, ToolCalls: []tool.Call{}}
+	snapshot := Snapshot{Run: run, Messages: messages, ToolCalls: []tool.Call{}, RunSteps: []RunStep{}}
+	if reader, ok := s.events.(eventSequenceReader); ok {
+		snapshot.Sequence, err = reader.LatestEventSequence(ctx, run.ID)
+		if err != nil {
+			return Snapshot{}, err
+		}
+	}
 	s.mu.Lock()
 	toolCalls := s.toolCalls
+	runSteps := s.runSteps
 	s.mu.Unlock()
 	if toolCalls != nil {
 		snapshot.ToolCalls, err = toolCalls.ListByRun(ctx, run.ID)
+		if err != nil {
+			return Snapshot{}, err
+		}
+	}
+	if runSteps != nil {
+		snapshot.RunSteps, err = runSteps.ListRunSteps(ctx, run.ID)
 		if err != nil {
 			return Snapshot{}, err
 		}
@@ -410,24 +451,82 @@ func (s *Service) LatestSnapshot(ctx context.Context, conversationID string) (*S
 }
 
 func (s *Service) UsageDashboard(ctx context.Context, query UsageQuery) (UsageDashboard, error) {
+	if err := normalizeUsageQuery(&query); err != nil {
+		return UsageDashboard{}, err
+	}
+	return s.runs.UsageDashboard(ctx, query)
+}
+
+func (s *Service) UsageRequests(ctx context.Context, query UsageRequestQuery) (UsageRequestPage, error) {
+	base := UsageQuery{
+		StartDate: query.StartDate, EndDate: query.EndDate, StartTime: query.StartTime, EndTime: query.EndTime,
+		ModelProfileID: query.ModelProfileID, ModelID: query.ModelID,
+	}
+	if err := normalizeUsageQuery(&base); err != nil {
+		return UsageRequestPage{}, err
+	}
+	query.StartDate, query.EndDate = base.StartDate, base.EndDate
+	query.StartTime, query.EndTime = base.StartTime, base.EndTime
+	query.ModelProfileID, query.ModelID = base.ModelProfileID, base.ModelID
+	if query.Offset < 0 {
+		return UsageRequestPage{}, fmt.Errorf("usage request offset must not be negative")
+	}
+	if query.Limit <= 0 {
+		query.Limit = 20
+	}
+	if query.Limit > 100 {
+		query.Limit = 100
+	}
+	if query.StatusCode != 0 && (query.StatusCode < 100 || query.StatusCode > 599) {
+		return UsageRequestPage{}, fmt.Errorf("usage request status code must be between 100 and 599")
+	}
+	return s.runs.UsageRequests(ctx, query)
+}
+
+func normalizeUsageQuery(query *UsageQuery) error {
 	query.StartDate = strings.TrimSpace(query.StartDate)
 	query.EndDate = strings.TrimSpace(query.EndDate)
+	query.StartTime = strings.TrimSpace(query.StartTime)
+	query.EndTime = strings.TrimSpace(query.EndTime)
 	query.ModelProfileID = strings.TrimSpace(query.ModelProfileID)
 	query.ModelID = strings.TrimSpace(query.ModelID)
 	if query.StartDate != "" {
 		if _, err := time.Parse("2006-01-02", query.StartDate); err != nil {
-			return UsageDashboard{}, fmt.Errorf("invalid usage start date")
+			return fmt.Errorf("invalid usage start date")
 		}
 	}
 	if query.EndDate != "" {
 		if _, err := time.Parse("2006-01-02", query.EndDate); err != nil {
-			return UsageDashboard{}, fmt.Errorf("invalid usage end date")
+			return fmt.Errorf("invalid usage end date")
 		}
 	}
 	if query.StartDate != "" && query.EndDate != "" && query.StartDate > query.EndDate {
-		return UsageDashboard{}, fmt.Errorf("usage start date must not be after end date")
+		return fmt.Errorf("usage start date must not be after end date")
 	}
-	return s.runs.UsageDashboard(ctx, query)
+	if query.StartTime != "" || query.EndTime != "" {
+		if query.StartDate == "" || query.EndDate == "" || query.StartDate != query.EndDate {
+			return fmt.Errorf("usage time filtering requires one calendar day")
+		}
+		if query.StartTime == "" {
+			query.StartTime = "00:00"
+		}
+		if query.EndTime == "" {
+			query.EndTime = "23:59"
+		}
+		if len(query.StartTime) != 5 || len(query.EndTime) != 5 {
+			return fmt.Errorf("invalid usage time")
+		}
+		if _, err := time.Parse("15:04", query.StartTime); err != nil {
+			return fmt.Errorf("invalid usage start time")
+		}
+		if _, err := time.Parse("15:04", query.EndTime); err != nil {
+			return fmt.Errorf("invalid usage end time")
+		}
+		if query.StartTime > query.EndTime {
+			return fmt.Errorf("usage start time must not be after end time")
+		}
+	}
+	return nil
 }
 
 func (s *Service) Close() {

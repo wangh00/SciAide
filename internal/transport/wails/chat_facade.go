@@ -1,7 +1,11 @@
 package wails
 
 import (
+	"context"
+	"fmt"
+
 	"github.com/wangh00/SciAide/internal/app/chat"
+	"github.com/wangh00/SciAide/internal/app/contextmemory"
 	"github.com/wangh00/SciAide/internal/app/permission"
 )
 
@@ -14,10 +18,15 @@ type ChatFacade struct {
 	lifecycle *LifecycleContext
 	service   *chat.Service
 	approvals *permission.Engine
+	compactor ConversationCompactor
 }
 
-func NewChatFacade(lifecycle *LifecycleContext, service *chat.Service, approvals *permission.Engine) *ChatFacade {
-	return &ChatFacade{lifecycle: lifecycle, service: service, approvals: approvals}
+type ConversationCompactor interface {
+	CompactConversation(ctx context.Context, conversationID string) (contextmemory.CompactionResult, error)
+}
+
+func NewChatFacade(lifecycle *LifecycleContext, service *chat.Service, approvals *permission.Engine, compactor ConversationCompactor) *ChatFacade {
+	return &ChatFacade{lifecycle: lifecycle, service: service, approvals: approvals, compactor: compactor}
 }
 func (f *ChatFacade) StartChat(request chat.StartCommand) (chat.Run, error) {
 	return f.service.Start(f.lifecycle.Context(), request)
@@ -54,4 +63,15 @@ func (f *ChatFacade) GetLatestRunSnapshot(conversationID string) (*RunSnapshot, 
 
 func (f *ChatFacade) GetUsageDashboard(query chat.UsageQuery) (chat.UsageDashboard, error) {
 	return f.service.UsageDashboard(f.lifecycle.Context(), query)
+}
+
+func (f *ChatFacade) GetUsageRequests(query chat.UsageRequestQuery) (chat.UsageRequestPage, error) {
+	return f.service.UsageRequests(f.lifecycle.Context(), query)
+}
+
+func (f *ChatFacade) CompactConversation(conversationID string) (contextmemory.CompactionResult, error) {
+	if f.compactor == nil {
+		return contextmemory.CompactionResult{}, fmt.Errorf("conversation compaction is not configured")
+	}
+	return f.compactor.CompactConversation(f.lifecycle.Context(), conversationID)
 }

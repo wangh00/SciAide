@@ -16,22 +16,23 @@ const (
 )
 
 type Attachment struct {
-	ID                  string          `json:"id"`
-	ProjectID           string          `json:"projectId"`
-	OriginalName        string          `json:"originalName"`
-	MIMEType            string          `json:"mimeType"`
-	Format              document.Format `json:"format"`
-	SizeBytes           int64           `json:"sizeBytes"`
-	SHA256              string          `json:"sha256"`
-	StorageRelativePath string          `json:"-"`
-	CacheRelativePath   string          `json:"-"`
-	Status              Status          `json:"status"`
-	UnitCount           int             `json:"unitCount"`
-	ExtractedRunes      int             `json:"extractedRunes"`
-	Truncated           bool            `json:"truncated"`
-	ErrorMessage        string          `json:"errorMessage,omitempty"`
-	CreatedAt           time.Time       `json:"createdAt"`
-	UpdatedAt           time.Time       `json:"updatedAt"`
+	ID                  string            `json:"id"`
+	ProjectID           string            `json:"projectId"`
+	OriginalName        string            `json:"originalName"`
+	MIMEType            string            `json:"mimeType"`
+	Format              document.Format   `json:"format"`
+	SizeBytes           int64             `json:"sizeBytes"`
+	SHA256              string            `json:"sha256"`
+	StorageRelativePath string            `json:"-"`
+	CacheRelativePath   string            `json:"-"`
+	Status              Status            `json:"status"`
+	UnitCount           int               `json:"unitCount"`
+	ExtractedRunes      int               `json:"extractedRunes"`
+	Truncated           bool              `json:"truncated"`
+	ParseMetadata       map[string]string `json:"parseMetadata,omitempty"`
+	ErrorMessage        string            `json:"errorMessage,omitempty"`
+	CreatedAt           time.Time         `json:"createdAt"`
+	UpdatedAt           time.Time         `json:"updatedAt"`
 }
 
 type MessageReference struct {

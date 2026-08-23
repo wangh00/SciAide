@@ -39,6 +39,9 @@ func TestImportCompatibleChromeDevToolsConfiguration(t *testing.T) {
 	if !server.Enabled || server.AutoStart || server.Trust != TrustUntrusted || server.Status != StatusDisconnected {
 		t.Fatalf("unsafe import state = %#v", server)
 	}
+	if server.TimeoutSeconds != DefaultToolTimeoutSeconds {
+		t.Fatalf("tool timeout = %d", server.TimeoutSeconds)
+	}
 }
 
 func TestImportMultipleServersAndHTTPAliases(t *testing.T) {

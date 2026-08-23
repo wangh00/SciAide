@@ -29,6 +29,10 @@ func NewService(repository Repository, validator SchemaValidator) *Service {
 }
 
 func (s *Service) Propose(ctx context.Context, definition Definition, cmd CreateCommand) (Call, error) {
+	return s.propose(ctx, definition, cmd, true)
+}
+
+func (s *Service) propose(ctx context.Context, definition Definition, cmd CreateCommand, validateSchema bool) (Call, error) {
 	cmd.RunID, cmd.ProviderCallID = strings.TrimSpace(cmd.RunID), strings.TrimSpace(cmd.ProviderCallID)
 	cmd.IdempotencyKey = strings.TrimSpace(cmd.IdempotencyKey)
 	if cmd.RunID == "" || cmd.ProviderCallID == "" {
@@ -41,11 +45,13 @@ func (s *Service) Propose(ctx context.Context, definition Definition, cmd Create
 	if err := ValidateArguments(cmd.Arguments); err != nil {
 		return Call{}, err
 	}
-	if s.validator == nil {
-		return Call{}, fmt.Errorf("tool argument schema validator is not configured")
-	}
-	if err := s.validator.Validate(definition.InputSchema, cmd.Arguments); err != nil {
-		return Call{}, fmt.Errorf("validate tool arguments: %w", err)
+	if validateSchema {
+		if s.validator == nil {
+			return Call{}, fmt.Errorf("tool argument schema validator is not configured")
+		}
+		if err := s.validator.Validate(definition.InputSchema, cmd.Arguments); err != nil {
+			return Call{}, fmt.Errorf("validate tool arguments: %w", err)
+		}
 	}
 	callID, err := id.New()
 	if err != nil {
@@ -75,6 +81,38 @@ func (s *Service) ProposeRegistered(ctx context.Context, registry Registry, tool
 	return s.Propose(ctx, definition, cmd)
 }
 
+// RejectProviderCall preserves a model-issued call as a terminal ToolResult so
+// the model can correct an unavailable tool name or schema-invalid arguments.
+// The synthetic definition is audit-only and can never enter approval or
+// execution because the call is finished before this method returns.
+func (s *Service) RejectProviderCall(ctx context.Context, registry Registry, toolName string, cmd CreateCommand, message string) (Call, error) {
+	if registry == nil {
+		return Call{}, fmt.Errorf("tool registry is not configured")
+	}
+	toolName = strings.TrimSpace(toolName)
+	definition, err := registry.Definition(ctx, toolName)
+	if err != nil {
+		definition = Definition{
+			QualifiedName: toolName,
+			Description:   "Unavailable model-requested tool",
+			InputSchema:   json.RawMessage(`{"type":"object"}`),
+			Risk:          RiskLow,
+			Permissions:   []PermissionRequirement{},
+			Idempotent:    true,
+			Version:       "unavailable",
+		}
+	}
+	call, err := s.propose(ctx, definition, cmd, false)
+	if err != nil {
+		return Call{}, err
+	}
+	message = strings.TrimSpace(message)
+	if message == "" {
+		message = "工具调用无法执行，请检查可用工具和参数后重试。"
+	}
+	return s.Finish(context.Background(), call.ID, Result{Status: ResultError, Text: message}, ErrorCodeCallRejected, strings.TrimSuffix(message, "。"))
+}
+
 func (s *Service) Get(ctx context.Context, callID string) (Call, error) {
 	callID = strings.TrimSpace(callID)
 	if callID == "" {
@@ -101,6 +139,10 @@ func (s *Service) Start(ctx context.Context, callID string) (Call, error) {
 
 func (s *Service) Interrupt(ctx context.Context, callID, message string) (Call, error) {
 	return s.transition(ctx, callID, CallInterrupted, "TOOL_INTERRUPTED", strings.TrimSpace(message))
+}
+
+func (s *Service) MarkOutcomeUnknown(ctx context.Context, callID string) (Call, error) {
+	return s.transition(ctx, callID, CallInterrupted, ErrorCodeOutcomeUnknown, "工具可能已经产生副作用，但执行结果未能持久化")
 }
 
 func (s *Service) Finish(ctx context.Context, callID string, result Result, errorCode, errorMessage string) (Call, error) {

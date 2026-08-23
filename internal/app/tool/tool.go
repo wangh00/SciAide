@@ -102,11 +102,21 @@ type Call struct {
 	ErrorCode      string                  `json:"errorCode,omitempty"`
 	ErrorMessage   string                  `json:"errorMessage,omitempty"`
 	Result         *Result                 `json:"result,omitempty"`
-	CreatedAt      time.Time               `json:"createdAt"`
-	StartedAt      *time.Time              `json:"startedAt,omitempty"`
-	CompletedAt    *time.Time              `json:"completedAt,omitempty"`
-	UpdatedAt      time.Time               `json:"updatedAt"`
+	// ModelContext is the immutable, bounded representation originally exposed
+	// to the model. It is deliberately excluded from UI snapshots because the
+	// complete Result remains the user-facing and audit source of truth.
+	ModelContext        string     `json:"-"`
+	ModelContextVersion int        `json:"-"`
+	CreatedAt           time.Time  `json:"createdAt"`
+	StartedAt           *time.Time `json:"startedAt,omitempty"`
+	CompletedAt         *time.Time `json:"completedAt,omitempty"`
+	UpdatedAt           time.Time  `json:"updatedAt"`
 }
+
+const (
+	ModelContextSnapshotVersion = 1
+	MaxModelContextRunes        = 10_000
+)
 
 type ResultStatus string
 
@@ -154,6 +164,8 @@ const (
 	ErrorCodeCancelled        = "TOOL_CANCELLED"
 	ErrorCodeResultInvalid    = "TOOL_RESULT_INVALID"
 	ErrorCodeResultTooLarge   = "TOOL_RESULT_TOO_LARGE"
+	ErrorCodeOutcomeUnknown   = "TOOL_OUTCOME_UNKNOWN"
+	ErrorCodeCallRejected     = "TOOL_CALL_REJECTED"
 )
 
 type Result struct {
@@ -165,6 +177,46 @@ type Result struct {
 	Truncated  bool            `json:"truncated"`
 	Meta       ResultMeta      `json:"meta"`
 	CreatedAt  time.Time       `json:"createdAt"`
+}
+
+// BuildModelContextSnapshot freezes the exact bounded result representation
+// sent back to a model while the complete tool result remains locally stored.
+// encoding/json orders map keys deterministically, preserving the legacy wire
+// representation used by the agent context builder.
+func BuildModelContextSnapshot(callID, errorCode string, result Result) string {
+	payload := map[string]any{
+		"status":     result.Status,
+		"text":       result.Text,
+		"truncated":  result.Truncated,
+		"errorCode":  errorCode,
+		"toolCallId": callID,
+	}
+	if len(result.Structured) > 0 {
+		payload["structured"] = json.RawMessage(result.Structured)
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		encoded = []byte(fmt.Sprintf(`{"status":"error","text":"tool result could not be encoded","toolCallId":%q}`, callID))
+	}
+	return truncateModelContext(string(encoded), MaxModelContextRunes)
+}
+
+func truncateModelContext(value string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	marker := []rune("\n...[tool result truncated for model context]...\n")
+	if len(marker) >= limit {
+		return string(marker[:limit])
+	}
+	remaining := limit - len(marker)
+	head := (remaining + 1) / 2
+	tail := remaining - head
+	return string(runes[:head]) + string(marker) + string(runes[len(runes)-tail:])
 }
 
 var ErrTransitionConflict = errors.New("tool call transition conflict")

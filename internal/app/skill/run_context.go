@@ -131,7 +131,7 @@ func (s *Service) PrepareRunContext(ctx context.Context, runID, projectID, userT
 		return RunContext{}, fmt.Errorf("load Run Skill context: %w", err)
 	}
 
-	links, err := s.ListProjectSkills(ctx, projectID)
+	links, err := s.listProjectSkills(ctx, projectID)
 	if err != nil {
 		return RunContext{}, fmt.Errorf("list project Skills for Run: %w", err)
 	}

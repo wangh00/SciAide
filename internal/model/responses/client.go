@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/wangh00/SciAide/internal/app/modelprofile"
@@ -21,10 +22,12 @@ import (
 const maxStreamLineBytes = 1024 * 1024
 
 type Client struct {
-	profile  modelprofile.Profile
-	secret   []byte
-	http     *http.Client
-	recorder modelcap.ReasoningRecorder
+	profile                   modelprofile.Profile
+	secret                    []byte
+	http                      *http.Client
+	recorder                  modelcap.ReasoningRecorder
+	cacheMu                   sync.RWMutex
+	promptCacheKeyUnsupported bool
 }
 
 func New(profile modelprofile.Profile, secret []byte, recorders ...modelcap.ReasoningRecorder) *Client {
@@ -36,7 +39,7 @@ func New(profile modelprofile.Profile, secret []byte, recorders ...modelcap.Reas
 	if len(recorders) > 0 {
 		recorder = recorders[0]
 	}
-	return &Client{profile: profile, secret: append([]byte(nil), secret...), http: &http.Client{Timeout: timeout}, recorder: recorder}
+	return &Client{profile: profile, secret: append([]byte(nil), secret...), http: modelutil.NewStreamingHTTPClient(timeout), recorder: recorder}
 }
 func NewWithHTTPClient(profile modelprofile.Profile, secret []byte, client *http.Client) *Client {
 	value := New(profile, secret)
@@ -67,8 +70,10 @@ func (i inputItem) MarshalJSON() ([]byte, error) {
 }
 
 type inputContent struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
+	Type     string `json:"type"`
+	Text     string `json:"text,omitempty"`
+	ImageURL string `json:"image_url,omitempty"`
+	Detail   string `json:"detail,omitempty"`
 }
 type toolDef struct {
 	Type        string          `json:"type"`
@@ -77,19 +82,24 @@ type toolDef struct {
 	Parameters  json.RawMessage `json:"parameters"`
 	Strict      bool            `json:"strict,omitempty"`
 }
+
+type reasoningOptions struct {
+	Effort  string `json:"effort,omitempty"`
+	Summary string `json:"summary,omitempty"`
+}
+
 type payload struct {
-	Model           string      `json:"model"`
-	Instructions    string      `json:"instructions,omitempty"`
-	Input           []inputItem `json:"input"`
-	Tools           []toolDef   `json:"tools,omitempty"`
-	Stream          bool        `json:"stream"`
-	Store           bool        `json:"store"`
-	Include         []string    `json:"include,omitempty"`
-	Temperature     *float64    `json:"temperature,omitempty"`
-	MaxOutputTokens *int        `json:"max_output_tokens,omitempty"`
-	Reasoning       *struct {
-		Effort string `json:"effort"`
-	} `json:"reasoning,omitempty"`
+	Model           string            `json:"model"`
+	Instructions    string            `json:"instructions,omitempty"`
+	Input           []inputItem       `json:"input"`
+	Tools           []toolDef         `json:"tools,omitempty"`
+	PromptCacheKey  string            `json:"prompt_cache_key,omitempty"`
+	Stream          bool              `json:"stream"`
+	Store           bool              `json:"store"`
+	Include         []string          `json:"include,omitempty"`
+	Temperature     *float64          `json:"temperature,omitempty"`
+	MaxOutputTokens *int              `json:"max_output_tokens,omitempty"`
+	Reasoning       *reasoningOptions `json:"reasoning,omitempty"`
 }
 
 type reasoningRejectedError struct {
@@ -99,6 +109,16 @@ type reasoningRejectedError struct {
 
 func (e *reasoningRejectedError) Error() string { return e.err.Error() }
 func (e *reasoningRejectedError) Unwrap() error { return e.err }
+
+type reasoningSummaryRejectedError struct{ err error }
+
+func (e *reasoningSummaryRejectedError) Error() string { return e.err.Error() }
+func (e *reasoningSummaryRejectedError) Unwrap() error { return e.err }
+
+type promptCacheKeyRejectedError struct{ err error }
+
+func (e *promptCacheKeyRejectedError) Error() string { return e.err.Error() }
+func (e *promptCacheKeyRejectedError) Unwrap() error { return e.err }
 
 func (c *Client) Stream(ctx context.Context, request model.ChatRequest) (model.Stream, error) {
 	requested := request.RequestedReasoningLevel
@@ -111,13 +131,41 @@ func (c *Client) Stream(ctx context.Context, request model.ChatRequest) (model.S
 	}
 	rejected := make([]modelcap.ReasoningLevel, 0, len(attempts))
 	controlUnsupported := false
+	requestSummary := request.ResolvedReasoningLevel.Valid()
+	promptCacheKey := request.PromptCacheKey
+	if c.promptCacheKeyIsUnsupported() {
+		promptCacheKey = ""
+	}
 	for index := 0; index <= len(attempts); index++ {
 		level := modelcap.ReasoningLevel("")
 		if index < len(attempts) {
 			level = attempts[index]
 		}
 		request.ResolvedReasoningLevel = level
-		stream, err := c.streamOnce(ctx, request)
+		request.PromptCacheKey = promptCacheKey
+		var stream model.Stream
+		var err error
+		for {
+			stream, err = c.streamOnce(ctx, request, requestSummary)
+			var summaryRejection *reasoningSummaryRejectedError
+			if requestSummary && errors.As(err, &summaryRejection) {
+				// A compatible endpoint may implement effort without implementing
+				// provider-generated summaries. Keep the same effort and retry only
+				// without the optional summary request.
+				requestSummary = false
+				continue
+			}
+			var cacheKeyRejection *promptCacheKeyRejectedError
+			if request.PromptCacheKey != "" && errors.As(err, &cacheKeyRejection) {
+				// Cache routing is an optimization. Older compatible gateways may
+				// reject the field, so retry the real request without probing first.
+				promptCacheKey = ""
+				request.PromptCacheKey = ""
+				c.rememberPromptCacheKeyUnsupported()
+				continue
+			}
+			break
+		}
 		if err == nil {
 			wireMode := "responses_effort"
 			if !level.Valid() {
@@ -147,7 +195,19 @@ func (c *Client) Stream(ctx context.Context, request model.ChatRequest) (model.S
 	return nil, fmt.Errorf("reasoning negotiation exhausted")
 }
 
-func (c *Client) streamOnce(ctx context.Context, request model.ChatRequest) (model.Stream, error) {
+func (c *Client) promptCacheKeyIsUnsupported() bool {
+	c.cacheMu.RLock()
+	defer c.cacheMu.RUnlock()
+	return c.promptCacheKeyUnsupported
+}
+
+func (c *Client) rememberPromptCacheKeyUnsupported() {
+	c.cacheMu.Lock()
+	c.promptCacheKeyUnsupported = true
+	c.cacheMu.Unlock()
+}
+
+func (c *Client) streamOnce(ctx context.Context, request model.ChatRequest, requestSummary bool) (model.Stream, error) {
 	providerNames := map[string]string{}
 	aliases := map[string]string{}
 	for _, def := range request.Tools {
@@ -161,11 +221,12 @@ func (c *Client) streamOnce(ctx context.Context, request model.ChatRequest) (mod
 		providerNames[alias] = def.Name
 		aliases[def.Name] = alias
 	}
-	value := payload{Model: c.profile.ModelID, Input: []inputItem{}, Tools: []toolDef{}, Stream: true, Store: false, Include: []string{"reasoning.encrypted_content"}, Temperature: c.profile.Temperature, MaxOutputTokens: c.profile.MaxOutputTokens}
+	value := payload{Model: c.profile.ModelID, Input: []inputItem{}, Tools: []toolDef{}, PromptCacheKey: request.PromptCacheKey, Stream: true, Store: false, Include: []string{"reasoning.encrypted_content"}, Temperature: c.profile.Temperature, MaxOutputTokens: c.profile.MaxOutputTokens}
 	if request.ResolvedReasoningLevel.Valid() {
-		value.Reasoning = &struct {
-			Effort string `json:"effort"`
-		}{Effort: string(request.ResolvedReasoningLevel)}
+		value.Reasoning = &reasoningOptions{Effort: string(request.ResolvedReasoningLevel)}
+		if requestSummary {
+			value.Reasoning.Summary = "auto"
+		}
 	}
 	for _, def := range request.Tools {
 		value.Tools = append(value.Tools, toolDef{Type: "function", Name: aliases[def.Name], Description: def.Description, Parameters: append(json.RawMessage(nil), def.InputSchema...)})
@@ -178,7 +239,21 @@ func (c *Client) streamOnce(ctx context.Context, request model.ChatRequest) (mod
 			}
 			value.Instructions += message.Content
 		case model.RoleUser:
-			value.Input = append(value.Input, inputItem{Type: "message", Role: "user", Content: []inputContent{{Type: "input_text", Text: modelutil.WrapUntrusted("conversation_content", message.Content)}}})
+			content := make([]inputContent, 0, len(message.Parts)+1)
+			if message.Content != "" {
+				content = append(content, inputContent{Type: "input_text", Text: modelutil.WrapUntrusted("conversation_content", message.Content)})
+			}
+			for _, part := range message.Parts {
+				if part.Type != "input_image" {
+					continue
+				}
+				dataURL, imageErr := model.ImageDataURL(part)
+				if imageErr != nil {
+					return nil, imageErr
+				}
+				content = append(content, inputContent{Type: "input_image", ImageURL: dataURL, Detail: "auto"})
+			}
+			value.Input = append(value.Input, inputItem{Type: "message", Role: "user", Content: content})
 		case model.RoleAssistant:
 			if message.Content != "" {
 				value.Input = append(value.Input, inputItem{Type: "message", Role: "assistant", Content: []inputContent{{Type: "output_text", Text: message.Content}}})
@@ -223,21 +298,75 @@ func (c *Client) streamOnce(ctx context.Context, request model.ChatRequest) (mod
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		body := modelutil.ReadErrorBody(response.Body)
 		response.Body.Close()
+		if request.PromptCacheKey != "" && promptCacheKeyRejected(response.StatusCode, body) {
+			return nil, &promptCacheKeyRejectedError{err: modelutil.ClassifyStatusWithHeaders(response.StatusCode, response.Header, body)}
+		}
 		if request.ResolvedReasoningLevel.Valid() {
+			if requestSummary && reasoningSummaryRejected(response.StatusCode, body) {
+				return nil, &reasoningSummaryRejectedError{err: modelutil.ClassifyStatusWithHeaders(response.StatusCode, response.Header, body)}
+			}
 			if kind := modelutil.ClassifyReasoningRejection(response.StatusCode, body); kind != modelutil.ReasoningRejectionNone {
-				return nil, &reasoningRejectedError{kind: kind, err: modelutil.ClassifyStatus(response.StatusCode, body)}
+				return nil, &reasoningRejectedError{kind: kind, err: modelutil.ClassifyStatusWithHeaders(response.StatusCode, response.Header, body)}
 			}
 		}
-		return nil, modelutil.ClassifyStatus(response.StatusCode, body)
+		return nil, modelutil.ClassifyStatusWithHeaders(response.StatusCode, response.Header, body)
 	}
 	scanner := bufio.NewScanner(response.Body)
 	scanner.Buffer(make([]byte, 64*1024), maxStreamLineBytes)
-	return &stream{body: response.Body, scanner: scanner, providerNames: providerNames, calls: map[string]*callAccumulator{}, itemOrdinals: map[string]int{}, completedOrdinals: map[int]struct{}{}}, nil
+	return &stream{
+		body:              response.Body,
+		scanner:           scanner,
+		providerNames:     providerNames,
+		calls:             map[string]*callAccumulator{},
+		itemOrdinals:      map[string]int{},
+		itemTypes:         map[string]string{},
+		itemPhases:        map[string]string{},
+		itemIndexes:       map[string]int{},
+		itemTexts:         map[int]string{},
+		seenOrdinals:      map[int]struct{}{},
+		completedOrdinals: map[int]struct{}{},
+		providerItems:     map[int]model.ProviderItem{},
+	}, nil
+}
+
+func promptCacheKeyRejected(status int, body []byte) bool {
+	if status != http.StatusBadRequest && status != http.StatusUnprocessableEntity {
+		return false
+	}
+	detail := strings.ToLower(modelutil.ProviderErrorMessage(body) + " " + string(body))
+	if !strings.Contains(detail, "prompt_cache_key") && !strings.Contains(detail, "prompt cache key") {
+		return false
+	}
+	for _, marker := range []string{"unknown parameter", "unsupported parameter", "unrecognized parameter", "extra inputs", "not supported", "is unsupported", "does not support", "unknown field", "unexpected field"} {
+		if strings.Contains(detail, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func reasoningSummaryRejected(status int, body []byte) bool {
+	if status != http.StatusBadRequest && status != http.StatusUnprocessableEntity {
+		return false
+	}
+	detail := strings.ToLower(modelutil.ProviderErrorMessage(body) + " " + string(body))
+	mentionsSummary := strings.Contains(detail, "reasoning.summary") ||
+		(strings.Contains(detail, "reasoning") && strings.Contains(detail, "summary"))
+	if !mentionsSummary {
+		return false
+	}
+	for _, marker := range []string{"unknown parameter", "unsupported parameter", "unrecognized parameter", "extra inputs", "not supported", "is unsupported", "does not support", "unknown field", "unexpected field"} {
+		if strings.Contains(detail, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 type responseItem struct {
 	Type             string          `json:"type"`
 	ID               string          `json:"id,omitempty"`
+	Phase            string          `json:"phase,omitempty"`
 	Role             string          `json:"role,omitempty"`
 	Content          json.RawMessage `json:"content,omitempty"`
 	Summary          json.RawMessage `json:"summary,omitempty"`
@@ -245,6 +374,34 @@ type responseItem struct {
 	CallID           string          `json:"call_id,omitempty"`
 	Name             string          `json:"name,omitempty"`
 	Arguments        string          `json:"arguments,omitempty"`
+}
+
+type responseMessageContent struct {
+	Type    string `json:"type"`
+	Text    string `json:"text,omitempty"`
+	Refusal string `json:"refusal,omitempty"`
+}
+
+func responseMessageText(item responseItem) (string, error) {
+	if item.Type != "message" || len(item.Content) == 0 {
+		return "", nil
+	}
+	var content []responseMessageContent
+	if err := json.Unmarshal(item.Content, &content); err != nil {
+		return "", fmt.Errorf("decode Responses message content: %w", err)
+	}
+	var text strings.Builder
+	for _, block := range content {
+		switch block.Type {
+		case "output_text":
+			text.WriteString(block.Text)
+		case "refusal":
+			text.WriteString(block.Refusal)
+		default:
+			return "", fmt.Errorf("unsupported Responses message content %q", block.Type)
+		}
+	}
+	return text.String(), nil
 }
 
 func appendProviderTurns(value *payload, turns []model.ProviderTurn) error {
@@ -267,6 +424,12 @@ func appendProviderTurns(value *payload, turns []model.ProviderTurn) error {
 			}
 			if item.Type != persisted.Type {
 				return fmt.Errorf("Responses provider item type mismatch")
+			}
+			if persisted.ItemID != "" && item.ID != persisted.ItemID {
+				return fmt.Errorf("Responses provider item id mismatch")
+			}
+			if persisted.Phase != "" && item.Phase != persisted.Phase {
+				return fmt.Errorf("Responses provider item phase mismatch")
 			}
 			switch item.Type {
 			case "reasoning":
@@ -300,14 +463,30 @@ type callAccumulator struct {
 	ID, CallID, Name string
 	Arguments        strings.Builder
 }
+
+type anonymousItemState struct {
+	ordinal       int
+	itemType      string
+	providerIndex *int
+	completed     bool
+}
+
 type stream struct {
 	body              io.ReadCloser
 	scanner           *bufio.Scanner
 	providerNames     map[string]string
 	calls             map[string]*callAccumulator
 	itemOrdinals      map[string]int
+	itemTypes         map[string]string
+	itemPhases        map[string]string
+	itemIndexes       map[string]int
+	itemTexts         map[int]string
+	seenOrdinals      map[int]struct{}
 	completedOrdinals map[int]struct{}
+	providerItems     map[int]model.ProviderItem
+	anonymousItems    []*anonymousItemState
 	nextOrdinal       int
+	nextProviderItem  int
 	providerBytes     int
 	queue             []model.Event
 	hadToolCalls      bool
@@ -379,30 +558,81 @@ func responseItemKey(item responseItem) string {
 	return item.CallID
 }
 
+func (s *stream) allocateItemOrdinal() (int, error) {
+	if len(s.seenOrdinals) >= maxResponseItemsPerTurn || s.nextOrdinal >= maxResponseItemsPerTurn {
+		return 0, fmt.Errorf("Responses output item count exceeds limit")
+	}
+	ordinal := s.nextOrdinal
+	s.nextOrdinal++
+	s.seenOrdinals[ordinal] = struct{}{}
+	return ordinal, nil
+}
+
+func copyIndex(value *int) *int {
+	if value == nil {
+		return nil
+	}
+	result := *value
+	return &result
+}
+
+func sameIndex(left, right *int) bool {
+	return left != nil && right != nil && *left == *right
+}
+
+func (s *stream) anonymousItemOrdinal(item responseItem, explicit *int, completed bool) (int, error) {
+	if completed {
+		var fallback *anonymousItemState
+		for _, state := range s.anonymousItems {
+			if state.completed || state.itemType != item.Type {
+				continue
+			}
+			if sameIndex(state.providerIndex, explicit) {
+				fallback = state
+				break
+			}
+			if fallback == nil {
+				fallback = state
+			}
+		}
+		if fallback != nil {
+			fallback.completed = true
+			s.completedOrdinals[fallback.ordinal] = struct{}{}
+			return fallback.ordinal, nil
+		}
+	}
+
+	ordinal, err := s.allocateItemOrdinal()
+	if err != nil {
+		return 0, err
+	}
+	state := &anonymousItemState{ordinal: ordinal, itemType: item.Type, providerIndex: copyIndex(explicit), completed: completed}
+	s.anonymousItems = append(s.anonymousItems, state)
+	if completed {
+		s.completedOrdinals[ordinal] = struct{}{}
+	}
+	return ordinal, nil
+}
+
 func (s *stream) itemOrdinal(item responseItem, explicit *int, completed bool) (int, error) {
 	key := responseItemKey(item)
-	ordinal := -1
-	if explicit != nil {
-		ordinal = *explicit
-	} else if key != "" {
-		if existing, ok := s.itemOrdinals[key]; ok {
-			ordinal = existing
+	if key == "" {
+		return s.anonymousItemOrdinal(item, explicit, completed)
+	}
+
+	ordinal, exists := s.itemOrdinals[key]
+	if exists {
+		if s.itemTypes[key] != item.Type {
+			return 0, fmt.Errorf("Responses output item type changed")
 		}
-	}
-	if ordinal < 0 {
-		ordinal = s.nextOrdinal
-	}
-	if ordinal < 0 || ordinal >= maxResponseItemsPerTurn {
-		return 0, fmt.Errorf("Responses output item index is invalid")
-	}
-	if key != "" {
-		if existing, ok := s.itemOrdinals[key]; ok && existing != ordinal {
-			return 0, fmt.Errorf("Responses output item index changed")
+	} else {
+		var err error
+		ordinal, err = s.allocateItemOrdinal()
+		if err != nil {
+			return 0, err
 		}
 		s.itemOrdinals[key] = ordinal
-	}
-	if ordinal >= s.nextOrdinal {
-		s.nextOrdinal = ordinal + 1
+		s.itemTypes[key] = item.Type
 	}
 	if completed {
 		if _, exists := s.completedOrdinals[ordinal]; exists {
@@ -438,7 +668,7 @@ func (s *stream) completeProviderItem(item responseItem, ordinal int) (model.Pro
 		return model.ProviderItem{}, fmt.Errorf("Responses provider state exceeds limit")
 	}
 	s.providerBytes += len(normalized)
-	providerItem := model.ProviderItem{Ordinal: ordinal, Type: item.Type, Payload: normalized}
+	providerItem := model.ProviderItem{Ordinal: ordinal, ItemID: item.ID, Type: item.Type, Phase: item.Phase, Payload: normalized}
 	if item.Type == "function_call" {
 		providerItem.CallID = item.CallID
 	}
@@ -455,6 +685,55 @@ func (u responseUsage) normalized() model.Usage {
 		reasoning = u.OutputTokensDetails.ReasoningTokens
 	}
 	return model.Usage{InputTokens: u.InputTokens, FreshInputTokens: max(u.InputTokens-cached, 0), OutputTokens: u.OutputTokens, ReasoningTokens: reasoning, CachedInputTokens: cached, CacheDetailsReported: u.InputTokensDetails != nil}
+}
+
+func responsesStreamEventError(message, data string, cause error) error {
+	return modelutil.ErrorWithDetails(
+		"MODEL_STREAM_INVALID",
+		message,
+		modelutil.ProviderErrorDetails("Responses stream event", 0, []byte(data)),
+		false,
+		cause,
+	)
+}
+
+func (s *stream) queueProviderItem(item model.ProviderItem) error {
+	if _, exists := s.providerItems[item.Ordinal]; exists {
+		return fmt.Errorf("Responses provider item completed twice")
+	}
+	s.providerItems[item.Ordinal] = item
+	for {
+		next, exists := s.providerItems[s.nextProviderItem]
+		if !exists {
+			return nil
+		}
+		delete(s.providerItems, s.nextProviderItem)
+		s.nextProviderItem++
+		value := next
+		s.queue = append(s.queue, model.Event{Type: model.EventProviderItem, ProviderItem: &value})
+	}
+}
+
+func (s *stream) queueMessageText(ordinal int, phase, completeText string) error {
+	if completeText == "" {
+		return nil
+	}
+	emitted := s.itemTexts[ordinal]
+	if emitted != "" {
+		if completeText == emitted {
+			return nil
+		}
+		if !strings.HasPrefix(completeText, emitted) {
+			return fmt.Errorf("Responses completed message does not match streamed text")
+		}
+		completeText = strings.TrimPrefix(completeText, emitted)
+	}
+	if completeText == "" {
+		return nil
+	}
+	s.itemTexts[ordinal] = emitted + completeText
+	s.queue = append(s.queue, model.Event{Type: model.EventTextDelta, Text: completeText, Ordinal: ordinal, Phase: phase})
+	return nil
 }
 
 func (s *stream) Recv() (model.Event, error) {
@@ -483,15 +762,38 @@ func (s *stream) Recv() (model.Event, error) {
 		switch event.Type {
 		case "response.output_text.delta":
 			if event.Delta != "" {
-				s.queue = append(s.queue, model.Event{Type: model.EventTextDelta, Text: event.Delta})
+				key := event.ItemID
+				ordinal, known := s.itemIndexes[key]
+				if known {
+					s.itemTexts[ordinal] += event.Delta
+				}
+				s.queue = append(s.queue, model.Event{
+					Type: model.EventTextDelta, Text: event.Delta, ItemID: key,
+					Ordinal: ordinal, Phase: s.itemPhases[key],
+				})
 			}
 		case "response.output_item.added":
 			item, err := decodeResponseItem(event.Item)
 			if err != nil {
-				return model.Event{}, modelutil.Error("MODEL_STREAM_INVALID", "Responses 返回了无效的输出项。", false, err)
+				return model.Event{}, responsesStreamEventError("Responses 返回了无效的输出项。", data, err)
 			}
-			if _, err := s.itemOrdinal(item, event.OutputIndex, false); err != nil {
-				return model.Event{}, modelutil.Error("MODEL_STREAM_INVALID", "Responses 输出项顺序无效。", false, err)
+			ordinal, err := s.itemOrdinal(item, event.OutputIndex, false)
+			if err != nil {
+				return model.Event{}, responsesStreamEventError("Responses 输出项顺序无效。", data, err)
+			}
+			key := responseItemKey(item)
+			if key != "" {
+				s.itemPhases[key] = item.Phase
+				s.itemIndexes[key] = ordinal
+			}
+			if item.Type == "message" {
+				initialText, textErr := responseMessageText(item)
+				if textErr != nil {
+					return model.Event{}, responsesStreamEventError("Responses 返回了无效的消息内容。", data, textErr)
+				}
+				if err := s.queueMessageText(ordinal, item.Phase, initialText); err != nil {
+					return model.Event{}, responsesStreamEventError("Responses 消息增量不一致。", data, err)
+				}
 			}
 			if item.Type == "function_call" {
 				key := responseItemKey(item)
@@ -509,14 +811,22 @@ func (s *stream) Recv() (model.Event, error) {
 			key := event.ItemID
 			if a := s.calls[key]; a != nil {
 				if a.Arguments.Len()+len(event.Delta) > modelutil.MaxToolArgsBytes {
-					return model.Event{}, fmt.Errorf("tool arguments exceed limit")
+					return model.Event{}, modelutil.Error("MODEL_TOOL_CALL_INVALID", "模型返回的工具参数过大。", false, nil)
 				}
 				a.Arguments.WriteString(event.Delta)
 			}
 		case "response.output_item.done":
 			item, err := decodeResponseItem(event.Item)
 			if err != nil {
-				return model.Event{}, modelutil.Error("MODEL_STREAM_INVALID", "Responses 返回了无效的完成项。", false, err)
+				return model.Event{}, responsesStreamEventError("Responses 返回了无效的完成项。", data, err)
+			}
+			key := responseItemKey(item)
+			if key != "" {
+				if observedPhase := s.itemPhases[key]; item.Phase == "" {
+					item.Phase = observedPhase
+				} else if observedPhase != "" && observedPhase != item.Phase {
+					return model.Event{}, responsesStreamEventError("Responses 消息阶段发生变化。", data, nil)
+				}
 			}
 			var completedCall *callAccumulator
 			callKey := ""
@@ -542,11 +852,20 @@ func (s *stream) Recv() (model.Event, error) {
 			}
 			ordinal, err := s.itemOrdinal(item, event.OutputIndex, true)
 			if err != nil {
-				return model.Event{}, modelutil.Error("MODEL_STREAM_INVALID", "Responses 完成项顺序无效。", false, err)
+				return model.Event{}, responsesStreamEventError("Responses 完成项顺序无效。", data, err)
+			}
+			if item.Type == "message" {
+				completeText, textErr := responseMessageText(item)
+				if textErr != nil {
+					return model.Event{}, responsesStreamEventError("Responses 返回了无效的完成消息。", data, textErr)
+				}
+				if err := s.queueMessageText(ordinal, item.Phase, completeText); err != nil {
+					return model.Event{}, responsesStreamEventError("Responses 完成消息与流式增量不一致。", data, err)
+				}
 			}
 			providerItem, err := s.completeProviderItem(item, ordinal)
 			if err != nil {
-				return model.Event{}, modelutil.Error("MODEL_STREAM_INVALID", "Responses 完成项无法安全保存。", false, err)
+				return model.Event{}, responsesStreamEventError("Responses 完成项无法安全保存。", data, err)
 			}
 			if completedCall != nil {
 				if err := s.emitCall(completedCall); err != nil {
@@ -555,10 +874,12 @@ func (s *stream) Recv() (model.Event, error) {
 				s.hadToolCalls = true
 				delete(s.calls, callKey)
 			}
-			s.queue = append(s.queue, model.Event{Type: model.EventProviderItem, ProviderItem: &providerItem})
+			if err := s.queueProviderItem(providerItem); err != nil {
+				return model.Event{}, responsesStreamEventError("Responses 完成项无法安全排序。", data, err)
+			}
 		case "response.completed", "response.incomplete":
-			if event.Type == "response.completed" && (len(s.calls) > 0 || len(s.completedOrdinals) < len(s.itemOrdinals)) {
-				return model.Event{}, modelutil.Error("MODEL_STREAM_INVALID", "Responses 流在输出项完成前结束。", false, nil)
+			if event.Type == "response.completed" && (len(s.calls) > 0 || len(s.completedOrdinals) < len(s.seenOrdinals) || len(s.providerItems) > 0) {
+				return model.Event{}, responsesStreamEventError("Responses 流在输出项完成前结束。", data, nil)
 			}
 			usage := event.Response.Usage.normalized()
 			if usage.InputTokens > 0 || usage.OutputTokens > 0 {
@@ -590,7 +911,18 @@ func (s *stream) Recv() (model.Event, error) {
 			} else if providerMessage := modelutil.ProviderErrorMessage([]byte(data)); providerMessage != "" {
 				message = providerMessage
 			}
-			return model.Event{}, modelutil.ErrorWithDetails("MODEL_REQUEST_REJECTED", message, modelutil.ProviderErrorDetails("Responses stream event", 0, []byte(data)), false, nil)
+			errorType, errorCode := event.Type, event.Code
+			if event.Error != nil {
+				errorType, errorCode = event.Error.Type, event.Error.Code
+			} else if event.Response.Error != nil {
+				errorType, errorCode = event.Response.Error.Type, event.Response.Error.Code
+			}
+			retryable := modelutil.StreamErrorRetryable(errorType, errorCode)
+			code := "MODEL_REQUEST_REJECTED"
+			if retryable {
+				code = "MODEL_UNAVAILABLE"
+			}
+			return model.Event{}, modelutil.ErrorWithDetails(code, message, modelutil.ProviderErrorDetails("Responses stream event", 0, []byte(data)), retryable, nil)
 		}
 		if len(s.queue) > 0 {
 			return s.pop(), nil
@@ -600,10 +932,10 @@ func (s *stream) Recv() (model.Event, error) {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return model.Event{}, err
 		}
-		return model.Event{}, modelutil.Error("MODEL_UNAVAILABLE", "模型连接意外中断。", false, err)
+		return model.Event{}, modelutil.Error("MODEL_UNAVAILABLE", "模型连接意外中断，SciAide 将自动重连。", true, err)
 	}
 	if !s.done {
-		return model.Event{}, modelutil.Error("MODEL_STREAM_INVALID", "Responses 流在完成事件前结束。", false, io.ErrUnexpectedEOF)
+		return model.Event{}, modelutil.Error("MODEL_STREAM_INTERRUPTED", "Responses 流在完成事件前中断，SciAide 将自动重连。", true, io.ErrUnexpectedEOF)
 	}
 	return model.Event{}, io.EOF
 }
@@ -627,19 +959,12 @@ func (s *stream) finish() error {
 	if s.done {
 		return nil
 	}
-	for _, a := range s.calls {
-		if err := s.emitCall(a); err != nil {
-			return err
-		}
-		s.hadToolCalls = true
-	}
-	reason := "stop"
-	if s.hadToolCalls {
-		reason = "tool_calls"
-	}
-	s.queue = append(s.queue, model.Event{Type: model.EventDone, FinishReason: reason})
-	s.done = true
-	return nil
+	return modelutil.Error(
+		"MODEL_STREAM_INTERRUPTED",
+		"Responses 流缺少 response.completed 或 response.incomplete 终态，SciAide 将自动重连。",
+		true,
+		io.ErrUnexpectedEOF,
+	)
 }
 func (s *stream) pop() model.Event { e := s.queue[0]; s.queue = s.queue[1:]; return e }
 func (s *stream) Close() error     { s.done = true; return s.body.Close() }

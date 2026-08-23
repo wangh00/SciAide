@@ -108,3 +108,52 @@ func TestKnowledgeRepositoryRecoversJobsAndRejectsCrossProjectDocuments(t *testi
 		t.Fatal("knowledge document foreign keys accepted a cross-project attachment")
 	}
 }
+
+func TestKnowledgeRepositoryCancelsQueuedAndRunningJobs(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "cancel.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Now().UTC()
+	if err := NewProjectRepository(store.DB()).Create(ctx, project.Project{ID: "project", Name: "Project", WorkspacePath: "C:/project", WorkspaceKind: project.WorkspaceExternal, CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	item := attachment.Attachment{ID: "attachment", ProjectID: "project", OriginalName: "paper.txt", MIMEType: document.MIMEType(document.FormatText), Format: document.FormatText, SizeBytes: 10, SHA256: strings.Repeat("a", 64), StorageRelativePath: "attachments/paper.txt", CacheRelativePath: "cache/paper.json", Status: attachment.StatusReady, CreatedAt: now, UpdatedAt: now}
+	if err := NewAttachmentRepository(store.DB()).Create(ctx, item); err != nil {
+		t.Fatal(err)
+	}
+	repository := NewKnowledgeRepository(store.DB())
+	version, err := repository.EnsureVersion(ctx, "project", knowledge.DefaultIndexSpec(), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, queued, err := repository.Enqueue(ctx, item, version, true, now)
+	if err != nil || !queued {
+		t.Fatalf("enqueue = %#v, %v, %v", job, queued, err)
+	}
+	cancelled, ok, err := repository.CancelQueued(ctx, "project", job.DocumentID, now.Add(time.Second))
+	if err != nil || !ok || cancelled.Status != knowledge.JobCancelled {
+		t.Fatalf("cancel queued = %#v, %v, %v", cancelled, ok, err)
+	}
+	job, queued, err = repository.Enqueue(ctx, item, version, true, now.Add(2*time.Second))
+	if err != nil || !queued {
+		t.Fatalf("retry enqueue = %#v, %v, %v", job, queued, err)
+	}
+	work, found, err := repository.ClaimNext(ctx, "project", now.Add(3*time.Second))
+	if err != nil || !found {
+		t.Fatalf("claim = %#v, %v, %v", work, found, err)
+	}
+	if err := repository.CancelRunning(ctx, work, now.Add(4*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	jobs, err := repository.ListLatestJobs(ctx, "project")
+	if err != nil || len(jobs) != 1 || jobs[0].Status != knowledge.JobCancelled {
+		t.Fatalf("latest jobs = %#v, %v", jobs, err)
+	}
+	documentValue, found, err := repository.GetDocument(ctx, "project", job.DocumentID)
+	if err != nil || !found || documentValue.Status != knowledge.DocumentPending {
+		t.Fatalf("cancelled document = %#v, %v, %v", documentValue, found, err)
+	}
+}

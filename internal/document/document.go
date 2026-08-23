@@ -21,6 +21,7 @@ const (
 	FormatPDF      Format = "pdf"
 	FormatDOCX     Format = "docx"
 	FormatXLSX     Format = "xlsx"
+	FormatImage    Format = "image"
 )
 
 type Unit struct {
@@ -92,6 +93,8 @@ func FormatForName(name string) (Format, bool) {
 		return FormatDOCX, true
 	case ".xlsx":
 		return FormatXLSX, true
+	case ".jpg", ".jpeg", ".png", ".webp":
+		return FormatImage, true
 	default:
 		return "", false
 	}
@@ -111,6 +114,8 @@ func MIMEType(format Format) string {
 		return "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 	case FormatXLSX:
 		return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+	case FormatImage:
+		return "image/*"
 	default:
 		return "application/octet-stream"
 	}

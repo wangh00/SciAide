@@ -193,11 +193,18 @@ func (r *ConversationRepository) UpdateMessageText(ctx context.Context, messageI
 }
 
 func (r *ConversationRepository) ListMessages(ctx context.Context, conversationID string, limit int) ([]conversation.Message, error) {
-	if limit <= 0 || limit > 2_000 {
+	if limit < 0 {
+		// Agent context and checkpoint construction must see the complete durable
+		// history; SQLite still streams rows so this does not require one giant
+		// intermediate query result.
+		limit = 2_147_483_647
+	} else if limit == 0 {
 		limit = 200
 	}
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT id, conversation_id, COALESCE(run_id, ''), role, status, created_at, updated_at
+		SELECT selected.id, selected.conversation_id, COALESCE(selected.run_id, ''), selected.role, selected.status, selected.created_at, selected.updated_at,
+			COALESCE(r.status, ''), COALESCE(r.requested_reasoning_level, ''), COALESCE(r.resolved_reasoning_level, ''),
+			COALESCE(r.reasoning_observed, 0), COALESCE(r.reasoning_signature_observed, 0), COALESCE(r.reasoning_tokens, 0), COALESCE(r.reasoning_summary, '')
 		FROM (
 			SELECT m.*,
 				CASE WHEN m.role = 'user' THEN 0 WHEN m.role = 'assistant' THEN 1 ELSE 2 END AS role_order
@@ -205,17 +212,23 @@ func (r *ConversationRepository) ListMessages(ctx context.Context, conversationI
 			WHERE m.conversation_id = ?
 			ORDER BY m.created_at DESC, role_order DESC, m.id DESC
 			LIMIT ?
-		)
-		ORDER BY created_at, role_order, id`, conversationID, limit)
+		) selected
+		LEFT JOIN runs r ON r.id = selected.run_id
+		ORDER BY selected.created_at, selected.role_order, selected.id`, conversationID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list messages: %w", err)
 	}
 	values := make([]conversation.Message, 0)
 	for rows.Next() {
 		var value conversation.Message
+		var reasoning conversation.MessageReasoning
 		var createdAt, updatedAt string
-		if err := rows.Scan(&value.ID, &value.ConversationID, &value.RunID, &value.Role, &value.Status, &createdAt, &updatedAt); err != nil {
+		if err := rows.Scan(&value.ID, &value.ConversationID, &value.RunID, &value.Role, &value.Status, &createdAt, &updatedAt,
+			&reasoning.Status, &reasoning.RequestedLevel, &reasoning.ResolvedLevel, &reasoning.Observed, &reasoning.SignatureObserved, &reasoning.Tokens, &reasoning.Summary); err != nil {
 			return nil, err
+		}
+		if value.Role == conversation.RoleAssistant && value.RunID != "" {
+			value.Reasoning = &reasoning
 		}
 		value.CreatedAt, err = parseTime(createdAt)
 		if err != nil {

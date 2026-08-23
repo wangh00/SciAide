@@ -58,15 +58,28 @@ const (
 )
 
 type Message struct {
-	ID             string        `json:"id"`
-	ConversationID string        `json:"conversationId"`
-	RunID          string        `json:"runId,omitempty"`
-	Role           Role          `json:"role"`
-	Status         MessageStatus `json:"status"`
-	Parts          []MessagePart `json:"parts"`
-	Citations      []Citation    `json:"citations"`
-	CreatedAt      time.Time     `json:"createdAt"`
-	UpdatedAt      time.Time     `json:"updatedAt"`
+	ID             string            `json:"id"`
+	ConversationID string            `json:"conversationId"`
+	RunID          string            `json:"runId,omitempty"`
+	Role           Role              `json:"role"`
+	Status         MessageStatus     `json:"status"`
+	Parts          []MessagePart     `json:"parts"`
+	Citations      []Citation        `json:"citations"`
+	Reasoning      *MessageReasoning `json:"reasoning,omitempty"`
+	CreatedAt      time.Time         `json:"createdAt"`
+	UpdatedAt      time.Time         `json:"updatedAt"`
+}
+
+// MessageReasoning is a read-only projection from the message's Run. It is
+// not a MessagePart and therefore never enters subsequent model context.
+type MessageReasoning struct {
+	Status            string                  `json:"status"`
+	RequestedLevel    modelcap.ReasoningLevel `json:"requestedLevel"`
+	ResolvedLevel     modelcap.ReasoningLevel `json:"resolvedLevel,omitempty"`
+	Observed          bool                    `json:"observed"`
+	SignatureObserved bool                    `json:"signatureObserved"`
+	Tokens            int                     `json:"tokens"`
+	Summary           string                  `json:"summary,omitempty"`
 }
 
 type Citation struct {

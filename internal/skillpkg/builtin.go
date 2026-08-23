@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
+	"strings"
 
 	"github.com/wangh00/SciAide/internal/app/skill"
 )
 
-//go:embed builtins/*/*/skill.yaml builtins/*/*/SKILL.md
+//go:embed builtins
 var builtinSkillFiles embed.FS
 
 type BuiltinInstaller interface {
@@ -106,18 +108,29 @@ func SeedBuiltins(ctx context.Context, installer BuiltinInstaller, installedRoot
 
 func materializeBuiltin(descriptor builtinDescriptor, root string) (string, error) {
 	source := filepath.Join(root, descriptor.id)
-	if err := os.Mkdir(source, 0o700); err != nil {
-		return "", fmt.Errorf("create embedded Skill directory: %w", err)
-	}
-	for _, name := range []string{"skill.yaml", "SKILL.md"} {
-		embeddedPath := filepath.ToSlash(filepath.Join("builtins", descriptor.id, descriptor.version, name))
+	embeddedRoot := path.Join("builtins", descriptor.id, descriptor.version)
+	if err := fs.WalkDir(builtinSkillFiles, embeddedRoot, func(embeddedPath string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		relative := strings.TrimPrefix(strings.TrimPrefix(embeddedPath, embeddedRoot), "/")
+		if relative == "" {
+			relative = "."
+		}
+		destination := filepath.Join(source, filepath.FromSlash(relative))
+		if entry.IsDir() {
+			return os.MkdirAll(destination, 0o700)
+		}
 		contents, err := fs.ReadFile(builtinSkillFiles, embeddedPath)
 		if err != nil {
-			return "", fmt.Errorf("read embedded Skill file %s: %w", name, err)
+			return fmt.Errorf("read embedded Skill file %s: %w", relative, err)
 		}
-		if err := os.WriteFile(filepath.Join(source, name), contents, 0o600); err != nil {
-			return "", fmt.Errorf("materialize embedded Skill file %s: %w", name, err)
+		if err := os.WriteFile(destination, contents, 0o600); err != nil {
+			return fmt.Errorf("materialize embedded Skill file %s: %w", relative, err)
 		}
+		return nil
+	}); err != nil {
+		return "", fmt.Errorf("materialize built-in Skill %s@%s: %w", descriptor.id, descriptor.version, err)
 	}
 	return source, nil
 }

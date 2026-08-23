@@ -22,12 +22,14 @@ import (
 const maxStreamLineBytes = 1024 * 1024
 
 type Client struct {
-	profile  modelprofile.Profile
-	secret   []byte
-	http     *http.Client
-	recorder modelcap.ReasoningRecorder
-	modeMu   sync.RWMutex
-	mode     thinkingMode
+	profile                 modelprofile.Profile
+	secret                  []byte
+	http                    *http.Client
+	recorder                modelcap.ReasoningRecorder
+	modeMu                  sync.RWMutex
+	mode                    thinkingMode
+	cacheMu                 sync.RWMutex
+	cacheControlUnsupported bool
 }
 
 func New(profile modelprofile.Profile, secret []byte, recorders ...modelcap.ReasoningRecorder) *Client {
@@ -39,7 +41,7 @@ func New(profile modelprofile.Profile, secret []byte, recorders ...modelcap.Reas
 	if len(recorders) > 0 {
 		recorder = recorders[0]
 	}
-	return &Client{profile: profile, secret: append([]byte(nil), secret...), http: &http.Client{Timeout: timeout}, recorder: recorder}
+	return &Client{profile: profile, secret: append([]byte(nil), secret...), http: modelutil.NewStreamingHTTPClient(timeout), recorder: recorder}
 }
 func NewWithHTTPClient(profile modelprofile.Profile, secret []byte, client *http.Client) *Client {
 	v := New(profile, secret)
@@ -73,17 +75,29 @@ func TestConnection(ctx context.Context, profile modelprofile.Profile, secret []
 func intPointer(value int) *int { return &value }
 
 type contentBlock struct {
-	Type      string          `json:"type"`
-	Text      string          `json:"text,omitempty"`
-	Thinking  string          `json:"thinking,omitempty"`
-	Signature string          `json:"signature,omitempty"`
-	Data      string          `json:"data,omitempty"`
-	ID        string          `json:"id,omitempty"`
-	Name      string          `json:"name,omitempty"`
-	Input     json.RawMessage `json:"input,omitempty"`
-	ToolUseID string          `json:"tool_use_id,omitempty"`
-	Content   string          `json:"content,omitempty"`
-	IsError   bool            `json:"is_error,omitempty"`
+	Type         string          `json:"type"`
+	Text         string          `json:"text,omitempty"`
+	Source       *imageSource    `json:"source,omitempty"`
+	Thinking     string          `json:"thinking,omitempty"`
+	Signature    string          `json:"signature,omitempty"`
+	Data         string          `json:"data,omitempty"`
+	ID           string          `json:"id,omitempty"`
+	Name         string          `json:"name,omitempty"`
+	Input        json.RawMessage `json:"input,omitempty"`
+	ToolUseID    string          `json:"tool_use_id,omitempty"`
+	Content      string          `json:"content,omitempty"`
+	IsError      bool            `json:"is_error,omitempty"`
+	CacheControl *cacheControl   `json:"cache_control,omitempty"`
+}
+
+type imageSource struct {
+	Type      string `json:"type"`
+	MediaType string `json:"media_type"`
+	Data      string `json:"data"`
+}
+
+type cacheControl struct {
+	Type string `json:"type"`
 }
 type message struct {
 	Role    string         `json:"role"`
@@ -124,6 +138,11 @@ type reasoningRejectedError struct {
 	err  error
 }
 
+type cacheControlRejectedError struct{ err error }
+
+func (e *cacheControlRejectedError) Error() string { return e.err.Error() }
+func (e *cacheControlRejectedError) Unwrap() error { return e.err }
+
 func (e *reasoningRejectedError) Error() string { return e.err.Error() }
 func (e *reasoningRejectedError) Unwrap() error { return e.err }
 
@@ -147,7 +166,19 @@ func (c *Client) Stream(ctx context.Context, request model.ChatRequest) (model.S
 			mode = thinkingProviderDefault
 		}
 		request.ResolvedReasoningLevel = level
-		stream, err := c.streamOnce(ctx, request, mode)
+		useCacheControl := request.PromptCacheKey != "" && !c.cacheControlIsUnsupported()
+		var stream model.Stream
+		var err error
+		for {
+			stream, err = c.streamOnce(ctx, request, mode, useCacheControl)
+			var cacheRejection *cacheControlRejectedError
+			if useCacheControl && errors.As(err, &cacheRejection) {
+				c.rememberCacheControlUnsupported()
+				useCacheControl = false
+				continue
+			}
+			break
+		}
 		if err == nil {
 			c.rememberThinkingMode(mode)
 			result := modelcap.ReasoningResult{Requested: requested, Resolved: level, Rejected: rejected, ControlUnsupported: controlUnsupported, WireMode: string(mode)}
@@ -181,6 +212,18 @@ func (c *Client) Stream(ctx context.Context, request model.ChatRequest) (model.S
 		}
 	}
 	return nil, fmt.Errorf("reasoning negotiation exhausted")
+}
+
+func (c *Client) cacheControlIsUnsupported() bool {
+	c.cacheMu.RLock()
+	defer c.cacheMu.RUnlock()
+	return c.cacheControlUnsupported
+}
+
+func (c *Client) rememberCacheControlUnsupported() {
+	c.cacheMu.Lock()
+	c.cacheControlUnsupported = true
+	c.cacheMu.Unlock()
 }
 
 func (c *Client) preferredThinkingMode() thinkingMode {
@@ -230,7 +273,7 @@ func legacyAnthropicModel(modelID string) bool {
 	return false
 }
 
-func (c *Client) streamOnce(ctx context.Context, request model.ChatRequest, mode thinkingMode) (model.Stream, error) {
+func (c *Client) streamOnce(ctx context.Context, request model.ChatRequest, mode thinkingMode, useCacheControl bool) (model.Stream, error) {
 	aliases := map[string]string{}
 	providerNames := map[string]string{}
 	for _, def := range request.Tools {
@@ -283,7 +326,18 @@ func (c *Client) streamOnce(ctx context.Context, request model.ChatRequest, mode
 			}
 			value.System += item.Content
 		case model.RoleUser:
-			value.Messages = appendMessage(value.Messages, "user", contentBlock{Type: "text", Text: modelutil.WrapUntrusted("conversation_content", item.Content)})
+			if item.Content != "" {
+				value.Messages = appendMessage(value.Messages, "user", contentBlock{Type: "text", Text: modelutil.WrapUntrusted("conversation_content", item.Content)})
+			}
+			for _, part := range item.Parts {
+				if part.Type != "input_image" {
+					continue
+				}
+				if _, imageErr := model.ImageDataURL(part); imageErr != nil {
+					return nil, imageErr
+				}
+				value.Messages = appendMessage(value.Messages, "user", contentBlock{Type: "image", Source: &imageSource{Type: "base64", MediaType: part.MediaType, Data: part.Data}})
+			}
 		case model.RoleAssistant:
 			if item.Content != "" {
 				value.Messages = appendMessage(value.Messages, "assistant", contentBlock{Type: "text", Text: item.Content})
@@ -309,6 +363,9 @@ func (c *Client) streamOnce(ctx context.Context, request model.ChatRequest, mode
 	}
 	if err := appendProviderTurns(&value, request.ProviderTurns); err != nil {
 		return nil, err
+	}
+	if useCacheControl {
+		markLatestCacheBreakpoint(value.Messages)
 	}
 	body, err := json.Marshal(value)
 	if err != nil {
@@ -337,16 +394,46 @@ func (c *Client) streamOnce(ctx context.Context, request model.ChatRequest, mode
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		b := modelutil.ReadErrorBody(response.Body)
 		response.Body.Close()
+		if useCacheControl && cacheControlRejected(response.StatusCode, b) {
+			return nil, &cacheControlRejectedError{err: modelutil.ClassifyStatusWithHeaders(response.StatusCode, response.Header, b)}
+		}
 		if request.ResolvedReasoningLevel.Valid() {
 			if kind := modelutil.ClassifyReasoningRejection(response.StatusCode, b); kind != modelutil.ReasoningRejectionNone {
-				return nil, &reasoningRejectedError{kind: kind, err: modelutil.ClassifyStatus(response.StatusCode, b)}
+				return nil, &reasoningRejectedError{kind: kind, err: modelutil.ClassifyStatusWithHeaders(response.StatusCode, response.Header, b)}
 			}
 		}
-		return nil, modelutil.ClassifyStatus(response.StatusCode, b)
+		return nil, modelutil.ClassifyStatusWithHeaders(response.StatusCode, response.Header, b)
 	}
 	scanner := bufio.NewScanner(response.Body)
 	scanner.Buffer(make([]byte, 64*1024), maxStreamLineBytes)
 	return &stream{body: response.Body, scanner: scanner, providerNames: providerNames, blocks: map[int]*blockAccumulator{}, completed: map[int]struct{}{}}, nil
+}
+
+func markLatestCacheBreakpoint(messages []message) {
+	for messageIndex := len(messages) - 1; messageIndex >= 0; messageIndex-- {
+		if len(messages[messageIndex].Content) == 0 {
+			continue
+		}
+		blockIndex := len(messages[messageIndex].Content) - 1
+		messages[messageIndex].Content[blockIndex].CacheControl = &cacheControl{Type: "ephemeral"}
+		return
+	}
+}
+
+func cacheControlRejected(status int, body []byte) bool {
+	if status != http.StatusBadRequest && status != http.StatusUnprocessableEntity {
+		return false
+	}
+	detail := strings.ToLower(modelutil.ProviderErrorMessage(body) + " " + string(body))
+	if !strings.Contains(detail, "cache_control") && !strings.Contains(detail, "cache control") {
+		return false
+	}
+	for _, marker := range []string{"unknown parameter", "unsupported parameter", "unrecognized parameter", "extra inputs", "not supported", "is unsupported", "does not support", "unknown field", "unexpected field"} {
+		if strings.Contains(detail, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func appendProviderTurns(value *payload, turns []model.ProviderTurn) error {
@@ -476,6 +563,8 @@ type event struct {
 	} `json:"delta"`
 	Usage usage `json:"usage"`
 	Error struct {
+		Type    string `json:"type"`
+		Code    string `json:"code"`
 		Message string `json:"message"`
 	} `json:"error"`
 }
@@ -618,7 +707,7 @@ func (s *stream) Recv() (model.Event, error) {
 				a.Signature.WriteString(e.Delta.Signature)
 			case "input_json_delta":
 				if a.Arguments.Len()+len(e.Delta.PartialJSON) > modelutil.MaxToolArgsBytes {
-					return model.Event{}, fmt.Errorf("tool arguments exceed limit")
+					return model.Event{}, modelutil.Error("MODEL_TOOL_CALL_INVALID", "模型返回的工具参数过大。", false, nil)
 				}
 				a.Arguments.WriteString(e.Delta.PartialJSON)
 			default:
@@ -661,9 +750,18 @@ func (s *stream) Recv() (model.Event, error) {
 			if s.usage.InputTokens > 0 || s.usage.OutputTokens > 0 {
 				s.queue = append(s.queue, model.Event{Type: model.EventUsage, Usage: &s.usage})
 			}
-			reason := "stop"
-			if s.stopReason == "tool_use" {
+			reason := "incomplete"
+			switch s.stopReason {
+			case "end_turn", "stop_sequence":
+				reason = "stop"
+			case "tool_use":
 				reason = "tool_calls"
+			case "max_tokens":
+				reason = "length"
+			case "refusal":
+				reason = "refusal"
+			case "pause_turn":
+				reason = "incomplete"
 			}
 			s.queue = append(s.queue, model.Event{Type: model.EventDone, FinishReason: reason})
 			s.done = true
@@ -672,7 +770,12 @@ func (s *stream) Recv() (model.Event, error) {
 			if message == "" {
 				message = "Anthropic 请求未完成。"
 			}
-			return model.Event{}, modelutil.ErrorWithDetails("MODEL_REQUEST_REJECTED", message, modelutil.ProviderErrorDetails("Anthropic stream event", 0, []byte(data)), false, nil)
+			retryable := modelutil.StreamErrorRetryable(e.Error.Type, e.Error.Code)
+			code := "MODEL_REQUEST_REJECTED"
+			if retryable {
+				code = "MODEL_UNAVAILABLE"
+			}
+			return model.Event{}, modelutil.ErrorWithDetails(code, message, modelutil.ProviderErrorDetails("Anthropic stream event", 0, []byte(data)), retryable, nil)
 		}
 		if len(s.queue) > 0 {
 			return s.pop(), nil
@@ -682,9 +785,9 @@ func (s *stream) Recv() (model.Event, error) {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return model.Event{}, err
 		}
-		return model.Event{}, modelutil.Error("MODEL_UNAVAILABLE", "模型连接意外中断。", false, err)
+		return model.Event{}, modelutil.Error("MODEL_UNAVAILABLE", "模型连接意外中断，SciAide 将自动重连。", true, err)
 	}
-	return model.Event{}, modelutil.Error("MODEL_STREAM_INVALID", "Anthropic 流在完成事件前结束。", false, io.ErrUnexpectedEOF)
+	return model.Event{}, modelutil.Error("MODEL_STREAM_INTERRUPTED", "Anthropic 流在完成事件前中断，SciAide 将自动重连。", true, io.ErrUnexpectedEOF)
 }
 func (s *stream) pop() model.Event { e := s.queue[0]; s.queue = s.queue[1:]; return e }
 func (s *stream) Close() error     { s.done = true; return s.body.Close() }

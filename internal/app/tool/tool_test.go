@@ -27,6 +27,18 @@ func TestCallStateMachineRejectsTerminalReplay(t *testing.T) {
 	}
 }
 
+func TestModelContextSnapshotIsDeterministicAndBounded(t *testing.T) {
+	result := Result{Status: ResultSuccess, Text: strings.Repeat("科研结果", 4_000), Structured: json.RawMessage(`{"ok":true}`), Truncated: true}
+	first := BuildModelContextSnapshot("call", "", result)
+	second := BuildModelContextSnapshot("call", "", result)
+	if first != second || len([]rune(first)) != MaxModelContextRunes {
+		t.Fatalf("snapshot stability = equal:%v runes:%d", first == second, len([]rune(first)))
+	}
+	if !strings.Contains(first, "tool result truncated for model context") || !strings.Contains(first, `"structured":{"ok":true}`) {
+		t.Fatal("snapshot did not preserve bounded head/tail evidence")
+	}
+}
+
 func TestDefinitionRejectsDuplicateAndMismatchedSyntheticPermissions(t *testing.T) {
 	base := Definition{QualifiedName: "builtin.test", Description: "test", InputSchema: json.RawMessage(`{}`), Risk: RiskLow, Version: "1"}
 	duplicate := base
@@ -83,9 +95,10 @@ func TestJSONSchemaValidatorRejectsUnknownAndInvalidArguments(t *testing.T) {
 }
 
 type memoryToolRepository struct {
-	mu     sync.Mutex
-	calls  map[string]Call
-	events []events.Envelope
+	mu        sync.Mutex
+	calls     map[string]Call
+	events    []events.Envelope
+	finishErr error
 }
 
 func newMemoryToolRepository() *memoryToolRepository {
@@ -137,6 +150,9 @@ func (r *memoryToolRepository) transition(_ context.Context, id string, expected
 func (r *memoryToolRepository) finish(_ context.Context, id string, expected, next CallStatus, result Result, errorCode, errorMessage string, at time.Time) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.finishErr != nil {
+		return r.finishErr
+	}
 	value := r.calls[id]
 	if value.Status != expected {
 		return ErrTransitionConflict

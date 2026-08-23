@@ -2,7 +2,7 @@
 
 面向科研工作者的本地优先桌面 AI Agent，支持自定义模型、工具调用、MCP、Skill、科研知识库和可信引用。
 
-当前阶段：**P5.5 PDF/DOCX 结构解析加固完成**。
+当前阶段：**P6.0 斜杠命令面板与手动会话压缩完成**。
 
 ## 当前能力
 
@@ -21,6 +21,8 @@
 - P2 权限基线：统一 ToolRegistry、精确资源 PolicyEngine、逐项 Approval、作用域 Grant 与重启恢复
 - P2 执行基线：有界 ToolExecutor、取消/超时/panic 隔离、Workspace PathGuard、列目录与 UTF-8 文本读取工具
 - 支持选择或拖放 PDF、DOCX、XLSX、TXT、Markdown、CSV/TSV；PDF 保留页码并整理碎片换行、英文断词及重复页眉页脚，DOCX 保留标题层级、章节路径、列表、表格行和 OpenXML 元数据
+- 聊天支持 JPEG、PNG 和 WebP 原生图片输入；当前模型明确拒图后，宿主级识图兜底按优先级调用用户配置的视觉渠道，再把不可信图片描述回交原文本模型
+- 项目不内置识图模型、端点或密钥；用户可在“模型与 API → 识图兜底”添加、测试、启停和删除自定义协议、Base URL、Model ID 与 API Key，密钥只存 Windows Credential Manager
 - 内置附件列表、文档检查、按定位读取和搜索工具；附件以消息 `media` part 持久化，解析缓存可从 SHA256 原件重建
 - 聊天附件默认只供当前对话读取；顶部独立知识库窗口支持显式导入、查看状态和移出索引，`builtin.knowledge.search` 只跨已加入知识库的文献检索
 - Document、ImportJob 与 IndexVersion 元数据保存在全局 SQLite，Chunk 正文和词法索引位于 `<Workspace>/.sciaide/cache/knowledge`；删除派生缓存后可从项目附件重建
@@ -32,6 +34,8 @@
 - `builtin.knowledge.search@3` 为片段返回绑定 Run、IndexVersion、Chunk 和原文 SHA256 的稳定 `[K-...]` 标记；最终回答只持久化通过工具来源与证据快照校验的实际使用引用，正文、引用和 Run 完成状态原子提交
 - 聊天中的已验证引用可点击查看来源、页码/段落/Sheet 定位、原文和证据哈希；伪造、变形或跨 Run 标记不会显示为可信引用
 - P5.1 v1 在 v2 影子构建期间继续可用，只有全部 ready 文档完成并校验后才原子切换
+- 知识库展示等待、解析、分块/向量化、提交等任务阶段及解析质量诊断；支持取消、显式重试和单文档重建，重建完成前继续查询上一份可用索引
+- 固定中英文科研语料同时覆盖 BM25 与确定性混合检索，持续校验 Hit Rate、Recall、MRR 和来源定位率；扫描型 PDF 只提示缺少文本，当前不内置 OCR
 - P3 MCP：stdio / Streamable HTTP 配置、显式信任、initialize 与 Tools/Resources/Prompts 能力发现
 - 兼容 Claude Desktop、Cursor、Codex 常见的 `mcpServers` JSON，可一次粘贴并导入多个 Server
 - MCP Tool 使用稳定的 `mcp.<namespace>.<tool>` 名称进入统一 ToolRegistry、Plan/Full Access 审批和 ToolExecutor
@@ -40,6 +44,10 @@
 - 推理证据区分“参数已接受”和“已观察到思考”，支持 reasoning token 汇总、默认折叠的安全状态卡，以及不拆分原生推理/工具协议组的上下文压缩
 - 每个模型独立保存上下文窗口及 `provider/manual/builtin/fallback` 来源；运行时使用 95% 有效预算和不高于 90% 的自动压缩阈值，普通 `/v1/models` 缺少元数据时明确回退 200K
 - 超长会话先生成无工具的结构化科研 checkpoint，再以“已校验摘要 + 最近完整对话组”继续；checkpoint 带消息边界、revision 和 SHA256，原始聊天记录不删除
+- 聊天框输入 `/` 可筛选并执行本地命令；`/mcp`、`/skill`、`/knowledge`、`/model`、`/reasoning`、`/permission`、`/status` 和 `/usage` 进入运行时二级面板，本地命令不会作为消息发送给模型
+- `/reasoning` 与 `/permission` 可快速切换当前会话的思考强度和工具权限；`/status` 只读汇总模型、上下文、checkpoint、MCP、Skill、知识库和识图兜底状态
+- `/mcp` 按 Server 展示真实启动/关闭状态、Tools/Resources/Prompts，并可直接连接或断开；`/skill` 展示项目启用状态并可插入 `$skill-id`，完整配置页只作为二级面板中的显式管理入口
+- `/compact` 显式生成并持久化可校验 checkpoint，运行中的会话不会并发压缩
 - P4.1 Skill 基线：严格解析 `skill.yaml` 与非空 UTF-8 `SKILL.md`，按 `~/.sciaide/skills/<id>/<version>/` 扫描版本化包
 - Skill Manifest、入口内容和全包 SHA256 持久化；包被修改、缺失或校验失败时进入不可用状态，启动扫描不会静默信任已安装包的新内容
 - Skill 可按项目固定启用具体版本和优先级；必需 Tool 缺失或 SciAide 版本不兼容时禁止启用，可选 Tool 缺失仅作为状态提示
@@ -59,4 +67,4 @@
 
 ## 开发
 
-依赖安装和命令见 [`docs/development.md`](docs/development.md)。完整架构与阶段门禁见 [`start.md`](start.md)。
+新会话或接手开发请先读 [`docs/CURRENT_STATE.md`](docs/CURRENT_STATE.md)。依赖安装和命令见 [`docs/development.md`](docs/development.md)，完整架构与阶段门禁见 [`start.md`](start.md)。

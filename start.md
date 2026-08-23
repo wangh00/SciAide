@@ -202,22 +202,11 @@ queued → running ↔ waiting_approval
 - 写文件、发请求、启动外部操作等非幂等调用不得自动重放。
 - Tool Call 使用 `call_id` 和可选 `idempotency_key` 防止重复提交。
 
-### 6.3 运行预算
+### 6.3 Run 执行控制
 
-每个 Run 必须有明确预算，默认值可由用户调整：
+Run 不设累计模型轮次、累计工具调用或整段墙钟时长上限。复杂任务可持续调用模型和工具，直到正常完成或用户主动停止。`runs.model_turns` 与 ToolCall 时间线只用于统计、审计和恢复。
 
-```go
-type RunBudget struct {
-    MaxModelTurns int
-    MaxToolCalls  int
-    MaxDuration   time.Duration
-    MaxInputTokens  int
-    MaxOutputTokens int
-    MaxCost       *decimal.Decimal // Provider 能提供价格时使用
-}
-```
-
-任何一项达到上限都停止继续调用，并向用户解释已达到的限制。禁止无限 Agent Loop。
+执行边界作用于具体操作而非整个任务：用户可随时停止/中断，单次模型 HTTP 请求和单次 Tool/MCP 调用保留超时，上下文超过模型窗口时使用安全检查点压缩。
 
 ### 6.4 上下文构建顺序
 
@@ -1155,7 +1144,7 @@ P2.5 范围：`Plan` / `Full Access` 两档会话权限、审批卡片、ToolCal
 
 交付物：
 
-- AgentLoop、ContextBuilder、RunBudget。
+- AgentLoop、ContextBuilder 与可取消的 Run 生命周期。
 - ToolRegistry、JSON Schema 校验、ToolExecutor。
 - Plan / Full Access Policy、Approval；历史 PermissionGrant 仅兼容旧数据。
 - 只读工具：列出 Workspace、读取文本、知识搜索占位工具。
@@ -1166,7 +1155,7 @@ P2.5 范围：`Plan` / `Full Access` 两档会话权限、审批卡片、ToolCal
 
 - FakeModel 可以发起 Tool Call，工具结果回填后得到最终回答。
 - 非法参数、未知工具、越界路径、权限拒绝不会执行工具。
-- 达到 Turn/Tool/Time 预算后可靠停止。
+- 超过旧版 Turn/Tool 累计上限后仍能继续执行并生成最终回答。
 - 崩溃恢复不会重复执行非幂等 Tool Call。
 - Windows 路径穿越、junction 和符号链接测试通过。
 
@@ -1196,6 +1185,8 @@ P2.5 范围：`Plan` / `Full Access` 两档会话权限、审批卡片、ToolCal
 ### P3.5：模型协议完整性（插入阶段）
 
 > 实施状态（2026-08-14）：P3.5.1～P3.5.3 的代码与自动化 Provider Fixture 已完成；Responses-compatible 真实接口 E2E 已通过，实测 3 个连续模型轮次中 `reasoning → message → function_call → function_call_output` 可持久化并继续调用 MCP，reasoning token 和折叠证据 UI 正常，工具拒绝后也能完成本轮。该接口返回了 reasoning summary，但 `encrypted_content` 为空字符串，因此非空 encrypted payload 仍由自动化 Fixture 覆盖；真实 Anthropic E2E 仍待配置服务后验收。内部协议新增不对前端暴露的 Provider Turn/Item；Anthropic `thinking_delta`、`signature_delta`、`redacted_thinking`、`text` 与 `tool_use` 按原 content block index 累积；OpenAI Responses 请求显式包含 `reasoning.encrypted_content`，并按 output index 保存 `reasoning`、assistant `message` 与 `function_call` 完成项。两种协议都在 ToolCall 进入审批/执行前不可变持久化，并在 ToolResult/function_call_output 前按原顺序回放。SQLite 已加入 `provider_turn_items` 与运行级推理证据；OpenAI Chat/Responses 的 reasoning token 可独立统计，且不会重复计入总 Token。界面严格区分“参数已接受”和“已观察到思考”，只显示默认折叠的证据状态，不暴露原始 thinking/signature/encrypted content。上下文压缩会先计入 system、工具定义和最新消息，再仅保留最新的完整 Provider Turn 后缀，不拆分推理、工具调用与工具结果协议组。
+
+> 推理摘要展示（2026-08-20）：助手消息在正文前立即显示所选思考强度，并在 Provider 返回明确的 Responses `summary_text` 后原位更新；Responses 请求显式使用 `reasoning.summary: "auto"`，兼容端点明确拒绝时仅撤掉该可选字段并保持原 effort 重试。没有安全摘要时只展示实际档位、观察状态和 reasoning token。展示不增加正常请求次数、不阻塞正文流式输出，摘要作为 Run 的消息只读投影持久化但不属于 MessagePart，因此不会进入后续模型上下文。Anthropic 原始 thinking/signature/redacted_thinking 与加密推理状态继续仅用于协议连续性，不向 UI 公开。
 
 **目标：** 文本、推理状态和工具调用在多协议、暂停审批、程序恢复与上下文裁剪后仍保持服务端要求的原始关系。
 
@@ -1252,6 +1243,8 @@ P2.5 范围：`Plan` / `Full Access` 两档会话权限、审批卡片、ToolCal
 > P5.4 实施状态（2026-08-19）：`builtin.knowledge.search@3` 为检索片段生成绑定 Run、IndexVersion、Chunk 与原文 SHA256 的稳定 `[K-...]` 标记。同一 Chunk 的不同检索片段使用不同标记，回答完成时只接受当前 Run 成功知识工具结果中存在且证据快照有效的实际使用标记。Assistant Message 正文、不可变 Citation 快照与 Run 完成状态在同一事务提交。前端将已验证引用显示为可点击编号，可查看来源、页码/段落/Sheet 定位、原文和哈希；伪造、变形、跨 Run 或冲突标记不会显示为可信引用。历史引用不依赖可重建索引继续存在。当前仍不包含 OCR、原生 PDF 页跳转和固定语料召回评测。
 >
 > P5.5 实施状态（2026-08-19）：文档解析缓存升级为 schema v2。PDF 在稳定页码边界内保守合并碎片行、恢复英文断词、识别章节，并跨页清除重复页眉页脚及页码；分析文本受 8.25M rune 上限约束。DOCX 解析真实段落样式、大纲标题、章节路径、列表、表格行和核心 OpenXML 元数据，DOCX/XLSX 共用元数据读取。旧缓存从附件 SHA256 原件懒重建，知识库按 ParserSchemaVersion 构建影子索引后切换。同页多章节对模型保留标题上下文，但 Citation locator 去重。当前决策是不在 SciAide 内置 OCR 运行时。
+>
+> P5.6 实施状态（2026-08-20）：知识库窗口已展示导入任务的等待、读取、分块/向量化、提交、完成、失败和取消阶段，并根据解析元数据给出 PDF 文本页覆盖率、空页/截断提示、DOCX 标题/表格和 XLSX Sheet 诊断。用户可取消排队或运行中的任务、显式重试失败/取消任务、重建单篇文档；取消不会被普通搜索自动撤销，应用关闭导致的中断仍可恢复。已有 ready 索引时，重建不会阻塞检索，单文档内容在本地事务提交后整体替换。固定中英文科研语料为 BM25 和确定性 Embedding + RRF 建立 Hit Rate、Mean Recall、MRR 与来源定位率回归门槛。解析诊断不证明内容语义正确，扫描件仍只提示当前未内置 OCR。
 
 **目标：** 基于项目文献回答并定位引用来源。
 
@@ -1272,6 +1265,10 @@ P2.5 范围：`Plan` / `Full Access` 两档会话权限、审批卡片、ToolCal
 - 在固定测试语料上建立检索召回基线，回归测试通过。
 
 ### P6：科研产物与导出（2 周）
+
+> P6.0 实施状态（2026-08-20）：聊天输入框新增统一斜杠命令面板，输入 `/` 后支持过滤、鼠标、上下方向键、Tab、Enter 和 Esc。首批本地命令为 `/mcp`、`/skill`、`/knowledge`、`/compact`、`/model`、`/usage`、`/new` 与 `/help`；只有整段文本精确匹配已注册命令时才本地执行，未知命令或带参数文本继续作为普通消息。参考 Codex 运行时 inventory 与 Claude Code `/mcp` 交互，`/mcp` 进入 Server 二级列表，展示真实启动/关闭状态及 Tools/Resources/Prompts，并可直接启动或关闭；`/skill` 展示项目启用状态并可插入 `$skill-id`，`/model` 直接选择模型，`/knowledge` 和 `/usage` 展示运行时摘要，配置窗口仅作为显式管理入口。`/compact` 不创建聊天 Message，而是复用无工具科研 checkpoint 协议，校验旧摘要哈希、固定最新终态 Run 的消息边界、最多渐进执行三轮并记录模型用量；运行中会话拒绝手动压缩。命令面板和所有二级层级支持点击外部关闭；主界面与管理窗口统一中性 Apple-like 材质和 compositor-only 动效，移除全屏实时模糊以降低 WebView2 重绘开销。
+>
+> P6.0 流式性能加固（2026-08-20）：`content.delta` 不再逐分片触发全页更新，而是按浏览器动画帧合并；终态正文仍以 `content.completed` 和 SQLite Snapshot 为准，避免缓冲导致丢字或重复。历史消息保持稳定引用并使用 memo 隔离，流式自动跟随使用即时滚动，用户离开底部后不再强制拉回。Windows 发布必须通过 `build-release.ps1` 生成并验证 amd64 PE，禁止把当前机器默认的 386 目标误作为发布版本。
 
 **目标：** 把回答转化为可管理、可复现的科研产物。
 

@@ -11,6 +11,7 @@ declare global {
 	  WindowMinimise?: () => void;
 	  WindowToggleMaximise?: () => void;
 	  Quit?: () => void;
+	  ClipboardSetText?: (text: string) => Promise<boolean>;
 	  OnFileDrop?: (callback: (x: number, y: number, paths: string[]) => void, useDropTarget: boolean) => void;
 	  OnFileDropOff?: () => void;
     };
@@ -20,6 +21,10 @@ declare global {
 export function minimiseWindow(): void { window.runtime?.WindowMinimise?.(); }
 export function toggleMaximiseWindow(): void { window.runtime?.WindowToggleMaximise?.(); }
 export function quitApplication(): void { window.runtime?.Quit?.(); }
+export async function setClipboardText(text: string): Promise<boolean> {
+  const write = window.runtime?.ClipboardSetText;
+  return write ? write(text) : false;
+}
 export function onFileDrop(callback: (paths: string[]) => void): () => void {
   const runtime = window.runtime;
   if (!runtime?.OnFileDrop) return () => undefined;

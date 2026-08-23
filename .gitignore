@@ -1,6 +1,7 @@
 # Go
 /bin/
 /build/bin/
+/build/qa/
 *.test
 *.out
 coverage.*
