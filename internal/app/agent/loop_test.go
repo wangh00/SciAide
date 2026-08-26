@@ -5,8 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -19,7 +17,6 @@ import (
 	"github.com/wangh00/SciAide/internal/app/conversation"
 	"github.com/wangh00/SciAide/internal/app/multimodal"
 	"github.com/wangh00/SciAide/internal/app/permission"
-	"github.com/wangh00/SciAide/internal/app/project"
 	appskill "github.com/wangh00/SciAide/internal/app/skill"
 	"github.com/wangh00/SciAide/internal/app/tool"
 	"github.com/wangh00/SciAide/internal/apperr"
@@ -27,8 +24,7 @@ import (
 	"github.com/wangh00/SciAide/internal/model"
 	"github.com/wangh00/SciAide/internal/model/fake"
 	"github.com/wangh00/SciAide/internal/modelcap"
-	"github.com/wangh00/SciAide/internal/skillpkg"
-	"github.com/wangh00/SciAide/internal/storage/sqlite"
+	"github.com/wangh00/SciAide/internal/opensciskill"
 )
 
 type loopState struct {
@@ -472,6 +468,11 @@ type staticRunSkillContexts struct {
 	calls int
 }
 
+type staticDynamicSkillRouter struct {
+	prompt string
+	calls  int
+}
+
 type imageResolverFixture struct {
 	part         model.ContentPart
 	attachmentID string
@@ -531,23 +532,14 @@ func (m *rejectImageOnceModel) Stream(ctx context.Context, request model.ChatReq
 	return m.inner.Stream(ctx, request)
 }
 
-type registrySkillTools struct{ registry *tool.MemoryRegistry }
-
-func (r registrySkillTools) AvailableToolNames(ctx context.Context) ([]string, error) {
-	definitions, err := r.registry.Definitions(ctx)
-	if err != nil {
-		return nil, err
-	}
-	result := make([]string, len(definitions))
-	for index, definition := range definitions {
-		result[index] = definition.QualifiedName
-	}
-	return result, nil
-}
-
 func (s *staticRunSkillContexts) PrepareRunContext(context.Context, string, string, string, int) (appskill.RunContext, error) {
 	s.calls++
 	return s.value, nil
+}
+
+func (s *staticDynamicSkillRouter) RoutingPromptForRun(context.Context, string, opensciskill.RoutingInput) (string, error) {
+	s.calls++
+	return s.prompt, nil
 }
 
 func agentSkillContext(runID string) appskill.RunContext {
@@ -566,7 +558,7 @@ func agentSkillContext(runID string) appskill.RunContext {
 	instructions := "Always inspect the evidence before drawing conclusions."
 	contentHash := sha256.Sum256([]byte(instructions))
 	return appskill.RunContext{
-		SchemaVersion:           appskill.RunContextSchemaVersion,
+		SchemaVersion:           appskill.LegacyRunContextSchemaVersion,
 		RunID:                   runID,
 		ProjectID:               "project",
 		ContextWindowTokens:     200_000,
@@ -1335,6 +1327,43 @@ func TestAgentLoopPausesBeforeExecutingApprovalTool(t *testing.T) {
 	}
 }
 
+func TestAgentLoopRestoresDynamicSkillRoutingAfterApproval(t *testing.T) {
+	first := []fake.Step{{Event: model.Event{Type: model.EventToolCall, ToolCall: &model.ToolCall{ID: "provider-call", Name: "builtin.fixture", Arguments: json.RawMessage(`{"query":"paper"}`)}}}, {Event: model.Event{Type: model.EventDone, FinishReason: "tool_calls"}}}
+	second := []fake.Step{{Event: model.Event{Type: model.EventTextDelta, Text: "done"}}, {Event: model.Event{Type: model.EventDone, FinishReason: "stop"}}}
+	loop, state, provider := newLoopFixture(t, nil, first, second)
+	service := loop.tools.(*tool.Service)
+	loop.approvals = statefulAskCoordinator{service, state}
+	router := &staticDynamicSkillRouter{prompt: "IMMUTABLE RUN ROUTING SNAPSHOT"}
+	loop.skillRouter = router
+	if outcome := loop.Run(context.Background(), "run"); outcome != OutcomeWaitingApproval {
+		t.Fatalf("initial outcome = %s", outcome)
+	}
+	calls, err := service.ListByRun(context.Background(), "run")
+	if err != nil || len(calls) != 1 {
+		t.Fatalf("approval calls = %#v, %v", calls, err)
+	}
+	if _, err := service.Start(context.Background(), calls[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	state.transitionRun(chat.RunWaitingApproval, chat.RunRunning)
+	if outcome := loop.Resume(context.Background(), "run"); outcome != OutcomeCompleted {
+		t.Fatalf("resume outcome = %s", outcome)
+	}
+	requests := provider.Requests()
+	if router.calls != 2 || len(requests) != 2 {
+		t.Fatalf("routing calls=%d model requests=%d", router.calls, len(requests))
+	}
+	for index, request := range requests {
+		found := false
+		for _, message := range request.Messages {
+			found = found || strings.Contains(message.Content, router.prompt)
+		}
+		if !found {
+			t.Fatalf("model request %d lost Run routing snapshot: %#v", index, request.Messages)
+		}
+	}
+}
+
 func TestAgentLoopSkillInstructionsDoNotBypassToolApproval(t *testing.T) {
 	first := []fake.Step{{Event: model.Event{Type: model.EventToolCall, ToolCall: &model.ToolCall{ID: "provider-call", Name: "builtin.fixture", Arguments: json.RawMessage(`{"query":"paper"}`)}}}, {Event: model.Event{Type: model.EventDone, FinishReason: "tool_calls"}}}
 	loop, state, provider := newLoopFixture(t, nil, first)
@@ -1358,133 +1387,6 @@ func TestAgentLoopSkillInstructionsDoNotBypassToolApproval(t *testing.T) {
 	}
 }
 
-func TestAgentLoopSQLiteApprovalResumeReusesImmutableSkillSnapshot(t *testing.T) {
-	ctx := context.Background()
-	root := t.TempDir()
-	store, err := sqlite.Open(ctx, filepath.Join(root, "agent-skill.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-
-	projectService := project.NewService(sqlite.NewProjectRepository(store.DB()), filepath.Join(root, "workspaces"), filepath.Join(root, "trash"))
-	projectValue, err := projectService.Create(ctx, "Skill approval", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	conversationRepository := sqlite.NewConversationRepository(store.DB())
-	conversationValue, err := conversation.NewService(conversationRepository).Create(ctx, projectValue.ID, "Skill snapshot")
-	if err != nil {
-		t.Fatal(err)
-	}
-	now := time.Now().UTC().Truncate(time.Microsecond)
-	if _, err := store.DB().ExecContext(ctx, `INSERT INTO model_profiles(id,name,provider_type,base_url,model_id,secret_ref,timeout_seconds,custom_headers_json,enabled,is_default,created_at,updated_at) VALUES ('profile','fixture','openai_compatible','https://example.test/v1','model','secret',60,'{}',1,1,?,?)`, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)); err != nil {
-		t.Fatal(err)
-	}
-	run := chat.Run{ID: "sqlite-skill-run", ConversationID: conversationValue.ID, UserMessageID: "sqlite-skill-user", AssistantMessageID: "sqlite-skill-assistant", ModelProfileID: "profile", ModelID: "model", ContextWindowTokens: 200_000, PermissionMode: conversation.PermissionPlan, Status: chat.RunQueued, CreatedAt: now, UpdatedAt: now}
-	user := conversation.Message{ID: run.UserMessageID, ConversationID: conversationValue.ID, RunID: run.ID, Role: conversation.RoleUser, Status: conversation.MessageComplete, Parts: []conversation.MessagePart{{ID: "sqlite-user-part", MessageID: run.UserMessageID, Type: "text", Text: "$approval-skill inspect evidence", CreatedAt: now}}, CreatedAt: now, UpdatedAt: now}
-	assistant := conversation.Message{ID: run.AssistantMessageID, ConversationID: conversationValue.ID, RunID: run.ID, Role: conversation.RoleAssistant, Status: conversation.MessageStreaming, Parts: []conversation.MessagePart{{ID: "sqlite-assistant-part", MessageID: run.AssistantMessageID, Type: "text", CreatedAt: now}}, CreatedAt: now, UpdatedAt: now}
-	runRepository := sqlite.NewRunRepository(store.DB())
-	if err := runRepository.CreateWithMessages(ctx, run, user, assistant); err != nil {
-		t.Fatal(err)
-	}
-
-	registry := tool.NewRegistry()
-	implementation := fixtureTool{definition: tool.Definition{QualifiedName: "builtin.fixture", Description: "fixture", InputSchema: json.RawMessage(`{"type":"object","additionalProperties":false,"required":["query"],"properties":{"query":{"type":"string"}}}`), Risk: tool.RiskLow, Permissions: []tool.PermissionRequirement{}, Idempotent: true, Version: "1"}, invoke: func(tool.Invocation) tool.Result {
-		return tool.Result{Status: tool.ResultSuccess, Text: "evidence loaded"}
-	}}
-	if err := registry.Register(ctx, implementation); err != nil {
-		t.Fatal(err)
-	}
-	skillRepository := sqlite.NewSkillRepository(store.DB())
-	skillService := appskill.NewService(skillRepository, skillpkg.NewCatalog(filepath.Join(root, "skills")), registrySkillTools{registry}, "0.3.0-dev")
-	packageStore := skillpkg.NewFilePackageStore(filepath.Join(root, "skills"), filepath.Join(root, "skill-staging"), filepath.Join(root, "skill-backups"))
-	if err := skillService.SetPackageStore(packageStore); err != nil {
-		t.Fatal(err)
-	}
-	source := filepath.Join(root, "source")
-	if err := os.MkdirAll(source, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	manifest := `schema_version: 1
-id: approval-skill
-name: Approval Skill
-version: 1.0.0
-description: Verify immutable approval resume
-entry: SKILL.md
-activation:
-  mode: explicit
-requires:
-  tools: []
-  optional_tools: []
-permissions: [destructive]
-compatibility:
-  sciaide: ">=0.2.0 <1.0.0"
-context:
-  max_tokens: 2000
-`
-	const originalInstructions = "ORIGINAL SKILL: inspect evidence before using the tool."
-	if err := os.WriteFile(filepath.Join(source, "skill.yaml"), []byte(manifest), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(source, "SKILL.md"), []byte(originalInstructions), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	installed, err := skillService.Install(ctx, appskill.InstallCommand{SourcePath: source, SourceKind: appskill.SourceFolder})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := skillService.SetProjectSkill(ctx, appskill.SetProjectSkillCommand{ProjectID: projectValue.ID, SkillID: "approval-skill", Version: "1.0.0", Enabled: true, Priority: 10}); err != nil {
-		t.Fatal(err)
-	}
-
-	toolService := tool.NewService(sqlite.NewToolRepository(store.DB()), tool.JSONSchemaValidator{})
-	permissionRepository := sqlite.NewPermissionRepository(store.DB())
-	coordinator := permission.NewCoordinator(permission.NewEngine(permissionRepository), toolService, runRepository)
-	executor := tool.NewExecutor(registry, toolService, runRepository, tool.ExecutorOptions{})
-	first := []fake.Step{{Event: model.Event{Type: model.EventToolCall, ToolCall: &model.ToolCall{ID: "provider-call", Name: "builtin.fixture", Arguments: json.RawMessage(`{"query":"paper"}`)}}}, {Event: model.Event{Type: model.EventDone, FinishReason: "tool_calls"}}}
-	second := []fake.Step{{Event: model.Event{Type: model.EventTextDelta, Text: "done"}}, {Event: model.Event{Type: model.EventDone, FinishReason: "stop"}}}
-	provider := fake.New(first, second)
-	loop := NewLoop(runRepository, conversationRepository, toolService, registry, coordinator, executionAdapter{executor}, fakeResolver{provider}, nil, Options{SkillContexts: skillService})
-	if outcome := loop.Run(ctx, run.ID); outcome != OutcomeWaitingApproval {
-		t.Fatalf("initial outcome = %s", outcome)
-	}
-	before, err := skillRepository.GetRunContext(ctx, run.ID)
-	if err != nil || len(before.Skills) != 1 || before.Skills[0].Instructions != originalInstructions {
-		t.Fatalf("initial Skill snapshot = %#v, %v", before, err)
-	}
-	pending, err := permissionRepository.ListPendingApprovals(ctx, run.ID)
-	if err != nil || len(pending) != 1 {
-		t.Fatalf("pending approvals = %#v, %v", pending, err)
-	}
-	if _, err := skillService.Uninstall(ctx, appskill.UninstallCommand{SkillID: installed.Skill.Manifest.ID, Version: installed.Skill.Manifest.Version, RemoveProjectLinks: true}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := coordinator.Resolve(ctx, permission.ResolveCommand{ApprovalID: pending[0].ID, Allow: true, Scope: permission.ScopeCall}); err != nil {
-		t.Fatal(err)
-	}
-	if outcome := loop.Resume(ctx, run.ID); outcome != OutcomeCompleted {
-		t.Fatalf("resume outcome = %s", outcome)
-	}
-	after, err := skillRepository.GetRunContext(ctx, run.ID)
-	if err != nil || after.SnapshotHash != before.SnapshotHash || after.Skills[0].Instructions != originalInstructions {
-		t.Fatalf("resumed Skill snapshot = %#v, %v", after, err)
-	}
-	requests := provider.Requests()
-	if len(requests) != 2 {
-		t.Fatalf("model requests = %d", len(requests))
-	}
-	for index, request := range requests {
-		found := false
-		for _, message := range request.Messages {
-			found = found || strings.Contains(message.Content, originalInstructions)
-		}
-		if !found {
-			t.Fatalf("request %d did not reuse snapshotted Skill: %#v", index, request.Messages)
-		}
-	}
-}
-
 func TestAgentLoopReusesOneSkillSnapshotAcrossToolTurns(t *testing.T) {
 	first := []fake.Step{{Event: model.Event{Type: model.EventToolCall, ToolCall: &model.ToolCall{ID: "provider-call", Name: "builtin.fixture", Arguments: json.RawMessage(`{"query":"paper"}`)}}}, {Event: model.Event{Type: model.EventDone, FinishReason: "tool_calls"}}}
 	second := []fake.Step{{Event: model.Event{Type: model.EventTextDelta, Text: "done"}}, {Event: model.Event{Type: model.EventDone, FinishReason: "stop"}}}
@@ -1502,6 +1404,36 @@ func TestAgentLoopReusesOneSkillSnapshotAcrossToolTurns(t *testing.T) {
 		if len(request.Messages) < 3 || request.Messages[2].Content != requests[0].Messages[2].Content || !strings.Contains(request.Messages[2].Content, "inspect the evidence") {
 			t.Fatalf("request %d lost immutable Skill context: %#v", index, request.Messages)
 		}
+	}
+}
+
+func TestAgentLoopLegacySkillSnapshotDoesNotMixDynamicRouting(t *testing.T) {
+	script := []fake.Step{{Event: model.Event{Type: model.EventTextDelta, Text: "done"}}, {Event: model.Event{Type: model.EventDone, FinishReason: "stop"}}}
+	loop, _, provider := newLoopFixture(t, nil, script)
+	contexts := &staticRunSkillContexts{value: agentSkillContext("run")}
+	router := &staticDynamicSkillRouter{prompt: "DYNAMIC ROUTING MUST NOT APPEAR"}
+	loop.skillContexts = contexts
+	loop.skillRouter = router
+
+	if outcome := loop.Run(context.Background(), "run"); outcome != OutcomeCompleted {
+		t.Fatalf("outcome = %s", outcome)
+	}
+	if contexts.calls != 1 || router.calls != 0 {
+		t.Fatalf("legacy context calls=%d, dynamic routing calls=%d", contexts.calls, router.calls)
+	}
+	requests := provider.Requests()
+	if len(requests) != 1 {
+		t.Fatalf("model requests = %d", len(requests))
+	}
+	foundLegacy := false
+	for _, message := range requests[0].Messages {
+		if strings.Contains(message.Content, router.prompt) {
+			t.Fatalf("legacy Run mixed dynamic routing into its request: %#v", requests[0].Messages)
+		}
+		foundLegacy = foundLegacy || strings.Contains(message.Content, "inspect the evidence")
+	}
+	if !foundLegacy {
+		t.Fatalf("legacy Skill snapshot was not replayed: %#v", requests[0].Messages)
 	}
 }
 

@@ -16,6 +16,25 @@ type Store struct {
 }
 
 func Open(ctx context.Context, path string) (*Store, error) {
+	db, err := openDatabase(ctx, path, false)
+	if err != nil {
+		return nil, err
+	}
+	if err := Migrate(ctx, db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return &Store{db: db}, nil
+}
+
+// OpenExisting opens an existing SQLite database without applying SciAide
+// migrations. Archive validation uses read-only mode; isolated restore staging
+// uses writable mode only after the archive version has been verified.
+func OpenExisting(ctx context.Context, path string, readOnly bool) (*sql.DB, error) {
+	return openDatabase(ctx, path, readOnly)
+}
+
+func openDatabase(ctx context.Context, path string, readOnly bool) (*sql.DB, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return nil, fmt.Errorf("resolve database path: %w", err)
@@ -26,16 +45,21 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		// file://C:/..., where C: would incorrectly become the URI host.
 		uriPath = "/" + uriPath
 	}
+	query := url.Values{
+		"_pragma": []string{
+			"foreign_keys(1)",
+			"busy_timeout(5000)",
+		},
+	}
+	if readOnly {
+		query.Set("mode", "ro")
+	} else {
+		query["_pragma"] = append(query["_pragma"], "journal_mode(WAL)")
+	}
 	dsn := (&url.URL{
-		Scheme: "file",
-		Path:   uriPath,
-		RawQuery: url.Values{
-			"_pragma": []string{
-				"foreign_keys(1)",
-				"journal_mode(WAL)",
-				"busy_timeout(5000)",
-			},
-		}.Encode(),
+		Scheme:   "file",
+		Path:     uriPath,
+		RawQuery: query.Encode(),
 	}).String()
 
 	db, err := sql.Open("sqlite", dsn)
@@ -54,11 +78,7 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("ping sqlite: %w", err)
 	}
-	if err := Migrate(ctx, db); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-	return &Store{db: db}, nil
+	return db, nil
 }
 
 func (s *Store) DB() *sql.DB { return s.db }

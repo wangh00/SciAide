@@ -169,6 +169,24 @@ type Match struct {
 	SourceEnd      int             `json:"sourceEnd"`
 }
 
+// EvidenceChunk is a full, exact chunk read for a caller that already knows
+// the immutable index/document/attachment/chunk identity. It is separate from
+// bounded search snippets so evidence capture never trusts client text.
+type EvidenceChunk struct {
+	IndexVersionID string
+	DocumentID     string
+	AttachmentID   string
+	ChunkID        string
+	SourceName     string
+	MIMEType       string
+	Locator        string
+	Title          string
+	Content        string
+	ContentSHA256  string
+	SourceStart    int
+	SourceEnd      int
+}
+
 type SearchResult struct {
 	Query            string        `json:"query"`
 	Matches          []Match       `json:"matches"`

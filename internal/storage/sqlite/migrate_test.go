@@ -2,7 +2,9 @@ package sqlite
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -14,6 +16,171 @@ import (
 	"github.com/wangh00/SciAide/internal/app/modelprofile"
 	"github.com/wangh00/SciAide/internal/app/project"
 )
+
+func TestWorkspacePythonEnvironmentMigrationPreservesLegacyRecords(t *testing.T) {
+	ctx := context.Background()
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "python-workspace-upgrade.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	if err := migrateToVersion(ctx, db, 60); err != nil {
+		t.Fatal(err)
+	}
+	const at = "2026-08-26T00:00:00Z"
+	if _, err := db.ExecContext(ctx, `INSERT INTO projects(id,name,description,workspace_path,workspace_kind,created_at,updated_at) VALUES ('project','Project','','C:/workspace','external',?,?)`, at, at); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO python_environments(id,project_id,state,environment_python_path,lock_json,created_at,updated_at) VALUES ('environment','project','ready','C:/Users/test/.sciaide/data/python-envs/project/venv/Scripts/python.exe','[]',?,?)`, at, at); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO python_environment_operations(id,project_id,environment_id,kind,state,request_json,started_at,completed_at) VALUES ('operation','project','environment','verify','completed','{}',?,?)`, at, at); err != nil {
+		t.Fatal(err)
+	}
+	if err := Migrate(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	var kind, operationKind string
+	if err := db.QueryRowContext(ctx, `SELECT environment_kind FROM python_environments WHERE id='environment'`).Scan(&kind); err != nil || kind != "legacy_managed" {
+		t.Fatalf("migrated environment kind = %q, %v", kind, err)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT kind FROM python_environment_operations WHERE id='operation'`).Scan(&operationKind); err != nil || operationKind != "verify" {
+		t.Fatalf("preserved operation kind = %q, %v", operationKind, err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO python_environment_operations(id,project_id,environment_id,kind,state,request_json,started_at) VALUES ('bind','project','environment','bind','running','{}',?)`, at); err != nil {
+		t.Fatalf("bind operation was rejected: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE python_environments SET environment_kind='invalid' WHERE id='environment'`); err == nil {
+		t.Fatal("invalid Python environment kind was accepted")
+	}
+}
+
+func TestCandidateSelectionMigrationPreservesWorkflowStepsAndDecisions(t *testing.T) {
+	ctx := context.Background()
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "candidate-selection-upgrade.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	if _, err := db.ExecContext(ctx, `PRAGMA foreign_keys=ON; CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY NOT NULL, name TEXT NOT NULL, checksum TEXT NOT NULL, applied_at TEXT NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	migrations, err := loadMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range migrations {
+		if item.version >= 60 {
+			break
+		}
+		if migrationNeedsForeignKeysDisabled(item) {
+			if err := applyMigrationWithForeignKeysDisabled(ctx, db, item); err != nil {
+				t.Fatalf("apply migration %d: %v", item.version, err)
+			}
+		} else if err := applyMigrationTransaction(ctx, db, item, false); err != nil {
+			t.Fatalf("apply migration %d: %v", item.version, err)
+		}
+	}
+	const at = "2026-08-25T00:00:00Z"
+	statements := []string{
+		`INSERT INTO projects(id,name,description,workspace_path,workspace_kind,created_at,updated_at) VALUES ('project','Project','','C:/fixture','external','` + at + `','` + at + `')`,
+		`INSERT INTO workflows(id,project_id,name,description,current_version_id,version,created_at,updated_at) VALUES ('workflow','project','Flow','',NULL,1,'` + at + `','` + at + `')`,
+		`INSERT INTO workflow_versions(id,workflow_id,version_number,definition_json,definition_sha256,compilation_json,compilation_sha256,created_at) VALUES ('version','workflow',1,'{}','` + strings.Repeat("a", 64) + `','{}','` + strings.Repeat("b", 64) + `','` + at + `')`,
+		`UPDATE workflows SET current_version_id='version' WHERE id='workflow'`,
+		`INSERT INTO workflow_runs(id,project_id,workflow_id,workflow_version_id,status,inputs_json,inputs_sha256,compilation_json,compilation_sha256,outputs_json,current_step_ordinal,created_at,updated_at) VALUES ('run','project','workflow','version','completed','{}','` + strings.Repeat("c", 64) + `','{}','` + strings.Repeat("b", 64) + `','{}',1,'` + at + `','` + at + `')`,
+		`INSERT INTO workflow_steps(id,workflow_run_id,node_id,ordinal,node_kind,status,attempt,input_json,input_sha256,output_json,idempotency_key,updated_at) VALUES ('step','run','confirm',0,'human_confirmation','completed',1,'{"context":"x"}','` + strings.Repeat("d", 64) + `','{"approved":true}','key','` + at + `')`,
+		`INSERT INTO workflow_human_decisions(id,workflow_run_id,workflow_step_id,decision_kind,attempt,approved,note,context_json,created_at) VALUES ('decision','run','step','node_confirmation',1,1,'kept','{}','` + at + `')`,
+	}
+	for _, statement := range statements {
+		if _, err := db.ExecContext(ctx, statement); err != nil {
+			t.Fatalf("insert migration fixture: %v", err)
+		}
+	}
+	if err := Migrate(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	var kind, note string
+	if err := db.QueryRowContext(ctx, `SELECT node_kind FROM workflow_steps WHERE id='step'`).Scan(&kind); err != nil || kind != "human_confirmation" {
+		t.Fatalf("preserved step = %q, %v", kind, err)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT note FROM workflow_human_decisions WHERE id='decision'`).Scan(&note); err != nil || note != "kept" {
+		t.Fatalf("preserved decision = %q, %v", note, err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE workflow_steps SET node_kind='candidate_selection' WHERE id='step'`); err != nil {
+		t.Fatalf("candidate_selection remains rejected after migration: %v", err)
+	}
+	rows, err := db.QueryContext(ctx, `PRAGMA foreign_key_check`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	if rows.Next() {
+		t.Fatal("candidate selection migration left a foreign key violation")
+	}
+}
+
+func TestSkillCoordinationMigrationPreservesLegacySnapshotBytes(t *testing.T) {
+	ctx := context.Background()
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "skill-context-v1.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	if _, err := db.ExecContext(ctx, `PRAGMA foreign_keys=ON; CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY NOT NULL, name TEXT NOT NULL, checksum TEXT NOT NULL, applied_at TEXT NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	migrations, err := loadMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range migrations {
+		if item.version >= 48 {
+			break
+		}
+		if migrationNeedsForeignKeysDisabled(item) {
+			if err := applyMigrationWithForeignKeysDisabled(ctx, db, item); err != nil {
+				t.Fatalf("apply migration %d: %v", item.version, err)
+			}
+			continue
+		}
+		if err := applyMigrationTransaction(ctx, db, item, false); err != nil {
+			t.Fatalf("apply migration %d: %v", item.version, err)
+		}
+	}
+	const at = "2026-08-24T00:00:00Z"
+	for _, statement := range []string{
+		`INSERT INTO projects(id,name,description,workspace_path,workspace_kind,created_at,updated_at) VALUES ('legacy-project','Legacy','','C:/fixture','external','` + at + `','` + at + `')`,
+		`INSERT INTO model_profiles(id,name,provider_type,base_url,model_id,secret_ref,timeout_seconds,custom_headers_json,enabled,is_default,created_at,updated_at) VALUES ('legacy-profile','Legacy','openai_compatible','https://example.test/v1','legacy-model','legacy-secret',60,'{}',1,1,'` + at + `','` + at + `')`,
+		`INSERT INTO conversations(id,project_id,title,created_at,updated_at) VALUES ('legacy-conversation','legacy-project','Legacy','` + at + `','` + at + `')`,
+		`INSERT INTO messages(id,conversation_id,run_id,role,status,created_at,updated_at) VALUES ('legacy-user','legacy-conversation','legacy-run','user','complete','` + at + `','` + at + `')`,
+		`INSERT INTO messages(id,conversation_id,run_id,role,status,created_at,updated_at) VALUES ('legacy-assistant','legacy-conversation','legacy-run','assistant','complete','` + at + `','` + at + `')`,
+		`INSERT INTO runs(id,conversation_id,user_message_id,assistant_message_id,model_profile_id,status,created_at,updated_at,model_id) VALUES ('legacy-run','legacy-conversation','legacy-user','legacy-assistant','legacy-profile','completed','` + at + `','` + at + `','legacy-model')`,
+	} {
+		if _, err := db.ExecContext(ctx, statement); err != nil {
+			t.Fatalf("insert legacy fixture: %v", err)
+		}
+	}
+	snapshot := []byte(`{"schemaVersion":1,"runId":"legacy-run","projectId":"legacy-project","contextWindowTokens":200000,"catalogBudgetTokens":4000,"instructionBudgetTokens":40000,"catalog":[],"catalogOmitted":0,"skippedSuggestions":0,"selectionNotices":[],"skills":[],"createdAt":"2026-08-24T00:00:00Z"}`)
+	digest := sha256.Sum256(snapshot)
+	hash := hex.EncodeToString(digest[:])
+	if _, err := db.ExecContext(ctx, `INSERT INTO run_skill_contexts(run_id,project_id,schema_version,snapshot_json,snapshot_hash,created_at) VALUES ('legacy-run','legacy-project',1,?,?,?)`, string(snapshot), hash, at); err != nil {
+		t.Fatal(err)
+	}
+	if err := Migrate(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	var gotJSON, gotHash string
+	var schemaVersion int
+	if err := db.QueryRowContext(ctx, `SELECT schema_version,snapshot_json,snapshot_hash FROM run_skill_contexts WHERE run_id='legacy-run'`).Scan(&schemaVersion, &gotJSON, &gotHash); err != nil {
+		t.Fatal(err)
+	}
+	if schemaVersion != 1 || gotJSON != string(snapshot) || gotHash != hash {
+		t.Fatalf("legacy snapshot changed: schema=%d json=%q hash=%q", schemaVersion, gotJSON, gotHash)
+	}
+}
 
 func TestMCPToolTimeoutMigrationUpgradesOnlyHistoricalDefault(t *testing.T) {
 	ctx := context.Background()
@@ -283,6 +450,42 @@ func TestMigrateAcceptsEarlyVisionFallbackMigrationChecksum(t *testing.T) {
 	}
 	if err := Migrate(ctx, store.DB()); err == nil || !strings.Contains(err.Error(), "migration 43 checksum changed") {
 		t.Fatalf("Migrate() accepted an unknown migration 43 checksum: %v", err)
+	}
+}
+
+func TestPythonEnvironmentMigrationChecksumsAreNarrow(t *testing.T) {
+	for _, value := range []string{
+		"59aac83bba4ebcc4bf7d17a757bd93be29910948e7828fb6031e4914b8e72ea2",
+		"1fd30be2634c1e35925f63947bc54b2f26cb9f7bfeac4dc80171525ca331d3d9",
+	} {
+		if !pythonEnvironmentMigrationChecksum(value) {
+			t.Fatalf("pythonEnvironmentMigrationChecksum(%q) = false", value)
+		}
+	}
+	if pythonEnvironmentMigrationChecksum("changed") {
+		t.Fatal("unrecognized Python environment migration checksum was accepted")
+	}
+}
+
+func TestMigrateAcceptsEarlyPythonEnvironmentMigrationChecksum(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "legacy-python-environment-checksum.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	const earlyChecksum = "59aac83bba4ebcc4bf7d17a757bd93be29910948e7828fb6031e4914b8e72ea2"
+	if _, err := store.DB().ExecContext(ctx, `UPDATE schema_migrations SET checksum=? WHERE version=54`, earlyChecksum); err != nil {
+		t.Fatal(err)
+	}
+	if err := Migrate(ctx, store.DB()); err != nil {
+		t.Fatalf("Migrate() rejected the released migration 54 checksum: %v", err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `UPDATE schema_migrations SET checksum='changed' WHERE version=54`); err != nil {
+		t.Fatal(err)
+	}
+	if err := Migrate(ctx, store.DB()); err == nil || !strings.Contains(err.Error(), "migration 54 checksum changed") {
+		t.Fatalf("Migrate() accepted an unknown migration 54 checksum: %v", err)
 	}
 }
 

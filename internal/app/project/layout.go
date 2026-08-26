@@ -14,7 +14,7 @@ const (
 	legacyMarkerName     = ".sciaide-workspace.json"
 )
 
-var privateSubdirectories = []string{"attachments", "cache", "artifacts", "tmp"}
+var privateSubdirectories = []string{"attachments", "cache", "artifacts", "python", "tmp"}
 
 type projectMarker struct {
 	Version   int    `json:"version"`
@@ -25,6 +25,23 @@ type projectMarker struct {
 // managed attachments, derived caches, temporary files, and generated output.
 func PrivateDataPath(value Project) string {
 	return filepath.Join(value.WorkspacePath, PrivateDirectoryName)
+}
+
+// PrepareRestoredWorkspace creates the private layout and ownership marker for
+// an archive restore before the project row is published to the main database.
+func PrepareRestoredWorkspace(workspacePath, projectID string) error {
+	_, err := ensurePrivateLayout(workspacePath, projectID)
+	return err
+}
+
+// EnsurePrivateDataLayout upgrades an existing project layout with any new
+// private subdirectories after validating the ownership marker.
+func EnsurePrivateDataLayout(value Project) error {
+	if strings.TrimSpace(value.ID) == "" || strings.TrimSpace(value.WorkspacePath) == "" {
+		return fmt.Errorf("project workspace identity is incomplete")
+	}
+	_, err := ensurePrivateLayout(value.WorkspacePath, value.ID)
+	return err
 }
 
 // VerifyPrivateDataLayout prevents project-scoped services from accepting a

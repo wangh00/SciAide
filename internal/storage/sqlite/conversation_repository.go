@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -310,6 +311,13 @@ func completeAssistantMessageWithCitations(ctx context.Context, tx *sql.Tx, mess
 		if trustedCall != 1 {
 			return fmt.Errorf("citation tool call is not a successful knowledge search")
 		}
+		bibliographyID, snapshot, level, snapshotErr := bibliographySnapshotForAttachment(ctx, tx, projectID, value.AttachmentID, updatedAt)
+		if snapshotErr != nil {
+			return snapshotErr
+		}
+		values[index].BibliographyID = bibliographyID
+		values[index].Bibliography = snapshot
+		values[index].EvidenceLevel = level
 	}
 	messageResult, err := tx.ExecContext(ctx, `UPDATE messages SET status='complete', updated_at=? WHERE id=? AND run_id=? AND role='assistant' AND status='streaming'`, formatTime(updatedAt), messageID, runID)
 	if err != nil {
@@ -329,8 +337,12 @@ func completeAssistantMessageWithCitations(ctx context.Context, tx *sql.Tx, mess
 		return fmt.Errorf("clear message citations: %w", err)
 	}
 	for _, value := range values {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO message_citations(id,message_id,run_id,tool_call_id,project_id,reference_key,ordinal,index_version_id,document_id,attachment_id,chunk_id,source_name,mime_type,locator,title,quote_text,quote_sha256,source_start,source_end,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			value.ID, value.MessageID, value.RunID, value.ToolCallID, value.ProjectID, value.Reference, value.Ordinal, value.IndexVersionID, value.DocumentID, value.AttachmentID, value.ChunkID, value.SourceName, value.MIMEType, value.Locator, value.Title, value.Quote, value.QuoteSHA256, value.SourceStart, value.SourceEnd, formatTime(value.CreatedAt)); err != nil {
+		snapshot := value.Bibliography
+		if len(snapshot) == 0 {
+			snapshot = json.RawMessage(`{}`)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO message_citations(id,message_id,run_id,tool_call_id,project_id,reference_key,ordinal,index_version_id,document_id,attachment_id,chunk_id,source_name,mime_type,locator,title,quote_text,quote_sha256,source_start,source_end,created_at,bibliography_id_snapshot,bibliography_snapshot_json,evidence_level) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			value.ID, value.MessageID, value.RunID, value.ToolCallID, value.ProjectID, value.Reference, value.Ordinal, value.IndexVersionID, value.DocumentID, value.AttachmentID, value.ChunkID, value.SourceName, value.MIMEType, value.Locator, value.Title, value.Quote, value.QuoteSHA256, value.SourceStart, value.SourceEnd, formatTime(value.CreatedAt), value.BibliographyID, string(snapshot), value.EvidenceLevel); err != nil {
 			return fmt.Errorf("insert message citation: %w", err)
 		}
 	}
@@ -363,7 +375,7 @@ func (r *ConversationRepository) listParts(ctx context.Context, messageID string
 }
 
 func (r *ConversationRepository) listMessageCitations(ctx context.Context, messageID string) ([]conversation.Citation, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT id,message_id,run_id,tool_call_id,project_id,reference_key,ordinal,index_version_id,document_id,attachment_id,chunk_id,source_name,mime_type,locator,title,quote_text,quote_sha256,source_start,source_end,created_at FROM message_citations WHERE message_id=? ORDER BY ordinal`, messageID)
+	rows, err := r.db.QueryContext(ctx, `SELECT id,message_id,run_id,tool_call_id,project_id,reference_key,ordinal,index_version_id,document_id,attachment_id,chunk_id,source_name,mime_type,locator,title,quote_text,quote_sha256,source_start,source_end,created_at,bibliography_id_snapshot,bibliography_snapshot_json,evidence_level FROM message_citations WHERE message_id=? ORDER BY ordinal`, messageID)
 	if err != nil {
 		return nil, fmt.Errorf("list message citations: %w", err)
 	}
@@ -372,8 +384,12 @@ func (r *ConversationRepository) listMessageCitations(ctx context.Context, messa
 	for rows.Next() {
 		var value conversation.Citation
 		var createdAt string
-		if err := rows.Scan(&value.ID, &value.MessageID, &value.RunID, &value.ToolCallID, &value.ProjectID, &value.Reference, &value.Ordinal, &value.IndexVersionID, &value.DocumentID, &value.AttachmentID, &value.ChunkID, &value.SourceName, &value.MIMEType, &value.Locator, &value.Title, &value.Quote, &value.QuoteSHA256, &value.SourceStart, &value.SourceEnd, &createdAt); err != nil {
+		var bibliographyJSON string
+		if err := rows.Scan(&value.ID, &value.MessageID, &value.RunID, &value.ToolCallID, &value.ProjectID, &value.Reference, &value.Ordinal, &value.IndexVersionID, &value.DocumentID, &value.AttachmentID, &value.ChunkID, &value.SourceName, &value.MIMEType, &value.Locator, &value.Title, &value.Quote, &value.QuoteSHA256, &value.SourceStart, &value.SourceEnd, &createdAt, &value.BibliographyID, &bibliographyJSON, &value.EvidenceLevel); err != nil {
 			return nil, err
+		}
+		if bibliographyJSON != "{}" {
+			value.Bibliography = json.RawMessage(bibliographyJSON)
 		}
 		value.CreatedAt, err = parseTime(createdAt)
 		if err != nil {
@@ -382,6 +398,34 @@ func (r *ConversationRepository) listMessageCitations(ctx context.Context, messa
 		values = append(values, value)
 	}
 	return values, rows.Err()
+}
+
+func bibliographySnapshotForAttachment(ctx context.Context, tx *sql.Tx, projectID, attachmentID string, at time.Time) (string, json.RawMessage, string, error) {
+	var bibliographyID, canonicalJSON string
+	var revision int
+	var level string
+	err := tx.QueryRowContext(ctx, `SELECT b.id,b.revision_number,b.canonical_json,m.evidence_level FROM research_bibliography_materials m JOIN research_bibliographies b ON b.id=m.bibliography_id AND b.project_id=m.project_id WHERE m.project_id=? AND (m.attachment_id=? OR m.attachment_id_snapshot=?) ORDER BY m.updated_at DESC,m.id LIMIT 1`, projectID, attachmentID, attachmentID).Scan(&bibliographyID, &revision, &canonicalJSON, &level)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", json.RawMessage(`{}`), "", nil
+	}
+	if err != nil {
+		return "", nil, "", fmt.Errorf("load citation bibliography snapshot: %w", err)
+	}
+	var data json.RawMessage = json.RawMessage(canonicalJSON)
+	if !json.Valid(data) {
+		return "", nil, "", fmt.Errorf("citation bibliography snapshot is invalid")
+	}
+	snapshot, err := json.Marshal(struct {
+		SchemaVersion  int             `json:"schemaVersion"`
+		BibliographyID string          `json:"bibliographyId"`
+		Revision       int             `json:"revision"`
+		Data           json.RawMessage `json:"data"`
+		CapturedAt     time.Time       `json:"capturedAt"`
+	}{1, bibliographyID, revision, data, at.UTC()})
+	if err != nil {
+		return "", nil, "", err
+	}
+	return bibliographyID, snapshot, level, nil
 }
 
 func scanConversation(row rowScanner) (conversation.Conversation, error) {

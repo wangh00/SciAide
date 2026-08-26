@@ -23,6 +23,7 @@ import (
 	"github.com/wangh00/SciAide/internal/model"
 	"github.com/wangh00/SciAide/internal/modelcap"
 	"github.com/wangh00/SciAide/internal/modelutil"
+	"github.com/wangh00/SciAide/internal/opensciskill"
 )
 
 const (
@@ -38,6 +39,10 @@ type ModelResolver interface {
 
 type RunSkillContexts interface {
 	PrepareRunContext(ctx context.Context, runID, projectID, userText string, contextWindowTokens int) (skill.RunContext, error)
+}
+
+type DynamicSkillRouter interface {
+	RoutingPromptForRun(ctx context.Context, projectID string, input opensciskill.RoutingInput) (string, error)
 }
 
 type ImageAttachmentResolver interface {
@@ -134,6 +139,7 @@ type Options struct {
 	Checkpoints    *contextmemory.Service
 	Terminator     *chat.Terminator
 	SkillContexts  RunSkillContexts
+	SkillRouter    DynamicSkillRouter
 	Images         ImageAttachmentResolver
 	Multimodal     MultimodalFallback
 	RetryDelay     func(retryIndex int) time.Duration
@@ -162,6 +168,7 @@ type Loop struct {
 	terminator    *chat.Terminator
 	checkpoints   *contextmemory.Service
 	skillContexts RunSkillContexts
+	skillRouter   DynamicSkillRouter
 	images        ImageAttachmentResolver
 	multimodal    MultimodalFallback
 	now           func() time.Time
@@ -185,7 +192,7 @@ func NewLoop(runs Runs, conversations Conversations, tools ToolCalls, registry t
 	if options.Sleep == nil {
 		options.Sleep = sleepContext
 	}
-	return &Loop{runs: runs, conversations: conversations, tools: tools, registry: registry, approvals: approvals, executor: executor, models: models, observer: observer, builder: options.ContextBuilder, terminator: options.Terminator, checkpoints: options.Checkpoints, skillContexts: options.SkillContexts, images: options.Images, multimodal: options.Multimodal, now: func() time.Time { return time.Now().UTC() }, retryDelay: options.RetryDelay, sleep: options.Sleep, fallbackByRun: make(map[string]multimodal.Result)}
+	return &Loop{runs: runs, conversations: conversations, tools: tools, registry: registry, approvals: approvals, executor: executor, models: models, observer: observer, builder: options.ContextBuilder, terminator: options.Terminator, checkpoints: options.Checkpoints, skillContexts: options.SkillContexts, skillRouter: options.SkillRouter, images: options.Images, multimodal: options.Multimodal, now: func() time.Time { return time.Now().UTC() }, retryDelay: options.RetryDelay, sleep: options.Sleep, fallbackByRun: make(map[string]multimodal.Result)}
 }
 
 func (l *Loop) Run(ctx context.Context, runID string) Outcome {
@@ -286,14 +293,27 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 		}
 	}
 	var runSkillContext skill.RunContext
-	if l.skillContexts != nil {
+	var dynamicSkillRouting string
+	if l.skillContexts != nil || l.skillRouter != nil {
 		userText, textErr := runUserText(messages, run.UserMessageID)
 		if textErr != nil {
 			return OutcomeFailed, &apperr.Error{Code: "CONTEXT_LOAD_FAILED", UserMessage: "无法定位本次对话的用户消息。", Cause: textErr}
 		}
-		runSkillContext, err = l.skillContexts.PrepareRunContext(ctx, run.ID, projectID, userText, run.ContextWindowTokens)
-		if err != nil {
-			return OutcomeFailed, &apperr.Error{Code: "SKILL_CONTEXT_FAILED", UserMessage: "无法准备本次对话的 Skill 上下文，请检查项目 Skill 配置。", Cause: err}
+		if l.skillContexts != nil {
+			runSkillContext, err = l.skillContexts.PrepareRunContext(ctx, run.ID, projectID, userText, run.ContextWindowTokens)
+			if err != nil {
+				return OutcomeFailed, &apperr.Error{Code: "SKILL_CONTEXT_FAILED", UserMessage: "无法恢复历史 Skill 上下文。", Cause: err}
+			}
+		}
+		// A legacy Run must replay only its immutable legacy snapshot. Dynamic
+		// routing is reserved for new Runs that have no retired Skill context.
+		// The router returns the immutable snapshot bound to this Run, including
+		// after an approval pause, instead of recalculating against a changed catalog.
+		if l.skillRouter != nil && runSkillContext.RunID == "" {
+			dynamicSkillRouting, err = l.skillRouter.RoutingPromptForRun(ctx, projectID, opensciskill.RoutingInput{ConversationID: run.ConversationID, RunID: run.ID, Current: userText, Recent: recentUserTaskText(messages, run.UserMessageID)})
+			if err != nil {
+				return OutcomeFailed, &apperr.Error{Code: "SKILL_ROUTING_FAILED", UserMessage: "无法准备动态 Skill 目录。", Cause: err}
+			}
 		}
 	}
 	definitions, err := l.registry.Definitions(ctx)
@@ -347,7 +367,7 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 			return OutcomeFailed, err
 		}
 		run.ModelTurns, run.UpdatedAt = checkpoint.ModelTurns, checkpoint.UpdatedAt
-		request, contextInfo, err := l.builder.BuildWithRuntimeContext(ctx, messages, run.AssistantMessageID, run.UserMessageID, definitions, calls, runSkillContext, ContextLimits{EffectiveTokens: run.ContextBudgetTokens, AutoCompactTokens: run.AutoCompactTokenLimit}, contextCheckpoint, providerTurns...)
+		request, contextInfo, err := l.builder.BuildWithRuntimeGuidance(ctx, messages, run.AssistantMessageID, run.UserMessageID, definitions, calls, runSkillContext, dynamicSkillRouting, ContextLimits{EffectiveTokens: run.ContextBudgetTokens, AutoCompactTokens: run.AutoCompactTokenLimit}, contextCheckpoint, providerTurns...)
 		if err != nil {
 			return OutcomeFailed, err
 		}
@@ -1078,6 +1098,23 @@ func runUserText(messages []conversation.Message, messageID string) (string, err
 		}
 	}
 	return "", nil
+}
+
+func recentUserTaskText(messages []conversation.Message, currentMessageID string) string {
+	values := make([]string, 0, 3)
+	for index := len(messages) - 1; index >= 0 && len(values) < 3; index-- {
+		message := messages[index]
+		if message.Role != conversation.RoleUser || message.ID == currentMessageID {
+			continue
+		}
+		if text := strings.TrimSpace(conversationText(message)); text != "" {
+			values = append(values, text)
+		}
+	}
+	for left, right := 0, len(values)-1; left < right; left, right = left+1, right-1 {
+		values[left], values[right] = values[right], values[left]
+	}
+	return strings.Join(values, "\n\n")
 }
 
 func ValidateProviderToolCalls(calls []model.ToolCall) error {

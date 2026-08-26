@@ -103,9 +103,26 @@ func (s *Service) Close() {
 	s.closed = true
 	cancel := s.cancel
 	s.stateMu.Unlock()
+
+	// Cancel active parsing/embedding work first, then wait until processNext has
+	// left its SQLite critical section before cancelling the worker loop. On
+	// Windows, interrupting modernc SQLite while a claim statement is being
+	// finalized can leave the database file handle alive after sql.DB.Close.
+	s.jobMu.Lock()
+	runningCancels := make([]context.CancelFunc, 0, len(s.running))
+	for _, value := range s.running {
+		runningCancels = append(runningCancels, value.cancel)
+	}
+	s.jobMu.Unlock()
+	for _, runningCancel := range runningCancels {
+		runningCancel()
+	}
+	s.signal()
+	s.processMu.Lock()
 	if cancel != nil {
 		cancel()
 	}
+	s.processMu.Unlock()
 	s.wg.Wait()
 }
 
@@ -349,6 +366,121 @@ func (s *Service) RemoveDocument(ctx context.Context, projectID, documentID stri
 
 func (s *Service) Search(ctx context.Context, projectID, query string, limit int) (SearchResult, error) {
 	return s.SearchWithOptions(ctx, projectID, SearchOptions{Query: query, Limit: limit})
+}
+
+// SynchronizeAttachments drains only the selected project and proves that the
+// requested attachments are readable from the active index before returning.
+// It is used by deterministic Workflows that cannot continue on a stale ready
+// snapshot after importing new research material.
+func (s *Service) SynchronizeAttachments(ctx context.Context, projectID string, attachmentIDs []string) ([]Document, error) {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" || len(attachmentIDs) == 0 || len(attachmentIDs) > 20 {
+		return nil, fmt.Errorf("project and 1-20 knowledge attachments are required")
+	}
+	wanted := make(map[string]struct{}, len(attachmentIDs))
+	for _, value := range attachmentIDs {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return nil, fmt.Errorf("knowledge attachment id is required")
+		}
+		if _, exists := wanted[value]; exists {
+			return nil, fmt.Errorf("knowledge attachment ids must be unique")
+		}
+		wanted[value] = struct{}{}
+	}
+
+	s.processMu.Lock()
+	defer s.processMu.Unlock()
+	selectedProject, version, err := s.ensureProjectVersion(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.queueMissingProjectDocuments(ctx, selectedProject, version); err != nil {
+		return nil, err
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		processed, err := s.processNext(ctx, projectID)
+		if err != nil {
+			return nil, err
+		}
+		if !processed {
+			break
+		}
+	}
+	if _, err := s.tryActivate(ctx, selectedProject, version); err != nil {
+		return nil, err
+	}
+	active, found, err := s.repository.ReadyVersion(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, fmt.Errorf("project knowledge index is still building")
+	}
+	documents, err := s.repository.ListDocuments(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	byAttachment := make(map[string]Document, len(documents))
+	for _, value := range documents {
+		if _, selected := wanted[value.AttachmentID]; selected {
+			byAttachment[value.AttachmentID] = value
+		}
+	}
+	result := make([]Document, 0, len(attachmentIDs))
+	for _, attachmentID := range attachmentIDs {
+		value, exists := byAttachment[strings.TrimSpace(attachmentID)]
+		if !exists {
+			return nil, fmt.Errorf("imported research attachment has no knowledge document")
+		}
+		if value.Status != DocumentReady || value.IndexVersionID != active.ID {
+			message := value.ErrorMessage
+			if message == "" {
+				message = "knowledge document is not ready in the active index"
+			}
+			return nil, fmt.Errorf("%s: %s", value.Title, message)
+		}
+		result = append(result, value)
+	}
+	return result, nil
+}
+
+func (s *Service) ReadEvidenceChunk(ctx context.Context, projectID, indexVersionID, documentID, attachmentID, chunkID string) (EvidenceChunk, error) {
+	projectID, indexVersionID = strings.TrimSpace(projectID), strings.TrimSpace(indexVersionID)
+	selectedProject, err := s.projects.Get(ctx, projectID)
+	if err != nil {
+		return EvidenceChunk{}, err
+	}
+	version, found, err := s.repository.ReadyVersion(ctx, projectID)
+	if err != nil {
+		return EvidenceChunk{}, err
+	}
+	if !found || version.ID != indexVersionID {
+		return EvidenceChunk{}, fmt.Errorf("knowledge evidence index is no longer the active verified version")
+	}
+	documentValue, found, err := s.repository.GetDocument(ctx, projectID, strings.TrimSpace(documentID))
+	if err != nil {
+		return EvidenceChunk{}, err
+	}
+	if !found || documentValue.Status != DocumentReady || documentValue.IndexVersionID != version.ID || documentValue.AttachmentID != strings.TrimSpace(attachmentID) {
+		return EvidenceChunk{}, fmt.Errorf("knowledge evidence document is not ready in the selected index")
+	}
+	index, err := openProjectIndex(ctx, selectedProject, version)
+	if err != nil {
+		return EvidenceChunk{}, err
+	}
+	value, readErr := index.EvidenceChunk(ctx, documentID, attachmentID, chunkID)
+	closeErr := index.Close()
+	if readErr != nil {
+		return EvidenceChunk{}, readErr
+	}
+	if closeErr != nil {
+		return EvidenceChunk{}, closeErr
+	}
+	return value, nil
 }
 
 func (s *Service) SearchWithOptions(ctx context.Context, projectID string, options SearchOptions) (SearchResult, error) {
@@ -803,8 +935,14 @@ func (s *Service) processNext(ctx context.Context, projectID string) (bool, erro
 
 func (s *Service) registerRunning(work Work, cancel context.CancelFunc) {
 	s.jobMu.Lock()
-	defer s.jobMu.Unlock()
 	s.running[work.Job.ID] = &runningKnowledgeJob{projectID: work.Job.ProjectID, documentID: work.Document.ID, cancel: cancel}
+	s.jobMu.Unlock()
+	s.stateMu.Lock()
+	closed := s.closed
+	s.stateMu.Unlock()
+	if closed {
+		cancel()
+	}
 }
 
 func (s *Service) unregisterRunning(jobID string) {

@@ -64,6 +64,7 @@ type Grant struct {
 type Approval struct {
 	ID             string              `json:"id"`
 	RunID          string              `json:"runId"`
+	SubjectKind    tool.SubjectKind    `json:"subjectKind"`
 	ToolCallID     string              `json:"toolCallId"`
 	ProjectID      string              `json:"projectId"`
 	ToolName       string              `json:"toolName"`
@@ -80,9 +81,10 @@ type Approval struct {
 }
 
 type EvaluationRequest struct {
-	ProjectID string    `json:"projectId"`
-	RunID     string    `json:"runId"`
-	Call      tool.Call `json:"call"`
+	ProjectID   string           `json:"projectId"`
+	RunID       string           `json:"runId"`
+	SubjectKind tool.SubjectKind `json:"subjectKind,omitempty"`
+	Call        tool.Call        `json:"call"`
 }
 
 type Evaluation struct {
@@ -114,6 +116,11 @@ type Repository interface {
 	ExpirePending(ctx context.Context, at time.Time) (int64, error)
 }
 
+type SubjectRepository interface {
+	ListApprovalsBySubject(ctx context.Context, subjectKind tool.SubjectKind, subjectID string) ([]Approval, error)
+	ListPendingApprovalsBySubject(ctx context.Context, subjectKind tool.SubjectKind, subjectID string) ([]Approval, error)
+}
+
 type Engine struct {
 	repository Repository
 	now        func() time.Time
@@ -137,12 +144,24 @@ func (e *Engine) EvaluateCall(ctx context.Context, request EvaluationRequest, mo
 	return e.evaluate(ctx, request, mode == conversation.PermissionFullAccess, mode == conversation.PermissionPlan)
 }
 
+// EvaluateWorkflow applies the permission mode frozen on a Workflow Run.
+// A Workflow has already presented and frozen its tool snapshots before
+// launch, so Plan asks for declared authority rather than every otherwise
+// permissionless low-risk call.
+func (e *Engine) EvaluateWorkflow(ctx context.Context, request EvaluationRequest, mode conversation.PermissionMode) (Evaluation, error) {
+	if !mode.Valid() {
+		return Evaluation{}, fmt.Errorf("invalid permission mode")
+	}
+	return e.evaluate(ctx, request, mode == conversation.PermissionFullAccess, false)
+}
+
 func (e *Engine) evaluate(ctx context.Context, request EvaluationRequest, fullAccess, approveWholeCall bool) (Evaluation, error) {
 	request.ProjectID, request.RunID = strings.TrimSpace(request.ProjectID), strings.TrimSpace(request.RunID)
+	request.SubjectKind = tool.NormalizeSubjectKind(request.SubjectKind)
 	if request.ProjectID == "" || request.RunID == "" || strings.TrimSpace(request.Call.ID) == "" {
 		return Evaluation{}, fmt.Errorf("project, run and tool call are required")
 	}
-	if request.Call.RunID != request.RunID {
+	if !request.SubjectKind.Valid() || request.Call.RunID != request.RunID || tool.NormalizeSubjectKind(request.Call.SubjectKind) != request.SubjectKind {
 		return Evaluation{}, fmt.Errorf("tool call does not belong to run")
 	}
 	request.Call.ToolName = strings.TrimSpace(request.Call.ToolName)
@@ -153,7 +172,7 @@ func (e *Engine) evaluate(ctx context.Context, request EvaluationRequest, fullAc
 		return Evaluation{}, fmt.Errorf("tool call is not eligible for policy evaluation")
 	}
 	if fullAccess {
-		return Evaluation{Decision: DecisionAllow, Reason: "用户已为该会话启用 Full Access。", Missing: []tool.PermissionRequirement{}, GrantIDs: []string{}}, nil
+		return Evaluation{Decision: DecisionAllow, Reason: "用户已为该任务启用 Full Access。", Missing: []tool.PermissionRequirement{}, GrantIDs: []string{}}, nil
 	}
 	if approveWholeCall {
 		// Plan mode allows low-risk, idempotent reads that are already confined
@@ -173,6 +192,7 @@ func (e *Engine) evaluate(ctx context.Context, request EvaluationRequest, fullAc
 		return Evaluation{Decision: DecisionAsk, Reason: "Plan 模式要求用户确认每次工具调用。", Missing: []tool.PermissionRequirement{requirement}, GrantIDs: []string{}}, nil
 	}
 	requirements := cloneRequirements(request.Call.Permissions)
+	requirements = withoutDefaultNetworkPermissions(requirements)
 	if (request.Call.Risk == tool.RiskModerate || request.Call.Risk == tool.RiskHigh || request.Call.Risk == tool.RiskDestructive) && !containsPermission(requirements, tool.PermissionToolInvoke) {
 		requirements = append([]tool.PermissionRequirement{{Kind: tool.PermissionToolInvoke, Resource: request.Call.ToolName}}, requirements...)
 	}
@@ -193,6 +213,19 @@ func (e *Engine) evaluate(ctx context.Context, request EvaluationRequest, fullAc
 		return Evaluation{Decision: DecisionAllow, Reason: "调用所需权限已由有效授权覆盖。", Missing: []tool.PermissionRequirement{}, GrantIDs: used}, nil
 	}
 	return Evaluation{Decision: DecisionAsk, Reason: "调用需要用户确认尚未授权的权限范围。", Missing: missing, GrantIDs: used}, nil
+}
+
+// Shell, one-shot Python and project Kernels may use the network without
+// per-domain configuration. Other authority, including process execution,
+// Workspace writes and dependency installation, remains policy-controlled.
+func withoutDefaultNetworkPermissions(values []tool.PermissionRequirement) []tool.PermissionRequirement {
+	result := make([]tool.PermissionRequirement, 0, len(values))
+	for _, value := range values {
+		if value.Kind != tool.PermissionNetworkDomain {
+			result = append(result, value)
+		}
+	}
+	return result
 }
 
 func planAllowsWorkspaceRead(call tool.Call) bool {
@@ -221,8 +254,8 @@ func (e *Engine) RequestApproval(ctx context.Context, request EvaluationRequest,
 		return Approval{}, err
 	}
 	now := e.now()
-	value := Approval{ID: approvalID, RunID: request.RunID, ToolCallID: request.Call.ID, ProjectID: request.ProjectID, ToolName: request.Call.ToolName, ToolVersion: request.Call.ToolVersion, PermissionKind: requirement.Kind, Resource: strings.TrimSpace(requirement.Resource), Risk: request.Call.Risk, Status: ApprovalPending, RequestedScope: maximumScope(request.Call, requirement), Reason: evaluation.Reason, CreatedAt: now}
-	event, err := approvalEvent(value.RunID, "approval.requested", map[string]any{"approval": value})
+	value := Approval{ID: approvalID, RunID: request.RunID, SubjectKind: request.SubjectKind, ToolCallID: request.Call.ID, ProjectID: request.ProjectID, ToolName: request.Call.ToolName, ToolVersion: request.Call.ToolVersion, PermissionKind: requirement.Kind, Resource: strings.TrimSpace(requirement.Resource), Risk: request.Call.Risk, Status: ApprovalPending, RequestedScope: maximumScope(request.Call, requirement), Reason: evaluation.Reason, CreatedAt: now}
+	event, err := approvalEvent(value.SubjectKind, value.RunID, "approval.requested", map[string]any{"approval": value})
 	if err != nil {
 		return Approval{}, err
 	}
@@ -253,7 +286,7 @@ func (e *Engine) Resolve(ctx context.Context, command ResolveCommand) (Approval,
 	if next == ApprovalGranted {
 		eventType = "approval.granted"
 	}
-	event, err := approvalEvent(value.RunID, eventType, map[string]any{"approval": projected, "grant": grant})
+	event, err := approvalEvent(value.SubjectKind, value.RunID, eventType, map[string]any{"approval": projected, "grant": grant})
 	if err != nil {
 		return Approval{}, nil, err
 	}
@@ -278,6 +311,38 @@ func (e *Engine) ListPending(ctx context.Context, runID string) ([]Approval, err
 		return nil, fmt.Errorf("run id is required")
 	}
 	return e.repository.ListPendingApprovals(ctx, runID)
+}
+
+func (e *Engine) ListBySubject(ctx context.Context, subjectKind tool.SubjectKind, subjectID string) ([]Approval, error) {
+	subjectID = strings.TrimSpace(subjectID)
+	subjectKind = tool.NormalizeSubjectKind(subjectKind)
+	if subjectID == "" || !subjectKind.Valid() {
+		return nil, fmt.Errorf("valid approval subject is required")
+	}
+	if subjectKind == tool.SubjectChatRun {
+		return e.repository.ListApprovalsByRun(ctx, subjectID)
+	}
+	repository, ok := e.repository.(SubjectRepository)
+	if !ok {
+		return nil, fmt.Errorf("approval subject repository is not configured")
+	}
+	return repository.ListApprovalsBySubject(ctx, subjectKind, subjectID)
+}
+
+func (e *Engine) ListPendingForSubject(ctx context.Context, subjectKind tool.SubjectKind, subjectID string) ([]Approval, error) {
+	subjectID = strings.TrimSpace(subjectID)
+	subjectKind = tool.NormalizeSubjectKind(subjectKind)
+	if subjectID == "" || !subjectKind.Valid() {
+		return nil, fmt.Errorf("valid approval subject is required")
+	}
+	if subjectKind == tool.SubjectChatRun {
+		return e.repository.ListPendingApprovals(ctx, subjectID)
+	}
+	repository, ok := e.repository.(SubjectRepository)
+	if !ok {
+		return nil, fmt.Errorf("approval subject repository is not configured")
+	}
+	return repository.ListPendingApprovalsBySubject(ctx, subjectKind, subjectID)
 }
 
 func (e *Engine) Get(ctx context.Context, approvalID string) (Approval, error) {
@@ -348,8 +413,8 @@ func callRequires(call tool.Call, target tool.PermissionRequirement) bool {
 	return false
 }
 
-func approvalEvent(runID, eventType string, payload any) (events.Envelope, error) {
-	return permissionEvent(runID, "run", eventType, payload)
+func approvalEvent(subjectKind tool.SubjectKind, runID, eventType string, payload any) (events.Envelope, error) {
+	return permissionEvent(runID, tool.NormalizeSubjectKind(subjectKind).AggregateType(), eventType, payload)
 }
 
 func permissionEvent(aggregateID, aggregateType, eventType string, payload any) (events.Envelope, error) {

@@ -1,0 +1,180 @@
+{
+  "schemaVersion": 1,
+  "description": "Versioned bilingual and mixed-language semantic routing evaluation. Group entries expand to individual test cases.",
+  "groups": [
+    {
+      "id": "scientific-writing", "expected": "scientific-writing",
+      "chinese": ["起草一篇结构完整的科研论文", "帮我润色这篇学术稿件", "改写论文的讨论部分", "优化手稿语言并保持学术语气", "根据结果撰写论文正文"],
+      "english": ["Draft a complete scientific manuscript", "Polish this academic paper", "Revise the discussion section of my manuscript", "Edit the paper while preserving an academic tone", "Write the manuscript body from these results"],
+      "mixed": ["请 revise 这篇 scientific manuscript", "Polish 论文的 discussion section"]
+    },
+    {
+      "id": "citation-management", "expected": "citation-management",
+      "chinese": ["检查论文引用是否准确", "修复参考文献格式并补全 DOI", "把这些引文整理成 BibTeX", "核对文中引用和文末条目", "清理重复的参考文献"],
+      "english": ["Validate every citation in this paper", "Repair bibliography metadata and missing DOI values", "Convert these references to BibTeX", "Cross-check in-text citations against the bibliography", "Deduplicate the reference list"],
+      "mixed": ["核对 citation 并生成 BibTeX", "Repair 参考文献 DOI metadata"]
+    },
+    {
+      "id": "scientific-schematics", "expected": "scientific-schematics",
+      "chinese": ["为实验方法画一张科学流程图", "绘制论文中的系统架构图", "把研究流程做成技术示意图", "生成神经网络结构示意图", "画出样本处理工作流"],
+      "english": ["Create a scientific workflow schematic", "Draw the system architecture diagram for the paper", "Turn this method into a technical flowchart", "Create a neural network architecture diagram", "Diagram the sample processing workflow"],
+      "mixed": ["为 experiment 画 scientific schematic", "Create 研究方法 flowchart"]
+    },
+    {
+      "id": "statistical-analysis", "expected": "statistical-analysis",
+      "chinese": ["为实验选择正确的统计检验", "计算样本量和统计功效", "分析组间差异是否显著", "检查统计假设并报告效应量", "设计多重比较校正方案"],
+      "english": ["Choose the correct statistical test", "Calculate sample size and statistical power", "Test whether group differences are significant", "Check statistical assumptions and report effect sizes", "Design a multiple-comparison correction strategy"],
+      "mixed": ["选择 statistical test 并算功效", "检查显著性和 effect size"]
+    },
+    {
+      "id": "research-grants", "expected": "research-grants",
+      "chinese": ["帮我起草科研基金申请书", "优化项目申请的研究目标", "撰写标书的创新性说明", "准备基金预算论证", "修改项目申请的影响力部分"],
+      "english": ["Draft a research grant proposal", "Improve the specific aims of my funding application", "Write the innovation section for this grant", "Prepare a grant budget justification", "Revise the impact section of the proposal"],
+      "mixed": ["起草 grant proposal 的 specific aims", "优化基金 application 的 innovation section"]
+    },
+    {
+      "id": "peer-review", "expected": "peer-review",
+      "chinese": ["对这篇投稿稿件做同行评审", "以审稿人身份指出论文问题", "生成结构化审稿意见", "评价这篇手稿的方法学缺陷", "帮我写拒稿或大修建议"],
+      "english": ["Peer review this submitted manuscript", "Act as a referee and identify weaknesses", "Write a structured reviewer report", "Evaluate methodological flaws in this paper", "Recommend rejection or major revision with reasons"],
+      "mixed": ["给这篇 manuscript 做同行评审", "Write 审稿意见 as a referee"]
+    },
+    {
+      "id": "research-lookup", "expected": "research-lookup",
+      "chinese": ["检索并核实相关研究论文", "查找这个主题的权威文献", "搜索支持该论断的论文", "根据 DOI 查询出版信息", "找到近期发表的相关研究"],
+      "english": ["Find and verify related research papers", "Look up authoritative literature on this topic", "Search for publications supporting this claim", "Retrieve publication metadata from a DOI", "Find recent studies on this question"],
+      "mixed": ["检索 related papers 并 verify 来源", "Search 近期研究文献"]
+    },
+    {
+      "id": "literature-review", "expected": "literature-review",
+      "chinese": ["围绕这个问题写一篇文献综述", "制定系统综述检索策略", "整理领域研究现状和空白", "开展范围综述并归纳主题", "综合多篇论文形成综述框架"],
+      "english": ["Write a literature review on this question", "Design a systematic review search strategy", "Synthesize the state of research and gaps", "Conduct a scoping review and organize themes", "Build a review outline from these papers"],
+      "mixed": ["制定 systematic review 检索策略", "整理领域 literature review 框架"]
+    },
+    {
+      "id": "hypothesis-generation", "expected": "hypothesis-generation",
+      "chinese": ["根据这些结果提出可检验的研究假设", "生成几个有机制依据的科学假设", "把观察结果转成实验假设", "为下一步研究构建竞争性假设", "提出可证伪的假说和预测"],
+      "english": ["Generate testable research hypotheses from these results", "Propose mechanistically grounded scientific hypotheses", "Turn these observations into an experimental hypothesis", "Develop competing hypotheses for the next study", "Formulate falsifiable hypotheses and predictions"],
+      "mixed": ["根据数据 generate testable hypotheses", "提出可证伪 hypothesis 和 predictions"]
+    },
+    {
+      "id": "exploratory-data-analysis", "expected": "exploratory-data-analysis",
+      "chinese": ["对这份数据做探索性分析", "检查数据分布和异常值", "先做缺失值与相关性分析", "总结数据集的主要模式", "为建模前的数据生成 EDA 报告"],
+      "english": ["Perform exploratory data analysis on this dataset", "Inspect distributions and outliers", "Analyze missingness and correlations first", "Summarize the main patterns in the data", "Create an EDA report before modeling"],
+      "mixed": ["对 dataset 做 exploratory analysis", "生成建模前 EDA 报告"]
+    },
+    {
+      "id": "scikit-survival", "expected": "scikit-survival",
+      "chinese": ["用生存分析建立 Cox 回归模型", "绘制 Kaplan Meier 生存曲线", "分析删失时间事件数据", "评估生存模型的一致性指数", "比较两组患者的生存率"],
+      "english": ["Fit a Cox regression survival model", "Plot Kaplan Meier survival curves", "Analyze censored time-to-event data", "Evaluate a survival model with concordance index", "Compare patient survival between two groups"],
+      "mixed": ["用 scikit survival 拟合 Cox 模型", "绘制 Kaplan Meier 生存曲线并 compare groups"]
+    },
+    {
+      "id": "bioimage-analysis", "expected": "bioimage-analysis",
+      "chinese": ["分析显微镜细胞图像", "对生物医学图像做分割和定量", "统计荧光显微图像中的细胞", "处理组织切片成像数据", "提取显微图像的形态特征"],
+      "english": ["Analyze microscopy cell images", "Segment and quantify biomedical images", "Count cells in fluorescence microscopy", "Process tissue section imaging data", "Extract morphological features from micrographs"],
+      "mixed": ["对 microscopy 图像做细胞 segmentation", "分析荧光 bioimage 并 quantify cells"]
+    },
+    {
+      "id": "cancer-genomics-analysis", "expected": "cancer-genomics-analysis",
+      "chinese": ["分析癌症基因组突变数据", "研究肿瘤队列的拷贝数变异", "比较癌症样本的基因表达", "寻找肿瘤驱动基因", "整合癌症基因组和临床数据"],
+      "english": ["Analyze cancer genomics mutation data", "Study copy-number alterations in a tumor cohort", "Compare gene expression across cancer samples", "Identify candidate cancer driver genes", "Integrate cancer genomic and clinical data"],
+      "mixed": ["分析 cancer genomics mutation 数据", "整合肿瘤 gene expression 和 clinical data"]
+    },
+    {
+      "id": "drug-design", "expected": "drug-design",
+      "chinese": ["设计针对这个靶点的小分子药物", "优化先导化合物的结构", "开展计算药物设计流程", "提出候选分子的药效团修改", "为靶蛋白设计结合配体"],
+      "english": ["Design small-molecule drugs for this target", "Optimize the structure of a lead compound", "Run a computational drug design workflow", "Suggest pharmacophore changes for candidate molecules", "Design binding ligands for the target protein"],
+      "mixed": ["为 target protein 做 drug design", "优化 lead compound 分子结构"]
+    },
+    {
+      "id": "protein-diagram", "expected": "protein-diagram",
+      "chinese": ["绘制蛋白质结构域示意图", "画出蛋白的功能位点和突变", "生成蛋白序列特征图", "制作蛋白结构注释图", "展示蛋白质各区域的相互作用"],
+      "english": ["Draw a protein domain diagram", "Map functional sites and mutations on a protein", "Generate a protein sequence feature diagram", "Create an annotated protein structure figure", "Show interactions among protein regions"],
+      "mixed": ["绘制 protein domain 示意图", "Map 蛋白 mutation 和 functional sites"]
+    },
+    {
+      "id": "scientific-visualization", "expected": "scientific-visualization",
+      "chinese": ["把实验数据做成出版级科学图表", "设计清晰的多面板科研图", "优化论文结果图的可视化", "选择合适图形展示定量结果", "制作符合期刊规范的数据图"],
+      "english": ["Create publication-quality scientific visualizations", "Design a clear multi-panel research figure", "Improve visualization of the paper results", "Choose an appropriate plot for quantitative results", "Produce journal-ready data figures"],
+      "mixed": ["制作 publication quality 科学图表", "优化 paper results visualization"]
+    },
+    {
+      "id": "scientific-slides", "expected": "scientific-slides",
+      "chinese": ["制作科研汇报幻灯片", "把论文整理成学术演示文稿", "设计组会报告的 slides", "生成会议口头报告大纲", "优化科学汇报的页面结构"],
+      "english": ["Create slides for a scientific presentation", "Turn this paper into an academic slide deck", "Design slides for a lab meeting", "Outline a conference talk", "Improve the structure of my research presentation"],
+      "mixed": ["制作科研 presentation slides", "把 paper 转成 academic slide deck"]
+    },
+    {
+      "id": "latex-posters", "expected": "latex-posters",
+      "chinese": ["用 LaTeX 制作学术海报", "排版会议墙报", "设计 beamerposter 科研海报", "把研究摘要做成大型海报", "优化学术 poster 的栏目布局"],
+      "english": ["Create an academic poster in LaTeX", "Lay out a conference research poster", "Design a beamerposter for this study", "Turn the abstract into a large-format poster", "Improve the column layout of my scientific poster"],
+      "mixed": ["用 LaTeX 制作 conference poster", "优化学术 poster 栏目 layout"]
+    },
+    {
+      "id": "protocolsio-integration", "expected": "protocolsio-integration",
+      "chinese": ["从 protocols.io 获取实验方案", "把实验流程发布到 protocols.io", "同步在线实验操作规程", "检索公开的实验 protocol", "管理 protocols.io 中的实验步骤"],
+      "english": ["Retrieve an experimental protocol from protocols.io", "Publish this procedure to protocols.io", "Synchronize an online laboratory protocol", "Search for a public experimental protocol", "Manage experimental steps in protocols.io"],
+      "mixed": ["从 protocols.io 检索实验流程", "Publish 实验 protocol 到 protocols.io"]
+    },
+    {
+      "id": "physics-fitting", "expected": "physics-fitting",
+      "chinese": ["拟合物理实验数据并估计参数", "对测量曲线做非线性拟合", "使用物理模型拟合观测结果", "计算拟合参数的不确定度", "比较多个物理模型的拟合优度"],
+      "english": ["Fit physical experiment data and estimate parameters", "Perform nonlinear fitting on the measured curve", "Fit observations with a physics model", "Calculate uncertainty of fitted parameters", "Compare goodness of fit across physical models"],
+      "mixed": ["用 physics model 拟合实验数据", "估计 fitting parameters 的 uncertainty"]
+    }
+  ],
+  "negativeCases": [
+    {"id":"neg-citation-zh-01","language":"zh","query":"润色这篇论文，但不要检查引用","expected":"scientific-writing","forbidden":"citation-management"},
+    {"id":"neg-citation-en-01","language":"en","query":"Revise this manuscript without citation checking","expected":"scientific-writing","forbidden":"citation-management"},
+    {"id":"neg-citation-mixed-01","language":"mixed","query":"Polish 论文，不需要 citation management","expected":"scientific-writing","forbidden":"citation-management"},
+    {"id":"neg-writing-zh-01","language":"zh","query":"只检查参考文献，不要润色论文","expected":"citation-management","forbidden":"scientific-writing"},
+    {"id":"neg-writing-en-01","language":"en","query":"Validate the bibliography without revising the manuscript","expected":"citation-management","forbidden":"scientific-writing"},
+    {"id":"neg-schematic-zh-01","language":"zh","query":"分析实验统计结果，不要画流程图","expected":"statistical-analysis","forbidden":"scientific-schematics"},
+    {"id":"neg-schematic-en-01","language":"en","query":"Run the statistical analysis without creating a schematic","expected":"statistical-analysis","forbidden":"scientific-schematics"},
+    {"id":"neg-statistics-zh-01","language":"zh","query":"只画实验流程图，不用做统计检验","expected":"scientific-schematics","forbidden":"statistical-analysis"},
+    {"id":"neg-statistics-en-01","language":"en","query":"Draw the workflow diagram without statistical testing","expected":"scientific-schematics","forbidden":"statistical-analysis"},
+    {"id":"neg-review-zh-01","language":"zh","query":"检索这篇论文，不要做同行评审","expected":"research-lookup","forbidden":"peer-review"},
+    {"id":"neg-review-en-01","language":"en","query":"Find the paper but do not peer review it","expected":"research-lookup","forbidden":"peer-review"},
+    {"id":"neg-search-zh-01","language":"zh","query":"根据已有论文写综述，不需要检索新文献","expected":"literature-review","forbidden":"research-lookup"},
+    {"id":"neg-search-en-01","language":"en","query":"Write a literature review without searching for new papers","expected":"literature-review","forbidden":"research-lookup"},
+    {"id":"neg-slides-zh-01","language":"zh","query":"制作 LaTeX 学术海报，不要幻灯片","expected":"latex-posters","forbidden":"scientific-slides"},
+    {"id":"neg-slides-en-01","language":"en","query":"Create a LaTeX poster without presentation slides","expected":"latex-posters","forbidden":"scientific-slides"},
+    {"id":"neg-poster-zh-01","language":"zh","query":"准备科研汇报幻灯片，不用做海报","expected":"scientific-slides","forbidden":"latex-posters"},
+    {"id":"neg-poster-en-01","language":"en","query":"Prepare scientific slides and avoid making a poster","expected":"scientific-slides","forbidden":"latex-posters"},
+    {"id":"neg-visual-zh-01","language":"zh","query":"拟合物理数据，不要制作可视化图表","expected":"physics-fitting","forbidden":"scientific-visualization"},
+    {"id":"neg-visual-en-01","language":"en","query":"Fit the physics data without creating a visualization","expected":"physics-fitting","forbidden":"scientific-visualization"},
+    {"id":"neg-protocol-mixed-01","language":"mixed","query":"Search related papers，不用获取 experimental protocol","expected":"research-lookup","forbidden":"protocolsio-integration"}
+  ],
+  "noSkill": [
+    {"id":"none-zh-01","language":"zh","query":"你好"}, {"id":"none-zh-02","language":"zh","query":"谢谢你的回答"},
+    {"id":"none-zh-03","language":"zh","query":"继续"}, {"id":"none-zh-04","language":"zh","query":"请简短一点"},
+    {"id":"none-zh-05","language":"zh","query":"把上一条再说一遍"}, {"id":"none-zh-06","language":"zh","query":"你现在是什么状态"},
+    {"id":"none-zh-07","language":"zh","query":"今天是几号"}, {"id":"none-zh-08","language":"zh","query":"给我三个普通标题"},
+    {"id":"none-zh-09","language":"zh","query":"把这句话翻译成英文"}, {"id":"none-zh-10","language":"zh","query":"解释一下这个词"},
+    {"id":"none-zh-11","language":"zh","query":"换一种表达"}, {"id":"none-zh-12","language":"zh","query":"列出刚才的要点"},
+    {"id":"none-zh-13","language":"zh","query":"不要调用任何专业工作流"}, {"id":"none-zh-14","language":"zh","query":"确认收到即可"},
+    {"id":"none-zh-15","language":"zh","query":"这段话有多少个字"}, {"id":"none-zh-16","language":"zh","query":"把数字按从小到大排序"},
+    {"id":"none-zh-17","language":"zh","query":"输出一个空列表"}, {"id":"none-zh-18","language":"zh","query":"回答是或否"},
+    {"id":"none-zh-19","language":"zh","query":"总结我们刚才的对话"}, {"id":"none-zh-20","language":"zh","query":"暂时不用处理"},
+    {"id":"none-en-01","language":"en","query":"Hello"}, {"id":"none-en-02","language":"en","query":"Thanks for the answer"},
+    {"id":"none-en-03","language":"en","query":"Continue"}, {"id":"none-en-04","language":"en","query":"Make it shorter"},
+    {"id":"none-en-05","language":"en","query":"Repeat the previous response"}, {"id":"none-en-06","language":"en","query":"What is your current status"},
+    {"id":"none-en-07","language":"en","query":"What date is it"}, {"id":"none-en-08","language":"en","query":"Give me three ordinary titles"},
+    {"id":"none-en-09","language":"en","query":"Translate this sentence into Chinese"}, {"id":"none-en-10","language":"en","query":"Explain this word"},
+    {"id":"none-en-11","language":"en","query":"Say it another way"}, {"id":"none-en-12","language":"en","query":"List the previous points"},
+    {"id":"none-en-13","language":"en","query":"Do not invoke a specialized workflow"}, {"id":"none-en-14","language":"en","query":"Only acknowledge receipt"},
+    {"id":"none-en-15","language":"en","query":"Count the characters in this sentence"}, {"id":"none-en-16","language":"en","query":"Sort these numbers in ascending order"},
+    {"id":"none-en-17","language":"en","query":"Return an empty list"}, {"id":"none-en-18","language":"en","query":"Answer yes or no"},
+    {"id":"none-en-19","language":"en","query":"Summarize our conversation so far"}, {"id":"none-en-20","language":"en","query":"No action is needed yet"},
+    {"id":"none-mix-01","language":"mixed","query":"Hello，你好"}, {"id":"none-mix-02","language":"mixed","query":"Continue，继续"},
+    {"id":"none-mix-03","language":"mixed","query":"请 make it shorter"}, {"id":"none-mix-04","language":"mixed","query":"Repeat 上一条回答"},
+    {"id":"none-mix-05","language":"mixed","query":"当前 status 是什么"}, {"id":"none-mix-06","language":"mixed","query":"Translate 这句话"},
+    {"id":"none-mix-07","language":"mixed","query":"解释这个 English word"}, {"id":"none-mix-08","language":"mixed","query":"列出 previous points"},
+    {"id":"none-mix-09","language":"mixed","query":"Only 回答 yes or no"}, {"id":"none-mix-10","language":"mixed","query":"暂时 no action"},
+    {"id":"none-mix-11","language":"mixed","query":"确认 received 即可"}, {"id":"none-mix-12","language":"mixed","query":"Sort 这些数字"},
+    {"id":"none-mix-13","language":"mixed","query":"输出 empty list"}, {"id":"none-mix-14","language":"mixed","query":"总结 conversation so far"},
+    {"id":"none-mix-15","language":"mixed","query":"换一种 wording"}, {"id":"none-mix-16","language":"mixed","query":"给我 three ordinary titles"},
+    {"id":"none-mix-17","language":"mixed","query":"今天 date 是多少"}, {"id":"none-mix-18","language":"mixed","query":"Count 这句话的字符"},
+    {"id":"none-mix-19","language":"mixed","query":"Thanks，谢谢"}, {"id":"none-mix-20","language":"mixed","query":"不要 invoke specialized workflow"}
+  ]
+}

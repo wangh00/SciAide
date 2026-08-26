@@ -13,6 +13,7 @@ import (
 
 type CreateCommand struct {
 	RunID          string          `json:"runId"`
+	SubjectKind    SubjectKind     `json:"subjectKind,omitempty"`
 	ProviderCallID string          `json:"providerCallId"`
 	Arguments      json.RawMessage `json:"arguments"`
 	IdempotencyKey string          `json:"idempotencyKey,omitempty"`
@@ -34,9 +35,13 @@ func (s *Service) Propose(ctx context.Context, definition Definition, cmd Create
 
 func (s *Service) propose(ctx context.Context, definition Definition, cmd CreateCommand, validateSchema bool) (Call, error) {
 	cmd.RunID, cmd.ProviderCallID = strings.TrimSpace(cmd.RunID), strings.TrimSpace(cmd.ProviderCallID)
+	cmd.SubjectKind = NormalizeSubjectKind(cmd.SubjectKind)
 	cmd.IdempotencyKey = strings.TrimSpace(cmd.IdempotencyKey)
 	if cmd.RunID == "" || cmd.ProviderCallID == "" {
 		return Call{}, fmt.Errorf("run and provider call are required")
+	}
+	if !cmd.SubjectKind.Valid() {
+		return Call{}, fmt.Errorf("invalid tool call subject kind")
 	}
 	if err := ValidateDefinition(definition); err != nil {
 		return Call{}, err
@@ -59,8 +64,8 @@ func (s *Service) propose(ctx context.Context, definition Definition, cmd Create
 	}
 	now := s.now()
 	permissions := append([]PermissionRequirement(nil), definition.Permissions...)
-	value := Call{ID: callID, RunID: cmd.RunID, ProviderCallID: cmd.ProviderCallID, ToolName: definition.QualifiedName, ToolVersion: definition.Version, Arguments: append(json.RawMessage(nil), cmd.Arguments...), Status: CallPending, Risk: definition.Risk, Permissions: permissions, Idempotent: definition.Idempotent, IdempotencyKey: cmd.IdempotencyKey, CreatedAt: now, UpdatedAt: now}
-	event, err := newToolEvent(value.RunID, "tool.proposed", map[string]any{"toolCall": value})
+	value := Call{ID: callID, RunID: cmd.RunID, SubjectKind: cmd.SubjectKind, ProviderCallID: cmd.ProviderCallID, ToolName: definition.QualifiedName, ToolVersion: definition.Version, Arguments: append(json.RawMessage(nil), cmd.Arguments...), Status: CallPending, Risk: definition.Risk, Permissions: permissions, Idempotent: definition.Idempotent, IdempotencyKey: cmd.IdempotencyKey, CreatedAt: now, UpdatedAt: now}
+	event, err := newToolEvent(value.SubjectKind, value.RunID, "tool.proposed", map[string]any{"toolCall": value})
 	if err != nil {
 		return Call{}, err
 	}
@@ -129,6 +134,22 @@ func (s *Service) ListByRun(ctx context.Context, runID string) ([]Call, error) {
 	return s.repository.ListByRun(ctx, runID)
 }
 
+func (s *Service) ListBySubject(ctx context.Context, subjectKind SubjectKind, subjectID string) ([]Call, error) {
+	subjectID = strings.TrimSpace(subjectID)
+	subjectKind = NormalizeSubjectKind(subjectKind)
+	if subjectID == "" || !subjectKind.Valid() {
+		return nil, fmt.Errorf("valid tool call subject is required")
+	}
+	if subjectKind == SubjectChatRun {
+		return s.repository.ListByRun(ctx, subjectID)
+	}
+	repository, ok := s.repository.(SubjectRepository)
+	if !ok {
+		return nil, fmt.Errorf("tool subject repository is not configured")
+	}
+	return repository.ListBySubject(ctx, subjectKind, subjectID)
+}
+
 func (s *Service) AwaitApproval(ctx context.Context, callID string) (Call, error) {
 	return s.transition(ctx, callID, CallAwaitingApproval, "", "")
 }
@@ -164,7 +185,7 @@ func (s *Service) Finish(ctx context.Context, callID string, result Result, erro
 	result.CreatedAt = now
 	projected := value
 	projected.Status, projected.Result, projected.ErrorCode, projected.ErrorMessage, projected.CompletedAt, projected.UpdatedAt = next, &result, strings.TrimSpace(errorCode), strings.TrimSpace(errorMessage), &now, now
-	event, err := newToolEvent(value.RunID, "tool."+string(next), map[string]any{"toolCall": projected})
+	event, err := newToolEvent(value.SubjectKind, value.RunID, "tool."+string(next), map[string]any{"toolCall": projected})
 	if err != nil {
 		return Call{}, err
 	}
@@ -196,7 +217,7 @@ func (s *Service) transition(ctx context.Context, callID string, next CallStatus
 	if next.Terminal() {
 		projected.CompletedAt = &now
 	}
-	event, err := newToolEvent(value.RunID, "tool."+string(next), map[string]any{"toolCall": projected})
+	event, err := newToolEvent(value.SubjectKind, value.RunID, "tool."+string(next), map[string]any{"toolCall": projected})
 	if err != nil {
 		return Call{}, err
 	}
@@ -207,7 +228,7 @@ func (s *Service) transition(ctx context.Context, callID string, next CallStatus
 	return updated, err
 }
 
-func newToolEvent(runID, eventType string, payload any) (events.Envelope, error) {
+func newToolEvent(subjectKind SubjectKind, runID, eventType string, payload any) (events.Envelope, error) {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return events.Envelope{}, err
@@ -216,5 +237,5 @@ func newToolEvent(runID, eventType string, payload any) (events.Envelope, error)
 	if err != nil {
 		return events.Envelope{}, err
 	}
-	return events.New(eventID, runID, "run", eventType, 0, data), nil
+	return events.New(eventID, runID, NormalizeSubjectKind(subjectKind).AggregateType(), eventType, 0, data), nil
 }

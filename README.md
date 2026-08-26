@@ -2,13 +2,15 @@
 
 面向科研工作者的本地优先桌面 AI Agent，支持自定义模型、工具调用、MCP、Skill、科研知识库和可信引用。
 
-当前阶段：**P6.0 斜杠命令面板与手动会话压缩完成**。
+当前阶段：**P7.1～P7.6 已完成；下一阶段为 P8 发布加固**。
 
 ## 当前能力
 
 - Wails + React + TypeScript
 - Application / Port / Adapter 边界
 - SQLite 版本化迁移与 Project / Conversation / Message / Run 持久化
+- 项目级科研 Artifact：不可变版本、SHA256 内容寻址对象、Run/Message/Tool/Skill 来源快照、可信引用快照、完整性校验与回收站
+- ArtifactVersion 可派生确定性 DOCX/PDF，支持 GB/T 7714-2015 与 APA 7；导出记录不可变且不覆盖原件，相同来源和选项幂等复用
 - 默认数据根目录 `~/.sciaide`，旧 AppData 数据首次启动安全迁移
 - 默认托管 Workspace 与用户自选外部目录；支持安全移除项目/会话
 - 项目附件、解析缓存和 Artifact 默认收敛到 `<Workspace>/.sciaide`，大体积科研数据跟随用户选择的磁盘；全局 Skill/MCP/SQLite 仍保存在 `~/.sciaide`
@@ -36,6 +38,10 @@
 - P5.1 v1 在 v2 影子构建期间继续可用，只有全部 ready 文档完成并校验后才原子切换
 - 知识库展示等待、解析、分块/向量化、提交等任务阶段及解析质量诊断；支持取消、显式重试和单文档重建，重建完成前继续查询上一份可用索引
 - 固定中英文科研语料同时覆盖 BM25 与确定性混合检索，持续校验 Hit Rate、Recall、MRR 和来源定位率；扫描型 PDF 只提示缺少文本，当前不内置 OCR
+- 公共科研数据库 Connector 接入 OpenAlex、Crossref、arXiv、PubMed、Europe PMC 和 Semantic Scholar；模型始终使用固定 `Catalog / Search / Fetch` 工具面，来源增加不会扩大 Tool Schema
+- 项目级文献发现支持多源部分失败、保守去重、纳入/排除/笔记，以及开放全文或明确披露为元数据/摘要的知识库导入；在线命中本身不会取得可信引用身份
+- 每个候选文献具有规范书目、字段级来源、冲突选择和用户修订历史；证据矩阵支持研究问题、方法、样本/数据集、结论、局限和笔记，并将模型证据强制置为待复核
+- Message 与 Artifact Citation 保存生成时的规范书目和证据等级快照；GB/T 7714-2015 与 APA 7 从该快照渲染，历史 ArtifactExport 不会因后续书目修订而改变
 - P3 MCP：stdio / Streamable HTTP 配置、显式信任、initialize 与 Tools/Resources/Prompts 能力发现
 - 兼容 Claude Desktop、Cursor、Codex 常见的 `mcpServers` JSON，可一次粘贴并导入多个 Server
 - MCP Tool 使用稳定的 `mcp.<namespace>.<tool>` 名称进入统一 ToolRegistry、Plan/Full Access 审批和 ToolExecutor
@@ -46,23 +52,31 @@
 - 超长会话先生成无工具的结构化科研 checkpoint，再以“已校验摘要 + 最近完整对话组”继续；checkpoint 带消息边界、revision 和 SHA256，原始聊天记录不删除
 - 聊天框输入 `/` 可筛选并执行本地命令；`/mcp`、`/skill`、`/knowledge`、`/model`、`/reasoning`、`/permission`、`/status` 和 `/usage` 进入运行时二级面板，本地命令不会作为消息发送给模型
 - `/reasoning` 与 `/permission` 可快速切换当前会话的思考强度和工具权限；`/status` 只读汇总模型、上下文、checkpoint、MCP、Skill、知识库和识图兜底状态
-- `/mcp` 按 Server 展示真实启动/关闭状态、Tools/Resources/Prompts，并可直接连接或断开；`/skill` 展示项目启用状态并可插入 `$skill-id`，完整配置页只作为二级面板中的显式管理入口
+- `/mcp` 按 Server 展示真实启动/关闭状态、Tools/Resources/Prompts，并可直接连接或断开；`/skill` 只列出可作为入口且允许加载的动态 Skill，选择后插入 `Use the <name> skill:` 供模型显式加载
 - `/compact` 显式生成并持久化可校验 checkpoint，运行中的会话不会并发压缩
-- P4.1 Skill 基线：严格解析 `skill.yaml` 与非空 UTF-8 `SKILL.md`，按 `~/.sciaide/skills/<id>/<version>/` 扫描版本化包
-- Skill Manifest、入口内容和全包 SHA256 持久化；包被修改、缺失或校验失败时进入不可用状态，启动扫描不会静默信任已安装包的新内容
-- Skill 可按项目固定启用具体版本和优先级；必需 Tool 缺失或 SciAide 版本不兼容时禁止启用，可选 Tool 缺失仅作为状态提示
-- P4.2 支持本地文件夹/ZIP 经随机暂存和完整校验后原子安装；拒绝路径穿越、符号链接、压缩炸弹、Windows 危险路径和半安装状态
-- 原始包归档、安装副本和暂存缓存相互分离；同版本不同内容必须显式确认替换，卸载默认进入可恢复备份，被项目引用时默认拒绝
-- 多版本可并存，项目可以显式回滚到已安装且可用的更低 Skill 版本；安装、替换、来源哈希和归档状态均持久化
-- P4.3 按 Run 构建有界 Skill catalog；仅 `$skill-id` 显式选择或确定性 suggest trigger 命中的 Skill 才完整加载正文，不跨用户 Run 自动沿用
-- 首次模型请求前原子保存不可变 Skill 上下文与 `run_skills` 审计；工具循环和审批恢复复用同一快照，项目改动或卸载不会改变进行中的 Run
-- 兼容导入 Codex 风格 `SKILL.md` 并归一化为版本化 SciAide 包；正文引用的 `references/` 文本通过 Run 绑定的 `builtin.skill.resource.read_text` 按需读取，不暴露主机路径、不自动执行脚本
-- 未知、未启用或不可用的显式 Skill 会产生可审计状态提示；选中正文按当前 Turn 时序放在历史之后、本轮问题之前
-- Skill catalog/正文以 contextual user 内容注入；Manifest 权限不参与授权，所有工具仍经过 Plan/Full Access、Workspace 边界和 ToolExecutor
-- P4.4 Skill 管理页按 Skill ID 聚合多版本，展示完整性、可用性、来源哈希、激活规则以及必需/可选 Tool 缺失状态
-- 支持原生选择本地文件夹或 ZIP 安装、显式同版本替换确认、目录刷新、引用保护卸载，以及当前项目的版本固定、启停、优先级和低版本回滚
-- P4.5 随程序提供 `literature-reading` 文献阅读和 `academic-writing` 学术写作两个版本化科研 Skill；`literature-reading@1.1.0` 已接入本地文档工具
-- 内置原件只读嵌入二进制，启动补装仍经过暂存、校验、来源归档和原子安装；同版本用户包优先且不会被升级静默覆盖
+- `builtin.shell.execute` 与 `builtin.python.execute` 通过统一 Registry、Schema、Policy、审批、取消和审计管道运行；Windows 使用 Job Object 约束完整进程树，stdout/stderr 有界返回但持续排空，应用密钥不下传
+- 本地执行是用户授权后的当前账户进程，不是强安全沙箱；工作目录、脚本和声明产物受 Workspace/链接边界校验，但获准代码仍可能主动访问其他本机路径或网络
+- 每个项目可创建独立 Python 虚拟环境并固化解释器、依赖锁、`pip freeze` 和环境指纹；依赖安装使用 `builtin.python.environment.install` 单独审批，环境更新采用暂存重建和原子替换
+- 项目 Python Kernel 串行保持变量与导入，支持 stdout/stderr、JSON、表格、异常和 Matplotlib PNG；声明输入只读、输出限定 `analysis-output/`，成功和异常均生成复现哈希，默认 1 GiB 进程树内存预算并在 15 分钟空闲后回收
+- 内置“XLSX 清洗与描述统计”Workflow 使用项目 Kernel 和 Python 标准库读取首张工作表，生成清洗 CSV、统计 CSV、SVG 图及可独立重放脚本；输入、环境、代码和四类产物均进入哈希与 Artifact 来源链，不要求预装 pandas/openpyxl
+- Shell、一次性 Python 和项目 Kernel 获准执行后默认允许联网，不要求域名白名单或额外网络审批；`pip install` 仍因改变项目环境单独确认，模型 API Key 与 MCP Secret 不注入子进程
+- 可选 Workflow Studio 支持版本化 JSON Schema、静态图预览、不可变编译快照、Tool/MCP/Shell/Python/人工决策节点、逐步审批、暂停/恢复/取消、重启恢复和副作用未知结果确认；Run 详情展示冻结环境 Manifest、Kernel 复现哈希及 Citation/分析产物/报告/正式导出的产物图谱，普通聊天继续直接使用 Agent Loop
+- 内置参考科研 Workflow 串联公共数据库检索、人工候选筛选、材料导入、知识索引、本地证据检索、人工 Citation 选择、Python 分析、CSV/SVG Artifact、Markdown 报告以及 DOCX/PDF 正式导出
+- 完整助手回答可显式保存为 Markdown Artifact；Workspace 文件可登记或追加为新版本；Tool 只有显式声明 `workspacePath` 时才自动登记产物，普通附件引用不会误入产物库
+- 科研产物窗口可预览 Markdown、PDF、DOCX、XLSX、CSV/TSV 的标题、段落、代码和表格结构，并按历史版本生成、查看和下载正式导出
+- OpenScience 动态 Skill 体系：311 个默认 Skill 及 `LICENSE`/`NOTICE` 共 1,624 个文件只读嵌入 EXE；逐文件 Manifest 固定 OpenScience `2.0.31` 的路径、大小和 SHA256，启动时不复制到用户目录
+- Skill 仅使用带 frontmatter 的 UTF-8 `SKILL.md`；来源解析优先级固定为 `project > user > installed > default`，同名高优先级来源覆盖低优先级来源并显示覆盖关系
+- Project 来源扫描 Workspace 的 `.openscience/`、`.synsc/` 及 OpenScience 配置中的相对 `skills.paths`；当前明确不扫描或兼容 `.claude/skills`
+- 新 Run 只注入分类摘要、固定科研路由和有界重排候选，不预注入任何 Skill 正文；中英文请求与 Skill 元数据对称映射到科研概念，支持英文词形归一化、明确否定和可选 `routing-aliases` 双语扩展，再结合最近三条用户任务与同会话最近加载项召回最多 20 项、向模型展示 16 项，模型最终决定是否调用 `builtin.skill.load`
+- 路由候选、分数组成、连续性来源、输入 SHA256 与实际加载结果按 Run 审计；版本化 320 条中文/英文/混合评测门禁当前达到 Recall@16 `98.5%`、MRR `0.834`、无关请求误召回 `0%`、否定误命中 `0%`
+- `builtin.skill.load` 可浏览分类或按精确名称渐进加载正文；首次加载会把完整正文、来源和内容/全包 SHA256 写入 `run_dynamic_skills`，后续分页与工具续轮复用同一不可变快照
+- 短 Skill 正文完整加载；长 Markdown 先返回章节目录并按稳定章节读取，完整正文仍形成不可变 Run 快照；无标题长文保留有界分页兜底
+- `builtin.skill.resource.list` 先列出本 Run 已加载 Skill 的附属资源类型、大小和文本可读性，`builtin.skill.resource.read_text` 再读取哈希匹配包内的规范相对路径 UTF-8 文本；二进制 asset 只展示元数据，脚本源码绝不由 Skill 机制自动执行
+- `allowed-tools` 只与实时 Registry 做能力诊断并显示可用/MCP/缺失，实际权限仍由具体工具决定；新 Run 使用当前任务、最近用户上下文、中文科研别名和最近真实加载 Skill 做有界召回，再由主模型重排
+- 管理页支持搜索、分类/来源/能力筛选、逐项允许加载、全开/全关、目录刷新、User Skill 创建/编辑/可恢复删除，以及经本地审查、固定 commit SHA 和警告二次确认的 Git 安装；P7.3 v2 能力审计分为原生可用 4、需要本地依赖 200、需要外部服务 87、当前不可用 20
+- 每个当前生效的 Default/Installed/User/Project Skill 都可在管理页查看完整包目录树并逐文件浏览；UTF-8 文本显示只读源码，二进制或超大文件只显示元数据，磁盘包与目录哈希漂移时失败关闭并要求刷新
+- 旧版 `$skill-id`、关键词 trigger、项目版本绑定、依赖/冲突协调和两个 SciAide 内置 Skill 已退出新 Run 的生产路径；旧 Run 继续只读恢复原不可变快照，Artifact 与项目归档同时兼容旧/新 Skill provenance
+- 项目可导出为版本化 `.sciaide-project` 无密钥归档，并默认恢复为新的托管项目；归档包含项目关系及附件、知识索引和 Artifact 真实对象，不包含 API Key、MCP 配置/Secret、识图或 Embedding 凭据和权限授权
 - 可脚本化 `FakeChatModel`、Provider Fixture 测试、威胁模型、ADR 和 CI
 
 ## 开发

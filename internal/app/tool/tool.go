@@ -39,6 +39,35 @@ type PermissionRequirement struct {
 	Resource string         `json:"resource,omitempty"`
 }
 
+// SubjectKind identifies the durable execution aggregate that owns a ToolCall.
+// The empty value is accepted at API boundaries for backwards compatibility
+// and is normalized to SubjectChatRun before persistence.
+type SubjectKind string
+
+const (
+	SubjectChatRun     SubjectKind = "chat_run"
+	SubjectWorkflowRun SubjectKind = "workflow_run"
+)
+
+func NormalizeSubjectKind(value SubjectKind) SubjectKind {
+	if value == "" {
+		return SubjectChatRun
+	}
+	return value
+}
+
+func (value SubjectKind) Valid() bool {
+	value = NormalizeSubjectKind(value)
+	return value == SubjectChatRun || value == SubjectWorkflowRun
+}
+
+func (value SubjectKind) AggregateType() string {
+	if NormalizeSubjectKind(value) == SubjectWorkflowRun {
+		return "workflow_run"
+	}
+	return "run"
+}
+
 type Definition struct {
 	QualifiedName string                  `json:"qualifiedName"`
 	Description   string                  `json:"description"`
@@ -51,10 +80,16 @@ type Definition struct {
 }
 
 type Invocation struct {
-	CallID    string          `json:"callId"`
-	RunID     string          `json:"runId"`
-	ProjectID string          `json:"projectId"`
-	Arguments json.RawMessage `json:"arguments"`
+	CallID      string      `json:"callId"`
+	RunID       string      `json:"runId"`
+	SubjectKind SubjectKind `json:"subjectKind"`
+	// ProviderCallID and IdempotencyKey are trusted execution metadata copied
+	// from the persisted ToolCall. They let a tool derive stable operation
+	// identity without accepting caller-controlled fields in its JSON schema.
+	ProviderCallID string          `json:"providerCallId,omitempty"`
+	IdempotencyKey string          `json:"idempotencyKey,omitempty"`
+	ProjectID      string          `json:"projectId"`
+	Arguments      json.RawMessage `json:"arguments"`
 }
 
 type Tool interface {
@@ -90,6 +125,7 @@ const (
 type Call struct {
 	ID             string                  `json:"id"`
 	RunID          string                  `json:"runId"`
+	SubjectKind    SubjectKind             `json:"subjectKind"`
 	ProviderCallID string                  `json:"providerCallId"`
 	ToolName       string                  `json:"toolName"`
 	ToolVersion    string                  `json:"toolVersion"`
@@ -131,6 +167,15 @@ type ArtifactRef struct {
 	ID       string `json:"id"`
 	Name     string `json:"name,omitempty"`
 	MIMEType string `json:"mimeType,omitempty"`
+	// WorkspacePath is the explicit, project-confined contract for a file
+	// newly produced by a tool. ID-only references remain source metadata and
+	// are not promoted to research Artifacts.
+	WorkspacePath string `json:"workspacePath,omitempty"`
+	// SizeBytes and SHA256 are filled by the executor before a successful
+	// ToolResult is persisted. Deferred Artifact registration must match this
+	// immutable byte identity instead of trusting the current Workspace path.
+	SizeBytes int64  `json:"sizeBytes,omitempty"`
+	SHA256    string `json:"sha256,omitempty"`
 }
 
 type CitationRef struct {
@@ -335,6 +380,17 @@ func ValidateResult(value Result) error {
 	}
 	if value.Meta.DurationMillis < 0 || value.Meta.OriginalBytes < 0 {
 		return fmt.Errorf("tool result metadata must not be negative")
+	}
+	if len(value.Artifacts) > 256 {
+		return fmt.Errorf("tool result contains too many Artifact references")
+	}
+	for _, item := range value.Artifacts {
+		if len(item.ID) > 512 || len(item.Name) > 512 || len(item.MIMEType) > 255 || len(item.WorkspacePath) > 4096 || strings.IndexByte(item.WorkspacePath, 0) >= 0 {
+			return fmt.Errorf("tool Artifact reference exceeds size limits")
+		}
+		if item.SizeBytes < 0 || (item.SHA256 != "" && (len(item.SHA256) != 64 || strings.ToLower(item.SHA256) != item.SHA256)) || (item.WorkspacePath == "" && (item.SizeBytes != 0 || item.SHA256 != "")) {
+			return fmt.Errorf("tool Artifact byte identity is invalid")
+		}
 	}
 	return nil
 }

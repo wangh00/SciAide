@@ -59,7 +59,7 @@ func (c *Coordinator) EvaluateCall(ctx context.Context, projectID, callID string
 	if call.Status != tool.CallPending {
 		return Coordination{}, fmt.Errorf("tool call is not pending")
 	}
-	request := EvaluationRequest{ProjectID: projectID, RunID: call.RunID, Call: call}
+	request := EvaluationRequest{ProjectID: projectID, RunID: call.RunID, SubjectKind: call.SubjectKind, Call: call}
 	evaluation, err := c.engine.EvaluateCall(ctx, request, run.PermissionMode)
 	if err != nil {
 		return Coordination{}, err
@@ -131,7 +131,7 @@ func (c *Coordinator) Resolve(ctx context.Context, command ResolveCommand) (Coor
 		}
 		result.Evaluation = Evaluation{Decision: DecisionDeny, Reason: "用户拒绝了工具调用权限。", Missing: []tool.PermissionRequirement{}}
 	} else {
-		request := EvaluationRequest{ProjectID: resolved.ProjectID, RunID: call.RunID, Call: call}
+		request := EvaluationRequest{ProjectID: resolved.ProjectID, RunID: call.RunID, SubjectKind: call.SubjectKind, Call: call}
 		evaluation, err := c.engine.EvaluateCall(ctx, request, run.PermissionMode)
 		if err != nil {
 			return Coordination{}, err
@@ -168,6 +168,9 @@ func (c *Coordinator) loadOwnedCall(ctx context.Context, projectID, callID strin
 	call, err := c.tools.Get(ctx, callID)
 	if err != nil {
 		return tool.Call{}, chat.Run{}, err
+	}
+	if tool.NormalizeSubjectKind(call.SubjectKind) != tool.SubjectChatRun {
+		return tool.Call{}, chat.Run{}, fmt.Errorf("chat approval coordinator cannot resolve a Workflow tool call")
 	}
 	actualProjectID, err := c.runs.ProjectIDForRun(ctx, call.RunID)
 	if err != nil {

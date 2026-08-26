@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/wangh00/SciAide/internal/app/permission"
+	"github.com/wangh00/SciAide/internal/app/tool"
 	"github.com/wangh00/SciAide/internal/events"
 	"github.com/wangh00/SciAide/internal/id"
 )
@@ -57,7 +58,13 @@ func (r *PermissionRepository) CreateApprovalWithEvent(ctx context.Context, valu
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO approvals(id,run_id,tool_call_id,project_id,tool_name,tool_version,permission_kind,resource,risk,status,requested_scope,resolved_scope,reason,created_at,resolved_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, value.ID, value.RunID, value.ToolCallID, value.ProjectID, value.ToolName, value.ToolVersion, value.PermissionKind, value.Resource, value.Risk, value.Status, value.RequestedScope, nil, value.Reason, formatTime(value.CreatedAt), nil); err != nil {
+	var runID, workflowRunID any
+	if tool.NormalizeSubjectKind(value.SubjectKind) == tool.SubjectWorkflowRun {
+		workflowRunID = value.RunID
+	} else {
+		runID = value.RunID
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO approvals(id,run_id,workflow_run_id,tool_call_id,project_id,tool_name,tool_version,permission_kind,resource,risk,status,requested_scope,resolved_scope,reason,created_at,resolved_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, value.ID, runID, workflowRunID, value.ToolCallID, value.ProjectID, value.ToolName, value.ToolVersion, value.PermissionKind, value.Resource, value.Risk, value.Status, value.RequestedScope, nil, value.Reason, formatTime(value.CreatedAt), nil); err != nil {
 		return fmt.Errorf("insert approval: %w", err)
 	}
 	if err := appendNextEventTx(ctx, tx, &event); err != nil {
@@ -71,7 +78,23 @@ func (r *PermissionRepository) GetApproval(ctx context.Context, id string) (perm
 }
 
 func (r *PermissionRepository) ListApprovalsByRun(ctx context.Context, runID string) ([]permission.Approval, error) {
-	rows, err := r.db.QueryContext(ctx, approvalSelect+` WHERE run_id=? ORDER BY created_at,id`, runID)
+	return r.listApprovalsBySubject(ctx, tool.SubjectChatRun, runID, false)
+}
+
+func (r *PermissionRepository) ListApprovalsBySubject(ctx context.Context, subjectKind tool.SubjectKind, subjectID string) ([]permission.Approval, error) {
+	return r.listApprovalsBySubject(ctx, subjectKind, subjectID, false)
+}
+
+func (r *PermissionRepository) listApprovalsBySubject(ctx context.Context, subjectKind tool.SubjectKind, subjectID string, pendingOnly bool) ([]permission.Approval, error) {
+	column := "run_id"
+	if tool.NormalizeSubjectKind(subjectKind) == tool.SubjectWorkflowRun {
+		column = "workflow_run_id"
+	}
+	where := ` WHERE ` + column + `=?`
+	if pendingOnly {
+		where += ` AND status='pending'`
+	}
+	rows, err := r.db.QueryContext(ctx, approvalSelect+where+` ORDER BY created_at,id`, subjectID)
 	if err != nil {
 		return nil, fmt.Errorf("list approvals: %w", err)
 	}
@@ -88,20 +111,11 @@ func (r *PermissionRepository) ListApprovalsByRun(ctx context.Context, runID str
 }
 
 func (r *PermissionRepository) ListPendingApprovals(ctx context.Context, runID string) ([]permission.Approval, error) {
-	rows, err := r.db.QueryContext(ctx, approvalSelect+` WHERE run_id=? AND status='pending' ORDER BY created_at,id`, runID)
-	if err != nil {
-		return nil, fmt.Errorf("list pending approvals: %w", err)
-	}
-	defer rows.Close()
-	values := make([]permission.Approval, 0)
-	for rows.Next() {
-		value, err := scanApproval(rows)
-		if err != nil {
-			return nil, err
-		}
-		values = append(values, value)
-	}
-	return values, rows.Err()
+	return r.listApprovalsBySubject(ctx, tool.SubjectChatRun, runID, true)
+}
+
+func (r *PermissionRepository) ListPendingApprovalsBySubject(ctx context.Context, subjectKind tool.SubjectKind, subjectID string) ([]permission.Approval, error) {
+	return r.listApprovalsBySubject(ctx, subjectKind, subjectID, true)
 }
 
 func (r *PermissionRepository) ListGrantsByProject(ctx context.Context, projectID string) ([]permission.Grant, error) {
@@ -178,15 +192,18 @@ func (r *PermissionRepository) ExpirePending(ctx context.Context, at time.Time) 
 		return 0, fmt.Errorf("begin expire pending approvals: %w", err)
 	}
 	defer tx.Rollback()
-	rows, err := tx.QueryContext(ctx, `SELECT id,run_id FROM approvals WHERE status='pending' ORDER BY created_at,id`)
+	rows, err := tx.QueryContext(ctx, `SELECT id,run_id,'chat_run' FROM approvals WHERE status='pending' AND workflow_run_id IS NULL ORDER BY created_at,id`)
 	if err != nil {
 		return 0, fmt.Errorf("list pending approvals: %w", err)
 	}
-	type pendingApproval struct{ id, runID string }
+	type pendingApproval struct {
+		id, runID   string
+		subjectKind tool.SubjectKind
+	}
 	values := make([]pendingApproval, 0)
 	for rows.Next() {
 		var value pendingApproval
-		if err := rows.Scan(&value.id, &value.runID); err != nil {
+		if err := rows.Scan(&value.id, &value.runID, &value.subjectKind); err != nil {
 			_ = rows.Close()
 			return 0, err
 		}
@@ -207,7 +224,7 @@ func (r *PermissionRepository) ExpirePending(ctx context.Context, at time.Time) 
 		if affected, _ := result.RowsAffected(); affected != 1 {
 			return 0, permission.ErrApprovalConflict
 		}
-		event, err := recoveryApprovalEvent(value.runID, value.id, at)
+		event, err := recoveryApprovalEvent(value.subjectKind, value.runID, value.id, at)
 		if err != nil {
 			return 0, err
 		}
@@ -221,7 +238,7 @@ func (r *PermissionRepository) ExpirePending(ctx context.Context, at time.Time) 
 	return int64(len(values)), nil
 }
 
-func recoveryApprovalEvent(runID, approvalID string, at time.Time) (events.Envelope, error) {
+func recoveryApprovalEvent(subjectKind tool.SubjectKind, runID, approvalID string, at time.Time) (events.Envelope, error) {
 	payload, err := json.Marshal(map[string]any{"approvalId": approvalID, "status": permission.ApprovalExpired, "reason": "application_restarted"})
 	if err != nil {
 		return events.Envelope{}, err
@@ -230,19 +247,19 @@ func recoveryApprovalEvent(runID, approvalID string, at time.Time) (events.Envel
 	if err != nil {
 		return events.Envelope{}, err
 	}
-	event := events.New(eventID, runID, "run", "approval.expired", 0, payload)
+	event := events.New(eventID, runID, tool.NormalizeSubjectKind(subjectKind).AggregateType(), "approval.expired", 0, payload)
 	event.Timestamp = at
 	return event, nil
 }
 
-const approvalSelect = `SELECT id,run_id,tool_call_id,project_id,tool_name,tool_version,permission_kind,resource,risk,status,requested_scope,COALESCE(resolved_scope,''),reason,created_at,resolved_at FROM approvals`
+const approvalSelect = `SELECT id,COALESCE(run_id,workflow_run_id),CASE WHEN workflow_run_id IS NULL THEN 'chat_run' ELSE 'workflow_run' END,tool_call_id,project_id,tool_name,tool_version,permission_kind,resource,risk,status,requested_scope,COALESCE(resolved_scope,''),reason,created_at,resolved_at FROM approvals`
 const grantSelect = `SELECT id,project_id,COALESCE(run_id,''),tool_name,permission_kind,resource,scope,granted_by,created_at,expires_at,revoked_at FROM permission_grants`
 
 func scanApproval(row rowScanner) (permission.Approval, error) {
 	var value permission.Approval
 	var createdAt string
 	var resolvedAt sql.NullString
-	if err := row.Scan(&value.ID, &value.RunID, &value.ToolCallID, &value.ProjectID, &value.ToolName, &value.ToolVersion, &value.PermissionKind, &value.Resource, &value.Risk, &value.Status, &value.RequestedScope, &value.ResolvedScope, &value.Reason, &createdAt, &resolvedAt); err != nil {
+	if err := row.Scan(&value.ID, &value.RunID, &value.SubjectKind, &value.ToolCallID, &value.ProjectID, &value.ToolName, &value.ToolVersion, &value.PermissionKind, &value.Resource, &value.Risk, &value.Status, &value.RequestedScope, &value.ResolvedScope, &value.Reason, &createdAt, &resolvedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return permission.Approval{}, fmt.Errorf("approval not found")
 		}

@@ -92,6 +92,15 @@ func Verify(value Checkpoint) error {
 	return nil
 }
 
+// RefreshIntegrity recalculates the checkpoint hash after a project archive
+// restore remaps its conversation, boundary message, or historical profile.
+// Ordinary runtime checkpoints remain immutable and never call this helper.
+func RefreshIntegrity(value *Checkpoint) {
+	if value != nil {
+		value.CheckpointSHA256 = checkpointHash(*value)
+	}
+}
+
 func checkpointHash(value Checkpoint) string {
 	payload, _ := json.Marshal(struct {
 		ConversationID        string               `json:"conversation_id"`

@@ -16,13 +16,46 @@ const (
 )
 
 type ExecutorOptions struct {
-	InvocationTimeout  time.Duration
-	MaxTextBytes       int
-	MaxStructuredBytes int
+	InvocationTimeout           time.Duration
+	MaxTextBytes                int
+	MaxStructuredBytes          int
+	OnInvocationError           func(call Call, err error)
+	OnArtifactRegistrationError func(callID string, err error)
 }
 
 type RunProjectResolver interface {
 	ProjectIDForRun(ctx context.Context, runID string) (string, error)
+}
+
+type SubjectProjectResolver interface {
+	ProjectIDForSubject(ctx context.Context, subjectKind SubjectKind, subjectID string) (string, error)
+}
+
+type CompositeProjectResolver struct {
+	Runs      RunProjectResolver
+	Workflows SubjectProjectResolver
+}
+
+func (r CompositeProjectResolver) ProjectIDForRun(ctx context.Context, runID string) (string, error) {
+	if r.Runs == nil {
+		return "", fmt.Errorf("chat Run project resolver is not configured")
+	}
+	return r.Runs.ProjectIDForRun(ctx, runID)
+}
+
+func (r CompositeProjectResolver) ProjectIDForSubject(ctx context.Context, subjectKind SubjectKind, subjectID string) (string, error) {
+	if NormalizeSubjectKind(subjectKind) == SubjectChatRun {
+		return r.ProjectIDForRun(ctx, subjectID)
+	}
+	if r.Workflows == nil {
+		return "", fmt.Errorf("Workflow Run project resolver is not configured")
+	}
+	return r.Workflows.ProjectIDForSubject(ctx, subjectKind, subjectID)
+}
+
+type ArtifactRegistrar interface {
+	BindToolArtifacts(ctx context.Context, projectID string, call Call, references []ArtifactRef) ([]ArtifactRef, error)
+	RegisterToolArtifactsForExecutor(ctx context.Context, callID string) error
 }
 
 type Execution struct {
@@ -33,13 +66,16 @@ type Execution struct {
 }
 
 type Executor struct {
-	registry Registry
-	service  *Service
-	projects RunProjectResolver
-	timeout  time.Duration
-	maxText  int
-	maxJSON  int
-	now      func() time.Time
+	registry                    Registry
+	service                     *Service
+	projects                    RunProjectResolver
+	timeout                     time.Duration
+	maxText                     int
+	maxJSON                     int
+	now                         func() time.Time
+	artifacts                   ArtifactRegistrar
+	onInvocationError           func(call Call, err error)
+	onArtifactRegistrationError func(callID string, err error)
 
 	mu     sync.Mutex
 	active map[string]context.CancelFunc
@@ -58,7 +94,15 @@ func NewExecutor(registry Registry, service *Service, projects RunProjectResolve
 	if maxJSON <= 0 {
 		maxJSON = defaultMaxStructuredBytes
 	}
-	return &Executor{registry: registry, service: service, projects: projects, timeout: timeout, maxText: maxText, maxJSON: maxJSON, now: func() time.Time { return time.Now().UTC() }, active: map[string]context.CancelFunc{}}
+	return &Executor{registry: registry, service: service, projects: projects, timeout: timeout, maxText: maxText, maxJSON: maxJSON, now: func() time.Time { return time.Now().UTC() }, artifacts: nil, onInvocationError: options.OnInvocationError, onArtifactRegistrationError: options.OnArtifactRegistrationError, active: map[string]context.CancelFunc{}}
+}
+
+func (e *Executor) SetArtifactRegistrar(registrar ArtifactRegistrar) error {
+	if registrar == nil {
+		return fmt.Errorf("Artifact registrar is not configured")
+	}
+	e.artifacts = registrar
+	return nil
 }
 
 func (e *Executor) Execute(ctx context.Context, projectID, callID string) (Execution, error) {
@@ -76,7 +120,16 @@ func (e *Executor) Execute(ctx context.Context, projectID, callID string) (Execu
 	if call.Status != CallRunning {
 		return Execution{}, fmt.Errorf("tool call is not ready to execute")
 	}
-	actualProjectID, err := e.projects.ProjectIDForRun(ctx, call.RunID)
+	var actualProjectID string
+	if NormalizeSubjectKind(call.SubjectKind) == SubjectWorkflowRun {
+		resolver, ok := e.projects.(SubjectProjectResolver)
+		if !ok {
+			return Execution{}, fmt.Errorf("workflow execution subject resolver is not configured")
+		}
+		actualProjectID, err = resolver.ProjectIDForSubject(ctx, call.SubjectKind, call.RunID)
+	} else {
+		actualProjectID, err = e.projects.ProjectIDForRun(ctx, call.RunID)
+	}
 	if err != nil {
 		return Execution{}, err
 	}
@@ -105,7 +158,11 @@ func (e *Executor) Execute(ctx context.Context, projectID, callID string) (Execu
 	defer func() { cancel(); e.unregister(call.ID) }()
 
 	started := e.now()
-	result, invokeErr, panicOccurred := invokeSafely(invokeCtx, implementation, Invocation{CallID: call.ID, RunID: call.RunID, ProjectID: projectID, Arguments: append(json.RawMessage(nil), call.Arguments...)})
+	result, invokeErr, panicOccurred := invokeSafely(invokeCtx, implementation, Invocation{
+		CallID: call.ID, RunID: call.RunID, SubjectKind: NormalizeSubjectKind(call.SubjectKind),
+		ProviderCallID: call.ProviderCallID, IdempotencyKey: call.IdempotencyKey,
+		ProjectID: projectID, Arguments: append(json.RawMessage(nil), call.Arguments...),
+	})
 	duration := e.now().Sub(started)
 	if duration < 0 {
 		duration = 0
@@ -130,9 +187,12 @@ func (e *Executor) Execute(ctx context.Context, projectID, callID string) (Execu
 		return e.finishFailure(ctx, call, ErrorCodePanic, "工具执行异常。", started, &duration)
 	case errors.Is(invokeCtx.Err(), context.DeadlineExceeded) || errors.Is(invokeErr, context.DeadlineExceeded):
 		return e.finishFailure(ctx, call, ErrorCodeTimeout, "工具执行超时。", started, &duration)
-	case errors.Is(invokeCtx.Err(), context.Canceled) || errors.Is(invokeErr, context.Canceled):
+	case (errors.Is(invokeCtx.Err(), context.Canceled) || errors.Is(invokeErr, context.Canceled)) && !(invokeErr == nil && result.Status == ResultCancelled):
 		return e.finishCancelled(call, duration)
 	case invokeErr != nil:
+		if e.onInvocationError != nil {
+			e.onInvocationError(call, invokeErr)
+		}
 		return e.finishFailure(ctx, call, ErrorCodeInvocationFailed, "工具执行失败。", started, &duration)
 	}
 
@@ -146,11 +206,41 @@ func (e *Executor) Execute(ctx context.Context, projectID, callID string) (Execu
 			code, message = ErrorCodeResultInvalid, "工具返回结果不符合输出 Schema"
 		}
 	}
+	if code == "" && result.Status == ResultSuccess && hasWorkspaceArtifacts(result.Artifacts) {
+		if e.artifacts == nil {
+			result = Result{Status: ResultError, Text: "工具声明的产物无法固定内容身份。", Artifacts: []ArtifactRef{}, Citations: result.Citations, Meta: result.Meta}
+			code, message = ErrorCodeResultInvalid, "工具产物登记服务未配置"
+		} else if bound, bindErr := e.artifacts.BindToolArtifacts(context.Background(), projectID, call, result.Artifacts); bindErr != nil {
+			result = Result{Status: ResultError, Text: "工具声明的产物无法绑定到执行完成时的文件内容。", Artifacts: []ArtifactRef{}, Citations: result.Citations, Meta: result.Meta}
+			code, message = ErrorCodeResultInvalid, "工具产物内容身份校验失败"
+		} else {
+			result.Artifacts = bound
+			if bounded, boundCode, boundMessage := e.limitResult(result); boundCode != "" {
+				result, code, message = bounded, boundCode, boundMessage
+			}
+		}
+	}
 	updated, err := e.service.Finish(context.Background(), call.ID, result, code, message)
 	if err != nil {
 		return Execution{}, e.outcomeUnknown(call.ID, err)
 	}
+	if updated.Status == CallCompleted && updated.Result != nil && hasWorkspaceArtifacts(updated.Result.Artifacts) && e.artifacts != nil {
+		if err := e.artifacts.RegisterToolArtifactsForExecutor(context.Background(), updated.ID); err != nil {
+			if e.onArtifactRegistrationError != nil {
+				e.onArtifactRegistrationError(updated.ID, err)
+			}
+		}
+	}
 	return Execution{CallID: updated.ID, Result: *updated.Result, ErrorCode: code, DurationMillis: duration.Milliseconds()}, nil
+}
+
+func hasWorkspaceArtifacts(values []ArtifactRef) bool {
+	for _, value := range values {
+		if strings.TrimSpace(value.WorkspacePath) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *Executor) Cancel(callID string) bool {

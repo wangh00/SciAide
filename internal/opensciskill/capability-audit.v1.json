@@ -1,0 +1,5921 @@
+{
+  "schemaVersion": 1,
+  "auditVersion": "p7.3-v2",
+  "skillCount": 311,
+  "skills": [
+    {
+      "name": "adaptyv",
+      "packageHash": "de263d6e2f4129068e3cce198ef40eb1c7f7cea2c4583b145b1787649a99ed2f",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "python-dotenv",
+        "requests"
+      ],
+      "cliDependencies": [],
+      "externalServices": [
+        "第三方 API 凭据"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "admet-prediction",
+      "packageHash": "aff1d78d1f4507936dc124530d1c9629dd6b5cd0c1bbd481c286976fe57131c5",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "deepchem",
+        "numpy",
+        "pandas",
+        "PyTDC",
+        "rdkit-pypi"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "admet-reasoning",
+      "packageHash": "32202f4ba24f667dc7c9c9c1dad67776224b6fadf9f2a7630c5e830609e67d56",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "numpy",
+        "pandas",
+        "rdkit-pypi"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "aeon",
+      "packageHash": "b8bc199c992d2d15f03a20a9d77569da8769e4d51340310dea08dba6ccedc45f",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "aeon"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "alphafold-database",
+      "packageHash": "dd541176f476fb3faf05b73112e05aad4a5cbc6129a870ed454a5ed7f273a7c9",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "biopython",
+        "google-cloud-bigquery",
+        "gsutil",
+        "matplotlib",
+        "numpy",
+        "pandas",
+        "requests",
+        "scipy"
+      ],
+      "cliDependencies": [],
+      "externalServices": [
+        "领域数据库或其公开 API"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "anndata",
+      "packageHash": "335311cd47df5e2df02746ee662436e90d12d5259bb77a4dcbf5707ac851fb55",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "anndata",
+        "anndata\u003e=0.10.0",
+        "anndata[dev,test,doc]",
+        "numpy\u003e=1.25.0"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "arboreto",
+      "packageHash": "8687699b2e532c5e4afeadcc87f48de5d05e84d5e304f8b6d1af071b6f25412e",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "arboreto"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "astropy",
+      "packageHash": "6e5d090c621183f9721cb411bb925b1dc46fe46d24ac4d681df7d4a0f932d620",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "astropy",
+        "astropy[all]"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "audiocraft-audio-generation",
+      "packageHash": "8843cd9394028ba61a8ae2ae43794a795cd6d9d190683b31a4b2ac9cef5b2a07",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "audiocraft",
+        "torch",
+        "torch\u003e=2.0.0",
+        "torchaudio",
+        "transformers",
+        "transformers\u003e=4.30.0"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "autogpt-agents",
+      "packageHash": "fe8a2554991b301ced8b5fd62821b6b0331116bfb575a32c545962524b04991e",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute",
+        "builtin.shell.execute"
+      ],
+      "pythonPackages": [
+        "autogpt-platform\u003e=0.4.0"
+      ],
+      "cliDependencies": [
+        "Docker"
+      ],
+      "externalServices": [
+        "第三方 API 凭据"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "autoregressive-neural-pde-solver",
+      "packageHash": "4fd125f0a92147bb130bd73fab4abdec2fdd298279e642fb2106c0d6ffed074a",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "numpy\u003e=1.24.0",
+        "torch\u003e=2.1.0"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "awq-quantization",
+      "packageHash": "842299d5289e3aa718ae35119f0e1ce797bbb9513a3b2e612ee540847b57be61",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "autoawq",
+        "autoawq[cpu]",
+        "autoawq[kernels]",
+        "torch\u003e=2.0.0",
+        "transformers\u003e=4.45.0"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "axolotl",
+      "packageHash": "e25be5e24cdfd22f606e811064a2071a9da3384540c2e2b6a27c5bb646fc1730",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "accelerate",
+        "axolotl",
+        "datasets",
+        "deepspeed",
+        "peft",
+        "torch",
+        "transformers"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "bayesian-inference",
+      "packageHash": "57166581e84871017826451d959c8ebec195f6542c51f841bf27008ec6b4f226",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "corner\u003e=2.2.0",
+        "dynesty",
+        "emcee\u003e=3.1.0",
+        "matplotlib\u003e=3.7.0",
+        "numpy\u003e=1.24.0",
+        "scipy\u003e=1.11.0"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "benchling-integration",
+      "packageHash": "3a48a361825423be9028553a8a62706cb15efeeefefb5eca591f307542a556d0",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "benchling-sdk"
+      ],
+      "cliDependencies": [],
+      "externalServices": [
+        "第三方 API 凭据",
+        "第三方科研平台账户"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "binding-affinity",
+      "packageHash": "09b9c524a7c306e9d1a41c0d32c6890f315c8728a9d092b92b8817765d2211e8",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "biopython",
+        "biopython\u003e=1.84",
+        "numpy",
+        "openff-toolkit",
+        "openmm",
+        "openmmforcefields",
+        "rdkit-pypi",
+        "scipy"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "bioimage-analysis",
+      "packageHash": "7ee503d84d47da4ec8ec4c5a0264a92fe9c98f19f72105e2397c4fabe1e08e71",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "aicsimageio",
+        "cellpose",
+        "matplotlib",
+        "numpy",
+        "opencv-python",
+        "pandas",
+        "scikit-image",
+        "tifffile",
+        "trackpy"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "biopython",
+      "packageHash": "47867d154a21aade7744394b0bb358e96877c76e4f921bf0632b026ca063ec63",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "biopython",
+        "biopython\u003e=1.84",
+        "numpy\u003e=1.25.0"
+      ],
+      "cliDependencies": [],
+      "externalServices": [
+        "第三方 API 凭据"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "biorxiv-database",
+      "packageHash": "0afdd792a41ce40ef70d5e1375e38fcacba457a0836800d26b54abc7a6fedee2",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "requests"
+      ],
+      "cliDependencies": [],
+      "externalServices": [
+        "领域数据库或其公开 API"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "bioservices",
+      "packageHash": "b295ffb975f312b1835824ad366d93dd52edddf2babd7fb64ced76a45168f6cc",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "bioservices"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "blip-2-vision-language",
+      "packageHash": "d00603fafb1b1aea9e9def87321105e81dd54138c2e7b1ab35eaea6508451127",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "accelerate",
+        "Pillow",
+        "salesforce-lavis",
+        "torch",
+        "torch\u003e=1.10.0",
+        "transformers",
+        "transformers\u003e=4.30.0"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "brenda-database",
+      "packageHash": "59180cbea121496444c8c4c440b4b13acc84e30a3c2e41cf9562765bbe14bb73",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "matplotlib",
+        "pandas",
+        "requests",
+        "seaborn",
+        "zeep"
+      ],
+      "cliDependencies": [],
+      "externalServices": [
+        "第三方 API 凭据",
+        "领域数据库或其公开 API"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "cancer-genomics-analysis",
+      "packageHash": "757f1ebd03844b33b62e858139a408be925d0aea5af957d0cc7b6bd4e5f90494",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "cyvcf2",
+        "gseapy",
+        "matplotlib",
+        "networkx",
+        "numpy",
+        "pandas",
+        "pysam",
+        "pyvcf3",
+        "scikit-learn"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "cellxgene-census",
+      "packageHash": "6f12cbb88ff3e1cc75999c3537f0cf6cf9b669ee732bff9b736f3591b1192e6c",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "cellxgene-census",
+        "cellxgene-census[experimental]"
+      ],
+      "cliDependencies": [],
+      "externalServices": [
+        "领域数据库或其公开 API"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "checkpoint",
+      "packageHash": "8e368d8f47a511bd87a878daf44d834e56c41b79b576ce6773f8cb78a59e8df8",
+      "capability": "unavailable",
+      "reason": "需要 SciAide 会话或 Workflow 宿主能力；对应工具尚未注册",
+      "requiredTools": [
+        "builtin.workflow.checkpoint"
+      ],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": [
+        "工具注册后将由运行时能力求交集自动恢复"
+      ]
+    },
+    {
+      "name": "chembl-database",
+      "packageHash": "7a8b35229ff471a5611b00469a059630c391a3d8daae76c572d9ea22937d41dc",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "chembl_webresource_client"
+      ],
+      "cliDependencies": [],
+      "externalServices": [
+        "领域数据库或其公开 API"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "chroma",
+      "packageHash": "921694dba736d28cfb3e616db7db13ea028ea62ea4a887ecbeae63ed90231890",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "chromadb",
+        "sentence-transformers"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "cirq",
+      "packageHash": "4c7e40c26582b239da8d23d640b10e13cf04c4e5ede43482caa0af2a6bcbce50",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "azure-quantum",
+        "cirq",
+        "cirq-aqt",
+        "cirq-google",
+        "cirq-ionq",
+        "cirq-pasqal"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "citation-management",
+      "packageHash": "1d554e52355908629e82fe44fe4ee83ff6bfe8b9e949a62d7ba5f522c0932fe8",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.shell.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "bibtexparser",
+        "biopython",
+        "crossref-commons",
+        "pylatexenc",
+        "requests",
+        "scholarly",
+        "selenium"
+      ],
+      "cliDependencies": [],
+      "externalServices": [
+        "第三方 API 凭据"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "clinical-decision-support",
+      "packageHash": "c435ffeeb26b7bfb2e6ec8ec9024128904d9844aec304d261239b7e63e446b80",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.execute",
+        "builtin.shell.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "clinical-imaging",
+      "packageHash": "17519709e6f96b5b53cb1bed437f291ee36f64e9fb4dedc8542faf0880323fe1",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "matplotlib",
+        "nibabel",
+        "numpy",
+        "opencv-python",
+        "pandas",
+        "scikit-image",
+        "scipy",
+        "SimpleITK"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "clinical-reports",
+      "packageHash": "05dd2e3962cea4c7323b52cb5d199697527d16db98b7f1061097c60f4cf285b0",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.execute",
+        "builtin.shell.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "clinicaltrials-database",
+      "packageHash": "8e6c15952abac0e8306561597c773c7ead025fd42b8a682255c97324bd982c5d",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [
+        "领域数据库或其公开 API"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "clinpgx-database",
+      "packageHash": "1b2babc823664085d240473ff0857b704668d65ebf4658abdfc11f53d2193e27",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "requests"
+      ],
+      "cliDependencies": [],
+      "externalServices": [
+        "领域数据库或其公开 API"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "clinvar-database",
+      "packageHash": "54f6a56f633d28853a625dc947305e24cdb082b18509f0a2eeeb8d78c67fce37",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [
+        "第三方 API 凭据",
+        "领域数据库或其公开 API"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "clip",
+      "packageHash": "9c877dd2497544beb30dc6cd4dc95cfdba968b3b759463aeebff6b97ff9cccab",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "ftfy",
+        "pillow",
+        "regex",
+        "torch",
+        "torchvision",
+        "tqdm",
+        "transformers"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "cobrapy",
+      "packageHash": "332c9c59c0176173de3b7293ca4a569573ec214b08247609ae8a575259e01050",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.shell.execute"
+      ],
+      "pythonPackages": [],
+      "cliDependencies": [
+        "GLPK 或其他线性规划求解器"
+      ],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "colab-finetuning",
+      "packageHash": "251014bdd497258ef34876f2dc74d9eeb07bc83437e802ff426db82df1dcc2a1",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [
+        "第三方 API 凭据"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "compact",
+      "packageHash": "0d7ea8e07d623ff7253a680a10642ae9e29bff2b69bf0d62da6a45dba2e8d5c9",
+      "capability": "unavailable",
+      "reason": "需要 SciAide 会话或 Workflow 宿主能力；对应工具尚未注册",
+      "requiredTools": [
+        "builtin.session.compact"
+      ],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": [
+        "工具注册后将由运行时能力求交集自动恢复"
+      ]
+    },
+    {
+      "name": "compare",
+      "packageHash": "b6231ff88921f933df32774611ba9210e464b41a522b235670658bf5e825c2a1",
+      "capability": "unavailable",
+      "reason": "需要 SciAide 会话或 Workflow 宿主能力；对应工具尚未注册",
+      "requiredTools": [
+        "builtin.workflow.compare"
+      ],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": [
+        "工具注册后将由运行时能力求交集自动恢复"
+      ]
+    },
+    {
+      "name": "conducting-scientific-research",
+      "packageHash": "9a2103ef64a1742856c0b12cd911980e3befeeb527a814ab722f3be0da9de74f",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [
+        "第三方 API 凭据"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "conservation-law-discovery",
+      "packageHash": "7cb0300e623eaf2bfbb88f79aa460ea6d7fd3440facd3fa2b25fd5e3c53aee54",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "matplotlib\u003e=3.7.0",
+        "numpy\u003e=1.24.0",
+        "scipy\u003e=1.11.0"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "constitutional-ai",
+      "packageHash": "e491b31da3233bb04f1dba4ad1e917f08fbd06e6224c13d625f741657bc43f6e",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "torch",
+        "transformers",
+        "trl"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "context",
+      "packageHash": "e95b6482036522f2efbf6f91fd4809e5362378148f9eae87e4a026ab898ce589",
+      "capability": "unavailable",
+      "reason": "需要 SciAide 会话或 Workflow 宿主能力；对应工具尚未注册",
+      "requiredTools": [
+        "builtin.session.context"
+      ],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": [
+        "工具注册后将由运行时能力求交集自动恢复"
+      ]
+    },
+    {
+      "name": "cosmic-database",
+      "packageHash": "88a16d1f8c978edf13c486d101bac66a5b36aa7a2cd8b1c80567eea6cab9f2a1",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "pandas",
+        "requests"
+      ],
+      "cliDependencies": [],
+      "externalServices": [
+        "领域数据库或其公开 API"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "crewai-multi-agent",
+      "packageHash": "528dea68fa698e660318903ed4c224f409621af5c9624dfd2c97c5cc5e70f4cd",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "crewai",
+        "crewai-tools\u003e=1.2.0",
+        "crewai\u003e=1.2.0",
+        "crewai[tools]"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "curated-bio-datasets",
+      "packageHash": "b87053b32d9c268ebcffa6f5c294f21c4ae64542272a33de150e412008523255",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "gseapy",
+        "networkx",
+        "numpy",
+        "pandas",
+        "requests"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "dask",
+      "packageHash": "9719f2cf67c0d5c7b463a4c5597a2993a1aec572aa640e53e2085aeb0e51f188",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "dask\u003e=2024.1.0"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "datacommons-client",
+      "packageHash": "13ad89c131dc87985f386dba4cb747be9bb3d66c8ea29da621f758d4ffba6b42",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "datacommons-client",
+        "datacommons-client[Pandas]"
+      ],
+      "cliDependencies": [],
+      "externalServices": [
+        "第三方 API 凭据",
+        "领域数据库或其公开 API"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "datamol",
+      "packageHash": "ec6339f6813c0ac0b465d98d865807739763430a2dec4810578972f016e0d1d7",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "datamol",
+        "datamol\u003e=0.12.0",
+        "rdkit-pypi\u003e=2024.3.1"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "deepchem",
+      "packageHash": "1f643944ac3d961c20ebeccdc192418f2ed1879260e0948fb5e3f194de2af316",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "deepchem",
+        "deepchem\u003e=2.8.0",
+        "deepchem[all]",
+        "deepchem[torch]",
+        "numpy\u003e=1.25.0",
+        "torch\u003e=2.0.0"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "deepspeed",
+      "packageHash": "51581f6348b6d5c8e7beea3b7f8e8248a52b5a0b53eb6ad597dff329789d15f8",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "accelerate",
+        "deepspeed",
+        "torch",
+        "transformers"
+      ],
+      "cliDependencies": [],
+      "externalServices": [
+        "第三方 API 凭据"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "deeptools",
+      "packageHash": "810302388ab7576368b526a279c242f1e1c7b8f16250645c9bfd2f30c1a7b8ca",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "deeptools"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "denario",
+      "packageHash": "d37a8bfef357a9287f9c7062387f41c8dd75c923c20bb0d22ca848186046c56c",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute",
+        "builtin.shell.execute"
+      ],
+      "pythonPackages": [
+        "denario[app]"
+      ],
+      "cliDependencies": [
+        "Docker"
+      ],
+      "externalServices": [
+        "第三方 API 凭据"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "denovo-design",
+      "packageHash": "1a144ebb45fbf3687ca48f1d88acaf67fc836c21aab30d6f30c31326418ffaa7",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "biopython",
+        "datamol",
+        "numpy",
+        "pandas",
+        "rdkit-pypi",
+        "scipy"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "diffdock",
+      "packageHash": "4fb23047d53584a17e064471516a1bc724637b0fafe8388264ab70bbd4121033",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.shell.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "biopython",
+        "fair-esm",
+        "rdkit-pypi",
+        "torch-geometric",
+        "torch\u003e=1.12.0"
+      ],
+      "cliDependencies": [
+        "Docker"
+      ],
+      "externalServices": [
+        "第三方 API 凭据"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "dimensional-analysis",
+      "packageHash": "2c72599eb9e51cc50708dc5c64c74a6234326c970b93d16b34f4830134b6eb25",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "numpy\u003e=1.24.0",
+        "pint",
+        "scipy\u003e=1.11.0",
+        "sympy\u003e=1.12.0"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "distributed-llm-pretraining-torchtitan",
+      "packageHash": "d8dc62008525831061cff1ac1f1d7cc55471ca9461da98880d9fd7c1bd7f2d0e",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "requirements.txt",
+        "torch\u003e=2.6.0",
+        "torchao\u003e=0.5.0",
+        "torchtitan",
+        "torchtitan\u003e=0.2.0"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "dna-visualization",
+      "packageHash": "6000a3b9e3d1ad166cfb9d0581c182ea11f065002af9db7696a70d69b21a6d4c",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "biopython",
+        "dna_features_viewer",
+        "logomaker",
+        "matplotlib"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "dnanexus-integration",
+      "packageHash": "47e44aa484e0022227bfe60ece1506b65134dfe7860ac4d61b2b3eeed8cbac82",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute",
+        "builtin.shell.execute"
+      ],
+      "pythonPackages": [
+        "dxpy"
+      ],
+      "cliDependencies": [
+        "Docker"
+      ],
+      "externalServices": [
+        "第三方 API 凭据",
+        "第三方科研平台账户"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "drug-design",
+      "packageHash": "86121f3f50a0ba780cbe74609baabcc43010b41864c80a96050662aaa2dab76c",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "biopython\u003e=1.84",
+        "diffdock",
+        "numpy",
+        "rdkit-pypi",
+        "scipy",
+        "use",
+        "vina"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "drugbank-database",
+      "packageHash": "448b5898bffd4f6006581c1e7d66e3585a625bb7d860c98758af46f1a055ebf6",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "bioversions",
+        "drugbank-downloader",
+        "lxml",
+        "networkx",
+        "pandas",
+        "rdkit",
+        "scikit-learn"
+      ],
+      "cliDependencies": [],
+      "externalServices": [
+        "第三方 API 凭据",
+        "领域数据库或其公开 API"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "dspy",
+      "packageHash": "b033ef1685f80b4ecd4268522493425bc44253bda94043c5d1aeaf856ca561cc",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "anthropic",
+        "dspy",
+        "dspy[all]",
+        "dspy[anthropic]",
+        "dspy[openai]",
+        "openai"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "dynamical-systems",
+      "packageHash": "7618beb184a6d35c3ef0f5b57c064eb037bb3ff00f628e6d89685f27bbceb126",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "matplotlib\u003e=3.7.0",
+        "numpy\u003e=1.24.0",
+        "scipy\u003e=1.11.0"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "ena-database",
+      "packageHash": "58dbad16301d7d8c35a79930ce2d046e6acfb16fefffcad4498718f93cb2bd9d",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [
+        "领域数据库或其公开 API"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "ensembl-database",
+      "packageHash": "8e023eb11d0783b1512f1471556b8d76959b1a4d762966dacc1df6a578b01b31",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "ensembl_rest",
+        "requests"
+      ],
+      "cliDependencies": [],
+      "externalServices": [
+        "领域数据库或其公开 API"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "esm",
+      "packageHash": "4b4239b570de876a27801124665a7ee751015ebf151a46574383caaf2696f979",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "biopython\u003e=1.84",
+        "esm",
+        "fair-esm\u003e=2.0.0",
+        "flash-attn",
+        "torch\u003e=2.0.0"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "etetoolkit",
+      "packageHash": "74eba15360355b8cf774fd507abe149ee61ed8c902d84634d31b4b258293b149",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "ete3",
+        "ete3[gui]"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "evaluating-code-models",
+      "packageHash": "6d54dfa75ecb26c044fca93de15a2c9557b6338b3d3dc17f0ba14215f6dfddad",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute",
+        "builtin.shell.execute"
+      ],
+      "pythonPackages": [
+        "accelerate\u003e=0.13.2",
+        "bigcode-evaluation-harness",
+        "datasets\u003e=2.6.1",
+        "transformers\u003e=4.25.1"
+      ],
+      "cliDependencies": [
+        "Docker"
+      ],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "evaluating-llms-harness",
+      "packageHash": "48935afde6c578f8908e0471347532b5b67e90c118d7720e40b1c58cd4e62120",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "human-eval",
+        "lm-eval",
+        "transformers",
+        "vllm"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "exploratory-data-analysis",
+      "packageHash": "ab975627d0a57f2a2da74483f17161f26d350f1078cb1a4c5cd280af20c37144",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "biopython"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "export",
+      "packageHash": "c2c872b8d4714e96886075370bbc6249980dd76ec4f875de3ac57813aaa54611",
+      "capability": "unavailable",
+      "reason": "需要 SciAide 会话或 Workflow 宿主能力；对应工具尚未注册",
+      "requiredTools": [
+        "builtin.workflow.export"
+      ],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": [
+        "工具注册后将由运行时能力求交集自动恢复"
+      ]
+    },
+    {
+      "name": "faiss",
+      "packageHash": "b33fa35e93d4b623d1faa0afbf968c4303fd46172cf675e34c76158a582cdf12",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "faiss-cpu",
+        "faiss-gpu",
+        "numpy"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "fda-database",
+      "packageHash": "b2fe9d7fa733c32ea98c08c39ee7024562f84cb64c7a2fc40245587a9bab994d",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [
+        "第三方 API 凭据",
+        "领域数据库或其公开 API"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "fine-tuning-with-trl",
+      "packageHash": "1ee8fc3db6d8e1424819f4e5ba001a957e58c1d083c8f7473cb60180aa4e4ca5",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "accelerate",
+        "datasets",
+        "peft",
+        "torch",
+        "transformers",
+        "trl"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "fireworks-ai-inference",
+      "packageHash": "187f0c831f99a3fde68e8fa0ceebdf82856ecb487a02437deca42d06309cf8d1",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "fireworks-ai",
+        "openai"
+      ],
+      "cliDependencies": [],
+      "externalServices": [
+        "云计算平台账户",
+        "第三方 API 凭据"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "flow-cytometry-analysis",
+      "packageHash": "f8937cdec0f9e7ecea83f0d62ea2504c5e47fbab17685b89f02bcc3962477654",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "fcsparser",
+        "flowio",
+        "matplotlib",
+        "numpy",
+        "pandas",
+        "scikit-learn",
+        "scipy"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "flowio",
+      "packageHash": "cfbd5692203140d1ff8b21cddc3630e9589802db65b34fa930443242293a9df7",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "flowio"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "fluid-dynamics",
+      "packageHash": "ae0c313aaf8da0a2b7ff48df3e969e0f32af4aa317d043d336dc882c929e4bfc",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "matplotlib\u003e=3.7.0",
+        "numpy\u003e=1.24.0",
+        "scipy\u003e=1.11.0"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "fluidsim",
+      "packageHash": "498cb90193e53b1de754d8b665ac85c04fdd5b7a1728683b00eb6af4934e948f",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "fluidsim",
+        "fluidsim[fft,mpi]",
+        "fluidsim[fft]"
+      ],
+      "cliDependencies": [],
+      "externalServices": [
+        "第三方 API 凭据"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "fred-economic-data",
+      "packageHash": "37176a5980d009799e691269783b4cfa8267f132989b0dc2cae999bd62a8db77",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [
+        "第三方 API 凭据",
+        "领域数据库或其公开 API"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "gene-database",
+      "packageHash": "106128361a5ae11e8e9df03be5a69be2555f37df0b6590e23a4546e9ff7e5504",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [
+        "第三方 API 凭据",
+        "领域数据库或其公开 API"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "generate-image",
+      "packageHash": "913897c82ceff1ab2aa50e614f75e69a4d4ca073d8fb6d7506fea75bb495cc88",
+      "capability": "unavailable",
+      "reason": "SciAide 当前没有可由对话工具调用的托管图像生成服务",
+      "requiredTools": [],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": [
+        "该上游产品能力未在 SciAide 中伪造等价实现"
+      ]
+    },
+    {
+      "name": "geniml",
+      "packageHash": "dc0eabf2a886555ca49fd16c653e60b4ac5d224f59357acdaa8659ca6c22767e",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "geniml",
+        "geniml[ml]"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "geo-database",
+      "packageHash": "c61085aa6d850502cd0379b616c3b56330236862f2da897752c064c1b8a532cc",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "biopython",
+        "GEOparse",
+        "matplotlib",
+        "numpy",
+        "pandas",
+        "scikit-learn",
+        "scipy",
+        "seaborn",
+        "statsmodels"
+      ],
+      "cliDependencies": [],
+      "externalServices": [
+        "第三方 API 凭据",
+        "领域数据库或其公开 API"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "geopandas",
+      "packageHash": "891efb2da986c485f71d41063103c7e008eda07abe511639f72495041c498c93",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "cartopy",
+        "contextily",
+        "folium",
+        "geoalchemy2",
+        "geopandas",
+        "mapclassify",
+        "psycopg2",
+        "pyarrow"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "get-available-resources",
+      "packageHash": "0b7f5ba979181eba995e023e4f8629988172b594c2eb1af9f2429bd10eaf66bd",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "psutil"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "gget",
+      "packageHash": "1cc47ee09d7751e1c4cdcab9e8538be205f633a8d04ff7e430d33bc52febdfaf",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "gget",
+        "openmm"
+      ],
+      "cliDependencies": [],
+      "externalServices": [
+        "第三方 API 凭据"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "gguf-quantization",
+      "packageHash": "44e3e120a09f7b286cb188a975d9f6de3d2b1ea4295f523f2df2bc4a02d77b03",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "llama-cpp-python",
+        "llama-cpp-python\u003e=0.2.0",
+        "requirements.txt"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "glycobiology",
+      "packageHash": "a7c250db6e893a8ad746d3af5935bf688db0216982bfee999cc8aff066d4666b",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "biopython",
+        "numpy"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "goal",
+      "packageHash": "79ba1b82786178546152e21e13105dc22214240330ab899f3520c1a214b5ef8d",
+      "capability": "unavailable",
+      "reason": "需要 SciAide 会话或 Workflow 宿主能力；对应工具尚未注册",
+      "requiredTools": [
+        "builtin.workflow.goal"
+      ],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": [
+        "工具注册后将由运行时能力求交集自动恢复"
+      ]
+    },
+    {
+      "name": "gptq",
+      "packageHash": "efac3755fb419c6f68dbf79ededf0c59f100a469d28374513582d80a7bca9303",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "accelerate",
+        "auto-gptq",
+        "auto-gptq[triton]",
+        "optimum",
+        "peft",
+        "transformers"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "groq-inference",
+      "packageHash": "8b139b96cacae633dc1940933e6c2675180f002238595a1a13f300cb79933fe9",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "groq",
+        "openai"
+      ],
+      "cliDependencies": [],
+      "externalServices": [
+        "第三方 API 凭据"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "grpo-rl-training",
+      "packageHash": "a7e16ee5eee524a562ac00351c4ee8e9202639fa51fc32ba8a1a35d3cdc34a92",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "datasets\u003e=3.2.0",
+        "peft\u003e=0.14.0",
+        "torch",
+        "transformers\u003e=4.47.0",
+        "trl\u003e=0.14.0"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "gtars",
+      "packageHash": "a8127378cda88b9813530d3674aa248eeab33140b8c732f8933d055b092e566c",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "gtars"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "guidance",
+      "packageHash": "3c9e52e8bf943c9d21e507b606742f5dc4309b995a50bd0fd0cdfccfa9e6ce55",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "guidance",
+        "guidance[llama_cpp]",
+        "guidance[transformers]",
+        "transformers"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "gwas-database",
+      "packageHash": "505d324dc5b574fa41acc54816f4906766f52b204918c3e83b445fcfca708305",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [
+        "第三方 API 凭据",
+        "领域数据库或其公开 API"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "hamiltonian-mechanics",
+      "packageHash": "e9044915d8ef43a5227e0f4df2f03d496471c6b75170f9ec2148149586d15a51",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "matplotlib\u003e=3.7.0",
+        "numpy\u003e=1.24.0",
+        "scipy\u003e=1.11.0"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "handoff",
+      "packageHash": "fbd94114dd0d28fbebecdfc490f069feab558efe2e7925889cbe25ffc9d7f519",
+      "capability": "unavailable",
+      "reason": "需要 SciAide 会话或 Workflow 宿主能力；对应工具尚未注册",
+      "requiredTools": [
+        "builtin.workflow.handoff"
+      ],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": [
+        "工具注册后将由运行时能力求交集自动恢复"
+      ]
+    },
+    {
+      "name": "hdf5-pde-data-loading",
+      "packageHash": "c5f8a9e55e87e7f446aca8b49ef01ed1d4877a8d85963509f50a495d30239413",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "h5py",
+        "huggingface-hub",
+        "numpy",
+        "torch"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "histolab",
+      "packageHash": "9ed277ccd9cde075046f738d5be4f9ebbcba193d97b2a65973ec0e6642619e68",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "histolab"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "hmdb-database",
+      "packageHash": "f775d9acedce3459e8e51464566347a7195abc92dd491eb9c91f5ac98732d087",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [
+        "领域数据库或其公开 API"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "hqq-quantization",
+      "packageHash": "69ca819752f0960736b0de61f65233384ef62875a7fa8a123059e8f6278257cf",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "hqq",
+        "hqq\u003e=0.2.0",
+        "hqq[bitblas]",
+        "hqq[marlin]",
+        "hqq[torch]",
+        "hqq[torchao]",
+        "torch\u003e=2.0.0"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "hugging-face-cli",
+      "packageHash": "1f754ab2f691e0ff72242de3028c7802091b467606fd0eb9e594233324a55195",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "huggingface-hub",
+        "transformers"
+      ],
+      "cliDependencies": [],
+      "externalServices": [
+        "第三方 API 凭据"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "hugging-face-datasets",
+      "packageHash": "6d780d06ecc20597f7bf12086c0d7ef67041696bf36175a65dbd41ab0f46ae31",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "datasets",
+        "duckdb",
+        "huggingface-hub",
+        "pandas"
+      ],
+      "cliDependencies": [],
+      "externalServices": [
+        "第三方 API 凭据"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "hugging-face-evaluation",
+      "packageHash": "920189cf79b2395ccb29351c42a977e32afbbb4f5b55da5a64d150089bc16a36",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "huggingface-hub",
+        "markdown-it-py",
+        "python-dotenv",
+        "pyyaml",
+        "requests"
+      ],
+      "cliDependencies": [],
+      "externalServices": [
+        "第三方 API 凭据"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "hugging-face-jobs",
+      "packageHash": "511ce36187b8b47067a14e6a046214ffb4bf1c6e71cbb51697a10b10882cbac1",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.shell.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "datasets",
+        "huggingface-hub",
+        "torch",
+        "vllm"
+      ],
+      "cliDependencies": [
+        "Docker"
+      ],
+      "externalServices": [
+        "第三方 API 凭据"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "hugging-face-model-trainer",
+      "packageHash": "a766590a594cfd0546521479a897964c0d3d5e97d2c0a7f3c8e106e70f282baa",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.shell.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "accelerate",
+        "datasets",
+        "huggingface-hub",
+        "peft",
+        "requirements.txt",
+        "trackio",
+        "transformers",
+        "trl",
+        "trl-jobs"
+      ],
+      "cliDependencies": [
+        "Docker"
+      ],
+      "externalServices": [
+        "第三方 API 凭据"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "hugging-face-paper-publisher",
+      "packageHash": "825739a3d407618bd05bfdb5f018e83bfc3e9950c289024b79b991cadf8e5936",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "huggingface-hub",
+        "python-dotenv",
+        "pyyaml",
+        "requests"
+      ],
+      "cliDependencies": [],
+      "externalServices": [
+        "第三方 API 凭据"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "hugging-face-tool-builder",
+      "packageHash": "ff663dffa27ada3953845f32ddcbf6f9b29e5de4b5a71fdeb5dc4e766726ec22",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "huggingface-hub"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "hugging-face-trackio",
+      "packageHash": "509bfd1cf21aa9682bf64589e176403b6b1e5a6eaf05cc5e6ad148dba704d200",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "huggingface-hub",
+        "trackio"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "huggingface-accelerate",
+      "packageHash": "ca911480eb33cdd4728334120475ade86bd374eb48c37be65f78f50c8d39e8c1",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "accelerate",
+        "deepspeed",
+        "torch",
+        "transformers"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "huggingface-tokenizers",
+      "packageHash": "3fb70e80c604e3e7d2aa245af5564d8cb52730eff426c06c687140668a3b7371",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "datasets",
+        "tokenizers",
+        "transformers"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "hypogenic",
+      "packageHash": "3105361bacc0e4b71a3104b0204897c85d1c4aef43253a76245facfdec122af7",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "hypogenic"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "hypothesis-generation",
+      "packageHash": "af6b024a32044c248e447c214bc88d0bd7e19266fc8b2f07f147895fc07108ec",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.execute",
+        "builtin.shell.execute"
+      ],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "imaging-data-commons",
+      "packageHash": "9a60685ec042158405a8d410586a9e1ec99c1069f6a1ba38f2f4e9540473cc0a",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "idc-index",
+        "numpy",
+        "pandas",
+        "pydicom"
+      ],
+      "cliDependencies": [],
+      "externalServices": [
+        "领域数据库或其公开 API"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "immunology-assays",
+      "packageHash": "49d1088efa4f40e5a10f456cf4db3b824527d010fcf54187892ce50f4069a179",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "matplotlib",
+        "numpy",
+        "opencv-python",
+        "pandas",
+        "scikit-image",
+        "scipy"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "implementing-llms-litgpt",
+      "packageHash": "c2034386f13e15ceb0d7145d1699f1e76a5dd9df8be25af911f02e1fa660a7c6",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "litgpt",
+        "litgpt[extra]",
+        "torch",
+        "transformers"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "infographics",
+      "packageHash": "4b445e591581482b81683eec78732c2ad69a04314b9d7ddc1eeb4ea609e2bc0e",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.execute",
+        "builtin.shell.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [
+        "第三方 API 凭据"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "init",
+      "packageHash": "bd11d4777e468b508c324d48788a1bc20c512b7b756ff9855fe4e715d9afdefa",
+      "capability": "native",
+      "reason": "可使用 SciAide 当前对话、知识库、科研检索、引用与产物能力完成主要方法流程",
+      "requiredTools": [],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "initialize-atlas-graph",
+      "packageHash": "85de1739c4b268bd9066ed428a939e6d7707f5a67fcaba9219486507993efff4",
+      "capability": "unavailable",
+      "reason": "SciAide 不提供上游 Atlas Graph 账户、画布和云端项目路径",
+      "requiredTools": [],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": [
+        "该上游产品能力未在 SciAide 中伪造等价实现"
+      ]
+    },
+    {
+      "name": "instructor",
+      "packageHash": "bdfe480e898d08921596fb64b9713ae51ae07ea8fd31915b12caffdc7b674c4d",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "anthropic",
+        "instructor",
+        "instructor[all]",
+        "instructor[anthropic]",
+        "instructor[openai]",
+        "openai",
+        "pydantic"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "iso-13485-certification",
+      "packageHash": "37f3c5356ddf4e796d33ff49319e552fd11ba1421e5c4ef80d5bb7e943f3a4fc",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "kegg-database",
+      "packageHash": "1e7e48a63e323839c6a3e110a70730c56a073eb4b5b3e64db9abdd4ea91607ae",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [
+        "领域数据库或其公开 API"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "knowledge-distillation",
+      "packageHash": "974bed6c3d6eb854d8a29038958458f655e401c15670a34d0e8e005ca2932734",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "accelerate",
+        "datasets",
+        "deepspeed",
+        "torch",
+        "transformers",
+        "wandb"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "labarchive-integration",
+      "packageHash": "5c4df2005135e11f9da86e991ca58d4d5cb276f7694de573ef7f4f4ea3885bfe",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [
+        "第三方 API 凭据",
+        "第三方科研平台账户"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "lambda-labs-gpu-cloud",
+      "packageHash": "bbdcc0becbe7cd3669ecd3a6767ea220926fcee90c435c9a65acb67d88ee9078",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "accelerate",
+        "lambda-cloud-client",
+        "lambda-cloud-client\u003e=1.0.0",
+        "peft",
+        "requirements.txt",
+        "transformers"
+      ],
+      "cliDependencies": [],
+      "externalServices": [
+        "云计算平台账户",
+        "第三方 API 凭据"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "lamindb",
+      "packageHash": "bc8fb29c3d447a5bc935bbd00472299c0d09c2421c85403ba64696915a708539",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "lamindb",
+        "lamindb[gcp,zarr,fcs]"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "langchain",
+      "packageHash": "9d504c37c371be388c455046af89eccf10ee0704a01f19a1ddfaf43231a0291b",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "langchain",
+        "langchain-anthropic",
+        "langchain-chroma",
+        "langchain-community",
+        "langchain-core",
+        "langchain-openai"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "langsmith-observability",
+      "packageHash": "6edaadeee64ba4faab2ba77a2b3d4672e7cb5ff58a46276b9c507d1d377f847d",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "langsmith",
+        "langsmith\u003e=0.2.0"
+      ],
+      "cliDependencies": [],
+      "externalServices": [
+        "第三方 API 凭据"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "latchbio-integration",
+      "packageHash": "7c54ccdee731675749d300fb523e6a1f014aa7b2cb7c71308a443ef0ee5c8403",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute",
+        "builtin.shell.execute"
+      ],
+      "pythonPackages": [
+        "latch"
+      ],
+      "cliDependencies": [
+        "Docker"
+      ],
+      "externalServices": [
+        "第三方 API 凭据",
+        "第三方科研平台账户"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "latex-posters",
+      "packageHash": "1adc3a6c601e32f44314e67fedc716a6b884d0f01ff8ae89ec51415e86859fef",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.execute",
+        "builtin.shell.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [],
+      "cliDependencies": [
+        "TeX 发行版"
+      ],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "liteparse",
+      "packageHash": "973c21e94b0e3b375e63744efe260bc635d36e8f327b5a32ba3eb3cc11341b49",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "liteparse"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "literature-review",
+      "packageHash": "492e033e8011e63609185aeb01fe9379c6657c5780f352ae9cd88ae39a49b475",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.shell.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "requests"
+      ],
+      "cliDependencies": [],
+      "externalServices": [
+        "第三方 API 凭据"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "llama-cpp",
+      "packageHash": "c06187cf14ce74e4683e80be30204b9e4f6be1944b1f7c2540708001a729de86",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "llama-cpp-python"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "llama-factory",
+      "packageHash": "5f696195eb7323f5bcf7a6bf61c4f4fd512d4196c274598f4b65b219a447a12d",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "accelerate",
+        "datasets",
+        "gradio",
+        "llmtuner",
+        "peft",
+        "torch",
+        "transformers"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "llamaguard",
+      "packageHash": "258f7795dd23171ef2221bfe3ab6aef47be5d09a44920eb2f5f047e46244e90e",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "torch",
+        "transformers",
+        "vllm"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "llamaindex",
+      "packageHash": "04bfa83c50dc609acaefb790f1294e026f0c18afff6bf430578ee9d8f80bc91e",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "anthropic",
+        "llama-index",
+        "llama-index-core",
+        "llama-index-embeddings-openai",
+        "llama-index-llms-openai",
+        "openai"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "llava",
+      "packageHash": "c15a32000aabb5254216db26f6faffb4abc9da64bbba58523eaf0e8def40c788",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "pillow",
+        "torch",
+        "transformers"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "llm-as-judge-evaluation",
+      "packageHash": "3cfefa2493ccfd331998d38a830065464c09b96afc661c6c4ac946872e656664",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "anthropic",
+        "datasets",
+        "numpy",
+        "openai"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "long-context",
+      "packageHash": "dec7df3ee40d8c6eb47cadc9013bf619f45e00ace6bd9f4a93eae74e9ca5df2c",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "einops",
+        "flash-attn",
+        "rotary-embedding-torch",
+        "torch",
+        "transformers"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "mamba-architecture",
+      "packageHash": "7916eb952b479e1b644bd5168e1a7735c1a01b9d2d667b9b5a45d145f1fbf0ff",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "causal-conv1d",
+        "causal-conv1d\u003e=1.4.0",
+        "mamba-ssm",
+        "mamba-ssm[causal-conv1d]",
+        "torch",
+        "transformers"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "market-research-reports",
+      "packageHash": "ae45064ccc6381e175528fc3b1bea9beca548ca7fb97dde2884e4b42de84c921",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.execute",
+        "builtin.shell.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "markitdown",
+      "packageHash": "a0b7b979a3764014685a759ffbe1325715d70530ccfe23df9ba4f08a51dbfd3c",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.shell.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "docx",
+        "markitdown[all]",
+        "markitdown[pdf]"
+      ],
+      "cliDependencies": [
+        "Docker"
+      ],
+      "externalServices": [
+        "第三方 API 凭据"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "matchms",
+      "packageHash": "8082c53a338611a88610b75dce4f450d354bc1ce722257d61f934afc869d3097",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "matchms",
+        "matchms[chemistry]"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "matlab",
+      "packageHash": "52d396065360f5aafd83459039ec5dc50208597bcbc506561b155694e805c117",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.shell.execute"
+      ],
+      "pythonPackages": [],
+      "cliDependencies": [
+        "MATLAB 或 GNU Octave"
+      ],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "matplotlib",
+      "packageHash": "1024261efd56f7df92e5a317bd403f94bf066c10f025ab11300779aeb6fb65fc",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "matplotlib\u003e=3.9.0"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "medchem",
+      "packageHash": "553f5f8532f58150dcae26b754f732c6f4a04416cd40b6fffa119ce2f5a3b8c3",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "medchem"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "metabolomics-workbench-database",
+      "packageHash": "64f9537045e981aff3d7c865c0b86a28732b29b89fc5975d998e8e96d9e404f7",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [
+        "领域数据库或其公开 API"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "microbial-dynamics",
+      "packageHash": "098b397facdeeb6560538c58a9c6e699489cd21dd3280b83051904f0a2e9ed5d",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "matplotlib",
+        "numpy",
+        "pandas",
+        "scipy"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "miles-rl-training",
+      "packageHash": "f9b667495ce84e5f096499d3ca1eced864895023847e9e0afd7d61635a5c7d62",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute",
+        "builtin.shell.execute"
+      ],
+      "pythonPackages": [
+        "ray",
+        "requirements.txt",
+        "sglang-router\u003e=0.2.3",
+        "torch\u003e=2.0.0",
+        "transformers\u003e=4.40.0"
+      ],
+      "cliDependencies": [
+        "Docker"
+      ],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "ml-benchmark-evaluation",
+      "packageHash": "d75d5e49bcc0ed4083ad14f1b41602abed56a824eda57b4e144fa2ff1415b75f",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "numpy",
+        "torch"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "ml-paper-writing",
+      "packageHash": "1939c77818780b3a9459647b348806f33cfb2ba02208ce3810b7e880a2a08397",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "arxiv",
+        "habanero",
+        "requests",
+        "semanticscholar"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "mlflow",
+      "packageHash": "e1a01af2a5ebe2074fa5af4a7b7f01e5d2ca70832ca7ad8ebb0992f30f96253d",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "boto3",
+        "mlflow",
+        "mlflow[extras]",
+        "sqlalchemy"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "modal",
+      "packageHash": "22b50b4eda5ab2c84545ea5c94f862b6652630fb59cbee81bd1ed3a700bd052a",
+      "capability": "unavailable",
+      "reason": "SciAide 当前没有上游 compute_job 付费调度控制面",
+      "requiredTools": [],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": [
+        "该上游产品能力未在 SciAide 中伪造等价实现"
+      ]
+    },
+    {
+      "name": "modal-ml-training",
+      "packageHash": "9a65c0f6972ae95d0325f9aaf81611f13619de0e16c08e7e425098cb099d860a",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "modal\u003e=0.73.0",
+        "torch"
+      ],
+      "cliDependencies": [],
+      "externalServices": [
+        "云计算平台账户"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "modal-research-gpu",
+      "packageHash": "f332bb7d28194345305255ca8afa78cb1283df021e09525204da4c3164738142",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "modal\u003e=0.73.0"
+      ],
+      "cliDependencies": [],
+      "externalServices": [
+        "云计算平台账户",
+        "第三方 API 凭据"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "model-economics",
+      "packageHash": "3dcbd4c83a2076a2233795f92d9f050cb1fc7845dcbf52bf14b75b47543af783",
+      "capability": "native",
+      "reason": "可使用 SciAide 当前对话、知识库、科研检索、引用与产物能力完成主要方法流程",
+      "requiredTools": [],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "model-merging",
+      "packageHash": "dd1309e13a6320fcc78baa8b6d0b1f44a07164cd85e912fdf2ca5a8c2598beb5",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "mergekit",
+        "torch",
+        "transformers"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "model-pruning",
+      "packageHash": "593f4346e4d2ac323065ae0070eaab2310a12f184fa38866c2390dbdeb9a52ee",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "accelerate",
+        "requirements.txt",
+        "torch",
+        "transformers"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "moe-training",
+      "packageHash": "ed93fd6b8c182b600c18d1c3eb5213de68dc2c760912c5a019c4896f041816b0",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "accelerate",
+        "deepspeed",
+        "deepspeed\u003e=0.6.0",
+        "requirements.txt",
+        "torch",
+        "transformers"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "molecular-cloning",
+      "packageHash": "79ac0e2f54f0ae17818da068e7ba81ecedbfbddbfb8b7795382dc4a1e0d1b25c",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "biopython",
+        "numpy",
+        "primer3-py"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "molecular-docking",
+      "packageHash": "fed9cd3117ff5d4d0158f75375d5b35baf1d0fd4fcad031152f563a2b5a07ef7",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "biopython",
+        "MDAnalysis",
+        "meeko",
+        "meeko\u003c0.6",
+        "numpy\u003c2",
+        "openbabel-wheel",
+        "pandas",
+        "prolif",
+        "RDKit",
+        "rdkit-pypi",
+        "Requires",
+        "scipy",
+        "vina"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "molecular-optimization",
+      "packageHash": "5a0d5b193b6e0cfc422b1921456c1910f1a37eab73b23c23cb0b7d4f49c65666",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "datamol",
+        "numpy",
+        "pandas",
+        "PyTDC",
+        "rdkit-pypi"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "molecular-rag",
+      "packageHash": "fb256d401b40355140ac5a2dc485c9f08d40a328d6fcb0907f11bc7443660dc2",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "pandas",
+        "rdkit-pypi",
+        "requests"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "molecule-visualization",
+      "packageHash": "22fbb265a5e71bb01865c33a235c3f0d8aef75ceabd111e2fc4547813cfaf805",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "biopython",
+        "matplotlib",
+        "pillow",
+        "py3Dmol",
+        "rdkit-pypi"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "molfeat",
+      "packageHash": "7a5bf0f8298c25db39ad12c0a5e92afc1108d8233e13ac12f869294f4fa11f2f",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "molfeat",
+        "molfeat[all]",
+        "molfeat[dgl]",
+        "molfeat[transformer]"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "multi-objective-optimization",
+      "packageHash": "1d6d9f0501ab0e4bc64aa0d3bc147e958deb9a30673047add38b8125b226b8fa",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "matplotlib",
+        "numpy",
+        "pandas",
+        "rdkit-pypi"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "nanogpt",
+      "packageHash": "5a34bde769dc1394b59896f54df4de5e7e05097a7b6323928ae6b3ba5e5b33cd",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "datasets",
+        "numpy",
+        "tiktoken",
+        "torch",
+        "tqdm",
+        "transformers",
+        "wandb"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "nemo-curator",
+      "packageHash": "930ba0256c7d26cce15abc2f7b5d1334827d8adfa5c7a9c24af890363417697e",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "cudf",
+        "dask",
+        "nemo-curator",
+        "nemo-curator[all_cuda12]",
+        "nemo-curator[cpu]",
+        "nemo-curator[text_cuda12]",
+        "rapids"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "nemo-evaluator-sdk",
+      "packageHash": "bb45fd7ac43dc2c4c677841a4e52c9237dd6326a960ddd7c8fa34436d04954e3",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute",
+        "builtin.shell.execute"
+      ],
+      "pythonPackages": [
+        "docker",
+        "nemo-evaluator-launcher",
+        "nemo-evaluator-launcher\u003e=0.1.25"
+      ],
+      "cliDependencies": [
+        "Docker"
+      ],
+      "externalServices": [
+        "第三方 API 凭据"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "nemo-guardrails",
+      "packageHash": "0e4cdba2b265bb01d62e2da7b1fe1ebb96066cfa286ef164a4c8d78673987620",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "nemoguardrails"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "networkx",
+      "packageHash": "e82f478ca6bf28fe46d33aacf8c0cdabfbc6f83fa3c33da12ca476d2acd9245b",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "networkx",
+        "networkx\u003e=3.3",
+        "networkx[default]"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "neural-operator",
+      "packageHash": "231d3bd6a9ab5c27add8fc76bc1f6a88b16afa85e16c59256806c6ed5d9dee11",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "matplotlib\u003e=3.7.0",
+        "neuraloperator",
+        "neuraloperator\u003e=0.3.0",
+        "numpy\u003e=1.24.0",
+        "torch",
+        "torch\u003e=2.1.0"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "neurokit2",
+      "packageHash": "79161184d8ebb3639ddaa3b0fe76e8345709f6e891f244333e69218a1a10f1f3",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "neurokit2"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "neuropixels-analysis",
+      "packageHash": "786450fc92cc5e8d63e6b2f3307b8b620e5d0a5fa97a7aa39f12fd7129bda4f1",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "anthropic",
+        "ibl-neuropixel",
+        "ibllib",
+        "kilosort",
+        "mountainsort5",
+        "neo",
+        "neuropixels-analysis",
+        "probeinterface",
+        "spikeinterface[full]",
+        "spykingcircus"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "nnsight-remote-interpretability",
+      "packageHash": "77c8f37830e040dfc29b1865c74cd0b92583866c0b0e3243d13bfd87270767f8",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "nnsight",
+        "nnsight\u003e=0.5.0",
+        "nnsight[vllm]",
+        "torch\u003e=2.0.0"
+      ],
+      "cliDependencies": [],
+      "externalServices": [
+        "第三方 API 凭据"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "ode-solver",
+      "packageHash": "fe0a12de9e82daaf258fac5f3d4275be1836003d2e485734cbfb4561c2167843",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "matplotlib\u003e=3.7.0",
+        "numpy\u003e=1.24.0",
+        "scipy\u003e=1.11.0"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "omero-integration",
+      "packageHash": "3d8805633f422ebddf83bd0d90ab5920fab63d3089fc231eff25f0149949ff66",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "omero-py"
+      ],
+      "cliDependencies": [],
+      "externalServices": [
+        "第三方 API 凭据",
+        "第三方科研平台账户"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "openalex-database",
+      "packageHash": "ea2d2b36eb9535a0036bde874dec31b52d031232bc4635515da2ad33ef3cf120",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "requests"
+      ],
+      "cliDependencies": [],
+      "externalServices": [
+        "第三方 API 凭据",
+        "领域数据库或其公开 API"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "openrlhf-training",
+      "packageHash": "7ae19670d378d96377c10fefe1f06b77c6d80a92a79dae556e21251fb60d5c88",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute",
+        "builtin.shell.execute"
+      ],
+      "pythonPackages": [
+        "deepspeed",
+        "openrlhf",
+        "openrlhf[vllm]",
+        "ray",
+        "torch",
+        "transformers",
+        "vllm"
+      ],
+      "cliDependencies": [
+        "Docker"
+      ],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "opentargets-database",
+      "packageHash": "d305b084adf8c05eafb33b984eb176adc4c4021da4ce31c58dc48c925f426480",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [
+        "领域数据库或其公开 API"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "opentrons-integration",
+      "packageHash": "57f0d6d5eb849fedb7d01f2e53036064e525a8201b9744d425ef151786b8c3af",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [
+        "第三方科研平台账户"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "optimizing-attention-flash",
+      "packageHash": "fc01e48302fc472c745911bab42d882d45f5c54ecbc9b4295fcbb0f973d5a447",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "flash-attn",
+        "torch",
+        "transformers"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "outlines",
+      "packageHash": "5b9bbecaf146af0233afab8518fa38deca9080377b822e4dd87936c2c6b694c7",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "llama-cpp-python",
+        "outlines",
+        "pydantic",
+        "transformers",
+        "vllm"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "paper-2-web",
+      "packageHash": "813e81ab3caa34e7101f792fb3d351851e1663d6ef763fc36abf3580701f6be4",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.shell.execute"
+      ],
+      "pythonPackages": [
+        "requirements.txt"
+      ],
+      "cliDependencies": [],
+      "externalServices": [
+        "第三方 API 凭据"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "pathml",
+      "packageHash": "707e475b30ebb67dc54a769cc4e5254c57eb61eda04d8495e9dbf6586f0c34a3",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "pathml",
+        "pathml[all]"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "pdb-database",
+      "packageHash": "6ea11ee8ff138fbaddfbbf60e47899aa410041948b44cde683061c045ff145a7",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "rcsb-api",
+        "rcsbsearchapi"
+      ],
+      "cliDependencies": [],
+      "externalServices": [
+        "领域数据库或其公开 API"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "pde-solver",
+      "packageHash": "7031453655dd7e8172701f9e96d02743cef86de88996f7bcf81151d506f52153",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "deepxde",
+        "fenics-dolfinx",
+        "matplotlib\u003e=3.7.0",
+        "numpy\u003e=1.24.0",
+        "scipy\u003e=1.11.0"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "peer-review",
+      "packageHash": "112d4dcff0b4eb3e86ca4bf278b3c368f31281cc5ebadf860517898c84a2c225",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.execute",
+        "builtin.shell.execute"
+      ],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "peft-fine-tuning",
+      "packageHash": "3f28dfaa21a7da65a10514fe5e8c168306b60332222a2a0711b90944c3c6287d",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "accelerate",
+        "bitsandbytes",
+        "bitsandbytes\u003e=0.43.0",
+        "datasets",
+        "peft",
+        "peft\u003e=0.13.0",
+        "torch\u003e=2.0.0",
+        "transformers",
+        "transformers\u003e=4.45.0"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "pennylane",
+      "packageHash": "0636c574285be345872c7bcab5c744d2f353a2c3fee1e87a395d1c9ba7d2342f",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "amazon-braket-pennylane-plugin",
+        "pennylane",
+        "pennylane-cirq",
+        "pennylane-ionq",
+        "pennylane-qiskit",
+        "pennylane-rigetti"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "perplexity-search",
+      "packageHash": "cb2a11a52044b4d1845ce675a9f26519c4293a883b794f126aa521f383774670",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "jq",
+        "litellm",
+        "python-dotenv"
+      ],
+      "cliDependencies": [],
+      "externalServices": [
+        "第三方 API 凭据"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "pharmacology-wetlab",
+      "packageHash": "d910515a2d7836f568f26bebbc420051ab17db613597f80bf75a391cc920fd22",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "lifelines",
+        "matplotlib",
+        "numpy",
+        "opencv-python",
+        "pandas",
+        "scipy"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "phoenix-observability",
+      "packageHash": "e77d78b5a31e0aa400d5d04190fb9f20693b41919559bb36b969ee4a82f20b19",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute",
+        "builtin.shell.execute"
+      ],
+      "pythonPackages": [
+        "arize-phoenix",
+        "arize-phoenix-client",
+        "arize-phoenix-evals",
+        "arize-phoenix-otel",
+        "arize-phoenix\u003e=12.0.0",
+        "arize-phoenix[embeddings]"
+      ],
+      "cliDependencies": [
+        "Docker"
+      ],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "physics-databases",
+      "packageHash": "b9defaa9d18496bc59f26c277dba7532127d8252e49c0f91569b121bec09f1fd",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "mp-api",
+        "numpy\u003e=1.24.0",
+        "scipy\u003e=1.11.0"
+      ],
+      "cliDependencies": [],
+      "externalServices": [
+        "第三方 API 凭据"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "physics-fitting",
+      "packageHash": "37c49e6616cc37a8216b2a90acb6919c2a069516960a935de6bcffd72d41a4ab",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "lmfit\u003e=1.2.0",
+        "matplotlib\u003e=3.7.0",
+        "numpy\u003e=1.24.0",
+        "scipy\u003e=1.11.0"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "physics-visualization",
+      "packageHash": "56acbb22a76aa296f5babb0dbfa53b37dba150400fd2ef5a3b617926fbaa960b",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "matplotlib\u003e=3.7.0",
+        "numpy\u003e=1.24.0"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "pinecone",
+      "packageHash": "ad4d14417b8347cedbaf3807d3a21d1f67b83ca9c640ae933fd459b19de6fdbe",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "pinecone-client"
+      ],
+      "cliDependencies": [],
+      "externalServices": [
+        "第三方 API 凭据"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "pinn-training",
+      "packageHash": "0dc221ca57f472387ad2441d64121a54593a64e1e46c960634c5a3f5c0c1d044",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "deepxde",
+        "deepxde\u003e=1.12.0",
+        "matplotlib\u003e=3.7.0",
+        "numpy\u003e=1.24.0"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "plan",
+      "packageHash": "5e3a94dae71f0d36767b8eca4e1c8c5040f4791e1bef0efe7c0370256a6520a9",
+      "capability": "unavailable",
+      "reason": "需要 SciAide 会话或 Workflow 宿主能力；对应工具尚未注册",
+      "requiredTools": [
+        "builtin.workflow.plan"
+      ],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": [
+        "工具注册后将由运行时能力求交集自动恢复"
+      ]
+    },
+    {
+      "name": "plotly",
+      "packageHash": "2606f34bc95ef0539dd84fceb8fbbeda48394a03f652909fb6bdebf44288e1a2",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "dash",
+        "kaleido",
+        "plotly",
+        "plotly\u003e=5.22.0"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "pocket-detection",
+      "packageHash": "deae5ce89a42496c2e8ec94aa861dba7f4fe693dba1142622f5d5f8d35d48c44",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "biopython",
+        "biopython\u003e=1.84",
+        "matplotlib",
+        "numpy",
+        "rdkit-pypi",
+        "scipy"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "polars",
+      "packageHash": "bd5dd279650fdc71f10ddb6ec9d8bdeeec2a0e6a0d337ce6bcd3124e6bf8c31a",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "polars",
+        "polars\u003e=1.0.0"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "pptx-posters",
+      "packageHash": "abe5e146911d86307f03c9afcbe5cb31c2a2e3a466bc3e65d1f3272404a3b211",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.execute",
+        "builtin.shell.execute"
+      ],
+      "pythonPackages": [],
+      "cliDependencies": [
+        "LibreOffice（可选渲染）"
+      ],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "prime-intellect-lab",
+      "packageHash": "218ae6eb51000855dc1f69ef65f4273f71143cc17c96816752df17ce699eec11",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "prime",
+        "verifiers"
+      ],
+      "cliDependencies": [],
+      "externalServices": [
+        "第三方 API 凭据"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "protein-diagram",
+      "packageHash": "6702de07ea00d77b9ebf14042625b3e2053b185f564d19b68fbdf49cea1d2c5e",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "biopython",
+        "dssp",
+        "matplotlib",
+        "numpy",
+        "pymsaviz"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "protocolsio-integration",
+      "packageHash": "ee16269c8370c6277bce0b6cf0e1d545678a5d4b2ee6cfd49e18d43c3b11b511",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [
+        "第三方 API 凭据",
+        "第三方科研平台账户"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "pubchem-database",
+      "packageHash": "1ec7080dbf4ff3973c1d5ac8a9cf83f9157202d2fc8d12517e57bbf22e660116",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "pandas",
+        "pubchempy",
+        "requests"
+      ],
+      "cliDependencies": [],
+      "externalServices": [
+        "领域数据库或其公开 API"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "pubmed-database",
+      "packageHash": "0945effc4b1b4ade47b3aec841a8029688aa07f609ec2d1634529a53aaf25aba",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [
+        "第三方 API 凭据",
+        "领域数据库或其公开 API"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "pufferlib",
+      "packageHash": "96a6ba65b08229e2518248b4a0076d059ae84d60a574cd93ef9ef4de6f759f74",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "pufferlib"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "pydeseq2",
+      "packageHash": "2827efa53b224928986dcda267fa40fdf3b0613d54ab929a6e41603e78291630",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "pydeseq2"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "pydicom",
+      "packageHash": "0716236d387e2402988243195761d26129c15063018f77e5c306d1b41ab0c30e",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "matplotlib",
+        "numpy",
+        "pillow",
+        "pydicom",
+        "pylibjpeg",
+        "pylibjpeg-libjpeg",
+        "pylibjpeg-openjpeg",
+        "python-gdcm"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "pyhealth",
+      "packageHash": "86a8abea4f45650700a39c4b3d1e4de9ea8be70882c1a620c14134b9156b962a",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "pyhealth"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "pylabrobot",
+      "packageHash": "15ea7dc4b8d04cb2ae51956cb5789462e184ecc9fc71c74e46216f336f8a68ea",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "pylabrobot"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "pymatgen",
+      "packageHash": "bda9de434ceb60f10b140b971c38d1a5bf70e9e2cd8e0c66f76d84339942486f",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "mp-api",
+        "pymatgen",
+        "pymatgen[analysis,vis]",
+        "pymatgen[analysis]",
+        "pymatgen[vis]"
+      ],
+      "cliDependencies": [],
+      "externalServices": [
+        "第三方 API 凭据"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "pymc-bayesian-modeling",
+      "packageHash": "8e9dff8d90813ca3fc9e7482c7320ed1424e68df864f09f0016ad87761f85e4e",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "arviz\u003e=0.17.0",
+        "numpy\u003e=1.25.0",
+        "pymc\u003e=5.10.0"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "pymoo",
+      "packageHash": "05096520b8c17b53fe76f3dbce1734c0126b14812a2f78908448e5c7cb27f5c3",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "pymoo"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "pyopenms",
+      "packageHash": "adc8f60362a3cdb50479c72ede12e5427bdbdfc1d13908321bd24e30b2c2645e",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "pyopenms"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "pysam",
+      "packageHash": "de833daa755b30e66ce43566e9882865db02c6fe82dfa266198408e0527f97cb",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "pysam"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "pytdc",
+      "packageHash": "9dd3eddc4d941272990c7daee85d4efd0031bfc1034c12a814ccb8bc3b828232",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "PyTDC"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "pytorch-fsdp",
+      "packageHash": "56d60d030da9bfd4be33c0e21503517c8158b191d070a130eccc1cd60d47847e",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "torch\u003e=2.0",
+        "transformers"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "pytorch-lightning",
+      "packageHash": "8ce77e71db4d6c43dfffd676a8c8df1d9324eb7fd6a7263d95eea01105c4b353",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "lightning",
+        "torch",
+        "transformers"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "pyvene-interventions",
+      "packageHash": "ed4e1071a7cc1e1f05e588952b3f82a8c453d6a4bb9dde3a5fce2d202aeb256f",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "pyvene",
+        "pyvene\u003e=0.1.8",
+        "torch\u003e=2.0.0",
+        "transformers\u003e=4.30.0"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "qdrant-vector-search",
+      "packageHash": "3355db7b094ce259e46afe3ccfc533700f4160f363cad503c8fc9aec84be5e06",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute",
+        "builtin.shell.execute"
+      ],
+      "pythonPackages": [
+        "qdrant-client",
+        "qdrant-client\u003e=1.12.0"
+      ],
+      "cliDependencies": [
+        "Docker"
+      ],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "qiskit",
+      "packageHash": "c203c1410ceb5602d89bdfc62f175fc85f76efee18e71cff39660fba53d34cb8",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "matplotlib",
+        "qiskit",
+        "qiskit[visualization]"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "quantizing-models-bitsandbytes",
+      "packageHash": "09ff416211fa527d5c487fca57cf9f5e72a42700b837a54666b14621845dcbe0",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "accelerate",
+        "bitsandbytes",
+        "datasets",
+        "peft",
+        "torch",
+        "transformers"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "qutip",
+      "packageHash": "6aa08fd0d54dea6f6d6f979b56bc26789c2efaf024635a66485901e43c643288",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "qutip",
+        "qutip-qip",
+        "qutip-qtrl"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "ray-data",
+      "packageHash": "88e7301524128d1c7b74416ff04c0847b152baf98eff878b3dfe2f1ebe79a20d",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "pandas",
+        "pyarrow",
+        "ray[data]"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "ray-train",
+      "packageHash": "aeea641b363971690c58e93d361c0c27a4898bb461e6a55837fdeb5f3c73f750",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "ray[train]",
+        "torch",
+        "transformers"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "rdkit",
+      "packageHash": "9cf77c0db8cf0ba53ede213319a7c01ca76594913b8aa9eca4644c3cc532af4f",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "rdkit-pypi\u003e=2024.3.1"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "reactome-database",
+      "packageHash": "a61beb3f5fafd64ef59be9b4a3bfcd0d88930f852b48b5c2e24c6b2a790db7e0",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "reactome2py"
+      ],
+      "cliDependencies": [],
+      "externalServices": [
+        "领域数据库或其公开 API"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "reproduce",
+      "packageHash": "21311b250cd7313029fca1639b6575dbd763cc32c55c53a5308ece5310fdc23e",
+      "capability": "unavailable",
+      "reason": "需要 SciAide 会话或 Workflow 宿主能力；对应工具尚未注册",
+      "requiredTools": [
+        "builtin.workflow.reproduce"
+      ],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": [
+        "工具注册后将由运行时能力求交集自动恢复"
+      ]
+    },
+    {
+      "name": "research-grants",
+      "packageHash": "517d7eb68240e5d8c0281ade33e5ecedd8c6cc0fb29056997f2fe587a90610ac",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.execute",
+        "builtin.shell.execute"
+      ],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "research-lookup",
+      "packageHash": "dacd29a5c7c343d646d2e3a4277850fac671fa31c313c1135bd33047913fd1a5",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.execute",
+        "builtin.shell.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [
+        "第三方 API 凭据"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "research-workflows",
+      "packageHash": "a380e16e1da30cb83ca6442594f8b2e41bdd14bc3096941fd30bb9e729c495d3",
+      "capability": "unavailable",
+      "reason": "需要 SciAide 会话或 Workflow 宿主能力；对应工具尚未注册",
+      "requiredTools": [
+        "builtin.workflow.run"
+      ],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": [
+        "工具注册后将由运行时能力求交集自动恢复"
+      ]
+    },
+    {
+      "name": "resume",
+      "packageHash": "902c3f0695995a9673e13405a8fd92f40ad29d8a6184f95980b6925c54515e9e",
+      "capability": "unavailable",
+      "reason": "需要 SciAide 会话或 Workflow 宿主能力；对应工具尚未注册",
+      "requiredTools": [
+        "builtin.workflow.resume"
+      ],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": [
+        "工具注册后将由运行时能力求交集自动恢复"
+      ]
+    },
+    {
+      "name": "review",
+      "packageHash": "bf0b948b5e2fe6b474be6181e65dc833043fe43c5eb0d87d88364f50e79d0a17",
+      "capability": "unavailable",
+      "reason": "需要 SciAide 会话或 Workflow 宿主能力；对应工具尚未注册",
+      "requiredTools": [
+        "builtin.workflow.review"
+      ],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": [
+        "工具注册后将由运行时能力求交集自动恢复"
+      ]
+    },
+    {
+      "name": "rowan",
+      "packageHash": "c3f3aa5e47b65ec3bfdbd2f2d4e481a6cee29d03b8efe53c9e7f382c645bae3f",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "rowan-python"
+      ],
+      "cliDependencies": [],
+      "externalServices": [
+        "第三方 API 凭据"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "rwkv-architecture",
+      "packageHash": "63931388b8296fc45bdbd0900f2dbfc7c919e97633e99daafb4205a8067baef7",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "deepspeed",
+        "ninja",
+        "pytorch-lightning==1.9.5",
+        "rwkv",
+        "torch",
+        "transformers",
+        "wandb"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "scanpy",
+      "packageHash": "b6219aa5ef8be038edeb5688d43fe1862a1ed225b3f3a556e90f2ebe995f4bcd",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "anndata\u003e=0.10.0",
+        "numpy\u003e=1.25.0",
+        "scanpy\u003e=1.10.0"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "scholar-evaluation",
+      "packageHash": "3ba437d0fc5fd591248648e2ad8e09f0f4c653cea822683ec1b7ac25a0bac988",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "scientific-brainstorming",
+      "packageHash": "a4332c44fdbf0baadd288bc6864f37d28be2179ff97455d450f7ec056cd0bd93",
+      "capability": "native",
+      "reason": "可使用 SciAide 当前对话、知识库、科研检索、引用与产物能力完成主要方法流程",
+      "requiredTools": [],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "scientific-critical-thinking",
+      "packageHash": "8abe22cb3d5d817ccc47cd7f40220b779912177a9d5d138dc59bf37365b2255e",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.execute",
+        "builtin.shell.execute"
+      ],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "scientific-problem-selection",
+      "packageHash": "c4712a37bd2f140294c674301fc09dde957d797c43ee509983fa41d861c4bb4b",
+      "capability": "native",
+      "reason": "可使用 SciAide 当前对话、知识库、科研检索、引用与产物能力完成主要方法流程",
+      "requiredTools": [],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "scientific-schematics",
+      "packageHash": "6763f74a4ca3516c81970bb67ef515b8386d522423fbd4e09ca5c57ff481828b",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.execute",
+        "builtin.shell.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [
+        "第三方 API 凭据",
+        "用户配置的图像生成 MCP/API"
+      ],
+      "limitations": [
+        "SciAide 未注册托管 generate_image 工具；仅在用户配置真实外部 Tool/API 后可用"
+      ]
+    },
+    {
+      "name": "scientific-slides",
+      "packageHash": "d0d93154a2d84b9c1448e65b16b198aad9165deca9e77d5d0a4a6006b69866f1",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.execute",
+        "builtin.shell.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [
+        "第三方 API 凭据"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "scientific-visualization",
+      "packageHash": "db19d02b03ca991a5a1db33e7c3d69db36d1f4c2f0f1b9fe7969a6ca279ffdb3",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "scientific-writing",
+      "packageHash": "cc79b63392347d0efdd5bc5e0ed60023fd1694a7c0a432c560d47aaa8f9cf158",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.execute",
+        "builtin.shell.execute"
+      ],
+      "pythonPackages": [],
+      "cliDependencies": [
+        "Pandoc/LaTeX（按输出格式）"
+      ],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "scikit-bio",
+      "packageHash": "9f64994f2aea803d4caf9899df7d0f3328a9fb124baf1a0b4ab316dadd7b7e84",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "scikit-bio"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "scikit-learn",
+      "packageHash": "8d010340b78d298e9440723a71024877882a494b4c01e1601401510140fad190",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "matplotlib",
+        "numpy",
+        "pandas",
+        "scikit-learn",
+        "scikit-learn\u003e=1.5.0",
+        "seaborn"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "scikit-survival",
+      "packageHash": "488b4e16bc8d94e822e4975eca52240b38454ce852bbbdae0b92b166f7f5dd94",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "scikit-survival"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "scvi-tools",
+      "packageHash": "ec5486b766b78ab7a170a302407aaee3825024b99deb27b865b448342a83e9fd",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "scvi-tools",
+        "scvi-tools[cuda]"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "seaborn",
+      "packageHash": "da791551506948464c096dc773c573b2f982b0033a5b2cbc63898a4883052596",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "matplotlib\u003e=3.9.0",
+        "seaborn\u003e=0.13.0"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "segment-anything-model",
+      "packageHash": "7ff53c12eb0880aeffc9b4644d5df04f8c4be3096a7c2d4fbb26c6705ac042e9",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "matplotlib",
+        "opencv-python",
+        "pycocotools",
+        "segment-anything",
+        "torch\u003e=1.7.0",
+        "transformers",
+        "transformers\u003e=4.30.0"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "sentence-transformers",
+      "packageHash": "3378fe4c5480a90475c74f5605f3ce577026a5c1dcd93c8c355a0da78e7cd68f",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "sentence-transformers",
+        "torch",
+        "transformers"
+      ],
+      "cliDependencies": [],
+      "externalServices": [
+        "第三方 API 凭据"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "sentencepiece",
+      "packageHash": "d8b32e7cc29350a247f9042efff580892f74e0c3e579581aa82fd16b53cfe4e9",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "sentencepiece",
+        "transformers"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "serving-llms-vllm",
+      "packageHash": "3844357dbdc3bc3044b02ae0980eb174a1ec0a05ce416eca457818f8563493ca",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute",
+        "builtin.shell.execute"
+      ],
+      "pythonPackages": [
+        "locust",
+        "torch",
+        "transformers",
+        "vllm"
+      ],
+      "cliDependencies": [
+        "Docker"
+      ],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "sglang",
+      "packageHash": "f17de90fb54d9b64e95ca89926bf58e9e671521381e19730f0b35ac082f37a8d",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "flashinfer",
+        "python[all]",
+        "sglang",
+        "sglang[all]",
+        "torch",
+        "transformers"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "shap",
+      "packageHash": "fad8d4addbc1580579969c9f4220c3fd010418fbf4874e584fcdcfcc30c94132",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "matplotlib",
+        "shap"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "shock-capturing-neural-operators",
+      "packageHash": "329c0a6149feb3570ce1ba022e1539b9f435e4fee4b5cb6ace3ee3310092c038",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "numpy\u003e=1.24.0",
+        "torch\u003e=2.1.0"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "simpo-training",
+      "packageHash": "152404d506d6451832cf82c995f8de76825a0ca9dd9429c75ef673b2a3312c79",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "accelerate",
+        "datasets",
+        "flash-attn",
+        "torch",
+        "transformers",
+        "trl"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "simpy",
+      "packageHash": "72134b72a39b051fb9d8d11c4635d73d2ce3b0f356dac116413faeca541510b9",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "sindy-identification",
+      "packageHash": "9db2dc67c406ba1387f28b6e3ef2f64ec61bc043739ccddb0a78a756ec5d506b",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "matplotlib\u003e=3.7.0",
+        "numpy\u003e=1.24.0",
+        "pysindy",
+        "pysindy\u003e=2.1.0",
+        "scipy\u003e=1.11.0"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "skill-installer",
+      "packageHash": "90ea4b41ef8c7816509ef0800c84f8799710dab13f89db45b10c0817699f42f3",
+      "capability": "unavailable",
+      "reason": "SciAide 使用 Skills 管理页的受审查 Git 安装流程，不提供上游 CLI 与 Dashboard 同步路径",
+      "requiredTools": [],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": [
+        "该上游产品能力未在 SciAide 中伪造等价实现"
+      ]
+    },
+    {
+      "name": "skypilot-multi-cloud-orchestration",
+      "packageHash": "69294a9aec0eea6be47cf4dd68dee6012f6e0a809938ad61c421a02d3f5b282c",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "accelerate",
+        "requirements.txt",
+        "skypilot\u003e=0.7.0",
+        "skypilot[aws,gcp,azure,kubernetes]",
+        "torch",
+        "torchvision",
+        "transformers"
+      ],
+      "cliDependencies": [],
+      "externalServices": [
+        "云计算平台账户",
+        "第三方 API 凭据"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "slime-rl-training",
+      "packageHash": "da1e2dc45d030e32f62b061cf8df3f525e0ae29ebe6abdc9e250de0b72a42d25",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute",
+        "builtin.shell.execute"
+      ],
+      "pythonPackages": [
+        "ray",
+        "requirements.txt",
+        "sglang-router\u003e=0.2.3",
+        "torch\u003e=2.0.0",
+        "transformers\u003e=4.40.0"
+      ],
+      "cliDependencies": [
+        "Docker"
+      ],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "smiles-validation",
+      "packageHash": "ce7e75d4f4f9211c9f53c07f669dfa7f9ac39253bf3cf035720d4fc8f7731c23",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "rdkit-pypi"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "sources",
+      "packageHash": "3357ba6cda37890fd296ffa903722be610c2a2ba4fb0214d47ca6b7d3bc687e3",
+      "capability": "unavailable",
+      "reason": "需要 SciAide 会话或 Workflow 宿主能力；对应工具尚未注册",
+      "requiredTools": [
+        "builtin.workflow.sources"
+      ],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": [
+        "工具注册后将由运行时能力求交集自动恢复"
+      ]
+    },
+    {
+      "name": "sparse-autoencoder-training",
+      "packageHash": "77f515d20c63adb5fdd1c31f48f93a4a9fa18681964069aea06d942537a9312a",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "sae-lens",
+        "sae-lens\u003e=6.0.0",
+        "torch\u003e=2.0.0",
+        "transformer-lens\u003e=2.0.0"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "spectral-analysis",
+      "packageHash": "8dcbb0c0e2eb40f452f15c100ae7f882fbc2f92ce0206d43408ed22df3f51b31",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "matplotlib\u003e=3.7.0",
+        "numpy\u003e=1.24.0",
+        "scipy\u003e=1.11.0"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "speculative-decoding",
+      "packageHash": "5ce04257927c1218ac5d7d50bd6ceeda823a2485852bf1b3d289cc282628dc58",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "accelerate",
+        "torch",
+        "transformers",
+        "vllm"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "stable-baselines3",
+      "packageHash": "107942b3674cd8e802d8c1744a31f0826c5482ec69a3f7bb3a42db24a4c75978",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "stable-baselines3",
+        "stable-baselines3[extra]"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "stable-diffusion-image-generation",
+      "packageHash": "61d2937dbdd8cd2cdbd854dc8c4a3889aa8f672948f8c609948d8c60ddaa8b74",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "accelerate",
+        "accelerate\u003e=0.31.0",
+        "diffusers",
+        "diffusers\u003e=0.30.0",
+        "torch",
+        "torch\u003e=2.0.0",
+        "transformers",
+        "transformers\u003e=4.41.0",
+        "xformers"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "statistical-analysis",
+      "packageHash": "70276a0402eddcfb5e64cf6f1fd4aa9a0f066bff7ba283d352e2d187250e8f96",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "statistical-mechanics",
+      "packageHash": "8dfcd7d8cea746a33a39992b89b6b8d794351dbfc7ccd53b658774cd1a0bde27",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "matplotlib\u003e=3.7.0",
+        "numpy\u003e=1.24.0",
+        "scipy\u003e=1.11.0"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "statsmodels",
+      "packageHash": "33581e2c2e40d9e07b3fbf34f201bd395fe41249bb90f6b34cacd1da1a9dfc5c",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "numpy\u003e=1.25.0",
+        "scipy\u003e=1.12.0",
+        "statsmodels\u003e=0.14.0"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "status",
+      "packageHash": "2c0ff2ca54660076115a528f896c4c5f75cdcbebc165f517a21fbfbac0b70fad",
+      "capability": "unavailable",
+      "reason": "需要 SciAide 会话或 Workflow 宿主能力；对应工具尚未注册",
+      "requiredTools": [
+        "builtin.session.status"
+      ],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": [
+        "工具注册后将由运行时能力求交集自动恢复"
+      ]
+    },
+    {
+      "name": "stop",
+      "packageHash": "33f1fccbaa838a52608d4802d5ee2269b5ec5631914af37ffa28da076d870fee",
+      "capability": "unavailable",
+      "reason": "需要 SciAide 会话或 Workflow 宿主能力；对应工具尚未注册",
+      "requiredTools": [
+        "builtin.session.stop"
+      ],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": [
+        "工具注册后将由运行时能力求交集自动恢复"
+      ]
+    },
+    {
+      "name": "string-database",
+      "packageHash": "a1dbd7afb2d280acd28999b4acacdddf6bc72df735c27b9efca3000f87dee4c6",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [
+        "领域数据库或其公开 API"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "structure-prediction",
+      "packageHash": "99b39f7c4b0a29a32e8db12942ccad4a2ab0d0a67413873a251e4f673ab8d6e7",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "biopython",
+        "biopython\u003e=1.84",
+        "fair-esm",
+        "torch",
+        "torch\u003e=1.12.0"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "symbolic-regression",
+      "packageHash": "9a6b6b45e64a1ec650df7d2f71f47227ab223ba8abeadee429ae8d49bda2d0b2",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "pysr",
+        "pysr\u003e=0.19.0"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "sympy",
+      "packageHash": "0b7db4f7cb902092b66d426e58dcf18deb97b6444377e388d046c70443f12126",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "sympy"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "synthetic-biology",
+      "packageHash": "1fdabbeff2d6627f3f8c6f44ed2fdbba45e12e0762ee2d9d2d8b96f6cc87abce",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "biopython",
+        "install",
+        "libsbml",
+        "matplotlib",
+        "numpy",
+        "On",
+        "pandas",
+        "pip",
+        "python-libsbml",
+        "python-libsbml-experimental",
+        "scipy",
+        "some",
+        "systems"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "tensorboard",
+      "packageHash": "e3f91174956815b79b9d61b37332d2ef5513223ea7ee72e732c3c8d8911b6ace",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "tensorboard",
+        "tensorflow",
+        "torch",
+        "torchvision"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "tensorpool-gpu-cloud",
+      "packageHash": "adae027f55f527922de6b9fb4277798e8a9a26714339780dc67179598c83be0b",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "python",
+        "requirements.txt",
+        "tensorpool"
+      ],
+      "cliDependencies": [],
+      "externalServices": [
+        "云计算平台账户",
+        "第三方 API 凭据"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "tensorrt-llm",
+      "packageHash": "2fc799e38f4bc5cfd691a5ff655759825357b45e703dac22904be877c1f59092",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute",
+        "builtin.shell.execute"
+      ],
+      "pythonPackages": [
+        "tensorrt-llm",
+        "tensorrt_llm==1.2.0rc3",
+        "torch"
+      ],
+      "cliDependencies": [
+        "Docker"
+      ],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "tinker-fine-tuning",
+      "packageHash": "c1de5db0e30522b098d38cae4c1e50ab400c64f81687c815258cd4169974fcae",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "chz",
+        "datasets",
+        "numpy",
+        "tinker",
+        "tinker-cookbook",
+        "transformers\u003e=4.40.0"
+      ],
+      "cliDependencies": [],
+      "externalServices": [
+        "云计算平台账户"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "tinker-training-cost",
+      "packageHash": "25f7de6ff22ec56ff3ccd6076a34d9132f1a71ab4b862aeb8011a442f2fa43e4",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "transformers\u003e=4.40.0"
+      ],
+      "cliDependencies": [],
+      "externalServices": [
+        "云计算平台账户"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "together-ai-inference",
+      "packageHash": "1f3217d62eb4060e9ce089fce0bce5dbf98f88acaf3f12e815b0484ded216789",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "openai",
+        "together"
+      ],
+      "cliDependencies": [],
+      "externalServices": [
+        "云计算平台账户",
+        "第三方 API 凭据"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "torch-geometric",
+      "packageHash": "34042fa5493b14328a32f92ff873603ff938ce6947d2a8b236ff5cfc3cec157f",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "pyg_lib",
+        "torch-geometric\u003e=2.5.0",
+        "torch\u003e=2.0.0",
+        "torch_cluster",
+        "torch_geometric",
+        "torch_scatter",
+        "torch_sparse",
+        "torch_spline_conv"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "torchdrug",
+      "packageHash": "231b87d148c619e60e9fcf896309377a77ea2acb68c971df2b028e5e6c4756df",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "torchdrug",
+        "torchdrug[full]"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "torchforge-rl-training",
+      "packageHash": "ca2633238db476d287dd91c5a93b0eca653f0c90170e5a8590c9f79e56f010c3",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "monarch",
+        "torch\u003e=2.9.0",
+        "torchtitan\u003e=0.2.0",
+        "vllm"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "training-data-pipeline",
+      "packageHash": "ae7ddb70572bf049b0ba71ccd2e07e7932f856ffa91cc68a3146f6aad3ce56b3",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "datasets",
+        "openai",
+        "transformers"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "training-llms-megatron",
+      "packageHash": "1c8e8d2987c23f3a2168c298c846f0d78efe815e5b2ee7a02fdac4479e391633",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute",
+        "builtin.shell.execute"
+      ],
+      "pythonPackages": [
+        "apex",
+        "megatron-core",
+        "torch",
+        "transformer-engine"
+      ],
+      "cliDependencies": [
+        "Docker"
+      ],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "transformer-lens-interpretability",
+      "packageHash": "3c5df549693c19ffb06c4f4913b4194c2831801cd18e4c409caa23b6544c9736",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "torch\u003e=2.0.0",
+        "transformer-lens",
+        "transformer-lens\u003e=2.0.0"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "transformers",
+      "packageHash": "a0e94baa0c00a8ad4b2d5509f9388eaf75a2323e7bbc4a295f592e43d79598f2",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "accelerate",
+        "datasets",
+        "evaluate",
+        "librosa",
+        "pillow",
+        "soundfile",
+        "timm",
+        "tokenizers\u003e=0.19.0",
+        "torch",
+        "torch\u003e=2.0.0",
+        "transformers",
+        "transformers\u003e=4.45.0"
+      ],
+      "cliDependencies": [],
+      "externalServices": [
+        "第三方 API 凭据"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "treatment-plans",
+      "packageHash": "0a649668ce2e01e86761dde1702f01bfea6def62c5c812c888607caa341bebf0",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.execute",
+        "builtin.shell.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [
+        "第三方 API 凭据"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "umap-learn",
+      "packageHash": "50e1313acd62921da1f518f3c1d91ab8e90762ecf7e9262910ebfde7568a735a",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "umap-learn",
+        "umap-learn[parametric_umap]"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "uniprot-database",
+      "packageHash": "ee386da1cdd5c1a5430d2cf6aff75147312eab0ac260cc86d757b2d964d48acd",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [
+        "领域数据库或其公开 API"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "unsloth-fine-tuning",
+      "packageHash": "5cd6bb331c8a0709533d92f77060c27197bd63bed802b262090458773ca9b691",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute",
+        "builtin.shell.execute"
+      ],
+      "pythonPackages": [
+        "datasets",
+        "peft",
+        "torch\u003e=2.1.0",
+        "transformers\u003e=4.45.0",
+        "trl\u003e=0.15.0",
+        "unsloth",
+        "vllm",
+        "xformers"
+      ],
+      "cliDependencies": [
+        "Docker"
+      ],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "uspto-database",
+      "packageHash": "983da9a0a791a176619a9f64efc2649ac89969c9a778fceae1a1aa119533b19b",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.execute",
+        "builtin.python.kernel.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [
+        "uspto-opendata-python"
+      ],
+      "cliDependencies": [],
+      "externalServices": [
+        "第三方 API 凭据",
+        "领域数据库或其公开 API"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "vaex",
+      "packageHash": "f707d659a8f16e586bbf4fa53ba6ed0e0cba060094b2c3c962401245d14567d7",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "vaex"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "venue-templates",
+      "packageHash": "4735219924c8aa8f81abd42b9ea5697ddc90503cffba64872e6c8c041eabc0b5",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.execute",
+        "builtin.shell.execute",
+        "builtin.skill.resource.materialize"
+      ],
+      "pythonPackages": [],
+      "cliDependencies": [
+        "TeX 发行版"
+      ],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "verify",
+      "packageHash": "11564d1bbdbe6d7f86e4ec669fc4d67cff0b96628caabfeaec8144ca6bf1b719",
+      "capability": "unavailable",
+      "reason": "需要 SciAide 会话或 Workflow 宿主能力；对应工具尚未注册",
+      "requiredTools": [
+        "builtin.workflow.verify"
+      ],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": [
+        "工具注册后将由运行时能力求交集自动恢复"
+      ]
+    },
+    {
+      "name": "verl-rl-training",
+      "packageHash": "ed23e575ac8b3163f1e8685be67f010349f643e392ead3f4b32096cbd6b21b79",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute",
+        "builtin.shell.execute"
+      ],
+      "pythonPackages": [
+        "mbridge",
+        "ray\u003e=2.41.0",
+        "torch\u003e=2.0.0",
+        "transformers\u003e=4.40.0",
+        "verl\u003e=0.3.0",
+        "verl[vllm]",
+        "vllm\u003e=0.8.2"
+      ],
+      "cliDependencies": [
+        "Docker"
+      ],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "wave-propagation",
+      "packageHash": "aa6c653cd938c629c90dd2f162d1874cc07d6c0b59bb5d569d607b5428f32bb9",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "matplotlib\u003e=3.7.0",
+        "numpy\u003e=1.24.0",
+        "scipy\u003e=1.11.0"
+      ],
+      "cliDependencies": [],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "weights-and-biases",
+      "packageHash": "d1eb0bf1d4d99b060d67f96bf4434a703d88e324d801fb0af7b55d39eb95b3d4",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "wandb"
+      ],
+      "cliDependencies": [],
+      "externalServices": [
+        "第三方 API 凭据"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "whisper",
+      "packageHash": "86ba59994ff508414c404bd17899efeaeaf1038553849078e5c62ec525ca1bf3",
+      "capability": "requires_dependency",
+      "reason": "需要先在项目环境安装列出的 Python 包或命令行依赖；安装会单独确认",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute",
+        "builtin.shell.execute"
+      ],
+      "pythonPackages": [
+        "faster-whisper",
+        "openai-whisper",
+        "torch",
+        "transformers"
+      ],
+      "cliDependencies": [
+        "FFmpeg"
+      ],
+      "externalServices": [],
+      "limitations": []
+    },
+    {
+      "name": "zarr-python",
+      "packageHash": "2c7b730a4d713733ac94a2c63f126f5a9279ec2a5477c327880f31def87eec7f",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [
+        "builtin.python.environment.install",
+        "builtin.python.kernel.execute"
+      ],
+      "pythonPackages": [
+        "gcsfs",
+        "s3fs",
+        "zarr"
+      ],
+      "cliDependencies": [],
+      "externalServices": [
+        "第三方 API 凭据"
+      ],
+      "limitations": []
+    },
+    {
+      "name": "zinc-database",
+      "packageHash": "5e37ef40408c84adf5ccb24743c5362067aa3215016eda9bceb32b36cfe123a5",
+      "capability": "requires_external_service",
+      "reason": "主要流程可执行，但需要用户拥有并配置对应外部服务或凭据",
+      "requiredTools": [],
+      "pythonPackages": [],
+      "cliDependencies": [],
+      "externalServices": [
+        "领域数据库或其公开 API"
+      ],
+      "limitations": []
+    }
+  ]
+}

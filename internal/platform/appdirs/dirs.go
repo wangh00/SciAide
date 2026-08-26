@@ -19,6 +19,7 @@ type Dirs struct {
 	MCP        string
 	Backups    string
 	Workspaces string
+	PythonEnvs string
 	Trash      string
 }
 
@@ -45,12 +46,13 @@ func ResolveUnder(root string) Dirs {
 		Backups: filepath.Join(root, "backups"),
 	}
 	dirs.Workspaces = filepath.Join(dirs.Data, "workspaces")
+	dirs.PythonEnvs = filepath.Join(dirs.Data, "python-envs")
 	dirs.Trash = filepath.Join(dirs.Backups, "trash")
 	return dirs
 }
 
 func (d Dirs) Ensure() error {
-	for _, dir := range []string{d.Root, d.Config, d.Data, d.Cache, d.Logs, d.Skills, d.MCP, d.Backups, d.Workspaces, d.Trash} {
+	for _, dir := range []string{d.Root, d.Config, d.Data, d.Cache, d.Logs, d.Skills, d.MCP, d.Backups, d.Workspaces, d.PythonEnvs, d.Trash} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return fmt.Errorf("create application directory %q: %w", dir, err)
 		}

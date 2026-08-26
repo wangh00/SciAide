@@ -282,14 +282,14 @@ func TestPlanAllowsOnlyLowRiskIdempotentWorkspaceRead(t *testing.T) {
 	}
 }
 
-func TestLegacyEvaluationFlowHandlesMissingPermissionsOneAtATime(t *testing.T) {
+func TestNetworkPermissionIsDefaultAllowedWhileToolInvokeStillRequiresApproval(t *testing.T) {
 	repository := newMemoryRepository()
 	engine := NewEngine(repository)
 	call := testCall(tool.RiskModerate, tool.PermissionRequirement{Kind: tool.PermissionNetworkDomain, Resource: "api.example.test:443"})
 	request := EvaluationRequest{ProjectID: "project-1", RunID: "run-1", Call: call}
 
 	first, err := engine.Evaluate(context.Background(), request)
-	if err != nil || len(first.Missing) != 2 || first.Missing[0].Kind != tool.PermissionToolInvoke {
+	if err != nil || len(first.Missing) != 1 || first.Missing[0].Kind != tool.PermissionToolInvoke {
 		t.Fatalf("first Evaluate() = %#v, %v", first, err)
 	}
 	approval, err := engine.RequestApproval(context.Background(), request, first)
@@ -300,17 +300,6 @@ func TestLegacyEvaluationFlowHandlesMissingPermissionsOneAtATime(t *testing.T) {
 		t.Fatalf("Resolve(call) grant=%#v err=%v", grant, err)
 	}
 
-	second, err := engine.Evaluate(context.Background(), request)
-	if err != nil || len(second.Missing) != 1 || second.Missing[0].Kind != tool.PermissionNetworkDomain {
-		t.Fatalf("second Evaluate() = %#v, %v", second, err)
-	}
-	approval, err = engine.RequestApproval(context.Background(), request, second)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, grant, err := engine.Resolve(context.Background(), ResolveCommand{ApprovalID: approval.ID, Allow: true, Scope: ScopeProject}); err != nil || grant != nil {
-		t.Fatalf("Resolve(call) grant=%#v err=%v", grant, err)
-	}
 	final, err := engine.Evaluate(context.Background(), request)
 	if err != nil || final.Decision != DecisionAllow {
 		t.Fatalf("final Evaluate() = %#v, %v", final, err)

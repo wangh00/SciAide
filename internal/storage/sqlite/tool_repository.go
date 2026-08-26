@@ -28,8 +28,15 @@ func (r *ToolRepository) create(ctx context.Context, executor sqlExecer, value t
 	if err != nil {
 		return fmt.Errorf("encode tool permissions: %w", err)
 	}
-	_, err = executor.ExecContext(ctx, `INSERT INTO tool_calls(id, run_id, provider_call_id, tool_name, tool_version, arguments_json, status, risk, permissions_json, idempotent, idempotency_key, error_code, error_message, created_at, started_at, completed_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		value.ID, value.RunID, value.ProviderCallID, value.ToolName, value.ToolVersion, string(value.Arguments), value.Status, value.Risk, string(permissions), value.Idempotent, nullableString(value.IdempotencyKey), value.ErrorCode, value.ErrorMessage, formatTime(value.CreatedAt), nullableTime(value.StartedAt), nullableTime(value.CompletedAt), formatTime(value.UpdatedAt))
+	subjectKind := tool.NormalizeSubjectKind(value.SubjectKind)
+	var runID, workflowRunID any
+	if subjectKind == tool.SubjectWorkflowRun {
+		workflowRunID = value.RunID
+	} else {
+		runID = value.RunID
+	}
+	_, err = executor.ExecContext(ctx, `INSERT INTO tool_calls(id, run_id, workflow_run_id, provider_call_id, tool_name, tool_version, arguments_json, status, risk, permissions_json, idempotent, idempotency_key, error_code, error_message, created_at, started_at, completed_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		value.ID, runID, workflowRunID, value.ProviderCallID, value.ToolName, value.ToolVersion, string(value.Arguments), value.Status, value.Risk, string(permissions), value.Idempotent, nullableString(value.IdempotencyKey), value.ErrorCode, value.ErrorMessage, formatTime(value.CreatedAt), nullableTime(value.StartedAt), nullableTime(value.CompletedAt), formatTime(value.UpdatedAt))
 	if err != nil {
 		return fmt.Errorf("insert tool call: %w", err)
 	}
@@ -46,7 +53,16 @@ func (r *ToolRepository) Get(ctx context.Context, id string) (tool.Call, error) 
 }
 
 func (r *ToolRepository) ListByRun(ctx context.Context, runID string) ([]tool.Call, error) {
-	rows, err := r.db.QueryContext(ctx, toolCallSelect+` WHERE tc.run_id = ? ORDER BY tc.created_at, tc.id`, runID)
+	return r.ListBySubject(ctx, tool.SubjectChatRun, runID)
+}
+
+func (r *ToolRepository) ListBySubject(ctx context.Context, subjectKind tool.SubjectKind, subjectID string) ([]tool.Call, error) {
+	subjectKind = tool.NormalizeSubjectKind(subjectKind)
+	column := "tc.run_id"
+	if subjectKind == tool.SubjectWorkflowRun {
+		column = "tc.workflow_run_id"
+	}
+	rows, err := r.db.QueryContext(ctx, toolCallSelect+` WHERE `+column+` = ? ORDER BY tc.created_at, tc.id`, subjectID)
 	if err != nil {
 		return nil, fmt.Errorf("list tool calls: %w", err)
 	}
@@ -149,7 +165,7 @@ func finishToolCall(ctx context.Context, tx *sql.Tx, id string, expected, next t
 }
 
 func (r *ToolRepository) InterruptActive(ctx context.Context, at time.Time) (int64, error) {
-	result, err := r.db.ExecContext(ctx, `UPDATE tool_calls SET status='interrupted', error_code='APP_RESTARTED', error_message='应用退出时工具调用尚未完成', completed_at=?, updated_at=? WHERE status IN ('pending', 'awaiting_approval', 'running')`, formatTime(at), formatTime(at))
+	result, err := r.db.ExecContext(ctx, `UPDATE tool_calls SET status='interrupted', error_code='APP_RESTARTED', error_message='应用退出时工具调用尚未完成', completed_at=?, updated_at=? WHERE status IN ('pending','running') OR (status='awaiting_approval' AND run_id IS NOT NULL)`, formatTime(at), formatTime(at))
 	if err != nil {
 		return 0, fmt.Errorf("interrupt active tool calls: %w", err)
 	}
@@ -205,13 +221,13 @@ func appendToolEvent(ctx context.Context, tx *sql.Tx, event events.Envelope) err
 	return appendNextEventTx(ctx, tx, &event)
 }
 
-const toolCallSelect = `SELECT tc.id, tc.run_id, tc.provider_call_id, tc.tool_name, tc.tool_version, tc.arguments_json, tc.status, tc.risk, tc.permissions_json, tc.idempotent, COALESCE(tc.idempotency_key, ''), tc.error_code, tc.error_message, tc.created_at, tc.started_at, tc.completed_at, tc.updated_at FROM tool_calls tc`
+const toolCallSelect = `SELECT tc.id, COALESCE(tc.run_id,tc.workflow_run_id), CASE WHEN tc.workflow_run_id IS NULL THEN 'chat_run' ELSE 'workflow_run' END, tc.provider_call_id, tc.tool_name, tc.tool_version, tc.arguments_json, tc.status, tc.risk, tc.permissions_json, tc.idempotent, COALESCE(tc.idempotency_key, ''), tc.error_code, tc.error_message, tc.created_at, tc.started_at, tc.completed_at, tc.updated_at FROM tool_calls tc`
 
 func scanToolCall(row rowScanner) (tool.Call, error) {
 	var value tool.Call
 	var arguments, permissions, createdAt, updatedAt string
 	var startedAt, completedAt sql.NullString
-	if err := row.Scan(&value.ID, &value.RunID, &value.ProviderCallID, &value.ToolName, &value.ToolVersion, &arguments, &value.Status, &value.Risk, &permissions, &value.Idempotent, &value.IdempotencyKey, &value.ErrorCode, &value.ErrorMessage, &createdAt, &startedAt, &completedAt, &updatedAt); err != nil {
+	if err := row.Scan(&value.ID, &value.RunID, &value.SubjectKind, &value.ProviderCallID, &value.ToolName, &value.ToolVersion, &arguments, &value.Status, &value.Risk, &permissions, &value.Idempotent, &value.IdempotencyKey, &value.ErrorCode, &value.ErrorMessage, &createdAt, &startedAt, &completedAt, &updatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return tool.Call{}, fmt.Errorf("tool call not found")
 		}

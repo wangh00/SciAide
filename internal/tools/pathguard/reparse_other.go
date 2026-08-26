@@ -17,6 +17,9 @@ func rejectReparsePath(root, relative string) error {
 	for _, component := range splitPath(relative) {
 		current = filepath.Join(current, component)
 		info, err := os.Lstat(current)
+		if os.IsNotExist(err) {
+			return nil
+		}
 		if err != nil {
 			return fmt.Errorf("inspect workspace path: %w", err)
 		}

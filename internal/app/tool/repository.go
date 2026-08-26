@@ -16,6 +16,10 @@ type Repository interface {
 	FinishWithEvent(ctx context.Context, id string, expected, next CallStatus, result Result, errorCode, errorMessage string, at time.Time, event events.Envelope) error
 }
 
+type SubjectRepository interface {
+	ListBySubject(ctx context.Context, subjectKind SubjectKind, subjectID string) ([]Call, error)
+}
+
 type SchemaValidator interface {
 	Validate(schema, instance []byte) error
 }

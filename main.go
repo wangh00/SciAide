@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"embed"
+	"fmt"
 	"log"
+	"os"
 
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
@@ -19,7 +21,8 @@ var assets embed.FS
 func main() {
 	application, err := bootstrap.New(bootstrap.Options{})
 	if err != nil {
-		log.Fatalf("bootstrap SciAide: %v", err)
+		reportStartupError(fmt.Errorf("bootstrap SciAide: %w", err))
+		os.Exit(1)
 	}
 	defer application.Close()
 
@@ -48,6 +51,7 @@ func main() {
 		Bind: []interface{}{
 			application.SystemFacade,
 			application.ProjectFacade,
+			application.ProjectArchiveFacade,
 			application.ConversationFacade,
 			application.ModelFacade,
 			application.ChatFacade,
@@ -57,6 +61,10 @@ func main() {
 			application.SkillFacade,
 			application.AttachmentFacade,
 			application.KnowledgeFacade,
+			application.ArtifactFacade,
+			application.ResearchFacade,
+			application.PythonFacade,
+			application.WorkflowFacade,
 		},
 	})
 	if err != nil {

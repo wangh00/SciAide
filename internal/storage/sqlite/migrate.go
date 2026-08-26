@@ -25,6 +25,17 @@ type migration struct {
 }
 
 func Migrate(ctx context.Context, db *sql.DB) error {
+	migrations, err := loadMigrations()
+	if err != nil {
+		return err
+	}
+	if len(migrations) == 0 {
+		return fmt.Errorf("no embedded database migrations")
+	}
+	return migrateToVersion(ctx, db, migrations[len(migrations)-1].version)
+}
+
+func migrateToVersion(ctx context.Context, db *sql.DB, targetVersion int) error {
 	if _, err := db.ExecContext(ctx, `
         CREATE TABLE IF NOT EXISTS schema_migrations (
             version INTEGER PRIMARY KEY NOT NULL,
@@ -39,28 +50,20 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 	if err != nil {
 		return err
 	}
+	if len(migrations) == 0 || targetVersion <= 0 || targetVersion > migrations[len(migrations)-1].version {
+		return fmt.Errorf("unsupported database migration target %d", targetVersion)
+	}
 	for _, item := range migrations {
+		if item.version > targetVersion {
+			break
+		}
 		var existingChecksum string
 		err := db.QueryRowContext(ctx,
 			"SELECT checksum FROM schema_migrations WHERE version = ?", item.version,
 		).Scan(&existingChecksum)
 		switch {
 		case err == nil:
-			if existingChecksum != item.checksum {
-				// P0 shipped migration 000001 with one or two trailing LF bytes
-				// depending on the Windows checkout that built the binary. The SQL
-				// is byte-for-byte equivalent after trimming trailing newlines.
-				// Accept only these recorded legacy hashes; all other mutations fail.
-				if item.version == 1 && legacyBaselineChecksum(existingChecksum) && legacyBaselineChecksum(item.checksum) {
-					continue
-				}
-				// An early local 0.3.0 build applied migration 43 before its
-				// retired-Skill predicate was narrowed to builtin sources. Both
-				// forms create the same schema; accept only this exact checksum
-				// pair so those databases can start without weakening validation.
-				if item.version == 43 && visionFallbackMigrationChecksum(existingChecksum) && visionFallbackMigrationChecksum(item.checksum) {
-					continue
-				}
+			if !migrationChecksumAccepted(item, existingChecksum) {
 				return fmt.Errorf("migration %d checksum changed", item.version)
 			}
 			continue
@@ -78,6 +81,25 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 		}
 	}
 	return nil
+}
+
+func migrationChecksumAccepted(item migration, recorded string) bool {
+	if recorded == item.checksum {
+		return true
+	}
+	// P0 shipped migration 000001 with one or two trailing LF bytes depending
+	// on the Windows checkout. Only the two known equivalent hashes are valid.
+	if item.version == 1 && legacyBaselineChecksum(recorded) && legacyBaselineChecksum(item.checksum) {
+		return true
+	}
+	// An early 0.3.0 build applied migration 43 before its retired-Skill
+	// predicate was narrowed. The two known forms create the same schema.
+	if item.version == 43 && visionFallbackMigrationChecksum(recorded) && visionFallbackMigrationChecksum(item.checksum) {
+		return true
+	}
+	// Early P7.2 development builds embedded migration 54 with one extra
+	// trailing LF. Both byte sequences create the same tables and index.
+	return item.version == 54 && pythonEnvironmentMigrationChecksum(recorded) && pythonEnvironmentMigrationChecksum(item.checksum)
 }
 
 type transactionBeginner interface {
@@ -187,6 +209,16 @@ func visionFallbackMigrationChecksum(value string) bool {
 	}
 }
 
+func pythonEnvironmentMigrationChecksum(value string) bool {
+	switch value {
+	case "59aac83bba4ebcc4bf7d17a757bd93be29910948e7828fb6031e4914b8e72ea2",
+		"1fd30be2634c1e35925f63947bc54b2f26cb9f7bfeac4dc80171525ca331d3d9":
+		return true
+	default:
+		return false
+	}
+}
+
 func loadMigrations() ([]migration, error) {
 	entries, err := fs.ReadDir(migrationFiles, "migrations")
 	if err != nil {
@@ -224,4 +256,16 @@ func loadMigrations() ([]migration, error) {
 		}
 	}
 	return items, nil
+}
+
+// CurrentSchemaVersion is the latest embedded database migration version.
+func CurrentSchemaVersion() (int, error) {
+	items, err := loadMigrations()
+	if err != nil {
+		return 0, err
+	}
+	if len(items) == 0 {
+		return 0, fmt.Errorf("no embedded database migrations")
+	}
+	return items[len(items)-1].version, nil
 }

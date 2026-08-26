@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"math"
 	"net/url"
@@ -26,6 +27,27 @@ import (
 type projectIndex struct {
 	db      *sql.DB
 	version IndexVersion
+}
+
+func (i *projectIndex) EvidenceChunk(ctx context.Context, documentID, attachmentID, chunkID string) (EvidenceChunk, error) {
+	documentID, attachmentID, chunkID = strings.TrimSpace(documentID), strings.TrimSpace(attachmentID), strings.TrimSpace(chunkID)
+	if documentID == "" || attachmentID == "" || chunkID == "" {
+		return EvidenceChunk{}, fmt.Errorf("knowledge evidence identity is required")
+	}
+	var value EvidenceChunk
+	err := i.db.QueryRowContext(ctx, `SELECT c.document_id,c.attachment_id,c.id,d.original_name,d.mime_type,c.locator,c.title,c.content,c.content_sha256,c.source_start,c.source_end FROM chunks c JOIN documents d ON d.document_id=c.document_id WHERE c.document_id=? AND c.attachment_id=? AND c.id=?`, documentID, attachmentID, chunkID).Scan(&value.DocumentID, &value.AttachmentID, &value.ChunkID, &value.SourceName, &value.MIMEType, &value.Locator, &value.Title, &value.Content, &value.ContentSHA256, &value.SourceStart, &value.SourceEnd)
+	if errors.Is(err, sql.ErrNoRows) {
+		return EvidenceChunk{}, fmt.Errorf("knowledge evidence chunk not found")
+	}
+	if err != nil {
+		return EvidenceChunk{}, fmt.Errorf("read knowledge evidence chunk: %w", err)
+	}
+	digest := sha256.Sum256([]byte(value.Content))
+	if hex.EncodeToString(digest[:]) != value.ContentSHA256 || strings.TrimSpace(value.Content) == "" {
+		return EvidenceChunk{}, fmt.Errorf("knowledge evidence chunk failed integrity validation")
+	}
+	value.IndexVersionID = i.version.ID
+	return value, nil
 }
 
 const queryEmbeddingCacheLimit = 512

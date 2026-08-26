@@ -38,7 +38,7 @@ if ($generatedBindingImports) {
 
 Write-Host "== Go format =="
 $goFiles = Get-ChildItem -Path . -Recurse -Filter "*.go" -File |
-    Where-Object { $_.FullName -notmatch "[\\/](artifacts|frontend[\\/]node_modules)[\\/]" }
+    Where-Object { $_.FullName -notmatch "[\\/](\.codex-tmp|artifacts|frontend[\\/]node_modules)[\\/]" }
 $unformatted = $goFiles | ForEach-Object {
     $output = & gofmt -l $_.FullName
     if ($LASTEXITCODE -ne 0) {
@@ -55,10 +55,14 @@ Write-Host "== Frontend type check =="
 Push-Location frontend
 try {
     Invoke-Native npm run typecheck
+    Invoke-Native npm test
     Invoke-Native npm run build
 } finally {
     Pop-Location
 }
+
+Write-Host "== OpenScience Skill manifest =="
+& (Join-Path $PSScriptRoot "sync-openscience-skills.ps1") -Check
 
 # main.go embeds frontend/dist, so frontend build must precede Go package checks.
 Write-Host "== Go vet =="

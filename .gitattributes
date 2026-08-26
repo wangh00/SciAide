@@ -17,3 +17,7 @@
 *.png binary
 *.ico binary
 *.exe binary
+
+# This vendored tree is verified by a byte-for-byte SHA256 manifest. Preserve
+# upstream line endings and whitespace exactly on every platform.
+internal/opensciskill/defaultskills/** -text whitespace=-trailing-space,-blank-at-eof

@@ -1,4 +1,4 @@
-# SciAide 威胁模型（P1/P2）
+# SciAide 威胁模型
 
 ## P1 已落实的控制
 
@@ -132,14 +132,14 @@ React WebView
 
 ## P4 Skill 已落实的控制
 
-- Codex 风格 `SKILL.md` 只作为导入源，在随机暂存目录中归一化为版本化 SciAide 包；不会把源目录或绝对路径交给模型。
-
-- Run 仅为显式选择或确定性 trigger 命中的 Skill 读取完整正文，并在首次模型请求前保存正文、包路径、来源归档及哈希的不可变快照。
-- catalog 有界且明确标记省略项；显式 Skill 未知、未启用或不可用时记录状态，不允许静默伪装为已加载。
-- `builtin.skill.resource.read_text` 只接收当前 ToolCall 隐式 Run、已选 Skill ID 和规范包内相对路径；拒绝绝对路径、`..`、反斜杠、Windows 保留名/ADS 字符、符号链接、二进制和超限文件。
-- 资源读取先复核当前安装包哈希；包被替换或卸载后仅从 Run 快照绑定、重新校验 SHA256 的原始来源归档读取，并复核归档内 `SKILL.md` 内容哈希。
-- Skill 正文与资源均为 contextual user 数据。资源读取仍是普通 ToolCall：Plan 模式需要用户确认，Full Access 也不能绕过 Registry、Schema、超时、结果大小及取消边界；Skill Manifest 权限不参与授权。
-- 内置科研 Skill 的规范原件只读嵌入二进制，但落地时仍经过普通包的暂存、校验、来源归档和原子安装；同版本用户包不会被启动流程覆盖，内置正文也不获得更高指令或工具权限。
+- 默认 OpenScience Skill、references、assets、scripts、`LICENSE` 和 `NOTICE` 只读嵌入 EXE，不在启动时复制或执行；默认正文与第三方正文具有相同的不可信上下文等级。
+- 目录仅发现 `project > user > installed > default` 四类来源；Project 路径限制在当前 Workspace 及配置的规范相对 `skills.paths`，拒绝绝对路径和 Workspace 逃逸。当前不扫描 `.claude/skills`。
+- 新 Run 只获得分类计数、固定科研路由和最多 16 个重排候选。召回使用当前消息、最近三条用户任务和同会话最近真实加载项，但最近项不会自动激活；目录元数据明确标为不可信数据，完整 `SKILL.md` 不在模型调用 `builtin.skill.load` 前进入上下文。
+- 首次加载在一个事务中保存完整正文、来源、分类、内容/全包 SHA256 和 ToolCall 关系；同一 Run 的后续分页从该快照读取。磁盘包在加载前重算哈希，缓存过期时刷新一次，禁止把新正文与旧 provenance 组合。
+- `builtin.skill.resource.list` 与 `builtin.skill.resource.read_text` 都接受当前 ToolCall 隐式 Run 和已加载 Skill 名称；清单只枚举哈希匹配包内的安全常规文件，读取工具另要求规范包内相对路径并拒绝绝对路径、`..`、反斜杠、Windows 保留字符、符号链接、非 UTF-8、NUL 和超限文件。包变化后失败关闭。
+- references、assets、scripts、章节索引和 Skill ToolResult 都是 contextual user 数据。脚本只能由资源工具作为文本返回；Skill 机制没有进程、Shell、Python 或脚本执行入口。frontmatter 的 `allowed-tools` 仅与当前 Registry 做能力交集诊断，不能改变匹配工具的权限定义。
+- Git 安装只接受受限 HTTPS/GitHub 简写和固定 ref，克隆有 2 分钟外层超时；安装前限制文件数/单项/总体积，拒绝链接、路径逃逸和注入/灾难性模式。警告内容必须绑定已审查 commit SHA 二次确认后才原子发布，替换和卸载进入可恢复归档。
+- 旧 `run_skill_contexts/run_skills` 只用于历史 Run 和旧归档兼容。历史 Run 若存在旧快照，不注入新动态目录；新 Run 不执行旧 `$skill-id`、关键词 trigger、版本绑定或依赖/冲突选择路径。
 
 ## 上下文压缩加固
 
@@ -176,19 +176,60 @@ React WebView
 - 只有输入框完整内容精确匹配已注册 `/command` 时才执行本地动作；未知名称、带空格参数、路径和普通斜杠文本不被解释为特权命令。
 - 本地命令不创建 Message、Run 或 ToolCall，不进入模型上下文，也不接受模型、文档、Skill 或 MCP 返回内容动态注册命令。
 - `/mcp` 二级面板只读取脱敏后的 Server 与 CapabilitySnapshot；开启状态来自 `ready/degraded` 运行态而不是配置文本，Tools/Resources/Prompts 仍视为不可信显示数据，面板不读取 SecretEnv 明文。
-- MCP 启动/关闭继续调用既有 Service 生命周期接口，不能绕过 enabled、trust、SecretStore、Transport 或 ToolRegistry 边界。Skill 二级列表只允许把当前项目已启用且完整可用的 `$skill-id` 插入输入框，不能在面板内暗中启用 Skill。
+- MCP 启动/关闭继续调用既有 Service 生命周期接口，不能绕过 enabled、trust、SecretStore、Transport 或 ToolRegistry 边界。Skill 二级列表只显示 `entry=true` 且允许加载的动态 Skill，选择后插入 `Use the <name> skill:`；它不能暗中启用 Skill 或直接加载正文。
 - `/compact` 仅允许最新 Run 处于终态时执行，固定该 Run 的消息边界并复核操作期间会话未切换；已有 checkpoint 必须先通过 SHA256 完整性校验。
 - 手动压缩继续使用无 Tool Definition 的科研摘要请求，历史以不可信 JSON 数据输入。每轮保存独立 revision 和精确边界，原始消息、Provider Turn、ToolCall 与 Citation 均不删除。
 - 前端只接收 revision、边界和来源计数，不接收 checkpoint 摘要正文；模型调用 Token 继续计入最近 Run 的用量统计。
+
+## P6 科研发现、证据与产物控制
+
+- 公共科研 Connector 只允许注册来源的固定 Host 和结构化查询，模型不能传入任意 URL；取消、30 秒外层超时、按 Host 限速、有界重试、响应上限和缓存集中在共享网络层。
+- 在线命中、来源元数据、摘要和开放全文均是不可信研究数据。候选只有经过用户显式纳入、项目 Attachment/Knowledge 索引及 Run/Chunk/Quote SHA256 校验后才能取得可信 Citation 身份。
+- 去重优先使用规范强标识符并保留每条来源记录；冲突字段不会被静默覆盖。用户修订保存历史，模型不得补猜缺失书目信息。
+- 证据矩阵中的研究事实必须绑定当前书目的本地 Chunk；元数据/摘要与全文使用不同证据等级。模型条目必须先处于 `pending`，审核只能改变状态，正文、来源、Quote、哈希和定位快照不可更新。
+- ArtifactVersion、ArtifactExport、Lineage、Citation、书目和证据快照在生成后不可变；下载使用 SHA256 校验后的原子 no-replace 发布，失败或竞态不会覆盖已有用户文件。
+
+## P6.6 项目归档与动态 Skill 快照控制
+
+- 动态 Skill 保持单一用户可见 Research Agent；程序最多召回 20 个、模型最多看到 16 个候选，这不是提前选中或批量注入正文。模型逐个加载的每个 Skill 都形成独立、不可变且有序的 `run_dynamic_skills` 快照。
+- `.sciaide-project` 是不可信 ZIP 输入。导入限制条目数、单项/总大小和压缩比，拒绝路径穿越、重复/大小写碰撞、控制字符、Windows 设备名、尾随点/空格、超长组件、链接、未知和缺失条目，并逐项验证 Manifest 与 SHA256。
+- 归档数据库必须通过 SQLite 头、必需 Table、迁移名称/checksum、项目身份和外键检查；View 不能冒充 Table。项目及索引 ID 只在隔离暂存中重映射，历史证据和 Artifact 快照保持原语义。
+- 归档不包含 API Key、模型 Header、MCP 配置/Secret、识图或 Embedding 凭据、权限 Grant、pending Approval、第三方 Skill 包和临时缓存。历史模型恢复为禁用占位、会话恢复为 `Plan`；旧 Skill 绑定仅按本机完全匹配的哈希重新绑定，动态 Run Skill 正文/provenance 快照则随 Run、Project 和 ToolCall 一起重映射。
+- 恢复默认创建新项目。文件、数据库和索引全部通过后才原子 no-replace 发布 Workspace；全局数据库合并失败会移走 Workspace。启动 marker 恢复清理中断暂存并隔离未提交目录，不暴露半恢复项目。
+
+## P7 本地执行、Python 与 Workflow 控制
+
+- `builtin.shell.execute` 与 `builtin.python.execute` 是 Registry 中固定的高风险、非幂等工具；模型不能注册解释器、修改权限定义或绕过 JSON Schema、PolicyEngine、审批、ToolExecutor 和 ToolCall 持久化。Plan 模式审批卡默认展示完整参数、运行时、Workspace 工作目录与超时。
+- 工作目录、Python 脚本和声明产物必须是当前 Workspace 下的规范相对路径，拒绝 `.sciaide`、绝对路径、symlink、junction 和 reparse point。Shell/Python 获批后仍拥有当前用户权限，路径校验不能阻止命令主动读取 Workspace 外绝对路径或联网，因此该执行器不是强安全沙箱，不能运行不可信代码。
+- 子进程环境从核心 allowlist 构造，不继承完整应用环境，名称包含 `KEY`、`SECRET` 或 `TOKEN` 的变量被排除；PowerShell 使用 `-NoProfile`，不注入模型、MCP、视觉渠道或 Credential Manager 密钥。残余风险是普通允许变量及用户目录本身仍可能包含敏感信息。
+- Windows 在进程挂起时先纳入带 kill-on-close 的 Job Object 再恢复，启动/纳管与应用关闭串行化；超时、取消、应用退出和根进程正常结束后都终止整个进程树。`CTRL_BREAK` 仅为 best effort，最终由 Job Object 强制清理。
+- stdout/stderr 分流并持续排空，分别只向模型保留前 64 KiB；总字节数、SHA256 和截断状态进入审计，结束后管道另有 2 秒 drain timeout。输出内容仍是不可信 Tool 数据，不能扩大权限。
+- 解释器路径、版本与文件 SHA256，脚本路径/SHA256或内联命令 SHA256、工作目录、timeout、环境变量名称、PID、退出码、终止原因及输出摘要进入 `process_execution_audits`。审计不额外保存命令正文；遗留活动记录在启动时标为 `app_shutdown`。
+- 只有成功退出、显式声明且内容在本轮新增或改变的 Workspace 常规文件才能进入 Artifact；失败、取消、超时、旧内容、未声明文件和 `.sciaide` 路径均不登记。
+- 产品策略规定网络默认允许：Shell、一次性 Python 和项目 Kernel 调用获准后可直接联网，不追加 `network.domain` 弹窗、域名白名单或代理配置；已知目标仍可进入权限快照和执行审计。该策略不代表远端可信，也不阻止获准脚本上传其可读取的数据；Plan 模式依靠完整调用确认降低风险，Full Access 下该风险由用户显式选择承担。应用密钥仍不进入子进程环境。
+- 项目虚拟环境位于托管项目私有目录，环境记录固定基础解释器 SHA256、版本、架构、`pip freeze` 和锁定包。创建、重建和安装使用同卷暂存及原子替换；`pip install` 只能通过独立高风险 Tool 审批，Skill 和 Workflow 不能把依赖安装藏在普通 Kernel 步骤中。
+- Kernel 按项目串行执行并运行在 Windows Job Object 内，默认限制完整进程树为 1 GiB，取消、超时、空闲、`MemoryError` 和应用关闭后淘汰进程。该限制不约束 CPU、文件系统或网络，不构成不可信代码沙箱。
+- Kernel 声明输入必须是 Workspace 常规文件，执行期间设为只读并在结束后复核 SHA256；输出只允许新建于 `analysis-output/`，失败时清理声明文件和本轮图片。只读文件属性不是对恶意当前用户进程的强隔离，仍依赖用户只批准可信分析代码。
+- Kernel 结果记录代码、结构化输入、文件输入、环境、输出和异常快照哈希。总 `reproductionSha256` 按声明顺序使用内容摘要而忽略易变路径名，路径到 SHA256 的完整映射仍保存在独立审计/provenance 中；该哈希证明这些记录一致，不证明科学结论正确，也不证明远程响应可重现。
+- Workflow 定义、模板和输入均是不可信数据。编译器拒绝循环、类型错误、未知或变化的 Tool、路径逃逸、嵌套密钥和超大图，并冻结 Tool Schema、风险、权限、版本和幂等属性；执行时仍重新进入统一 Tool 权限管道。
+- Workflow 检查点只在步骤结果和事件事务提交后推进。重启不重放已提交步骤；未提交的幂等步骤可恢复，非幂等活动步骤进入 `outcome_unknown`，用户明确确认潜在副作用前不能重试。人工决策与审批使用条件提交防止双击或并发请求重复推进。
 
 | Prompt 注入诱导工具执行 | P2 | JSON Schema、PolicyEngine、Approval、预算 |
 | 路径穿越和 junction/symlink | P2 | 已实现 PathGuard、`os.Root`、Workspace 根和安全回归测试；写路径仍在 P2.6 |
 | SSRF 和 DNS rebinding | P2/P3 | NetworkClient、地址复查、域名/端口权限 |
 | 恶意 MCP 子进程或远端服务 | P3 | 已实现首次信任、SecretEnv 隔离、最小环境、生命周期恢复和统一权限管道；Job Object/DNS rebinding 仍需发布加固 |
-| Skill 供应链、上下文污染和自动脚本执行 | P4 | P4.1/P4.2 已实现严格 Manifest/内容/全包哈希、随机暂存、安全 ZIP 解压、显式替换、来源归档、引用保护和脚本不执行；P4.3 仅渐进读取选中正文，以 contextual user 优先级注入，并在模型请求前保存不可变 Run 快照；签名发布者与在线市场仍属后续生态能力 |
+| Skill 供应链、上下文污染和自动脚本执行 | P4/动态 Skill | OpenScience 默认资源只读嵌入；Project/User/Git 来源受路径、大小、链接、内容审查和 SHA256 约束；正文按需加载并快照，资源只读 UTF-8 文本，脚本无执行入口；签名发布者与在线市场仍属后续生态能力 |
 | 超长会话裁剪导致任务状态丢失 | P4 加固 | 分层上下文预算、完整 Run 组、无工具 checkpoint、消息边界、revision、SHA256 和失败关闭；模型摘要的语义损失仍需人工复核 |
 | 恶意论文中的指令 | P5 | 数据边界、来源标记、系统规则优先级 |
-| Python 逃逸和资源耗尽 | P7 | 明确非沙箱、进程树/资源限制、强授权 |
+| 公共数据库恶意元数据、SSRF 或来源降级 | P6.3/P6.4 | 固定 Host、结构化 Connector、网络上限、部分失败、显式纳入、本地 Citation 校验 |
+| 模型伪造书目或篡改证据审核 | P6.5 | 字段来源、修订历史、本地 Chunk、证据等级、pending 起点和不可变数据库触发器 |
+| 多 Skill 上下文挤占或错误路由 | 动态 Skill | 当前任务+最近三条用户任务+同会话最近加载项、中英文 token/n-gram/科研别名召回最多 20 项，模型可见最多 16 项并最终重排；长正文按章节加载且完整快照，最近项不自动继承；模型仍可能漏选或错选，用户可用 `/skill` 显式指定 |
+| 恶意项目归档、凭据泄露和半恢复 | P6.6 | 无密钥快照、隔离预检、ZIP/SQLite/SHA256 校验、ID 重映射、原子发布和启动恢复 |
+| Shell/Python 越界访问、联网外传、凭据泄露和子进程残留 | P7.1 | 工具调用授权、Workspace 输入路径校验、最小无密钥环境、Windows Job Object、取消/超时/关闭清理、输出与执行审计；联网按产品策略默认允许，仍是当前用户权限而非强沙箱 |
+| Python 依赖漂移、Kernel 污染、内存耗尽和半产物 | P7.2 | 独立虚拟环境、解释器/冻结锁/环境指纹、安装单独审批、项目串行 Kernel、1 GiB 进程树预算、输入复核、失败输出回滚、路径无关复现哈希、真实 XLSX 双项目重放和停止/重启/空闲回收 |
+| 上游 Skill 虚假宿主能力、隐式脚本或凭据承诺 | P7.3 | 派生转换审计、资源先物化检查、正式 Tool 审批、禁止自动凭据/计费/托管 API、未知能力降级为用户配置的外部服务 |
+| 恶意 Workflow、恢复重放和未知副作用 | P7.4/P7.5 | 版本化 Schema、静态图/类型/路径/密钥/体积校验、冻结 Tool 契约、事务检查点、幂等恢复、`outcome_unknown`、副作用确认和并发条件提交 |
+| 科研流程把在线候选或模型文本提升为可信证据 | P7.6 | 人工候选和 Citation 选择、P6 本地 Chunk/证据哈希复核、不可变 Artifact lineage、确定性 DOCX/PDF 导出和重启闭环测试 |
 | 更新包替换 | P8 | 代码签名、更新签名、SBOM、回滚 |
 
 ## 6. P0 验证案例

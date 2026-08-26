@@ -1,5 +1,65 @@
 # Changelog
 
+## [Unreleased]
+
+## [0.5.0] - 2026-08-26
+
+### Added
+
+- 完成 P6.1 可信 Artifact 核心：新增 Artifact、不可变 ArtifactVersion、按 SHA256 去重的 Blob、Lineage 与 Citation snapshot；项目元数据以 SQLite 为唯一事实源，真实字节存入 `<Workspace>/.sciaide/artifacts/objects`。
+- 增加项目级“科研产物”窗口，支持列表、文本/图片有界预览、版本历史、来源摘要、可信引用、完整性检查、下载、重命名、回收站与恢复。
+- 完整助手回答可显式保存为 Markdown Artifact；Workspace 文件可显式登记或为现有产物创建新版本。ToolResult 只有声明经过项目边界校验的 `workspacePath` 才自动登记，原有附件/知识来源引用不受影响。
+- 完成 P6.2 确定性文档导出：每个不可变 ArtifactVersion 可派生 DOCX/PDF，支持 GB/T 7714-2015 与 APA 7，导出历史可按版本查看和下载。
+- 增加 Markdown、PDF、DOCX、XLSX、CSV/TSV 结构化预览，按标题、段落、列表、引用、代码和有界表格块展示；图片及不可提取二进制明确拒绝文档导出。
+- 完成 P6.3 公共科研数据库 Connector：接入 OpenAlex、Crossref、arXiv、PubMed、Europe PMC 和 Semantic Scholar，并以固定 `Catalog / Search / Fetch` Tool 暴露统一能力。
+- 完成 P6.4 项目级文献发现：支持多源查询、部分失败、保守去重、来源快照、纳入/排除/笔记，以及经过校验的开放全文或披露型元数据附件导入知识库。
+- 完成 P6.5 规范书目与证据矩阵：保存多来源字段快照、冲突选择、用户修订历史、本地 Chunk 证据定位、证据等级和待复核/已核验/已拒绝状态。
+- Message Citation 与 Artifact Citation 增加不可变规范书目和证据等级快照；GB/T 7714-2015 与 APA 7 可渲染完整已知字段，缺失字段继续明确披露且不猜测。
+- 增加 OpenScience 动态 Skill 体系：311 个默认 Skill 及 `LICENSE`/`NOTICE` 共 1,624 个文件只读嵌入 EXE；支持 Project/User/Git Installed/Default 四级来源和同名覆盖。
+- 增加 `builtin.skill.load` 语义加载工具与 `builtin.skill.resource.read_text` 受限文本资源工具；新 Run 仅获得分类摘要和最多 16 个语义候选，完整正文在模型实际加载后才保存为不可变快照。
+- Skills 管理页增加当前有效包的只读源码浏览器：Default、Installed、User 与 Project 来源均展示完整目录树，UTF-8 文本可逐文件查看，二进制/超大文件仅展示元数据，路径逃逸与目录发现后的包哈希漂移会失败关闭。
+- 增加版本化 320 条中英双语 Skill 路由评测集、结构化 Run 路由审计及项目级实际加载指标；当前门禁为 Recall@16 98.5%、MRR 0.834、无关请求误召回 0%、否定误命中 0%。
+- 增加 311 个默认 Skill 能力矩阵和管理页能力筛选；P7 前的初版分类随后由 P7.3 `p7.3-v2` 执行边界与能力审计取代。
+- 增加 OpenScience `2.0.31` 逐文件来源 Manifest 与 `scripts/sync-openscience-skills.ps1`；默认只检查 1,624 个文件、许可证和 SHA256 漂移，显式 `-Update` 才经暂存验证后替换内嵌树。
+- 增加版本化 `.sciaide-project` 无密钥项目归档：携带一致性项目数据库、附件、文档缓存、知识索引、Artifact 原件/导出和科研关系，默认安全恢复为新托管项目。
+- 完成 P7.1 本地进程执行基础：新增高风险 `builtin.shell.execute` 与 `builtin.python.execute`，支持 PowerShell/CMD、Python 内联代码或 Workspace 脚本、1～300 秒超时、stdout/stderr 分流及显式产物登记。
+- 增加本地进程执行审计迁移 `000053`：保存解释器身份与 SHA256、脚本/命令 SHA256、工作目录、环境变量名称、PID、退出码、终止原因和完整输出统计，并纳入项目归档重映射与启动恢复。
+- 完成 P7.2 项目级 Python 科研环境：新建环境改为 `<Workspace>/.sciaide/python/venv`，旧版全局环境继续兼容；支持直接绑定已有 venv，外部环境只登记/验证/运行，不删除、不重建且不安装依赖。选择解释器对话框取消时保持现有状态，不再因空解释器列表导致白屏。
+- 增加持久 Python Kernel：按项目串行保持状态，结构化返回 stdout/stderr、JSON、表格、异常和 Matplotlib PNG；记录代码、输入、输出、环境及异常快照复现哈希，失败时回滚声明输出。
+- 增加“XLSX 清洗与描述统计”参考 Workflow：使用项目 Kernel 和 Python 标准库生成清洗 CSV、统计 CSV、SVG 图及可重放脚本，四类输出自动登记 Artifact，不要求默认安装 pandas/openpyxl。
+- 完成 P7.3 默认 Skill 原生化：238 个执行型 Skill 增加 SciAide 执行边界，脚本需先物化和检查再进入正式 Python/Shell Tool；移除上游自动凭据、自动计费和虚假宿主 API 承诺。
+- 完成 P7.4 版本化 Workflow Schema、静态编译与 Studio：支持 Tool、MCP、Shell、Python、人工确认及候选/Citation 选择节点，保存不可变定义和 Tool 契约快照。
+- 完成 P7.5 可恢复 Workflow Runtime：增加 Run/Step 状态机、输入输出快照、幂等键、逐步事件、审批、暂停/恢复/取消、重启恢复、未知结果和副作用确认重试。
+- 完成 P7.6 参考科研 Workflow：串联公共数据库检索、人工筛选、材料导入、知识索引、本地证据、Citation、项目 Python 分析、CSV/SVG Artifact、Markdown 报告和 DOCX/PDF 导出。
+- Workflow Run 详情增加环境 Manifest 与产物图谱，从已提交环境、Kernel、Citation、Artifact 和正式导出快照展示可复核来源；失败或未完成步骤不会生成推测证据。
+
+### Changed
+
+- Wails 发布构建明确使用 `npm ci --include=dev` 安装前端编译依赖，避免宿主 npm 的 production/omit 配置导致 `tsc` 或 Vite 缺失。
+- 固化联网授权策略：联网 Tool、Shell、一次性 Python 和项目 Kernel 在其工具调用获准后默认可以访问网络，不再追加逐域名审批、白名单或独立网络配置；依赖安装仍因修改项目环境而显式确认，应用密钥仍不下传子进程。
+- Kernel 总复现哈希改为按声明顺序使用输入/输出内容摘要，不再因不同项目或 Workflow Run 的文件名变化而漂移；完整路径与 SHA256 映射继续单独保存在审计和 Artifact provenance 中。
+- Kernel 声明输出与 Matplotlib 图片统一写入私有执行 staging，并作为单一批次无覆盖发布；同项目 Kernel 与环境创建、重建、安装、删除共用串行锁。目标被外部进程抢占时只回滚仍属于本次执行的文件，不覆盖或删除外部同名内容；启动恢复只清理严格 UUID 命名且整棵超过 10 分钟未更新的 staging。
+- Artifact 保存使用同卷随机暂存、SHA256 发布对象和 SQLite 事务提交；成功 ToolResult 落库前先把声明产物冻结为不可变内容对象并校验工具声明 SHA256，登记失败可从冻结字节幂等恢复，不再重新读取可变 Workspace 路径。启动时清理中断暂存和无引用对象。
+- Artifact 来源外键在会话删除时仅清除活链接，模型、协议、Skill、Run/Message/Tool ID 和引用内容快照继续保留，科研产物不会随 Conversation 删除。
+- Tool 产物登记复用调用时的 Workspace 权限资源范围；只有通过既有 Run 绑定、证据哈希和项目身份校验的知识引用会进入 Artifact 可信引用快照。
+- 导出使用源版本 SHA256 校验后的私有临时快照，生成后重新打开验证，再写入内容寻址对象；相同参数字节不一致会被拒绝，用户下载目标已存在时不会覆盖。
+- 正式导出在对象发布前拒绝无可读正文、超出解析上限的文档及越界表格；宽表按最多 8 列确定性分段，后续分段重复首列，DOCX 重复表头，PDF 超高单元格按页切片且保留完整文本。
+- 表格布局修订使用独立生成器版本 `p6.2-v2`；已有 `p6.2-v1` 导出继续作为不可变历史记录保留，不会被新字节覆盖或触发错误的非确定性冲突。
+- 只有可信 Citation snapshot 中存在的 `[K-...]` 标记会转为正式引文；缺少作者、年份、期刊或 DOI 时明确标注字段不足，不从正文或文件名伪造书目元数据。
+- Connector 共享网络层统一执行固定 Host、调用取消、30 秒超时、限速、`Retry-After`/429/5xx 有界重试、8 MiB 响应上限、短期缓存和来源错误分类；任一来源失败不会伪装成零结果。
+- 在线候选只有用户显式纳入并进入现有 Attachment、Knowledge、Chunk 与证据哈希链后才能成为可信引用；没有全文时生成的 Markdown 明确标记为元数据/摘要，不伪装成论文全文。
+- 模型生成的证据条目只能以 `pending` 创建；正文、provenance、证据等级、原文、哈希和定位快照不可更新，核验操作只能改变审核状态。
+- Skill 生产路径改为 OpenScience 式模型语义路由和按需加载，来源优先级固定为 `project > user > installed > default`；语义候选提示以不可变 Run 快照持久化，审批恢复不会因目录或策略变化发生路由漂移；移除新 Run 的旧关键词触发、版本绑定、依赖/冲突预协调和 `$skill-id` 机制，旧 schema-1/2 Run 快照继续只读兼容。
+- Skill 召回改为中英文对称概念路由：中文请求可召回英文 Skill，英文请求也可召回中文元数据 Skill；增加常见英文词形归一化、明确否定排除及 `routing-aliases` 双语扩展字段，并建立基于完整内嵌目录的 Recall@16/MRR 回归基线。
+- Skill 管理页改为动态目录搜索、分类/来源筛选、逐项允许加载、全开/全关、刷新、User Skill CRUD 和 Git 安装；Git 仓库固定 commit SHA 并执行本地安全审查，警告项必须针对同一 SHA 二次确认。
+- Skill scripts、references 和 assets 始终作为不可信文本资料处理；只有已加载且哈希匹配的包可读取 UTF-8 资源，脚本不会由 Skill 机制自动执行。当前明确不扫描 `.claude/skills`。
+- 默认 Skill 同步与能力审计升级为 `p7.3-v2`：当前 311 项为原生可用 4、需要本地依赖 200、需要外部服务 87、当前不可用 20、未审计 0；未知 `allowed-tools` 只降级为用户配置的 MCP/API，不伪装成 SciAide 托管能力。
+- Knowledge worker 关闭时先取消活动解析，再等待 SQLite claim 临界区退出后停止主循环，避免 Windows 上快速启动/退出偶发残留数据库文件句柄。
+- 项目恢复在隔离目录校验 Manifest、路径、大小、压缩比、SHA256、SQLite 迁移历史、外键和对象关系后才发布；导出文件和恢复 Workspace 使用原子 no-replace，竞态目标不会被覆盖。
+- 项目归档明确排除 API Key、MCP Server/Secret、识图渠道、Embedding 凭据/查询向量、权限授权、待审批、第三方 Skill 包和可重建临时缓存；历史模型只恢复为禁用占位。旧 Skill 绑定仍仅按本机哈希匹配重绑，动态 Run Skill 的完整正文与 provenance 快照随 Run 安全重映射。已经冻结到成功 ToolResult 但暂未登记为 ArtifactVersion 的内容对象也进入归档，恢复后可按原字节身份补登记。
+- 本地子进程改用核心环境 allowlist 并排除 `KEY`/`SECRET`/`TOKEN` 变量；Windows 采用挂起启动、Job Object 纳管后恢复及 kill-on-close，超时、取消、应用退出和正常根进程结束都会清理后台后代。输出达到 64 KiB 保留上限后仍持续排空并计算完整 SHA256。
+- Shell/Python 审批卡默认展开完整参数，显示运行时、Workspace 工作目录和超时，并明确提示本机执行器不是强安全沙箱。只有成功退出且内容由本轮新增或改变的显式声明文件才能进入 Artifact。
+
 ## [0.4.0] - 2026-08-23
 
 ### Added
@@ -49,6 +109,8 @@
 - OpenAI 兼容识图兜底使用非流式请求，避免部分兼容网关在 `stream:true` 下保持连接但不返回事件、最终被误报为超时。
 - 识图兜底失败现在在最终提示中按自定义模型列出安全的限流、鉴权、超时或像素不可用原因；未配置启用渠道时单独提示用户添加多模态模型。
 - 修复早期本地构建已经执行旧版迁移 `000043` 后，新 EXE 因收紧旧 Skill 清理条件而报 `migration 43 checksum changed` 并在窗口创建前退出；迁移器仅兼容旧版与当前版本两个精确 SHA256，其他篡改仍拒绝启动。
+- 修复早期 P7.2 开发构建以额外结尾换行执行迁移 `000054` 后，新 EXE 报 `migration 54 checksum changed` 并在窗口创建前退出；迁移器仅兼容两个已验证为同一 schema 的精确 SHA256，其他迁移篡改继续拒绝启动。
+- Windows GUI 在数据库或其他启动初始化失败时会显示包含原始原因的错误弹窗，不再因标准错误不可见而表现为无声退出。
 - 修复识图兜底的状态与构建边界：自定义渠道数据库写入失败时恢复原凭据，删除失败时恢复已移除凭据；模型配置或 Key 变化后重新探测图片能力，永久渠道错误不再重复请求。
 - 修复普通“纯文本模型/无法查看图片”回复未触发兜底，以及同名用户 Skill 被旧内置包迁移误删；移除编译期视觉配置后，检查与发布不再受外部配置文件影响。
 - 修复兼容网关以 HTTP 200 返回 `[Unsupported Image]` 时被误判为识图成功：主模型和识图兜底渠道都会识别像素不可用标记，清除错误草稿、缓存主模型不支持图片，并按渠道优先级继续回退。

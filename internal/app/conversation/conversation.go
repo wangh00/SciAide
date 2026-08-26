@@ -83,26 +83,29 @@ type MessageReasoning struct {
 }
 
 type Citation struct {
-	ID             string    `json:"id"`
-	MessageID      string    `json:"messageId"`
-	RunID          string    `json:"runId"`
-	ToolCallID     string    `json:"toolCallId"`
-	ProjectID      string    `json:"projectId"`
-	Reference      string    `json:"reference"`
-	Ordinal        int       `json:"ordinal"`
-	IndexVersionID string    `json:"indexVersionId"`
-	DocumentID     string    `json:"documentId"`
-	AttachmentID   string    `json:"attachmentId"`
-	ChunkID        string    `json:"chunkId"`
-	SourceName     string    `json:"sourceName"`
-	MIMEType       string    `json:"mimeType,omitempty"`
-	Locator        string    `json:"locator"`
-	Title          string    `json:"title,omitempty"`
-	Quote          string    `json:"quote"`
-	QuoteSHA256    string    `json:"quoteSha256"`
-	SourceStart    int       `json:"sourceStart"`
-	SourceEnd      int       `json:"sourceEnd"`
-	CreatedAt      time.Time `json:"createdAt"`
+	ID             string          `json:"id"`
+	MessageID      string          `json:"messageId"`
+	RunID          string          `json:"runId"`
+	ToolCallID     string          `json:"toolCallId"`
+	ProjectID      string          `json:"projectId"`
+	Reference      string          `json:"reference"`
+	Ordinal        int             `json:"ordinal"`
+	IndexVersionID string          `json:"indexVersionId"`
+	DocumentID     string          `json:"documentId"`
+	AttachmentID   string          `json:"attachmentId"`
+	ChunkID        string          `json:"chunkId"`
+	SourceName     string          `json:"sourceName"`
+	MIMEType       string          `json:"mimeType,omitempty"`
+	Locator        string          `json:"locator"`
+	Title          string          `json:"title,omitempty"`
+	Quote          string          `json:"quote"`
+	QuoteSHA256    string          `json:"quoteSha256"`
+	SourceStart    int             `json:"sourceStart"`
+	SourceEnd      int             `json:"sourceEnd"`
+	BibliographyID string          `json:"bibliographyId,omitempty"`
+	Bibliography   json.RawMessage `json:"bibliography,omitempty"`
+	EvidenceLevel  string          `json:"evidenceLevel,omitempty"`
+	CreatedAt      time.Time       `json:"createdAt"`
 }
 
 type MessagePart struct {

@@ -3,7 +3,9 @@
 package pathguard
 
 import (
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"syscall"
 )
@@ -30,6 +32,12 @@ func rejectReparsePath(root, relative string) error {
 	for _, component := range splitPath(relative) {
 		current = filepath.Join(current, component)
 		reparse, err := isReparsePoint(current)
+		if errors.Is(err, os.ErrNotExist) {
+			// A missing component cannot currently redirect traversal. The
+			// caller's os.Root operation remains responsible for opening or
+			// creating the path below the already verified parent chain.
+			return nil
+		}
 		if err != nil {
 			return err
 		}
@@ -47,7 +55,7 @@ func isReparsePoint(path string) (bool, error) {
 	}
 	attributes, err := syscall.GetFileAttributes(pointer)
 	if err != nil {
-		return false, fmt.Errorf("inspect workspace path attributes: %w", err)
+		return false, fmt.Errorf("inspect workspace path attributes: %w", error(err))
 	}
 	return attributes&syscall.FILE_ATTRIBUTE_REPARSE_POINT != 0, nil
 }

@@ -18,6 +18,46 @@ type executorFixtureTool struct {
 
 type runProjectFixture struct{ projectID string }
 
+type artifactRegistrarFixture struct {
+	calls []string
+	err   error
+}
+
+func (r *artifactRegistrarFixture) BindToolArtifacts(_ context.Context, _ string, _ Call, references []ArtifactRef) ([]ArtifactRef, error) {
+	bound := append([]ArtifactRef(nil), references...)
+	for index := range bound {
+		if bound[index].WorkspacePath != "" {
+			bound[index].SizeBytes = 7
+			if bound[index].SHA256 == "" {
+				bound[index].SHA256 = strings.Repeat("a", 64)
+			}
+		}
+	}
+	return bound, nil
+}
+
+func TestExecutorPersistsToolComputedArtifactHash(t *testing.T) {
+	wantHash := strings.Repeat("b", 64)
+	implementation := executorFixtureTool{definition: executorDefinition(), invoke: func(context.Context, Invocation) (Result, error) {
+		return Result{Status: ResultSuccess, Artifacts: []ArtifactRef{{WorkspacePath: "outputs/result.csv", SHA256: wantHash}}}, nil
+	}}
+	executor, repository, call := readyExecutor(t, implementation, ExecutorOptions{})
+	if err := executor.SetArtifactRegistrar(&artifactRegistrarFixture{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := executor.Execute(context.Background(), "project", call.ID); err != nil {
+		t.Fatal(err)
+	}
+	if repository.calls[call.ID].Result == nil || repository.calls[call.ID].Result.Artifacts[0].SHA256 != wantHash {
+		t.Fatalf("persisted Artifact hash = %#v", repository.calls[call.ID].Result)
+	}
+}
+
+func (r *artifactRegistrarFixture) RegisterToolArtifactsForExecutor(_ context.Context, callID string) error {
+	r.calls = append(r.calls, callID)
+	return r.err
+}
+
 func (r runProjectFixture) ProjectIDForRun(context.Context, string) (string, error) {
 	return r.projectID, nil
 }
@@ -70,6 +110,83 @@ func TestExecutorCompletesAndPersistsBoundedResult(t *testing.T) {
 	loaded := repository.calls[call.ID]
 	if loaded.Status != CallCompleted || loaded.Result == nil || loaded.Result.Meta.DurationMillis < 0 {
 		t.Fatalf("persisted call = %#v", loaded)
+	}
+}
+
+func TestExecutorRegistersOnlyExplicitWorkspaceArtifacts(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		ref  ArtifactRef
+		want int
+	}{
+		{name: "source reference", ref: ArtifactRef{ID: "attachment"}, want: 0},
+		{name: "produced file", ref: ArtifactRef{Name: "result.csv", WorkspacePath: "outputs/result.csv"}, want: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			implementation := executorFixtureTool{definition: executorDefinition(), invoke: func(context.Context, Invocation) (Result, error) {
+				return Result{Status: ResultSuccess, Artifacts: []ArtifactRef{test.ref}}, nil
+			}}
+			executor, _, call := readyExecutor(t, implementation, ExecutorOptions{})
+			registrar := &artifactRegistrarFixture{}
+			if err := executor.SetArtifactRegistrar(registrar); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := executor.Execute(context.Background(), "project", call.ID); err != nil {
+				t.Fatal(err)
+			}
+			if len(registrar.calls) != test.want {
+				t.Fatalf("registrar calls = %#v", registrar.calls)
+			}
+		})
+	}
+}
+
+func TestExecutorKeepsSuccessfulToolOutcomeWhenArtifactRegistrationIsDeferred(t *testing.T) {
+	wantErr := errors.New("fixture Artifact registration failure")
+	var observedCall string
+	var observedErr error
+	implementation := executorFixtureTool{definition: executorDefinition(), invoke: func(context.Context, Invocation) (Result, error) {
+		return Result{Status: ResultSuccess, Text: "tool output", Artifacts: []ArtifactRef{{WorkspacePath: "outputs/result.csv"}}}, nil
+	}}
+	executor, repository, call := readyExecutor(t, implementation, ExecutorOptions{OnArtifactRegistrationError: func(callID string, err error) {
+		observedCall, observedErr = callID, err
+	}})
+	registrar := &artifactRegistrarFixture{err: wantErr}
+	if err := executor.SetArtifactRegistrar(registrar); err != nil {
+		t.Fatal(err)
+	}
+	execution, err := executor.Execute(context.Background(), "project", call.ID)
+	if err != nil || execution.Result.Status != ResultSuccess || execution.Result.Text != "tool output" {
+		t.Fatalf("Execute() = %#v, %v", execution, err)
+	}
+	loaded := repository.calls[call.ID]
+	if loaded.Status != CallCompleted || loaded.Result == nil || loaded.Result.Status != ResultSuccess {
+		t.Fatalf("persisted call = %#v", loaded)
+	}
+	if loaded.Result.Artifacts[0].SizeBytes != 7 || loaded.Result.Artifacts[0].SHA256 != strings.Repeat("a", 64) {
+		t.Fatalf("persisted Artifact byte identity = %#v", loaded.Result.Artifacts[0])
+	}
+	if observedCall != call.ID || !errors.Is(observedErr, wantErr) {
+		t.Fatalf("registration callback = %q, %v", observedCall, observedErr)
+	}
+}
+
+func TestExecutorReappliesArtifactSizeLimitAfterBindingByteIdentity(t *testing.T) {
+	implementation := executorFixtureTool{definition: executorDefinition(), invoke: func(context.Context, Invocation) (Result, error) {
+		return Result{Status: ResultSuccess, Artifacts: []ArtifactRef{{Name: strings.Repeat("n", 60), WorkspacePath: "output.csv"}}}, nil
+	}}
+	executor, repository, call := readyExecutor(t, implementation, ExecutorOptions{MaxStructuredBytes: 120})
+	registrar := &artifactRegistrarFixture{}
+	if err := executor.SetArtifactRegistrar(registrar); err != nil {
+		t.Fatal(err)
+	}
+	execution, err := executor.Execute(context.Background(), "project", call.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded := repository.calls[call.ID]
+	if execution.Result.Status != ResultError || execution.ErrorCode != ErrorCodeResultTooLarge || loaded.Status != CallFailed || loaded.Result == nil || len(loaded.Result.Artifacts) != 0 || len(registrar.calls) != 0 {
+		t.Fatalf("bound oversized Artifact result = %#v, execution=%#v, calls=%#v", loaded, execution, registrar.calls)
 	}
 }
 
@@ -155,6 +272,29 @@ func TestExecutorTimeoutAndExplicitCancellation(t *testing.T) {
 	}
 }
 
+func TestExecutorPreservesStructuredCancellationReturnedByTool(t *testing.T) {
+	started := make(chan struct{})
+	implementation := executorFixtureTool{definition: executorDefinition(), invoke: func(ctx context.Context, _ Invocation) (Result, error) {
+		close(started)
+		<-ctx.Done()
+		return Result{Status: ResultCancelled, Text: "process audit retained", Structured: json.RawMessage(`{"terminationReason":"cancelled"}`)}, nil
+	}}
+	executor, repository, call := readyExecutor(t, implementation, ExecutorOptions{})
+	done := make(chan Execution, 1)
+	go func() {
+		value, _ := executor.Execute(context.Background(), "project", call.ID)
+		done <- value
+	}()
+	<-started
+	if !executor.Cancel(call.ID) {
+		t.Fatal("Cancel() did not find active call")
+	}
+	result := <-done
+	if result.Result.Status != ResultCancelled || result.Result.Text != "process audit retained" || string(result.Result.Structured) != `{"terminationReason":"cancelled"}` || repository.calls[call.ID].Status != CallCancelled {
+		t.Fatalf("structured cancellation = %#v; call=%#v", result, repository.calls[call.ID])
+	}
+}
+
 func TestExecutorClassifiesImplementationDeadlineAsTimeout(t *testing.T) {
 	implementation := executorFixtureTool{definition: executorDefinition(), invoke: func(context.Context, Invocation) (Result, error) {
 		return Result{}, fmt.Errorf("MCP tool call failed: %w", context.DeadlineExceeded)
@@ -222,13 +362,26 @@ func TestExecutorRejectsProjectSubstitutionBeforeInvoke(t *testing.T) {
 }
 
 func TestExecutorReturnsInvocationErrorAsPublicFailure(t *testing.T) {
+	wantErr := errors.New(`private filesystem detail: D:\Users\researcher\secret.csv`)
+	var observedCall Call
+	var observedErr error
 	implementation := executorFixtureTool{definition: executorDefinition(), invoke: func(context.Context, Invocation) (Result, error) {
-		return Result{}, errors.New("private filesystem detail")
+		return Result{}, wantErr
 	}}
-	executor, _, call := readyExecutor(t, implementation, ExecutorOptions{})
+	executor, repository, call := readyExecutor(t, implementation, ExecutorOptions{OnInvocationError: func(call Call, err error) {
+		observedCall, observedErr = call, err
+	}})
 	execution, err := executor.Execute(context.Background(), "project", call.ID)
-	if err != nil || execution.ErrorCode != ErrorCodeInvocationFailed || strings.Contains(execution.Result.Text, "filesystem") {
+	if err != nil || execution.ErrorCode != ErrorCodeInvocationFailed || execution.Result.Status != ResultError {
 		t.Fatalf("Execute(error) = %#v, %v", execution, err)
+	}
+	if observedCall.ID != call.ID || !errors.Is(observedErr, wantErr) {
+		t.Fatalf("invocation error callback = call %#v, error %v", observedCall, observedErr)
+	}
+	loaded := repository.calls[call.ID]
+	public := execution.Result.Text + " " + loaded.ErrorMessage
+	if loaded.Status != CallFailed || loaded.ErrorCode != ErrorCodeInvocationFailed || strings.Contains(public, "filesystem") || strings.Contains(public, "secret.csv") {
+		t.Fatalf("persisted public failure leaked private details: execution=%#v call=%#v", execution, loaded)
 	}
 }
 

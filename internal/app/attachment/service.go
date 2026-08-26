@@ -77,7 +77,7 @@ func (s *Service) ImportPaths(ctx context.Context, projectID string, paths []str
 			result.Errors = append(result.Errors, ImportError{Path: sourcePath, Message: "selected documents exceed the 1 GiB batch limit"})
 			continue
 		}
-		value, importErr := s.importOne(ctx, selectedProject, sourcePath)
+		value, importErr := s.importOne(ctx, selectedProject, sourcePath, "", false)
 		if value.ID != "" {
 			result.Attachments = append(result.Attachments, value)
 		}
@@ -88,11 +88,45 @@ func (s *Service) ImportPaths(ctx context.Context, projectID string, paths []str
 	return result, nil
 }
 
-func (s *Service) importOne(ctx context.Context, selectedProject project.Project, sourcePath string) (Attachment, error) {
+// ImportResearchStaged imports a file produced by the research downloader. It
+// accepts only the dedicated project-private staging prefix; ordinary callers
+// must continue to use ImportPaths and cannot import SciAide's private data.
+func (s *Service) ImportResearchStaged(ctx context.Context, projectID, sourcePath, originalName string) (Attachment, error) {
+	selectedProject, err := s.projects.Get(ctx, strings.TrimSpace(projectID))
+	if err != nil {
+		return Attachment{}, err
+	}
+	if err := project.VerifyPrivateDataLayout(selectedProject); err != nil {
+		return Attachment{}, fmt.Errorf("project attachment storage is unavailable: %w", err)
+	}
+	absSource, err := filepath.Abs(strings.TrimSpace(sourcePath))
+	if err != nil {
+		return Attachment{}, err
+	}
+	privateRoot, err := filepath.Abs(project.PrivateDataPath(selectedProject))
+	if err != nil {
+		return Attachment{}, err
+	}
+	relative, err := filepath.Rel(privateRoot, absSource)
+	if err != nil || filepath.Dir(relative) != "tmp" || !strings.HasPrefix(filepath.Base(relative), "research-import-") {
+		return Attachment{}, fmt.Errorf("research attachment staging path is invalid")
+	}
+	info, err := os.Lstat(absSource)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return Attachment{}, fmt.Errorf("research attachment staging file is unavailable")
+	}
+	return s.importOne(ctx, selectedProject, absSource, originalName, true)
+}
+
+func (s *Service) importOne(ctx context.Context, selectedProject project.Project, sourcePath, originalName string, allowPrivate bool) (Attachment, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	sourcePath = strings.TrimSpace(sourcePath)
-	format, supported := document.FormatForName(sourcePath)
+	formatName := sourcePath
+	if strings.TrimSpace(originalName) != "" {
+		formatName = originalName
+	}
+	format, supported := document.FormatForName(formatName)
 	if sourcePath == "" || !supported {
 		return Attachment{}, fmt.Errorf("supported formats are PDF, DOCX, XLSX, TXT, Markdown, CSV, TSV, JPEG, PNG and WebP")
 	}
@@ -101,7 +135,7 @@ func (s *Service) importOne(ctx context.Context, selectedProject project.Project
 		return Attachment{}, fmt.Errorf("resolve attachment path: %w", err)
 	}
 	privateRoot := project.PrivateDataPath(selectedProject)
-	if insidePath(privateRoot, absSource) {
+	if insidePath(privateRoot, absSource) && !allowPrivate {
 		return Attachment{}, fmt.Errorf("cannot import SciAide's own project data directory")
 	}
 	input, err := os.Open(absSource)
@@ -204,6 +238,9 @@ func (s *Service) importOne(ctx context.Context, selectedProject project.Project
 		return Attachment{}, err
 	}
 	name := safeFileName(filepath.Base(absSource))
+	if strings.TrimSpace(originalName) != "" {
+		name = safeFileName(filepath.Base(originalName))
+	}
 	objectDirectory := filepath.Join("attachments", "objects", digest)
 	if err := root.MkdirAll(objectDirectory, 0o700); err != nil {
 		_ = root.Remove(tempRelative)

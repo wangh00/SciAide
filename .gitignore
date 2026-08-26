@@ -2,6 +2,9 @@
 /bin/
 /build/bin/
 /build/qa/
+/build/research-ui-*.png
+/build/smoke-*/
+/build/release-smoke-*/
 *.test
 *.out
 coverage.*
@@ -34,3 +37,12 @@ Thumbs.db
 
 # Codex review artifacts
 /artifacts/
+/.codex-tmp/
+
+# OpenScience skill synchronization staging
+/internal/opensciskill/.capability-audit-*
+/internal/opensciskill/.defaultskills-derived-*
+/internal/opensciskill/.defaultskills-upstream-*
+
+# The embedded default Skill tree is closed by its versioned manifest.
+!/internal/opensciskill/defaultskills/**
