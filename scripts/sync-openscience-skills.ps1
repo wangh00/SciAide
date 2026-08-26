@@ -86,7 +86,8 @@ function Write-UpstreamManifest([object[]]$Inventory, [string]$Path) {
         fileCount = $Inventory.Count
         files = $Inventory
     }
-    [System.IO.File]::WriteAllText($Path, (($value | ConvertTo-Json -Depth 6) + "`n"), [System.Text.UTF8Encoding]::new($false))
+    $json = ($value | ConvertTo-Json -Depth 6).Replace("`r`n", "`n").TrimEnd("`r", "`n") + "`n"
+    [System.IO.File]::WriteAllText($Path, $json, [System.Text.UTF8Encoding]::new($false))
 }
 
 function Assert-SameFile([string]$Expected, [string]$Actual, [string]$Label) {

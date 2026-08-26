@@ -115,8 +115,9 @@ func TestBundledSciAideDerivedManifestMatchesEveryFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	upstreamHash := sha256.Sum256(upstream)
-	if manifest.SchemaVersion != 1 || manifest.TransformVersion != "p7.3-v2" || manifest.UpstreamManifestSHA != hex.EncodeToString(upstreamHash[:]) || manifest.SkillCount != 311 || manifest.FileCount != 1624 || len(manifest.Files) != 1624 {
-		t.Fatalf("SciAide derived manifest metadata = %#v", manifest)
+	actualUpstreamSHA := hex.EncodeToString(upstreamHash[:])
+	if manifest.SchemaVersion != 1 || manifest.TransformVersion != "p7.3-v2" || manifest.UpstreamManifestSHA != actualUpstreamSHA || manifest.SkillCount != 311 || manifest.FileCount != 1624 || len(manifest.Files) != 1624 {
+		t.Fatalf("SciAide derived manifest metadata: schema=%d transform=%q upstream=%s (actual %s) skills=%d files=%d entries=%d", manifest.SchemaVersion, manifest.TransformVersion, manifest.UpstreamManifestSHA, actualUpstreamSHA, manifest.SkillCount, manifest.FileCount, len(manifest.Files))
 	}
 	seen := make(map[string]struct{}, len(manifest.Files))
 	skillCount := 0

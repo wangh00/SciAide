@@ -3,6 +3,7 @@
 package localexec
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"os/exec"
@@ -12,16 +13,80 @@ import (
 	"time"
 )
 
-func TestRunnerCapturesOutputAndNonZeroExit(t *testing.T) {
-	runner := NewRunner(Options{MaxOutputBytes: 4 * 1024})
-	defer runner.Close()
-	cmd, err := exec.LookPath("cmd.exe")
+const localExecHelperEnvironment = "SCIAIDE_LOCAL_EXEC_TEST_HELPER"
+
+func TestLocalExecHelperProcess(t *testing.T) {
+	if os.Getenv(localExecHelperEnvironment) != "1" {
+		return
+	}
+	separator := -1
+	for index, argument := range os.Args {
+		if argument == "--" {
+			separator = index
+			break
+		}
+	}
+	if separator < 0 || separator+1 >= len(os.Args) {
+		os.Exit(2)
+	}
+	arguments := os.Args[separator+1:]
+	switch arguments[0] {
+	case "result":
+		_, _ = os.Stdout.WriteString("hello\n")
+		_, _ = os.Stderr.WriteString("failure\n")
+		os.Exit(7)
+	case "output":
+		_, _ = os.Stdout.Write(bytes.Repeat([]byte{'x'}, 1<<20))
+	case "sleep":
+		time.Sleep(30 * time.Second)
+	case "spawn-descendant":
+		if len(arguments) != 2 {
+			os.Exit(2)
+		}
+		child := exec.Command(os.Args[0], "-test.run=^TestLocalExecHelperProcess$", "--", "write-marker", arguments[1])
+		child.Env = os.Environ()
+		if err := child.Start(); err != nil {
+			os.Exit(3)
+		}
+		_ = child.Process.Release()
+	case "write-marker":
+		if len(arguments) != 2 {
+			os.Exit(2)
+		}
+		time.Sleep(800 * time.Millisecond)
+		if err := os.WriteFile(arguments[1], []byte("survived"), 0o600); err != nil {
+			os.Exit(4)
+		}
+	case "mark-and-sleep":
+		if len(arguments) != 2 {
+			os.Exit(2)
+		}
+		if err := os.WriteFile(arguments[1], []byte("started"), 0o600); err != nil {
+			os.Exit(4)
+		}
+		time.Sleep(30 * time.Second)
+	default:
+		os.Exit(2)
+	}
+	os.Exit(0)
+}
+
+func localExecHelperCommand(t *testing.T, arguments ...string) (string, []string, []string) {
+	t.Helper()
+	executable, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
+	return executable, append([]string{"-test.run=^TestLocalExecHelperProcess$", "--"}, arguments...), append(os.Environ(), localExecHelperEnvironment+"=1")
+}
+
+func TestRunnerCapturesOutputAndNonZeroExit(t *testing.T) {
+	runner := NewRunner(Options{MaxOutputBytes: 4 * 1024})
+	defer runner.Close()
+	program, arguments, environment := localExecHelperCommand(t, "result")
 	result, err := runner.Execute(context.Background(), Request{
-		Program: cmd, Args: []string{"/D", "/S", "/C", "echo hello & echo failure 1>&2 & exit /b 7"},
-		Dir: t.TempDir(), Env: os.Environ(), Timeout: 5 * time.Second,
+		Program: program, Args: arguments,
+		Dir: t.TempDir(), Env: environment, Timeout: 5 * time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -34,13 +99,10 @@ func TestRunnerCapturesOutputAndNonZeroExit(t *testing.T) {
 func TestRunnerContinuesDrainingAfterCaptureLimit(t *testing.T) {
 	runner := NewRunner(Options{MaxOutputBytes: 1024})
 	defer runner.Close()
-	powershell, err := exec.LookPath("powershell.exe")
-	if err != nil {
-		t.Fatal(err)
-	}
+	program, arguments, environment := localExecHelperCommand(t, "output")
 	result, err := runner.Execute(context.Background(), Request{
-		Program: powershell, Args: []string{"-NoProfile", "-NonInteractive", "-Command", "[Console]::Out.Write(('x' * 1048576))"},
-		Dir: t.TempDir(), Env: os.Environ(), Timeout: 10 * time.Second,
+		Program: program, Args: arguments,
+		Dir: t.TempDir(), Env: environment, Timeout: 10 * time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -51,10 +113,6 @@ func TestRunnerContinuesDrainingAfterCaptureLimit(t *testing.T) {
 }
 
 func TestRunnerDistinguishesTimeoutAndCancellation(t *testing.T) {
-	cmd, err := exec.LookPath("cmd.exe")
-	if err != nil {
-		t.Fatal(err)
-	}
 	for _, test := range []struct {
 		name    string
 		context func() (context.Context, context.CancelFunc)
@@ -69,6 +127,7 @@ func TestRunnerDistinguishesTimeoutAndCancellation(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			runner := NewRunner(Options{})
 			defer runner.Close()
+			program, arguments, environment := localExecHelperCommand(t, "sleep")
 			ctx, cancel := test.context()
 			defer cancel()
 			if test.name == "cancel" {
@@ -76,7 +135,7 @@ func TestRunnerDistinguishesTimeoutAndCancellation(t *testing.T) {
 				ctx, cancel = manual, manualCancel
 				time.AfterFunc(100*time.Millisecond, manualCancel)
 			}
-			result, err := runner.Execute(ctx, Request{Program: cmd, Args: []string{"/D", "/C", "ping -n 10 127.0.0.1 >nul"}, Dir: t.TempDir(), Env: os.Environ(), Timeout: test.timeout})
+			result, err := runner.Execute(ctx, Request{Program: program, Args: arguments, Dir: t.TempDir(), Env: environment, Timeout: test.timeout})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -94,14 +153,9 @@ func TestRunnerDistinguishesTimeoutAndCancellation(t *testing.T) {
 func TestRunnerKillsDescendantsAfterRootExits(t *testing.T) {
 	runner := NewRunner(Options{})
 	defer runner.Close()
-	powershell, err := exec.LookPath("powershell.exe")
-	if err != nil {
-		t.Fatal(err)
-	}
 	marker := filepath.Join(t.TempDir(), "descendant.txt")
-	child := "Start-Sleep -Milliseconds 800; Set-Content -LiteralPath '" + strings.ReplaceAll(marker, "'", "''") + "' -Value survived"
-	command := "Start-Process -FilePath powershell.exe -ArgumentList @('-NoProfile','-NonInteractive','-Command'," + quotePowerShell(child) + "); exit 0"
-	result, err := runner.Execute(context.Background(), Request{Program: powershell, Args: []string{"-NoProfile", "-NonInteractive", "-Command", command}, Dir: filepath.Dir(marker), Env: os.Environ(), Timeout: 5 * time.Second})
+	program, arguments, environment := localExecHelperCommand(t, "spawn-descendant", marker)
+	result, err := runner.Execute(context.Background(), Request{Program: program, Args: arguments, Dir: filepath.Dir(marker), Env: environment, Timeout: 5 * time.Second})
 	if err != nil || result.Reason != ReasonCompleted {
 		t.Fatalf("execute = %#v, %v", result, err)
 	}
@@ -114,16 +168,13 @@ func TestRunnerKillsDescendantsAfterRootExits(t *testing.T) {
 func TestRunnerRefusesExecutionAfterShutdownBegins(t *testing.T) {
 	runner := NewRunner(Options{})
 	runner.BeginShutdown()
-	cmd, err := exec.LookPath("cmd.exe")
-	if err != nil {
-		t.Fatal(err)
-	}
 	marker := filepath.Join(t.TempDir(), "started.txt")
-	_, err = runner.Execute(context.Background(), Request{
-		Program: cmd,
-		Args:    []string{"/D", "/S", "/C", "echo started>" + marker},
+	program, arguments, environment := localExecHelperCommand(t, "mark-and-sleep", marker)
+	_, err := runner.Execute(context.Background(), Request{
+		Program: program,
+		Args:    arguments,
 		Dir:     filepath.Dir(marker),
-		Env:     os.Environ(),
+		Env:     environment,
 		Timeout: 5 * time.Second,
 	})
 	if err == nil || !strings.Contains(err.Error(), "closed") {
@@ -136,21 +187,18 @@ func TestRunnerRefusesExecutionAfterShutdownBegins(t *testing.T) {
 
 func TestRunnerStopsActiveExecutionOnAppShutdown(t *testing.T) {
 	runner := NewRunner(Options{})
-	powershell, err := exec.LookPath("powershell.exe")
-	if err != nil {
-		t.Fatal(err)
-	}
 	marker := filepath.Join(t.TempDir(), "started.txt")
+	program, arguments, environment := localExecHelperCommand(t, "mark-and-sleep", marker)
 	done := make(chan struct {
 		result Result
 		err    error
 	}, 1)
 	go func() {
 		result, runErr := runner.Execute(context.Background(), Request{
-			Program: powershell,
-			Args:    []string{"-NoProfile", "-NonInteractive", "-Command", "Set-Content -LiteralPath " + quotePowerShell(marker) + " -Value started; Start-Sleep -Seconds 30"},
+			Program: program,
+			Args:    arguments,
 			Dir:     filepath.Dir(marker),
-			Env:     os.Environ(),
+			Env:     environment,
 			Timeout: time.Minute,
 		})
 		done <- struct {
@@ -180,8 +228,4 @@ func TestRunnerStopsActiveExecutionOnAppShutdown(t *testing.T) {
 	if err := runner.Close(); err != nil {
 		t.Fatal(err)
 	}
-}
-
-func quotePowerShell(value string) string {
-	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
 }

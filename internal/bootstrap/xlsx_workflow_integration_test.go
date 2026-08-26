@@ -224,6 +224,7 @@ func replayXLSXAnalysis(t *testing.T, value xlsxWorkflowEvidence) {
 	summary := filepath.Join(directory, "replayed-summary.csv")
 	chart := filepath.Join(directory, "replayed-summary.svg")
 	command := exec.Command(value.environment.EnvironmentPythonPath, "-I", value.scriptPath, value.inputPath, cleaned, summary, chart)
+	command.Env = append(os.Environ(), "PYTHONIOENCODING=utf-8", "PYTHONUTF8=1")
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("replay XLSX analysis: %v\n%s", err, output)
 	}
