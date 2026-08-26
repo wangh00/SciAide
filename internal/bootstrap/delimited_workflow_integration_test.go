@@ -138,8 +138,7 @@ func replayDelimitedAnalysis(t *testing.T, python, workspace, input string, role
 		"methods": filepath.Join(directory, "methods.md"),
 	}
 	requestJSON, _ := json.Marshal(request)
-	command := exec.Command(python, "-I", filepath.Join(workspace, filepath.FromSlash(roles["script"])), input, paths["cleaned"], paths["summary"], paths["chart"], paths["methods"], string(requestJSON))
-	command.Env = append(os.Environ(), "PYTHONIOENCODING=utf-8", "PYTHONUTF8=1")
+	command := exec.Command(python, "-I", "-u", "-X", "utf8", filepath.Join(workspace, filepath.FromSlash(roles["script"])), input, paths["cleaned"], paths["summary"], paths["chart"], paths["methods"], string(requestJSON))
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("replay delimited analysis: %v\n%s", err, output)
 	}
