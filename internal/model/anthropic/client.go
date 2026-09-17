@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/wangh00/SciAide/internal/httpua"
 	"io"
 	"net/http"
 	"strings"
@@ -43,11 +44,7 @@ func New(profile modelprofile.Profile, secret []byte, recorders ...modelcap.Reas
 	}
 	return &Client{profile: profile, secret: append([]byte(nil), secret...), http: modelutil.NewStreamingHTTPClient(timeout), recorder: recorder}
 }
-func NewWithHTTPClient(profile modelprofile.Profile, secret []byte, client *http.Client) *Client {
-	v := New(profile, secret)
-	v.http = client
-	return v
-}
+
 func (c *Client) Capabilities(context.Context) (model.Capabilities, error) {
 	return model.Capabilities{Streaming: true, ToolCalling: true, Reasoning: true, MaxContextTokens: c.profile.ContextBudget(c.profile.ModelID).WindowTokens}, nil
 }
@@ -109,13 +106,14 @@ type toolDef struct {
 	InputSchema json.RawMessage `json:"input_schema"`
 }
 type payload struct {
-	Model       string    `json:"model"`
-	System      string    `json:"system,omitempty"`
-	Messages    []message `json:"messages"`
-	Tools       []toolDef `json:"tools,omitempty"`
-	Stream      bool      `json:"stream"`
-	MaxTokens   int       `json:"max_tokens"`
-	Temperature *float64  `json:"temperature,omitempty"`
+	Model       string         `json:"model"`
+	System      any            `json:"system,omitempty"`
+	Messages    []message      `json:"messages"`
+	ToolChoice  map[string]any `json:"tool_choice,omitempty"`
+	Tools       []toolDef      `json:"tools,omitempty"`
+	Stream      bool           `json:"stream"`
+	MaxTokens   int            `json:"max_tokens"`
+	Temperature *float64       `json:"temperature,omitempty"`
 	Thinking    *struct {
 		Type         string `json:"type"`
 		BudgetTokens int    `json:"budget_tokens,omitempty"`
@@ -147,6 +145,24 @@ func (e *reasoningRejectedError) Error() string { return e.err.Error() }
 func (e *reasoningRejectedError) Unwrap() error { return e.err }
 
 func (c *Client) Stream(ctx context.Context, request model.ChatRequest) (model.Stream, error) {
+	if request.ForcedTool != "" {
+		// A forced tool is incompatible with extended thinking. Do not record this
+		// deliberate per-request mode as evidence that reasoning controls work/fail.
+		requested := request.RequestedReasoningLevel
+		request.ResolvedReasoningLevel = ""
+		useCache := request.PromptCacheKey != "" && !c.cacheControlIsUnsupported()
+		stream, err := c.streamOnce(ctx, request, thinkingProviderDefault, useCache)
+		var rejected *cacheControlRejectedError
+		if useCache && errors.As(err, &rejected) {
+			c.rememberCacheControlUnsupported()
+			stream, err = c.streamOnce(ctx, request, thinkingProviderDefault, false)
+		}
+		if err != nil {
+			return nil, err
+		}
+		return model.WithReasoningResolution(stream, requested, ""), nil
+	}
+
 	requested := request.RequestedReasoningLevel
 	if !requested.Valid() {
 		requested = request.ResolvedReasoningLevel
@@ -274,25 +290,28 @@ func legacyAnthropicModel(modelID string) bool {
 }
 
 func (c *Client) streamOnce(ctx context.Context, request model.ChatRequest, mode thinkingMode, useCacheControl bool) (model.Stream, error) {
-	aliases := map[string]string{}
-	providerNames := map[string]string{}
-	for _, def := range request.Tools {
-		if err := modelutil.ValidateDefinition(def); err != nil {
-			return nil, err
-		}
-		alias := modelutil.ProviderToolName(def.Name)
-		if old := providerNames[alias]; old != "" && old != def.Name {
-			return nil, fmt.Errorf("model tool name alias collision")
-		}
-		aliases[def.Name] = alias
-		providerNames[alias] = def.Name
+	aliases, providerNames, err := modelutil.BuildToolAliases(request.Tools)
+	if err != nil {
+		return nil, err
 	}
+	request = modelutil.ProjectToolReferences(request, modelutil.ToolReferenceAliases(request, aliases, modelutil.ProviderToolName))
 	maxTokens := 4096
 	if c.profile.MaxOutputTokens != nil {
 		maxTokens = *c.profile.MaxOutputTokens
 	}
 	value := payload{Model: c.profile.ModelID, Messages: []message{}, Tools: []toolDef{}, Stream: true, MaxTokens: maxTokens, Temperature: c.profile.Temperature}
-	if request.ResolvedReasoningLevel.Valid() && mode != thinkingProviderDefault {
+	if request.DisableTools {
+		value.ToolChoice = map[string]any{"type": "none"}
+	}
+	if request.ForcedTool != "" {
+		name := aliases[request.ForcedTool]
+		if name == "" || request.DisableTools {
+			return nil, fmt.Errorf("invalid forced tool contract")
+		}
+		value.ToolChoice = map[string]any{"type": "tool", "name": name, "disable_parallel_tool_use": true}
+	}
+	// Forced tool submission cannot be combined with extended thinking.
+	if request.ForcedTool == "" && request.ResolvedReasoningLevel.Valid() && mode != thinkingProviderDefault {
 		if value.MaxTokens <= 1024 {
 			value.MaxTokens = 2048
 		}
@@ -318,13 +337,19 @@ func (c *Client) streamOnce(ctx context.Context, request model.ChatRequest, mode
 	for _, def := range request.Tools {
 		value.Tools = append(value.Tools, toolDef{Name: aliases[def.Name], Description: def.Description, InputSchema: append(json.RawMessage(nil), def.InputSchema...)})
 	}
+	var systemText string
+	var dynamicSystem []contentBlock
 	for _, item := range request.Messages {
 		switch item.Role {
 		case model.RoleSystem:
-			if value.System != "" {
-				value.System += "\n\n"
+			if item.ContextTail {
+				dynamicSystem = append(dynamicSystem, contentBlock{Type: "text", Text: item.Content})
+				continue
 			}
-			value.System += item.Content
+			if systemText != "" {
+				systemText += "\n\n"
+			}
+			systemText += item.Content
 		case model.RoleUser:
 			if item.Content != "" {
 				value.Messages = appendMessage(value.Messages, "user", contentBlock{Type: "text", Text: modelutil.WrapUntrusted("conversation_content", item.Content)})
@@ -361,6 +386,18 @@ func (c *Client) streamOnce(ctx context.Context, request model.ChatRequest, mode
 			return nil, fmt.Errorf("unsupported model message role %q", item.Role)
 		}
 	}
+	value.System = systemText
+	if len(dynamicSystem) > 0 {
+		blocks := []contentBlock{}
+		if systemText != "" {
+			stable := contentBlock{Type: "text", Text: systemText}
+			if useCacheControl {
+				stable.CacheControl = &cacheControl{Type: "ephemeral"}
+			}
+			blocks = append(blocks, stable)
+		}
+		value.System = append(blocks, dynamicSystem...)
+	}
 	if err := appendProviderTurns(&value, request.ProviderTurns); err != nil {
 		return nil, err
 	}
@@ -384,6 +421,7 @@ func (c *Client) streamOnce(ctx context.Context, request model.ChatRequest, mode
 	for k, v := range c.profile.CustomHeaders {
 		req.Header.Set(k, v)
 	}
+	httpua.Apply(req)
 	response, err := c.http.Do(req)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -614,9 +652,8 @@ func (s *stream) completeBlock(index int, accumulator *blockAccumulator) (model.
 		}
 		block.ID, block.Name, block.Input = accumulator.ID, accumulator.Name, json.RawMessage(arguments)
 		name := accumulator.Name
-		if qualified := s.providerNames[name]; qualified != "" {
-			name = qualified
-		}
+		name = modelutil.ResolveProviderToolName(name, s.providerNames)
+		block.Name = modelutil.ProviderToolAliasForQualified(name, s.providerNames)
 		value := model.ToolCall{ID: accumulator.ID, Name: name, Arguments: json.RawMessage(arguments)}
 		if err := modelutil.ValidateToolCall(value); err != nil {
 			return model.ProviderItem{}, nil, modelutil.Error("MODEL_TOOL_CALL_INVALID", "模型返回了无效的工具调用。", false, err)

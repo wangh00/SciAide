@@ -43,8 +43,13 @@ type FileEntry struct {
 	Path                string   `json:"path"`
 	StorageRelativePath string   `json:"storageRelativePath"`
 	Kind                FileKind `json:"kind"`
-	SizeBytes           int64    `json:"sizeBytes"`
-	SHA256              string   `json:"sha256"`
+	// TaskID is set for task-private Workflow input snapshots. The relative
+	// path remains relative to that task's private workspace, while the archive
+	// path includes the owner to keep equal filenames from different tasks
+	// distinct and restorable.
+	TaskID    string `json:"taskId,omitempty"`
+	SizeBytes int64  `json:"sizeBytes"`
+	SHA256    string `json:"sha256"`
 }
 
 type SkillBinding struct {
@@ -87,6 +92,7 @@ type FileSource struct {
 	StorageRelativePath string
 	SourcePath          string
 	Kind                FileKind
+	TaskID              string
 	Required            bool
 	ExpectedSize        int64
 	ExpectedSHA256      string
@@ -114,6 +120,7 @@ type IndexRewrite struct {
 type RewritePlan struct {
 	Indexes            []IndexRewrite
 	HistoricalProfiles int
+	TaskIDs            map[string]string
 }
 
 type MergeReport struct {

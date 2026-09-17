@@ -187,18 +187,21 @@ func (r *KnowledgeRepository) Enqueue(ctx context.Context, value attachment.Atta
 	defer tx.Rollback()
 	documentValue, err := scanKnowledgeDocument(tx.QueryRowContext(ctx, knowledgeDocumentSelect+` WHERE project_id=? AND attachment_id=?`, value.ProjectID, value.ID))
 	if errors.Is(err, sql.ErrNoRows) {
+		if value.ScopeKind == "" {
+			value.ScopeKind = attachment.ScopeProjectShared
+		}
 		documentID, idErr := id.New()
 		if idErr != nil {
 			return knowledge.ImportJob{}, false, idErr
 		}
 		documentValue = knowledge.Document{
-			ID: documentID, ProjectID: value.ProjectID, AttachmentID: value.ID, IndexVersionID: version.ID,
+			ID: documentID, ProjectID: value.ProjectID, ScopeKind: value.ScopeKind, ResearchTaskID: value.ResearchTaskID, AttachmentID: value.ID, IndexVersionID: version.ID,
 			Title: value.OriginalName, AttachmentSHA256: value.SHA256, Status: knowledge.DocumentPending,
 			ParserSchemaVersion: version.ParserSchemaVersion, ChunkingVersion: version.ChunkingVersion,
 			CreatedAt: at, UpdatedAt: at,
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO knowledge_documents(id,project_id,attachment_id,index_version_id,title,attachment_sha256,status,parser_schema_version,chunking_version,chunk_count,error_message,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,0,'',?,?)`,
-			documentValue.ID, documentValue.ProjectID, documentValue.AttachmentID, documentValue.IndexVersionID, documentValue.Title, documentValue.AttachmentSHA256, documentValue.Status, documentValue.ParserSchemaVersion, documentValue.ChunkingVersion, formatTime(at), formatTime(at)); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO knowledge_documents(id,project_id,scope_kind,research_task_id,attachment_id,index_version_id,title,attachment_sha256,status,parser_schema_version,chunking_version,chunk_count,error_message,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,0,'',?,?)`,
+			documentValue.ID, documentValue.ProjectID, documentValue.ScopeKind, documentValue.ResearchTaskID, documentValue.AttachmentID, documentValue.IndexVersionID, documentValue.Title, documentValue.AttachmentSHA256, documentValue.Status, documentValue.ParserSchemaVersion, documentValue.ChunkingVersion, formatTime(at), formatTime(at)); err != nil {
 			return knowledge.ImportJob{}, false, fmt.Errorf("insert knowledge document: %w", err)
 		}
 	} else if err != nil {
@@ -511,11 +514,11 @@ func (r *KnowledgeRepository) Requeue(ctx context.Context, work knowledge.Work, 
 
 func (r *KnowledgeRepository) ProjectStatus(ctx context.Context, projectID string) (knowledge.ProjectStatus, error) {
 	var value knowledge.ProjectStatus
-	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(status='ready'),0),COALESCE(SUM(status='pending'),0),COALESCE(SUM(status='indexing'),0),COALESCE(SUM(status='failed'),0) FROM knowledge_documents WHERE project_id=?`, strings.TrimSpace(projectID)).Scan(
+	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(status='ready'),0),COALESCE(SUM(status='pending'),0),COALESCE(SUM(status='indexing'),0),COALESCE(SUM(status='failed'),0) FROM knowledge_documents WHERE project_id=? AND scope_kind IN ('project_shared','task')`, strings.TrimSpace(projectID)).Scan(
 		&value.Documents, &value.Ready, &value.Pending, &value.Indexing, &value.Failed); err != nil {
 		return value, fmt.Errorf("read project knowledge status: %w", err)
 	}
-	if err := r.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(status='queued'),0),COALESCE(SUM(status='running'),0) FROM knowledge_import_jobs WHERE project_id=?`, strings.TrimSpace(projectID)).Scan(&value.QueuedJobs, &value.RunningJobs); err != nil {
+	if err := r.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(j.status='queued'),0),COALESCE(SUM(j.status='running'),0) FROM knowledge_import_jobs j JOIN knowledge_documents d ON d.id=j.document_id AND d.project_id=j.project_id WHERE j.project_id=? AND d.scope_kind IN ('project_shared','task')`, strings.TrimSpace(projectID)).Scan(&value.QueuedJobs, &value.RunningJobs); err != nil {
 		return value, fmt.Errorf("read project knowledge jobs: %w", err)
 	}
 	return value, nil
@@ -534,11 +537,11 @@ func boundedKnowledgeError(value string) string {
 }
 
 const knowledgeIndexVersionSelect = `SELECT id,project_id,version_number,schema_version,parser_schema_version,chunking_version,search_kind,storage_relative_path,status,error_message,created_at,activated_at,updated_at,retrieval_engine,embedding_model,embedding_dimensions,embedding_config_fingerprint,hybrid_strategy FROM knowledge_index_versions `
-const knowledgeDocumentSelect = `SELECT id,project_id,attachment_id,index_version_id,title,attachment_sha256,status,parser_schema_version,chunking_version,chunk_count,error_message,created_at,indexed_at,updated_at FROM knowledge_documents `
+const knowledgeDocumentSelect = `SELECT d.id,d.project_id,d.scope_kind,d.research_task_id,COALESCE((SELECT a.source_kind FROM attachments a WHERE a.id=d.attachment_id AND a.project_id=d.project_id),'unknown'),d.attachment_id,d.index_version_id,d.title,d.attachment_sha256,d.status,d.parser_schema_version,d.chunking_version,d.chunk_count,d.error_message,d.created_at,d.indexed_at,d.updated_at FROM knowledge_documents d `
 const knowledgeJobSelect = `SELECT id,project_id,document_id,attachment_id,index_version_id,status,stage,attempt_count,error_message,created_at,started_at,completed_at,updated_at FROM knowledge_import_jobs `
 
 const knowledgeWorkSelect = `SELECT
-	d.id,d.project_id,d.attachment_id,d.index_version_id,d.title,d.attachment_sha256,d.status,d.parser_schema_version,d.chunking_version,d.chunk_count,d.error_message,d.created_at,d.indexed_at,d.updated_at,
+	d.id,d.project_id,d.scope_kind,d.research_task_id,COALESCE((SELECT a.source_kind FROM attachments a WHERE a.id=d.attachment_id AND a.project_id=d.project_id),'unknown'),d.attachment_id,d.index_version_id,d.title,d.attachment_sha256,d.status,d.parser_schema_version,d.chunking_version,d.chunk_count,d.error_message,d.created_at,d.indexed_at,d.updated_at,
 	j.id,j.project_id,j.document_id,j.attachment_id,j.index_version_id,j.status,j.stage,j.attempt_count,j.error_message,j.created_at,j.started_at,j.completed_at,j.updated_at,
 	v.id,v.project_id,v.version_number,v.schema_version,v.parser_schema_version,v.chunking_version,v.search_kind,v.storage_relative_path,v.status,v.error_message,v.created_at,v.activated_at,v.updated_at,v.retrieval_engine,v.embedding_model,v.embedding_dimensions,v.embedding_config_fingerprint,v.hybrid_strategy
 	FROM knowledge_import_jobs j
@@ -574,7 +577,7 @@ func scanKnowledgeDocument(row rowScanner) (knowledge.Document, error) {
 	var value knowledge.Document
 	var createdAt, updatedAt string
 	var indexedAt sql.NullString
-	err := row.Scan(&value.ID, &value.ProjectID, &value.AttachmentID, &value.IndexVersionID, &value.Title, &value.AttachmentSHA256, &value.Status, &value.ParserSchemaVersion, &value.ChunkingVersion, &value.ChunkCount, &value.ErrorMessage, &createdAt, &indexedAt, &updatedAt)
+	err := row.Scan(&value.ID, &value.ProjectID, &value.ScopeKind, &value.ResearchTaskID, &value.SourceKind, &value.AttachmentID, &value.IndexVersionID, &value.Title, &value.AttachmentSHA256, &value.Status, &value.ParserSchemaVersion, &value.ChunkingVersion, &value.ChunkCount, &value.ErrorMessage, &createdAt, &indexedAt, &updatedAt)
 	if err != nil {
 		return value, err
 	}
@@ -636,7 +639,7 @@ func scanKnowledgeWork(row rowScanner) (knowledge.Work, error) {
 	var versionCreated, versionUpdated string
 	var versionActivated sql.NullString
 	err := row.Scan(
-		&work.Document.ID, &work.Document.ProjectID, &work.Document.AttachmentID, &work.Document.IndexVersionID, &work.Document.Title, &work.Document.AttachmentSHA256, &work.Document.Status, &work.Document.ParserSchemaVersion, &work.Document.ChunkingVersion, &work.Document.ChunkCount, &work.Document.ErrorMessage, &documentCreated, &documentIndexed, &documentUpdated,
+		&work.Document.ID, &work.Document.ProjectID, &work.Document.ScopeKind, &work.Document.ResearchTaskID, &work.Document.SourceKind, &work.Document.AttachmentID, &work.Document.IndexVersionID, &work.Document.Title, &work.Document.AttachmentSHA256, &work.Document.Status, &work.Document.ParserSchemaVersion, &work.Document.ChunkingVersion, &work.Document.ChunkCount, &work.Document.ErrorMessage, &documentCreated, &documentIndexed, &documentUpdated,
 		&work.Job.ID, &work.Job.ProjectID, &work.Job.DocumentID, &work.Job.AttachmentID, &work.Job.IndexVersionID, &work.Job.Status, &work.Job.Stage, &work.Job.AttemptCount, &work.Job.ErrorMessage, &jobCreated, &jobStarted, &jobCompleted, &jobUpdated,
 		&work.Version.ID, &work.Version.ProjectID, &work.Version.VersionNumber, &work.Version.SchemaVersion, &work.Version.ParserSchemaVersion, &work.Version.ChunkingVersion, &work.Version.SearchKind, &work.Version.StorageRelativePath, &work.Version.Status, &work.Version.ErrorMessage, &versionCreated, &versionActivated, &versionUpdated, &work.Version.RetrievalEngine, &work.Version.EmbeddingModel, &work.Version.EmbeddingDimensions, &work.Version.EmbeddingFingerprint, &work.Version.HybridStrategy,
 	)

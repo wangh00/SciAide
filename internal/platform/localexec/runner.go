@@ -18,11 +18,30 @@ import (
 	"time"
 )
 
+type callIDContextKey struct{}
+
+// WithCallID tags a context for transient local-process observation. The ID is
+// never sent to child processes and is not persisted as process input.
+func WithCallID(ctx context.Context, callID string) context.Context {
+	return context.WithValue(ctx, callIDContextKey{}, strings.TrimSpace(callID))
+}
+
+func CallIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	value, _ := ctx.Value(callIDContextKey{}).(string)
+	return strings.TrimSpace(value)
+}
+
 const (
 	DefaultOutputBytes  = 64 * 1024
 	DefaultDrainTimeout = 2 * time.Second
 	DefaultMemoryBytes  = int64(1024 * 1024 * 1024)
-	cancellationGrace   = 50 * time.Millisecond
+	// LiveOutputBytes is intentionally much smaller than the durable capture.
+	// It is only a UI progress tail and must never become model context.
+	LiveOutputBytes   = 4 * 1024
+	cancellationGrace = 50 * time.Millisecond
 )
 
 type TerminationReason string
@@ -102,6 +121,19 @@ type Result struct {
 	FinishedAt        time.Time         `json:"finishedAt"`
 }
 
+// RuntimeSnapshot is a bounded, transient view of one running process. It is
+// not persisted and is safe to expose to progress UIs because it contains
+// only recent output tails, counters and lifecycle timestamps.
+type RuntimeSnapshot struct {
+	CallID      string    `json:"callId"`
+	PID         int       `json:"pid"`
+	StdoutTail  string    `json:"stdoutTail,omitempty"`
+	StderrTail  string    `json:"stderrTail,omitempty"`
+	StdoutBytes int64     `json:"stdoutBytes"`
+	StderrBytes int64     `json:"stderrBytes"`
+	UpdatedAt   time.Time `json:"updatedAt"`
+}
+
 type Options struct {
 	MaxOutputBytes   int
 	DrainTimeout     time.Duration
@@ -117,8 +149,95 @@ type Runner struct {
 
 	mu     sync.Mutex
 	active map[*executionState]struct{}
+	live   map[string]*liveProcess
 	closed bool
 	wg     sync.WaitGroup
+}
+
+type liveProcess struct {
+	mu     sync.Mutex
+	value  RuntimeSnapshot
+	stdout *tailBuffer
+	stderr *tailBuffer
+}
+
+type tailBuffer struct {
+	mu    sync.Mutex
+	data  []byte
+	limit int
+}
+
+func (b *tailBuffer) Write(value []byte) (int, error) {
+	if b == nil {
+		return len(value), nil
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(value) >= b.limit {
+		b.data = append(b.data[:0], value[len(value)-b.limit:]...)
+		return len(value), nil
+	}
+	b.data = append(b.data, value...)
+	if overflow := len(b.data) - b.limit; overflow > 0 {
+		b.data = append([]byte(nil), b.data[overflow:]...)
+	}
+	return len(value), nil
+}
+
+func (b *tailBuffer) String() string {
+	if b == nil {
+		return ""
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return strings.ToValidUTF8(string(b.data), "\uFFFD")
+}
+
+func newLiveProcess(callID string, pid int) *liveProcess {
+	return &liveProcess{value: RuntimeSnapshot{CallID: strings.TrimSpace(callID), PID: pid, UpdatedAt: time.Now().UTC()}, stdout: &tailBuffer{limit: LiveOutputBytes}, stderr: &tailBuffer{limit: LiveOutputBytes}}
+}
+
+func (p *liveProcess) writer(stdout bool) io.Writer {
+	return liveWriter{process: p, stdout: stdout}
+}
+
+type liveWriter struct {
+	process *liveProcess
+	stdout  bool
+}
+
+func (w liveWriter) Write(value []byte) (int, error) {
+	if w.process == nil {
+		return len(value), nil
+	}
+	w.process.mu.Lock()
+	buffer := w.process.stdout
+	if !w.stdout {
+		buffer = w.process.stderr
+	}
+	if w.stdout {
+		w.process.value.StdoutBytes += int64(len(value))
+	} else {
+		w.process.value.StderrBytes += int64(len(value))
+	}
+	w.process.value.UpdatedAt = time.Now().UTC()
+	w.process.mu.Unlock()
+	if buffer != nil {
+		_, _ = buffer.Write(value)
+	}
+	return len(value), nil
+}
+
+func (p *liveProcess) snapshot() RuntimeSnapshot {
+	if p == nil {
+		return RuntimeSnapshot{}
+	}
+	p.mu.Lock()
+	value := p.value
+	stdout, stderr := p.stdout, p.stderr
+	p.mu.Unlock()
+	value.StdoutTail, value.StderrTail = stdout.String(), stderr.String()
+	return value
 }
 
 type executionState struct {
@@ -140,7 +259,43 @@ func NewRunner(options Options) *Runner {
 	if memory == 0 {
 		memory = DefaultMemoryBytes
 	}
-	return &Runner{maxOutput: maxOutput, drain: drain, memory: memory, recorder: options.Recorder, active: make(map[*executionState]struct{})}
+	return &Runner{maxOutput: maxOutput, drain: drain, memory: memory, recorder: options.Recorder, active: make(map[*executionState]struct{}), live: make(map[string]*liveProcess)}
+}
+
+// Runtime returns the current bounded view for a running local process.
+// Finished calls are removed immediately; durable tool results remain the
+// source of truth for completed output.
+func (r *Runner) Runtime(callID string) (RuntimeSnapshot, bool) {
+	if r == nil || strings.TrimSpace(callID) == "" {
+		return RuntimeSnapshot{}, false
+	}
+	r.mu.Lock()
+	process := r.live[strings.TrimSpace(callID)]
+	r.mu.Unlock()
+	if process == nil {
+		return RuntimeSnapshot{}, false
+	}
+	return process.snapshot(), true
+}
+
+func (r *Runner) addLive(process *liveProcess) {
+	if r == nil || process == nil || strings.TrimSpace(process.value.CallID) == "" {
+		return
+	}
+	r.mu.Lock()
+	r.live[process.value.CallID] = process
+	r.mu.Unlock()
+}
+
+func (r *Runner) removeLive(callID string, process *liveProcess) {
+	if r == nil || process == nil {
+		return
+	}
+	r.mu.Lock()
+	if r.live[strings.TrimSpace(callID)] == process {
+		delete(r.live, strings.TrimSpace(callID))
+	}
+	r.mu.Unlock()
 }
 
 func (r *Runner) Execute(ctx context.Context, request Request) (Result, error) {
@@ -217,6 +372,13 @@ func (r *Runner) Execute(ctx context.Context, request Request) (Result, error) {
 	_ = stdoutWriter.Close()
 	_ = stderrWriter.Close()
 	pid := cmd.Process.Pid
+	callID := strings.TrimSpace(request.Audit.CallID)
+	if callID == "" {
+		callID = CallIDFromContext(ctx)
+	}
+	live := newLiveProcess(callID, pid)
+	r.addLive(live)
+	defer r.removeLive(callID, live)
 	if r.recorder != nil {
 		if err := r.recorder.MarkProcessExecutionStarted(context.Background(), request.Audit.CallID, pid, startedAt); err != nil {
 			_ = controller.terminate()
@@ -228,8 +390,8 @@ func (r *Runner) Execute(ctx context.Context, request Request) (Result, error) {
 
 	stdout := newCapture(r.maxOutput)
 	stderr := newCapture(r.maxOutput)
-	stdoutDone := drainPipe(stdoutPipe, stdout)
-	stderrDone := drainPipe(stderrPipe, stderr)
+	stdoutDone := drainPipe(stdoutPipe, io.MultiWriter(stdout, live.writer(true)))
+	stderrDone := drainPipe(stderrPipe, io.MultiWriter(stderr, live.writer(false)))
 	waitDone := make(chan waitResult, 1)
 	go func() {
 		state, waitErr := waitCommand(cmd)

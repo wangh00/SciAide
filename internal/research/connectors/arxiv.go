@@ -5,14 +5,11 @@ import (
 	"encoding/xml"
 	"fmt"
 	"net/url"
-	"regexp"
 	"strings"
 	"time"
 
 	appresearch "github.com/wangh00/SciAide/internal/app/research"
 )
-
-var arxivFieldedQuery = regexp.MustCompile(`(?i)^(ti|au|abs|co|jr|cat|rn|id|all):`)
 
 type arxivConnector struct {
 	client  *Client
@@ -60,11 +57,12 @@ func (c *arxivConnector) Source() appresearch.Source {
 }
 
 func (c *arxivConnector) Search(ctx context.Context, options appresearch.SearchOptions) ([]appresearch.Work, error) {
-	expression := strings.TrimSpace(options.Query)
-	if !arxivFieldedQuery.MatchString(expression) {
-		expression = "all:" + expression
+	expression, err := appresearch.ArXivQuery(options.Query)
+	if err != nil {
+		return nil, &appresearch.SourceError{SourceID: "arxiv", Code: appresearch.FailureInvalidData, Message: err.Error(), Cause: err}
 	}
 	query := url.Values{"search_query": {expression}, "start": {"0"}, "max_results": {fmt.Sprint(options.Limit)}, "sortBy": {"relevance"}}
+	query.Set("start", fmt.Sprint(options.Offset))
 	return c.feed(ctx, c.base+"?"+query.Encode())
 }
 

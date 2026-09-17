@@ -52,8 +52,6 @@ func (g *Guard) Close() error {
 	return g.rootDir.Close()
 }
 
-func (g *Guard) Root() string { return g.root }
-
 // Relative validates a user/model supplied relative path. filepath.Rel on the
 // absolute candidate prevents sibling-prefix tricks such as workspace-other.
 func (g *Guard) Relative(value string) (string, error) {

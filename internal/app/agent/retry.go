@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	maxRequestRetries = 4
+	maxRequestRetries = 5
 	maxStreamRetries  = 5
 )
 
@@ -37,12 +37,13 @@ func defaultRetryDelay(retryIndex int) time.Duration {
 	if retryIndex < 0 {
 		retryIndex = 0
 	}
-	if retryIndex > 8 {
-		retryIndex = 8
-	}
-	base := 200 * time.Millisecond * time.Duration(1<<retryIndex)
-	if base > 60*time.Second {
-		base = 60 * time.Second
+	// Start around four seconds, then grow gently instead of rapid-fire retries.
+	base := 4 * time.Second
+	for i := 0; i < retryIndex && base < 60*time.Second; i++ {
+		base = base * 3 / 2
+		if base > 60*time.Second {
+			base = 60 * time.Second
+		}
 	}
 	jitter := base / 10
 	if jitter <= 0 {

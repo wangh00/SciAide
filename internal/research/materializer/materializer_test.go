@@ -18,6 +18,10 @@ import (
 	appresearch "github.com/wangh00/SciAide/internal/app/research"
 )
 
+func newTestService(client *http.Client, sourceID, host string) *Service {
+	return &Service{client: client, allowHTTP: true, maxPDFBytes: defaultMaxPDFBytes, allowedHosts: map[string]map[string]struct{}{sourceID: {strings.ToLower(host): {}}}}
+}
+
 func createMaterializerProject(t *testing.T) project.Project {
 	t.Helper()
 	root := t.TempDir()

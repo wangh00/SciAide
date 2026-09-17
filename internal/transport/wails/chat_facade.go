@@ -7,6 +7,7 @@ import (
 	"github.com/wangh00/SciAide/internal/app/chat"
 	"github.com/wangh00/SciAide/internal/app/contextmemory"
 	"github.com/wangh00/SciAide/internal/app/permission"
+	"github.com/wangh00/SciAide/internal/app/tool"
 )
 
 type RunSnapshot struct {
@@ -42,9 +43,12 @@ func (f *ChatFacade) GetRunSnapshot(runID string) (RunSnapshot, error) {
 	if err != nil {
 		return RunSnapshot{}, err
 	}
+	projectToolCallSnapshot(&base)
 	result := RunSnapshot{Snapshot: base, PendingApprovals: []permission.Approval{}}
 	if f.approvals != nil {
-		result.PendingApprovals, err = f.approvals.ListPending(f.lifecycle.Context(), runID)
+		var approvals []permission.Approval
+		approvals, err = f.approvals.ListPending(f.lifecycle.Context(), runID)
+		result.PendingApprovals = permission.SafeApprovals(approvals)
 	}
 	return result, err
 }
@@ -54,11 +58,29 @@ func (f *ChatFacade) GetLatestRunSnapshot(conversationID string) (*RunSnapshot, 
 	if err != nil || base == nil {
 		return nil, err
 	}
+	projectToolCallSnapshot(base)
 	result := &RunSnapshot{Snapshot: *base, PendingApprovals: []permission.Approval{}}
 	if f.approvals != nil {
-		result.PendingApprovals, err = f.approvals.ListPending(f.lifecycle.Context(), base.Run.ID)
+		var approvals []permission.Approval
+		approvals, err = f.approvals.ListPending(f.lifecycle.Context(), base.Run.ID)
+		result.PendingApprovals = permission.SafeApprovals(approvals)
 	}
 	return result, err
+}
+
+// projectToolCallSnapshot is the transport boundary for ordinary chat
+// activity. The Agent and Workflow bridge still use the complete local Call
+// record, while Wails receives only the same bounded, redacted argument view
+// used by Workflow activity projections.
+func projectToolCallSnapshot(snapshot *chat.Snapshot) {
+	if snapshot == nil {
+		return
+	}
+	for index := range snapshot.ToolCalls {
+		call := &snapshot.ToolCalls[index]
+		call.Arguments = tool.SafeActivityArguments(call.Arguments)
+		call.Permissions = tool.SafeActivityPermissions(call.Permissions)
+	}
 }
 
 func (f *ChatFacade) GetUsageDashboard(query chat.UsageQuery) (chat.UsageDashboard, error) {

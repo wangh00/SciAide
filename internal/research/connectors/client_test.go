@@ -13,12 +13,23 @@ import (
 	appresearch "github.com/wangh00/SciAide/internal/app/research"
 )
 
+func newTestClient(client *http.Client) *Client {
+	if client == nil {
+		client = &http.Client{}
+	}
+	return &Client{
+		http: client, timeout: time.Second, cacheTTL: time.Minute, maxResponse: defaultMaxResponse,
+		attempts: defaultRetryAttempts, allowHTTP: true, now: func() time.Time { return time.Now().UTC() },
+		cache: map[string]cacheEntry{}, nextStart: map[string]time.Time{},
+	}
+}
+
 func TestClientRetriesCachesAndClassifiesFailures(t *testing.T) {
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if calls.Add(1) == 1 {
 			writer.Header().Set("Retry-After", "0")
-			writer.WriteHeader(http.StatusTooManyRequests)
+			writer.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
 		writer.Header().Set("Content-Type", "application/json")

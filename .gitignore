@@ -24,6 +24,9 @@ coverage.*
 *.db-wal
 *.log
 
+# Local test, review, and development cache
+/.tmp/
+
 # IDE / OS
 .idea/
 .vscode/

@@ -6,7 +6,66 @@ import "encoding/json"
 // definitions. Templates are still untrusted data at execution time and must
 // pass the current compiler before they can be saved or run.
 func ReferenceTemplates() []Template {
-	return []Template{researchClosureTemplate(), xlsxAnalysisTemplate(), pythonAnalysisTemplate()}
+	return []Template{researchClosureTemplate(), xlsxAnalysisTemplate(), pythonAnalysisTemplate(), researchDesignTemplate()}
+}
+
+func independentReviewNode(id, name, promptVersion string) Node {
+	return Node{
+		ID: id, Name: name, Kind: NodeAIAnalysis, Arguments: raw(`{}`), PromptVersion: promptVersion, ReviewPolicy: AIReviewAuto,
+		Prompt:       "你是独立的科研交付审查者，不是上一阶段结果的续写者。逐项核对当前冻结输入与 Workflow 中已完成的证据、Python 结果、方法约束和产物快照。检查不受支持的主张、不可追溯数字、无效或越界引用、方法错误、因果夸大和遗漏局限。问题数组只能写尚未解决且可执行修正的实质缺陷；不得把‘未发现问题’、已通过检查、一般提醒或已接受的局限写进问题数组。通过项写入 verifiedClaims，残余局限写入 limitations。approved=true 时所有问题数组和 requiredCorrections 必须为空；任一问题数组非空时 approved 必须为 false，并在 requiredCorrections 中归纳对应修正动作。reviewedInputSha256 必须原样复制宿主在当前阶段指令中给出的 stage_input SHA-256。不要用行文流畅度代替事实核验。",
+		OutputSchema: withRevisionPlanSchema(independentReviewSchema()),
+	}
+}
+
+func independentReviewSchema() json.RawMessage {
+	return raw(`{"type":"object","additionalProperties":false,"required":["approved","reviewedInputSha256","verifiedClaims","unsupportedClaims","citationIssues","numericIssues","methodIssues","requiredCorrections","confidence","limitations"],"properties":{"approved":{"type":"boolean"},"reviewedInputSha256":{"type":"string","pattern":"^[0-9a-f]{64}$"},"verifiedClaims":{"type":"array","maxItems":100,"items":{"type":"string","maxLength":2000}},"unsupportedClaims":{"type":"array","maxItems":100,"items":{"type":"string","maxLength":2000}},"citationIssues":{"type":"array","maxItems":100,"items":{"type":"string","maxLength":2000}},"numericIssues":{"type":"array","maxItems":100,"items":{"type":"string","maxLength":2000}},"methodIssues":{"type":"array","maxItems":100,"items":{"type":"string","maxLength":2000}},"requiredCorrections":{"type":"array","maxItems":100,"items":{"type":"string","maxLength":2000}},"confidence":{"type":"string","enum":["low","medium","high"]},"limitations":{"type":"array","maxItems":100,"items":{"type":"string","maxLength":2000}}}}`)
+}
+
+func reviewGateNode(id, name string) Node {
+	return Node{ID: id, Name: name, Kind: NodeTool, ToolName: "builtin.research.workflow.review.gate", Arguments: raw(`{}`)}
+}
+
+// ResearchStarterTemplate is a system Workflow. It is persisted so its AI
+// exploration can be cancelled, resumed, audited, and reopened like any other
+// research task, but it is intentionally not exposed as a reusable plan.
+func ResearchStarterTemplate() Template {
+	return dynamicResearchStarterTemplate()
+}
+
+func researchDesignTemplate() Template {
+	return Template{
+		ID:          "research-design",
+		Name:        "研究设计与开题方案",
+		Description: "把尚无数据或证据不足的研究想法转化为可执行、可审查的研究设计。",
+		Definition: Definition{
+			SchemaVersion: SchemaVersion,
+			Name:          "研究设计与开题方案",
+			Description:   "AI 在只读科研工具和动态 Skill 辅助下形成研究问题、采样、数据收集、分析与风险计划；输出是设计而非实证结论。",
+			Inputs:        []Port{{Name: "research_goal", Type: TypeString, Description: "原始研究想法或希望解决的问题", Required: true}},
+			Nodes: []Node{
+				{
+					ID: "design", Name: "形成可执行研究设计", Kind: NodeAgentStage, Arguments: raw(`{}`),
+					PromptVersion: "research-design-v1", ReviewPolicy: AIReviewAuto, SkillRouting: true,
+					AllowedTools: []string{"builtin.knowledge.search", "builtin.workspace.read_text"},
+					Prompt:       "依据原始研究目标、当前项目资料以及实际检索到的公开发现记录，形成一份可执行且可审查的研究设计。明确区分已知事实、待验证假设和方法建议。必须覆盖研究问题、可检验假设或探索目标、对象与采样、变量或材料、数据收集、分析计划、质量控制、伦理与风险、执行里程碑以及当前证据缺口。没有可信本地引用时必须如实披露；这是研究设计产物，不是数据结论或证据已经充分的报告。",
+					OutputSchema: raw(`{"type":"object","additionalProperties":false,"required":["title","researchQuestion","objectives","hypotheses","populationAndSampling","variablesOrMaterials","dataCollectionPlan","analysisPlan","qualityControls","ethicsAndRisks","milestones","evidenceGaps","limitations","status"],"properties":{"title":{"type":"string","minLength":1,"maxLength":240},"researchQuestion":{"type":"string","minLength":1,"maxLength":4000},"objectives":{"type":"array","minItems":1,"maxItems":30,"items":{"type":"string","maxLength":2000}},"hypotheses":{"type":"array","maxItems":30,"items":{"type":"string","maxLength":2000}},"populationAndSampling":{"type":"array","minItems":1,"maxItems":30,"items":{"type":"string","maxLength":2000}},"variablesOrMaterials":{"type":"array","minItems":1,"maxItems":40,"items":{"type":"string","maxLength":2000}},"dataCollectionPlan":{"type":"array","minItems":1,"maxItems":40,"items":{"type":"string","maxLength":2000}},"analysisPlan":{"type":"array","minItems":1,"maxItems":40,"items":{"type":"string","maxLength":2000}},"qualityControls":{"type":"array","minItems":1,"maxItems":30,"items":{"type":"string","maxLength":2000}},"ethicsAndRisks":{"type":"array","minItems":1,"maxItems":30,"items":{"type":"string","maxLength":2000}},"milestones":{"type":"array","minItems":1,"maxItems":30,"items":{"type":"string","maxLength":2000}},"evidenceGaps":{"type":"array","maxItems":30,"items":{"type":"string","maxLength":2000}},"limitations":{"type":"array","maxItems":30,"items":{"type":"string","maxLength":2000}},"status":{"type":"string","const":"research_design_not_empirical_result"}}}`),
+				},
+				independentReviewNode("review", "独立复核研究设计", "research-design-review-v1"),
+				reviewGateNode("review_gate", "核验研究设计交付条件"),
+			},
+			Edges: []Edge{
+				{FromNode: "$input", FromPort: "research_goal", ToNode: "design", ToPort: "context"},
+				{FromNode: "design", FromPort: "analysis", ToNode: "review", ToPort: "context"},
+				{FromNode: "design", FromPort: "analysis", ToNode: "review_gate", ToPort: "subject"},
+				{FromNode: "review", FromPort: "analysis", ToNode: "review_gate", ToPort: "review"},
+			},
+			Outputs: []Output{
+				{Name: "research_design", Type: TypeObject, FromNode: "design", FromPort: "analysis", Required: true, Description: "结构化研究设计，不代表已有实证结论"},
+				{Name: "independent_review", Type: TypeObject, FromNode: "review", FromPort: "analysis", Required: true, Description: "独立二次审查快照"},
+				{Name: "delivery_gate", Type: TypeObject, FromNode: "review_gate", FromPort: "structured", Required: true, Description: "宿主确定性交付门禁"},
+			},
+		},
+	}
 }
 
 const xlsxAnalysisScript = `import csv
@@ -229,7 +288,10 @@ func xlsxAnalysisTemplate() Template {
 			SchemaVersion: SchemaVersion,
 			Name:          "XLSX 清洗与描述统计",
 			Description:   "使用项目 Python Kernel 和标准库分析首张工作表；输入只读，环境、代码、输入及输出均进入复现审计。",
-			Inputs:        []Port{{Name: "input_paths", Type: TypeArray, Description: "选择一份 XLSX 工作簿", FileKind: "xlsx", MinItems: 1, MaxItems: 1, Required: true}},
+			Inputs: []Port{
+				{Name: "input_paths", Type: TypeArray, Description: "选择一份 XLSX 工作簿", FileKind: "xlsx", MinItems: 1, MaxItems: 1, Required: true},
+				{Name: "research_goal", Type: TypeString, Description: "这次分析希望解决的研究问题", Required: true, Default: raw(`"描述工作簿的数据质量与主要数值字段"`)},
+			},
 			Nodes: []Node{
 				{ID: "environment", Name: "确保项目 Python 环境", Kind: NodeTool, ToolName: "builtin.research.workflow.python.ensure", Arguments: raw(`{}`)},
 				{ID: "analysis", Name: "清洗、统计并绘图", Kind: NodePython, Arguments: rawObject(map[string]any{
@@ -242,13 +304,24 @@ func xlsxAnalysisTemplate() Template {
 					},
 					"timeoutSeconds": 120,
 				})},
+				{ID: "interpret", Name: "AI 解释描述统计", Kind: NodeAgentStage, Arguments: raw(`{}`), PromptVersion: "xlsx-interpret-v2", Prompt: "自主解释 Python 已生成的描述统计，指出缺失值、样本量和描述性结论的局限。按任务语义加载真正相关的科研 Skill，不得把相关性描述成因果关系，不得发明输入中没有的数字。输出通过结构化校验后由 Workflow 自动提交；仅在证据不足或存在高影响歧义时如实写入 limitations。", AllowedTools: []string{"builtin.workspace.read_text"}, SkillRouting: true, ReviewPolicy: AIReviewAuto, OutputSchema: raw(`{"type":"object","additionalProperties":false,"required":["summary","limitations"],"properties":{"summary":{"type":"string","minLength":1,"maxLength":10000},"limitations":{"type":"array","maxItems":20,"items":{"type":"string","maxLength":2000}}}}`)},
+				independentReviewNode("review", "独立审查分析结果", "xlsx-analysis-review-v1"),
+				reviewGateNode("review_gate", "核验分析结果交付条件"),
 			},
 			Edges: []Edge{
 				{FromNode: "$input", FromPort: "input_paths", ToNode: "analysis", ToPort: "inputPaths"},
+				{FromNode: "$input", FromPort: "research_goal", ToNode: "analysis", ToPort: "inputData"},
 				{FromNode: "environment", FromPort: "structured.environmentFingerprint", ToNode: "analysis", ToPort: "expectedEnvironmentFingerprint"},
+				{FromNode: "analysis", FromPort: "structured", ToNode: "interpret", ToPort: "context"},
+				{FromNode: "interpret", FromPort: "analysis", ToNode: "review", ToPort: "context"},
+				{FromNode: "interpret", FromPort: "analysis", ToNode: "review_gate", ToPort: "subject"},
+				{FromNode: "review", FromPort: "analysis", ToNode: "review_gate", ToPort: "review"},
 			},
 			Outputs: []Output{
 				{Name: "analysis", Type: TypeObject, FromNode: "analysis", FromPort: "structured", Required: true, Description: "带环境、输入、代码、输出及复现哈希的分析结果"},
+				{Name: "interpretation", Type: TypeObject, FromNode: "interpret", FromPort: "analysis", Required: true, Description: "经结构化校验并自动提交的 AI 结果解释"},
+				{Name: "independent_review", Type: TypeObject, FromNode: "review", FromPort: "analysis", Required: true, Description: "独立二次审查快照"},
+				{Name: "delivery_gate", Type: TypeObject, FromNode: "review_gate", FromPort: "structured", Required: true, Description: "宿主确定性交付门禁"},
 				{Name: "artifacts", Type: TypeArtifacts, FromNode: "analysis", FromPort: "artifacts", Required: true, Description: "清洗 CSV、统计 CSV、SVG 图和可重放 Python 脚本"},
 			},
 		},
@@ -324,9 +397,11 @@ analysis`
 				{ID: "analysis", Name: "生成 CSV 与 SVG 分析产物", Kind: NodePython, Arguments: rawObject(map[string]any{
 					"code": analysisCode, "outputPaths": []string{"analysis-output/research-{{runId}}-{{attempt}}.csv", "analysis-output/research-{{runId}}-{{attempt}}.svg"}, "timeoutSeconds": 120,
 				})},
-				{ID: "report", Name: "发布可信科研报告", Kind: NodeTool, ToolName: "builtin.research.workflow.report", Arguments: rawObject(map[string]any{
-					"name": "可信科研证据报告", "markdown": "# 可信科研证据报告\n\n## 方法\n\n本报告只使用本次 Workflow 中经人工选择并由本地知识索引重新核验的证据。分析结果来自项目 Python 环境，输入、环境与输出哈希均进入审计。\n\n## 结果\n\n所选证据的来源分布与摘录长度见随报告冻结的 CSV 和 SVG 产物。",
-				})},
+				{ID: "interpret", Name: "AI 审查证据并解释结果", Kind: NodeAgentStage, Arguments: raw(`{}`), PromptVersion: "research-interpret-v2", Prompt: "自主结合已经人工选择的可信引用和 Python 产生的结构化分析，解释结果、局限与可能的替代解释，并按任务语义加载真正相关的科研 Skill。引用只能来自阶段输入，不得新增不存在的数值或文献。先给出面向研究者的判断依据，再返回结构化审查结果；输出通过结构化校验后由 Workflow 自动提交。证据冲突或不足必须降低 confidence 并写入 limitations，不得静默补全。", AllowedTools: []string{"builtin.knowledge.search", "builtin.workspace.read_text"}, SkillRouting: true, ReviewPolicy: AIReviewAuto, OutputSchema: raw(`{"type":"object","additionalProperties":false,"required":["summary","limitations","confidence"],"properties":{"summary":{"type":"string","minLength":1,"maxLength":10000},"limitations":{"type":"array","maxItems":20,"items":{"type":"string","maxLength":2000}},"confidence":{"type":"string","enum":["low","medium","high"]}}}`)},
+				{ID: "draft_report", Name: "生成待审查研究报告", Kind: NodeAIAnalysis, Arguments: raw(`{}`), PromptVersion: "trusted-report-draft-v1", ReviewPolicy: AIReviewAuto, Prompt: "依据上一阶段冻结的结果解释和宿主提供的可信引用生成完整 Markdown 报告草稿。正文必须覆盖研究问题、方法、证据、可复现分析、结果、局限与结论。所有事实引用只能使用 trusted_workflow_citations 中的现有标记；所有数字必须可追溯到冻结的 Python 结果。不得把模型推断写成计算事实，不得隐藏证据冲突或数据缺口。", OutputSchema: raw(`{"type":"object","additionalProperties":false,"required":["markdown","claimSummary","limitations","confidence"],"properties":{"markdown":{"type":"string","minLength":1,"maxLength":180000},"claimSummary":{"type":"array","maxItems":100,"items":{"type":"string","maxLength":2000}},"limitations":{"type":"array","maxItems":50,"items":{"type":"string","maxLength":2000}},"confidence":{"type":"string","enum":["low","medium","high"]}}}`)},
+				independentReviewNode("review", "独立审查报告与结果", "trusted-report-review-v1"),
+				reviewGateNode("review_gate", "核验报告交付条件"),
+				{ID: "report", Name: "发布可信科研报告", Kind: NodeTool, ToolName: "builtin.research.workflow.report", Arguments: rawObject(map[string]any{"name": "可信科研证据报告"})},
 			},
 			Edges: []Edge{
 				{FromNode: "$input", FromPort: "query", ToNode: "search", ToPort: "query"},
@@ -341,14 +416,22 @@ analysis`
 				{FromNode: "select_citations", FromPort: "citations", ToNode: "environment", ToPort: "context"},
 				{FromNode: "select_citations", FromPort: "citations", ToNode: "analysis", ToPort: "inputData"},
 				{FromNode: "environment", FromPort: "structured.environmentFingerprint", ToNode: "analysis", ToPort: "expectedEnvironmentFingerprint"},
+				{FromNode: "analysis", FromPort: "structured", ToNode: "interpret", ToPort: "context"},
+				{FromNode: "interpret", FromPort: "analysis", ToNode: "draft_report", ToPort: "context"},
+				{FromNode: "draft_report", FromPort: "analysis", ToNode: "review", ToPort: "context"},
+				{FromNode: "draft_report", FromPort: "analysis", ToNode: "review_gate", ToPort: "subject"},
+				{FromNode: "review", FromPort: "analysis", ToNode: "review_gate", ToPort: "review"},
 				{FromNode: "select_citations", FromPort: "citations", ToNode: "report", ToPort: "citations"},
-				{FromNode: "analysis", FromPort: "structured", ToNode: "report", ToPort: "analysis"},
+				{FromNode: "draft_report", FromPort: "analysis", ToNode: "report", ToPort: "reportDraft"},
 				{FromNode: "analysis", FromPort: "artifacts", ToNode: "report", ToPort: "sourceArtifacts"},
+				{FromNode: "review_gate", FromPort: "structured", ToNode: "report", ToPort: "reviewGate"},
 			},
 			Outputs: []Output{
 				{Name: "report", Type: TypeObject, FromNode: "report", FromPort: "structured", Required: true, Description: "不可变报告及 DOCX/PDF 导出快照"},
 				{Name: "analysis_artifacts", Type: TypeArtifacts, FromNode: "analysis", FromPort: "artifacts", Required: true, Description: "CSV 与 SVG 分析产物"},
 				{Name: "report_artifacts", Type: TypeArtifacts, FromNode: "report", FromPort: "artifacts", Required: true, Description: "报告、DOCX 与 PDF Artifact"},
+				{Name: "independent_review", Type: TypeObject, FromNode: "review", FromPort: "analysis", Required: true, Description: "独立二次审查快照"},
+				{Name: "delivery_gate", Type: TypeObject, FromNode: "review_gate", FromPort: "structured", Required: true, Description: "报告发布前宿主确定性门禁"},
 			},
 		},
 	}
@@ -561,14 +644,24 @@ func pythonAnalysisTemplate() Template {
 				},
 				"timeoutSeconds": 120,
 			})},
+			{ID: "interpret", Name: "AI 解释分析与局限", Kind: NodeAgentStage, Arguments: raw(`{}`), PromptVersion: "tabular-interpret-v2", Prompt: "自主依据 Python 阶段的结构化输出解释数据质量、分布和所选方法的局限，并按任务语义加载真正相关的科研 Skill。明确区分计算事实、推断和建议，不得发明数字。输出通过结构化校验后由 Workflow 自动提交；只有证据不足、方法前提不满足或存在高影响歧义时才将问题明确写入 limitations 和 nextSteps。", AllowedTools: []string{"builtin.workspace.read_text"}, SkillRouting: true, ReviewPolicy: AIReviewAuto, OutputSchema: raw(`{"type":"object","additionalProperties":false,"required":["findings","limitations","nextSteps"],"properties":{"findings":{"type":"array","maxItems":30,"items":{"type":"string","maxLength":2000}},"limitations":{"type":"array","maxItems":20,"items":{"type":"string","maxLength":2000}},"nextSteps":{"type":"array","maxItems":20,"items":{"type":"string","maxLength":2000}}}}`)},
+			independentReviewNode("review", "独立审查分析结果", "tabular-analysis-review-v1"),
+			reviewGateNode("review_gate", "核验分析结果交付条件"),
 		},
 		Edges: []Edge{
 			{FromNode: "$input", FromPort: "input_paths", ToNode: "analysis", ToPort: "inputPaths"},
 			{FromNode: "$input", FromPort: "analysis_request", ToNode: "analysis", ToPort: "inputData"},
 			{FromNode: "environment", FromPort: "structured.environmentFingerprint", ToNode: "analysis", ToPort: "expectedEnvironmentFingerprint"},
+			{FromNode: "analysis", FromPort: "structured", ToNode: "interpret", ToPort: "context"},
+			{FromNode: "interpret", FromPort: "analysis", ToNode: "review", ToPort: "context"},
+			{FromNode: "interpret", FromPort: "analysis", ToNode: "review_gate", ToPort: "subject"},
+			{FromNode: "review", FromPort: "analysis", ToNode: "review_gate", ToPort: "review"},
 		},
 		Outputs: []Output{
 			{Name: "analysis", Type: TypeObject, FromNode: "analysis", FromPort: "structured", Required: true, Description: "带环境、代码、输入、输出和复现哈希的分析结果"},
+			{Name: "interpretation", Type: TypeObject, FromNode: "interpret", FromPort: "analysis", Required: true, Description: "经 Schema 校验并冻结的 AI 分析解释"},
+			{Name: "independent_review", Type: TypeObject, FromNode: "review", FromPort: "analysis", Required: true, Description: "独立二次审查快照"},
+			{Name: "delivery_gate", Type: TypeObject, FromNode: "review_gate", FromPort: "structured", Required: true, Description: "宿主确定性交付门禁"},
 			{Name: "artifacts", Type: TypeArtifacts, FromNode: "analysis", FromPort: "artifacts", Required: true, Description: "清洗数据、字段统计、SVG 图、方法说明和可重放脚本"},
 		},
 	}}

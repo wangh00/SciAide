@@ -573,7 +573,7 @@ func TestProjectArchiveRestoresWorkflowRuntimeGraphAndInterruptsPausedRun(t *tes
 	if source, err := runtimeRepo.GetRun(ctx, created.ID, completed.Run.ID); err != nil || source.Run.PermissionMode != conversation.PermissionFullAccess {
 		t.Fatalf("source Workflow permission mode = %q, %v", source.Run.PermissionMode, err)
 	}
-	oldRunID, oldHumanStepID, oldToolStepID, oldCallID := completed.Run.ID, completed.Steps[0].ID, completed.Steps[1].ID, completed.Steps[1].ToolCallID
+	oldRunID, oldConversationID, oldHumanStepID, oldToolStepID, oldCallID := completed.Run.ID, completed.Run.ConversationID, completed.Steps[0].ID, completed.Steps[1].ID, completed.Steps[1].ToolCallID
 
 	pausedStart, err := runtimeService.Start(ctx, workflow.StartCommand{ProjectID: created.ID, WorkflowID: saved.Workflow.ID, Inputs: inputs})
 	if err != nil {
@@ -584,7 +584,7 @@ func TestProjectArchiveRestoresWorkflowRuntimeGraphAndInterruptsPausedRun(t *tes
 	if err != nil || paused.Run.Status != workflow.RunPaused {
 		t.Fatalf("pause Workflow before archive = %#v, %v", paused, err)
 	}
-	oldPausedRunID := paused.Run.ID
+	oldPausedRunID, oldPausedConversationID := paused.Run.ID, paused.Run.ConversationID
 
 	archiveService := newProjectArchiveTestService(t, store, projects, root)
 	archivePath := filepath.Join(root, "workflow-runtime.sciaide-project")
@@ -665,6 +665,13 @@ func TestProjectArchiveRestoresWorkflowRuntimeGraphAndInterruptsPausedRun(t *tes
 	}
 	if restoredCompleted.Run.ID == "" || restoredCompleted.Run.ID == oldRunID || restoredInterrupted.Run.ID == "" || restoredInterrupted.Run.ID == oldPausedRunID {
 		t.Fatalf("restored Workflow identities/statuses = completed:%#v interrupted:%#v", restoredCompleted.Run, restoredInterrupted.Run)
+	}
+	if restoredCompleted.Run.ConversationID == "" || restoredCompleted.Run.ConversationID == oldConversationID || restoredInterrupted.Run.ConversationID == "" || restoredInterrupted.Run.ConversationID == oldPausedConversationID {
+		t.Fatalf("restored research conversation identities = completed:%q interrupted:%q", restoredCompleted.Run.ConversationID, restoredInterrupted.Run.ConversationID)
+	}
+	bound, exists, err := runtimeRepo.GetRunByConversation(ctx, restoredCompleted.Run.ConversationID)
+	if err != nil || !exists || bound.Run.ID != restoredCompleted.Run.ID || bound.Run.ProjectID != restored.Project.ID {
+		t.Fatalf("restored research conversation binding = %#v, %v, %v", bound.Run, exists, err)
 	}
 	if restoredInterrupted.Run.ErrorCode != "ARCHIVE_RESTORED" || len(restoredInterrupted.Steps) != 2 || restoredInterrupted.Steps[0].Status != workflow.StepInterrupted {
 		t.Fatalf("paused Workflow was not safely interrupted = %#v", restoredInterrupted)
@@ -782,7 +789,7 @@ func TestProjectArchiveRestoresMatchingSkillBindingWithoutPackagingSkill(t *test
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
-	manifest := skill.NormalizeManifest(skill.Manifest{SchemaVersion: skill.CurrentSchemaVersion, ID: "literature-reading", Name: "Literature reading", Version: "1.0.0", Description: "Review papers", Entry: "SKILL.md", Activation: skill.Activation{Mode: skill.ActivationExplicit}, Compatibility: skill.Compatibility{SciAide: ">=0.4.0 <1.0.0"}, Context: skill.ContextPolicy{MaxTokens: 1000}})
+	manifest := skill.Manifest{SchemaVersion: skill.CurrentSchemaVersion, ID: "literature-reading", Name: "Literature reading", Version: "1.0.0", Description: "Review papers", Entry: "SKILL.md", Activation: skill.Activation{Mode: skill.ActivationExplicit}, Compatibility: skill.Compatibility{SciAide: ">=0.4.0 <1.0.0"}, Context: skill.ContextPolicy{MaxTokens: 1000}}
 	manifestJSON, _ := json.Marshal(manifest)
 	for _, statement := range []struct {
 		query string
@@ -860,7 +867,7 @@ func TestProjectArchiveRemapsSchema2RunSkillContextAndRecomputesHash(t *testing.
 	}
 	instructions := "Review every claim against a local evidence chunk."
 	contentHash := sha256.Sum256([]byte(instructions))
-	manifest := skill.NormalizeManifest(skill.Manifest{SchemaVersion: skill.CurrentSchemaVersion, ID: "evidence-review", Name: "Evidence review", Version: "1.0.0", Description: "Review local evidence", Entry: "SKILL.md", Activation: skill.Activation{Mode: skill.ActivationExplicit}, Compatibility: skill.Compatibility{SciAide: ">=0.4.0 <1.0.0"}, Context: skill.ContextPolicy{MaxTokens: 1000}})
+	manifest := skill.Manifest{SchemaVersion: skill.CurrentSchemaVersion, ID: "evidence-review", Name: "Evidence review", Version: "1.0.0", Description: "Review local evidence", Entry: "SKILL.md", Activation: skill.Activation{Mode: skill.ActivationExplicit}, Compatibility: skill.Compatibility{SciAide: ">=0.4.0 <1.0.0"}, Context: skill.ContextPolicy{MaxTokens: 1000}}
 	runContext := skill.RunContext{
 		SchemaVersion: skill.RunContextSchemaVersion, RunID: run.ID, ProjectID: created.ID,
 		ContextWindowTokens: 200_000, CatalogBudgetTokens: 4_000, InstructionBudgetTokens: 40_000,
@@ -873,8 +880,16 @@ func TestProjectArchiveRemapsSchema2RunSkillContextAndRecomputesHash(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := NewSkillRepository(store.DB()).CreateRunContext(ctx, runContext); err != nil {
+	// Seed the archived snapshot through the storage contract directly. The
+	// active runtime never creates schema-1/2 snapshots; this fixture represents
+	// data imported from an older database before exercising archive remapping.
+	if _, err := store.DB().ExecContext(ctx, `INSERT INTO run_skill_contexts(run_id,project_id,schema_version,snapshot_json,snapshot_hash,created_at) VALUES (?,?,?,?,?,?)`, runContext.RunID, runContext.ProjectID, runContext.SchemaVersion, string(encodedBefore), hashBefore, formatTime(runContext.CreatedAt)); err != nil {
 		t.Fatal(err)
+	}
+	for ordinal, selected := range runContext.Skills {
+		if _, err := store.DB().ExecContext(ctx, `INSERT INTO run_skills(run_id,ordinal,skill_id,skill_version,content_hash,package_hash,created_at) VALUES (?,?,?,?,?,?,?)`, runContext.RunID, ordinal, selected.Manifest.ID, selected.Manifest.Version, selected.ContentHash, selected.PackageHash, formatTime(runContext.CreatedAt)); err != nil {
+			t.Fatal(err)
+		}
 	}
 	completedAt := now.Add(time.Second)
 	run.Status, run.FinishReason, run.CompletedAt, run.UpdatedAt = chat.RunCompleted, "stop", &completedAt, completedAt

@@ -58,6 +58,10 @@ func (c *semanticScholarConnector) Source() appresearch.Source {
 
 func (c *semanticScholarConnector) Search(ctx context.Context, options appresearch.SearchOptions) ([]appresearch.Work, error) {
 	query := url.Values{"query": {options.Query}, "limit": {fmt.Sprint(options.Limit)}, "fields": {semanticFields}}
+	applyPublicationYears("semantic-scholar", query, options.Years)
+	if options.Offset > 0 {
+		query.Set("offset", fmt.Sprint(options.Offset))
+	}
 	var response semanticSearchResponse
 	if err := c.client.getJSON(ctx, c.base+"/search?"+query.Encode(), requestOptions{SourceID: "semantic-scholar", Host: c.host, MinSpacing: c.spacing, Cache: true}, &response); err != nil {
 		return nil, err

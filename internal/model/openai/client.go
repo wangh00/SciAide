@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -205,19 +204,11 @@ func (c *Client) open(ctx context.Context, request model.ChatRequest) (model.Str
 	if request.ResolvedReasoningLevel.Valid() {
 		payload.ReasoningEffort = string(request.ResolvedReasoningLevel)
 	}
-	providerNames := make(map[string]string, len(request.Tools))
-	qualifiedNames := make(map[string]string, len(request.Tools))
-	for _, definition := range request.Tools {
-		if err := validateModelToolDefinition(definition); err != nil {
-			return nil, 0, err
-		}
-		providerName := providerToolName(definition.Name)
-		if existing, duplicate := providerNames[providerName]; duplicate && existing != definition.Name {
-			return nil, 0, fmt.Errorf("model tool name alias collision")
-		}
-		providerNames[providerName] = definition.Name
-		qualifiedNames[definition.Name] = providerName
+	qualifiedNames, providerNames, err := modelutil.BuildToolAliases(request.Tools)
+	if err != nil {
+		return nil, 0, err
 	}
+	request = modelutil.ProjectToolReferences(request, modelutil.ToolReferenceAliases(request, qualifiedNames, providerToolName))
 	payload.Messages = make([]requestMessage, 0, len(request.Messages))
 	for _, message := range request.Messages {
 		mapped, err := mapRequestMessage(message, qualifiedNames)
@@ -229,6 +220,18 @@ func (c *Client) open(ctx context.Context, request model.ChatRequest) (model.Str
 	payload.Tools = make([]requestTool, 0, len(request.Tools))
 	for _, definition := range request.Tools {
 		payload.Tools = append(payload.Tools, requestTool{Type: "function", Function: requestFunction{Name: qualifiedNames[definition.Name], Description: definition.Description, Parameters: append(json.RawMessage(nil), definition.InputSchema...)}})
+	}
+	if request.DisableTools {
+		payload.ToolChoice = "none"
+	}
+	if request.ForcedTool != "" {
+		name := qualifiedNames[request.ForcedTool]
+		if name == "" || request.DisableTools {
+			return nil, 0, fmt.Errorf("invalid forced tool contract")
+		}
+		payload.ToolChoice = map[string]any{"type": "function", "function": map[string]string{"name": name}}
+		disabled := false
+		payload.ParallelToolCalls = &disabled
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -306,9 +309,7 @@ func openBufferedResponse(response *http.Response, providerNames map[string]stri
 		}
 		for _, call := range choice.Message.ToolCalls {
 			name := call.Function.Name
-			if qualified := providerNames[name]; qualified != "" {
-				name = qualified
-			}
+			name = modelutil.ResolveProviderToolName(name, providerNames)
 			mapped := model.ToolCall{ID: call.ID, Name: name, Arguments: json.RawMessage(call.Function.Arguments)}
 			if err := validateCompleteToolCall(mapped); err != nil {
 				return nil, modelError("MODEL_TOOL_CALL_INVALID", "模型返回了不完整或无效的工具调用。", false, err)
@@ -408,75 +409,26 @@ func openAIImageParts(parts []model.ContentPart) ([]requestContentPart, error) {
 	return result, nil
 }
 
-// providerToolName maps SciAide's qualified names (which intentionally use
-// dots for namespaces) to the conservative OpenAI-compatible function-name
-// alphabet. A hash suffix keeps aliases stable and prevents dot/underscore
-// replacements from silently colliding.
+// All protocol adapters share the same deterministic naming policy.
 func providerToolName(qualified string) string {
-	qualified = strings.TrimSpace(qualified)
-	providerSafe := qualified != "" && len(qualified) <= maxProviderToolName
-	for _, character := range qualified {
-		if (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
-			(character >= '0' && character <= '9') || character == '_' || character == '-' {
-			continue
-		}
-		providerSafe = false
-		break
-	}
-	if providerSafe {
-		return qualified
-	}
-	var prefix strings.Builder
-	for _, character := range qualified {
-		if (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
-			(character >= '0' && character <= '9') || character == '_' || character == '-' {
-			prefix.WriteRune(character)
-		} else {
-			prefix.WriteByte('_')
-		}
-	}
-	value := strings.Trim(prefix.String(), "_-")
-	if value == "" {
-		value = "tool"
-	}
-	digest := sha256.Sum256([]byte(qualified))
-	suffix := fmt.Sprintf("_%x", digest[:6])
-	if len(value) > maxProviderToolName-len(suffix) {
-		value = value[:maxProviderToolName-len(suffix)]
-	}
-	return value + suffix
-}
-
-func validateModelToolDefinition(definition model.ToolDefinition) error {
-	name := strings.TrimSpace(definition.Name)
-	if name == "" || len(name) > maxToolNameBytes {
-		return fmt.Errorf("invalid model tool name")
-	}
-	var object map[string]json.RawMessage
-	if len(definition.InputSchema) == 0 || json.Unmarshal(definition.InputSchema, &object) != nil || object == nil {
-		return fmt.Errorf("tool input schema must be a JSON object")
-	}
-	return nil
+	return modelutil.ProviderToolName(qualified)
 }
 
 func (c *Client) applyHeaders(req *http.Request) {
-	if len(c.secret) > 0 {
-		req.Header.Set("Authorization", "Bearer "+string(c.secret))
-	}
-	for name, value := range c.profile.CustomHeaders {
-		req.Header.Set(name, value)
-	}
+	modelutil.ApplyBearerAndCustomHeaders(req, c.secret, c.profile.CustomHeaders)
 }
 
 type requestPayload struct {
-	Model           string           `json:"model"`
-	Messages        []requestMessage `json:"messages"`
-	Tools           []requestTool    `json:"tools,omitempty"`
-	Stream          bool             `json:"stream"`
-	StreamOptions   *streamOptions   `json:"stream_options,omitempty"`
-	Temperature     *float64         `json:"temperature,omitempty"`
-	MaxTokens       *int             `json:"max_tokens,omitempty"`
-	ReasoningEffort string           `json:"reasoning_effort,omitempty"`
+	Model             string           `json:"model"`
+	Messages          []requestMessage `json:"messages"`
+	ParallelToolCalls *bool            `json:"parallel_tool_calls,omitempty"`
+	ToolChoice        any              `json:"tool_choice,omitempty"`
+	Tools             []requestTool    `json:"tools,omitempty"`
+	Stream            bool             `json:"stream"`
+	StreamOptions     *streamOptions   `json:"stream_options,omitempty"`
+	Temperature       *float64         `json:"temperature,omitempty"`
+	MaxTokens         *int             `json:"max_tokens,omitempty"`
+	ReasoningEffort   string           `json:"reasoning_effort,omitempty"`
 }
 
 type requestMessage struct {
@@ -765,9 +717,7 @@ func (s *stream) finalizeToolCalls() error {
 	for _, index := range indexes {
 		value := s.toolCalls[index]
 		name := value.name.String()
-		if qualified := s.providerNames[name]; qualified != "" {
-			name = qualified
-		}
+		name = modelutil.ResolveProviderToolName(name, s.providerNames)
 		call := model.ToolCall{ID: value.id.String(), Name: name, Arguments: json.RawMessage(value.arguments.String())}
 		if err := validateCompleteToolCall(call); err != nil {
 			return modelError("MODEL_TOOL_CALL_INVALID", "模型返回了不完整或无效的工具调用。", false, err)

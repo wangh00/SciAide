@@ -11,6 +11,7 @@ import (
 )
 
 type SessionRequest struct {
+	CallID           string
 	Program          string
 	Args             []string
 	Dir              string
@@ -35,6 +36,7 @@ type Session struct {
 	state  *executionState
 	cmd    *exec.Cmd
 	runner *Runner
+	live   *liveProcess
 
 	startedAt time.Time
 	done      chan struct{}
@@ -95,7 +97,11 @@ func (r *Runner) StartSession(request SessionRequest) (*Session, error) {
 		_ = stderr.Close()
 		return fail(fmt.Errorf("start contained session: %w", err))
 	}
-	session := &Session{stdin: stdin, stdout: stdout, stderr: stderr, state: state, cmd: cmd, runner: r, startedAt: startedAt, done: make(chan struct{})}
+	live := newLiveProcess(request.CallID, cmd.Process.Pid)
+	if strings.TrimSpace(request.CallID) != "" {
+		r.addLive(live)
+	}
+	session := &Session{stdin: stdin, stdout: &trackedReader{reader: stdout, process: live, stdout: true}, stderr: &trackedReader{reader: stderr, process: live, stdout: false}, state: state, cmd: cmd, runner: r, live: live, startedAt: startedAt, done: make(chan struct{})}
 	go session.wait()
 	return session, nil
 }
@@ -103,6 +109,36 @@ func (r *Runner) StartSession(request SessionRequest) (*Session, error) {
 func (s *Session) Stdin() io.Writer  { return s.stdin }
 func (s *Session) Stdout() io.Reader { return s.stdout }
 func (s *Session) Stderr() io.Reader { return s.stderr }
+
+// SetRuntimeCallID associates a persistent Kernel session with its current
+// tool call. A session is reused across executions, so this moves the live
+// observer from the previous call to the new one.
+func (s *Session) SetRuntimeCallID(callID string) {
+	if s == nil || s.runner == nil || s.live == nil {
+		return
+	}
+	callID = strings.TrimSpace(callID)
+	s.runner.mu.Lock()
+	old := strings.TrimSpace(s.live.value.CallID)
+	if old != "" && s.runner.live[old] == s.live {
+		delete(s.runner.live, old)
+	}
+	s.live.mu.Lock()
+	// The live buffers are replaced for every Kernel execution. Keep the
+	// replacement under the same lock used by trackedReader and snapshot so a
+	// long-lived session cannot mix two calls' output tails.
+	s.live.value.CallID = callID
+	s.live.value.StdoutTail, s.live.value.StderrTail = "", ""
+	s.live.value.StdoutBytes, s.live.value.StderrBytes = 0, 0
+	s.live.stdout = &tailBuffer{limit: LiveOutputBytes}
+	s.live.stderr = &tailBuffer{limit: LiveOutputBytes}
+	s.live.value.UpdatedAt = time.Now().UTC()
+	s.live.mu.Unlock()
+	if callID != "" {
+		s.runner.live[callID] = s.live
+	}
+	s.runner.mu.Unlock()
+}
 func (s *Session) PID() int {
 	if s == nil || s.cmd == nil || s.cmd.Process == nil {
 		return 0
@@ -129,10 +165,38 @@ func (s *Session) wait() {
 	s.mu.Lock()
 	s.outcome = SessionOutcome{ExitCode: exitCode, Reason: reason, StartedAt: s.startedAt, ExitedAt: time.Now().UTC(), Err: waitErr}
 	s.mu.Unlock()
+	if s.live != nil {
+		// Keep the lock order (runner -> live) consistent with SetRuntimeCallID
+		// to avoid a shutdown/retagging deadlock.
+		s.runner.mu.Lock()
+		s.live.mu.Lock()
+		callID := s.live.value.CallID
+		if callID != "" && s.runner.live[callID] == s.live {
+			delete(s.runner.live, callID)
+		}
+		s.live.mu.Unlock()
+		s.runner.mu.Unlock()
+	}
 	_ = s.state.controller.close()
 	s.runner.unregister(s.state)
 	close(s.done)
 }
+
+type trackedReader struct {
+	reader  io.ReadCloser
+	process *liveProcess
+	stdout  bool
+}
+
+func (r *trackedReader) Read(value []byte) (int, error) {
+	n, err := r.reader.Read(value)
+	if n > 0 && r.process != nil {
+		_, _ = r.process.writer(r.stdout).Write(value[:n])
+	}
+	return n, err
+}
+
+func (r *trackedReader) Close() error { return r.reader.Close() }
 
 func (s *Session) Wait() SessionOutcome {
 	if s == nil {

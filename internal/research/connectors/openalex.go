@@ -34,6 +34,7 @@ type openAlexWork struct {
 	Authorships           []openAlexAuthorship `json:"authorships"`
 	PrimaryLocation       openAlexLocation     `json:"primary_location"`
 	BestOpenAccess        openAlexLocation     `json:"best_oa_location"`
+	Locations             []openAlexLocation   `json:"locations"`
 	OpenAccess            struct {
 		IsOA bool `json:"is_oa"`
 	} `json:"open_access"`
@@ -47,6 +48,7 @@ type openAlexAuthorship struct {
 }
 
 type openAlexLocation struct {
+	IsOA           bool   `json:"is_oa"`
 	LandingPageURL string `json:"landing_page_url"`
 	PDFURL         string `json:"pdf_url"`
 	Source         struct {
@@ -63,10 +65,24 @@ func (c *openAlexConnector) Source() appresearch.Source {
 }
 
 func (c *openAlexConnector) Search(ctx context.Context, options appresearch.SearchOptions) ([]appresearch.Work, error) {
-	query := url.Values{"search": {options.Query}, "per-page": {fmt.Sprint(options.Limit)}}
+	query := url.Values{"search": {options.Query}, "per-page": {fmt.Sprint(options.Limit)}, "sort": {"relevance_score:desc"}}
+	if strings.ContainsAny(options.Query, "*?") {
+		query.Del("search")
+		query.Set("search.exact", options.Query)
+	}
+	applyPublicationYears("openalex", query, options.Years)
+	if options.Limit <= 0 || options.Offset%options.Limit != 0 {
+		return nil, fmt.Errorf("OpenAlex offset must align to page size")
+	}
+	if options.Offset > 0 {
+		query.Set("page", fmt.Sprint(options.Offset/options.Limit+1))
+	}
 	var response openAlexResponse
 	if err := c.client.getJSON(ctx, c.base+"?"+query.Encode(), requestOptions{SourceID: "openalex", Host: c.host, Cache: true}, &response); err != nil {
 		return nil, err
+	}
+	if response.Results == nil {
+		return nil, fmt.Errorf("OpenAlex response is missing results")
 	}
 	return openAlexWorks(response.Results), nil
 }
@@ -113,6 +129,15 @@ func openAlexWorks(records []openAlexWork) []appresearch.Work {
 			pdf = record.PrimaryLocation.PDFURL
 		}
 		venue := record.PrimaryLocation.Source.DisplayName
+		pdfs := []string{}
+		seen := map[string]bool{}
+		for _, location := range append([]openAlexLocation{record.BestOpenAccess, record.PrimaryLocation}, record.Locations...) {
+			u := strings.TrimSpace(location.PDFURL)
+			if u != "" && (location.IsOA || u == record.BestOpenAccess.PDFURL) && !seen[u] && len(pdfs) < 12 {
+				seen[u] = true
+				pdfs = append(pdfs, u)
+			}
+		}
 		if venue == "" {
 			venue = record.BestOpenAccess.Source.DisplayName
 		}
@@ -120,7 +145,7 @@ func openAlexWorks(records []openAlexWork) []appresearch.Work {
 			SourceRecordID: id, Title: title, Abstract: invertedAbstract(record.AbstractInvertedIndex), Authors: authors,
 			Year: record.PublicationYear, Published: record.PublicationDate, Venue: venue, WorkType: record.Type,
 			Language: record.Language, Identifiers: appresearch.Identifiers{DOI: appresearch.NormalizeDOI(record.DOI), OpenAlex: id},
-			LandingURL: landing, PDFURL: pdf, OpenAccess: record.OpenAccess.IsOA || pdf != "",
+			LandingURL: landing, PDFURL: pdf, PDFURLs: pdfs, OpenAccess: record.OpenAccess.IsOA || pdf != "",
 			CitedByCount: record.CitedByCount, Score: record.RelevanceScore, RawSnapshot: rawSnapshot(record),
 		})
 	}

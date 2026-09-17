@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/wangh00/SciAide/internal/app/conversation"
 	"github.com/wangh00/SciAide/internal/app/project"
 	"github.com/wangh00/SciAide/internal/document"
 )
@@ -66,6 +67,55 @@ func (l attachmentProjectLoader) Get(_ context.Context, projectID string) (proje
 		return project.Project{}, fmt.Errorf("project not found")
 	}
 	return l.value, nil
+}
+
+type attachmentConversationValidator struct {
+	values map[string]conversation.Conversation
+}
+
+func (v attachmentConversationValidator) GetConversation(_ context.Context, conversationID string) (conversation.Conversation, error) {
+	value, ok := v.values[conversationID]
+	if !ok {
+		return conversation.Conversation{}, fmt.Errorf("conversation not found")
+	}
+	return value, nil
+}
+
+func TestConversationAttachmentsRequireLiveProjectOwnership(t *testing.T) {
+	workspace := t.TempDir()
+	createPrivateFixture(t, workspace)
+	source := filepath.Join(workspace, "chat.txt")
+	if err := os.WriteFile(source, []byte("conversation-local input"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	repository := &attachmentMemoryRepository{values: map[string]Attachment{}}
+	service := NewService(repository, attachmentProjectLoader{value: project.Project{ID: "project", WorkspacePath: workspace}})
+	service.SetConversationValidator(attachmentConversationValidator{values: map[string]conversation.Conversation{
+		"current": {ID: "current", ProjectID: "project"},
+		"foreign": {ID: "foreign", ProjectID: "other"},
+	}})
+
+	batch, err := service.ImportPathsForConversation(context.Background(), "project", []string{source}, "current")
+	if err != nil || len(batch.Errors) != 0 || len(batch.Attachments) != 1 {
+		t.Fatalf("conversation import = %#v, %v", batch, err)
+	}
+	value := batch.Attachments[0]
+	if value.ScopeKind != ScopeConversation || value.ResearchTaskID != "conversation:current" {
+		t.Fatalf("conversation attachment scope = %#v", value)
+	}
+	visible, err := service.ListForConversation(context.Background(), "project", "current")
+	if err != nil || len(visible) != 1 || visible[0].ID != value.ID {
+		t.Fatalf("conversation attachments = %#v, %v", visible, err)
+	}
+	if _, err := service.ListForConversation(context.Background(), "project", "missing"); err == nil {
+		t.Fatal("missing conversation was accepted")
+	}
+	if _, err := service.ImportPathsForConversation(context.Background(), "project", []string{source}, "foreign"); err == nil {
+		t.Fatal("cross-project conversation import was accepted")
+	}
+	if _, err := service.ResolveForConversation(context.Background(), "project", "foreign", []string{value.ID}); err == nil {
+		t.Fatal("cross-project conversation resolved an attachment")
+	}
 }
 
 func TestImportDeduplicatesAndRebuildsDeletedCache(t *testing.T) {

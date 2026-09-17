@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -40,6 +41,7 @@ type Runtime struct {
 
 type kernel struct {
 	projectID   string
+	workspace   string
 	id          string
 	fingerprint string
 	session     *localexec.Session
@@ -118,6 +120,8 @@ func (r *Runtime) Execute(ctx context.Context, request pythonenv.KernelExecuteRe
 	if err != nil {
 		return pythonenv.KernelResult{}, err
 	}
+	value.session.SetRuntimeCallID(request.ToolCallID)
+	defer value.session.SetRuntimeCallID("")
 	outputRelative := filepath.ToSlash(strings.TrimSpace(request.FigurePath))
 	if outputRelative == "" {
 		outputRelative = filepath.ToSlash(filepath.Join("analysis-output", "figures", executionID))
@@ -139,9 +143,9 @@ func (r *Runtime) Execute(ctx context.Context, request pythonenv.KernelExecuteRe
 		"execution_id": executionID,
 		"code":         request.Code,
 		"workspace":    workspacePath,
-		"inputs":       request.InputPaths,
+		"inputs":       kernelInputAbsolutePaths(workspacePath, request.InputPaths),
 		"input_data":   json.RawMessage(request.InputData),
-		"outputs":      request.OutputPaths,
+		"outputs":      kernelInputAbsolutePaths(workspacePath, request.OutputPaths),
 		"image_dir":    outputRelative,
 	}
 	encoded, err := json.Marshal(frame)
@@ -211,8 +215,46 @@ func (r *Runtime) Execute(ctx context.Context, request pythonenv.KernelExecuteRe
 	}
 }
 
+func kernelInputAbsolutePaths(workspace string, paths []string) []string {
+	result := make([]string, len(paths))
+	for index, value := range paths {
+		clean := filepath.Clean(filepath.FromSlash(strings.TrimSpace(value)))
+		// Python accepts forward-slash absolute paths on Windows, avoiding
+		// ambiguity when the path is transported through JSON and a persistent
+		// interpreter session.
+		absolute := filepath.Clean(filepath.Join(workspace, clean))
+		if runtime.GOOS == "windows" && !strings.HasPrefix(absolute, `\\?\`) {
+			// The private task root plus a content-addressed filename can exceed
+			// MAX_PATH. Python's Win32 file APIs accept the extended-length form.
+			absolute = `\\?\` + absolute
+		}
+		result[index] = absolute
+	}
+	return result
+}
+
+func kernelEnvironment() ([]string, []string) {
+	// Native numeric libraries may otherwise create one worker per logical CPU.
+	// On Windows, their thread-local buffers count against the Kernel Job Object's
+	// process-tree budget and can make even a small NumPy/SciPy import fail.
+	return localexec.CoreEnvironment(map[string]string{
+		"PYTHONIOENCODING":       "utf-8",
+		"PYTHONUTF8":             "1",
+		"PYTHONUNBUFFERED":       "1",
+		"MPLBACKEND":             "Agg",
+		"NO_COLOR":               "1",
+		"OPENBLAS_NUM_THREADS":   "1",
+		"OMP_NUM_THREADS":        "1",
+		"MKL_NUM_THREADS":        "1",
+		"BLIS_NUM_THREADS":       "1",
+		"NUMEXPR_NUM_THREADS":    "1",
+		"VECLIB_MAXIMUM_THREADS": "1",
+	})
+}
+
 func (r *Runtime) getOrStart(request pythonenv.KernelExecuteRequest, workspacePath string) (*kernel, error) {
-	start := r.projectStartLock(request.ProjectID)
+	key := kernelKey(request.ProjectID, workspacePath)
+	start := r.projectStartLock(key)
 	start.Lock()
 	defer start.Unlock()
 
@@ -221,13 +263,13 @@ func (r *Runtime) getOrStart(request pythonenv.KernelExecuteRequest, workspacePa
 		r.mu.Unlock()
 		return nil, fmt.Errorf("Python Kernel runtime is closed")
 	}
-	value := r.kernels[request.ProjectID]
+	value := r.kernels[key]
 	if value != nil && value.fingerprint == request.Environment.EnvironmentFingerprint {
 		r.mu.Unlock()
 		return value, nil
 	}
 	if value != nil {
-		delete(r.kernels, request.ProjectID)
+		delete(r.kernels, key)
 	}
 	r.mu.Unlock()
 	if value != nil {
@@ -239,9 +281,7 @@ func (r *Runtime) getOrStart(request pythonenv.KernelExecuteRequest, workspacePa
 	if err != nil {
 		return nil, err
 	}
-	environment, _ := localexec.CoreEnvironment(map[string]string{
-		"PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1", "PYTHONUNBUFFERED": "1", "MPLBACKEND": "Agg", "NO_COLOR": "1",
-	})
+	environment, _ := kernelEnvironment()
 	session, err := r.runner.StartSession(localexec.SessionRequest{
 		Program:          request.Environment.EnvironmentPythonPath,
 		Args:             []string{"-I", "-u", "-X", "utf8", "-c", kernelBootstrap},
@@ -252,7 +292,7 @@ func (r *Runtime) getOrStart(request pythonenv.KernelExecuteRequest, workspacePa
 	if err != nil {
 		return nil, err
 	}
-	value = &kernel{projectID: request.ProjectID, id: kernelID, fingerprint: request.Environment.EnvironmentFingerprint, session: session,
+	value = &kernel{projectID: request.ProjectID, workspace: workspacePath, id: kernelID, fingerprint: request.Environment.EnvironmentFingerprint, session: session,
 		input: bufio.NewWriterSize(session.Stdin(), 64*1024), frames: make(chan frameResult, 1), protocol: make(chan error, 1), stderr: &boundedBuffer{limit: 64 * 1024}, lastUse: time.Now().UTC()}
 	go value.readFrames()
 	go func() { _, _ = io.Copy(value.stderr, session.Stderr()) }()
@@ -262,14 +302,18 @@ func (r *Runtime) getOrStart(request pythonenv.KernelExecuteRequest, workspacePa
 		_ = session.Close()
 		return nil, fmt.Errorf("Python Kernel runtime is closed")
 	}
-	if existing := r.kernels[request.ProjectID]; existing != nil {
+	if existing := r.kernels[key]; existing != nil {
 		r.mu.Unlock()
 		_ = session.Close()
 		return nil, fmt.Errorf("Python Kernel lifecycle changed while starting")
 	}
-	r.kernels[request.ProjectID] = value
+	r.kernels[key] = value
 	r.mu.Unlock()
 	return value, nil
+}
+
+func kernelKey(projectID, workspacePath string) string {
+	return strings.TrimSpace(projectID) + "\x00" + filepath.Clean(strings.TrimSpace(workspacePath))
 }
 
 func (r *Runtime) projectStartLock(projectID string) *sync.Mutex {
@@ -315,9 +359,33 @@ func (r *Runtime) Stop(projectID string) error {
 	start.Lock()
 	defer start.Unlock()
 	r.mu.Lock()
-	value := r.kernels[projectID]
+	values := make([]*kernel, 0)
+	for key, value := range r.kernels {
+		if value.projectID == projectID {
+			delete(r.kernels, key)
+			values = append(values, value)
+		}
+	}
+	r.mu.Unlock()
+	var errs []error
+	for _, value := range values {
+		value.execute.Lock()
+		errs = append(errs, value.session.Close())
+		value.execute.Unlock()
+	}
+	return errors.Join(errs...)
+}
+
+// StopScoped terminates only the interpreter attached to one task workspace.
+func (r *Runtime) StopScoped(projectID, workspacePath string) error {
+	key := kernelKey(projectID, workspacePath)
+	start := r.projectStartLock(key)
+	start.Lock()
+	defer start.Unlock()
+	r.mu.Lock()
+	value := r.kernels[key]
 	if value != nil {
-		delete(r.kernels, value.projectID)
+		delete(r.kernels, key)
 	}
 	r.mu.Unlock()
 	if value == nil {
@@ -326,6 +394,10 @@ func (r *Runtime) Stop(projectID string) error {
 	value.execute.Lock()
 	defer value.execute.Unlock()
 	return value.session.Close()
+}
+
+func (r *Runtime) RestartScoped(projectID, workspacePath string) error {
+	return r.StopScoped(projectID, workspacePath)
 }
 
 func (r *Runtime) Restart(projectID string) error { return r.Stop(projectID) }
@@ -337,8 +409,9 @@ func (r *Runtime) stopKernel(value *kernel, reason localexec.TerminationReason) 
 
 func (r *Runtime) removeKernel(value *kernel) {
 	r.mu.Lock()
-	if r.kernels[value.projectID] == value {
-		delete(r.kernels, value.projectID)
+	key := kernelKey(value.projectID, value.workspace)
+	if r.kernels[key] == value {
+		delete(r.kernels, key)
 	}
 	r.mu.Unlock()
 }
@@ -469,9 +542,22 @@ for _line in _sys.stdin:
         try:
             with _contextlib.redirect_stdout(_stdout), _contextlib.redirect_stderr(_stderr):
                 _tree = _ast.parse(_code, filename="<sciaide-kernel>", mode="exec")
+                _tail = _tree.body[-1] if _tree.body else None
+                _publish_result = (
+                    isinstance(_tail, _ast.Assign) and len(_tail.targets) == 1
+                    and isinstance(_tail.targets[0], _ast.Name) and _tail.targets[0].id == "result"
+                ) or (
+                    isinstance(_tail, _ast.AnnAssign) and _tail.value is not None
+                    and isinstance(_tail.target, _ast.Name) and _tail.target.id == "result"
+                )
                 if _tree.body and isinstance(_tree.body[-1], _ast.Expr):
                     _last = _ast.Expression(_tree.body.pop().value); exec(compile(_tree, "<sciaide-kernel>", "exec"), _globals); _value = eval(compile(_last, "<sciaide-kernel>", "eval"), _globals)
-                else: exec(compile(_tree, "<sciaide-kernel>", "exec"), _globals)
+                else:
+                    exec(compile(_tree, "<sciaide-kernel>", "exec"), _globals)
+                    # Only this execution's terminal assignment explicitly
+                    # publishes result. Never fall back to a persistent global
+                    # after print(), unrelated assignments, or empty code.
+                    if _publish_result: _value = _globals["result"]
                 if _value is not None: _value, _value_type, _table = _project(_value)
                 try:
                     import matplotlib.pyplot as _plt

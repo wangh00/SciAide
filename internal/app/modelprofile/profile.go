@@ -264,11 +264,11 @@ func (s *Service) Delete(ctx context.Context, profileID string) error {
 	if err != nil {
 		return err
 	}
-	if err := s.repository.Delete(ctx, profileID); err != nil {
-		return fmt.Errorf("delete model profile: %w", err)
-	}
 	if err := s.secrets.Delete(ctx, value.SecretRef); err != nil {
 		return fmt.Errorf("delete model secret: %w", err)
+	}
+	if err := s.repository.Delete(ctx, profileID); err != nil {
+		return fmt.Errorf("delete model profile: %w", err)
 	}
 	return nil
 }

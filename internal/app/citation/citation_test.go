@@ -68,3 +68,21 @@ func TestResolveRejectsChangedOrAmbiguousEvidence(t *testing.T) {
 		t.Fatalf("changed quote was accepted: %#v", values)
 	}
 }
+
+func TestReissueKnowledgeRefsChangesRunBindingWithoutChangingEvidence(t *testing.T) {
+	quote := "bounded evidence"
+	ref := tool.CitationRef{Kind: KindKnowledgeChunk, ProjectID: "project", IndexVersionID: "index", DocumentID: "document", AttachmentID: "attachment", ChunkID: "chunk", SourceName: "paper.md", Locator: "lines:1-2", Quote: quote, QuoteSHA256: QuoteSHA256(quote), SourceStart: 0, SourceEnd: len(quote)}
+	ref.Reference = KnowledgeReference("workflow-run", ref.IndexVersionID, ref.ChunkID, ref.QuoteSHA256)
+	values, err := ReissueKnowledgeRefs("workflow-run", "chat-run", "project", []tool.CitationRef{ref})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(values) != 1 || values[0].Reference == ref.Reference || values[0].Reference != KnowledgeReference("chat-run", ref.IndexVersionID, ref.ChunkID, ref.QuoteSHA256) || values[0].Quote != quote {
+		t.Fatalf("reissued refs = %#v", values)
+	}
+	tampered := ref
+	tampered.Quote = "changed"
+	if _, err := ReissueKnowledgeRefs("workflow-run", "chat-run", "project", []tool.CitationRef{tampered}); err == nil {
+		t.Fatal("tampered Workflow citation was accepted")
+	}
+}

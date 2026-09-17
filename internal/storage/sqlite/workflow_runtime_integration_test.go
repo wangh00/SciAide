@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/wangh00/SciAide/internal/app/artifact"
+	"github.com/wangh00/SciAide/internal/app/conversation"
 	"github.com/wangh00/SciAide/internal/app/permission"
 	"github.com/wangh00/SciAide/internal/app/project"
 	"github.com/wangh00/SciAide/internal/app/tool"
@@ -91,7 +92,12 @@ func newWorkflowRuntimeHarness(t *testing.T, tools ...runtimeFixtureTool) *workf
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = runtimeService.Close(); _ = store.Close() })
+	t.Cleanup(func() {
+		_ = runtimeService.Close()
+		if err := store.Close(); err != nil {
+			t.Errorf("close workflow store: %v", err)
+		}
+	})
 	return &workflowRuntimeHarness{store: store, project: selected, definitions: definitions, runtime: runtimeService, executor: executor}
 }
 
@@ -132,6 +138,35 @@ func TestWorkflowRuntimeExecutesBoundInputsAndFreezesCheckpoints(t *testing.T) {
 		t.Fatal(err)
 	}
 	detail := waitWorkflowStatus(t, h.runtime, h.project.ID, started.Run.ID, workflow.RunCompleted)
+	if detail.Run.ConversationID == "" {
+		t.Fatal("research Workflow did not create a bound conversation")
+	}
+	researchConversation, err := NewConversationRepository(h.store.DB()).GetConversation(context.Background(), detail.Run.ConversationID)
+	if err != nil || researchConversation.ProjectID != h.project.ID || researchConversation.PermissionMode != detail.Run.PermissionMode || researchConversation.Title != "Research: Runtime" {
+		t.Fatalf("research conversation = %#v, %v", researchConversation, err)
+	}
+	conversationRepository := NewConversationRepository(h.store.DB())
+	listedConversations, err := conversationRepository.ListConversations(context.Background(), h.project.ID)
+	if err != nil || len(listedConversations) != 0 {
+		t.Fatalf("research-only ordinary conversation list = %#v, %v", listedConversations, err)
+	}
+	ordinaryConversation := conversation.Conversation{ID: "ordinary-conversation", ProjectID: h.project.ID, Title: "Ordinary chat", PermissionMode: conversation.PermissionPlan, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	if err := conversationRepository.CreateConversation(context.Background(), ordinaryConversation); err != nil {
+		t.Fatal(err)
+	}
+	listedConversations, err = conversationRepository.ListConversations(context.Background(), h.project.ID)
+	if err != nil || len(listedConversations) != 1 || listedConversations[0].ID != ordinaryConversation.ID {
+		t.Fatalf("ordinary conversation list = %#v, %v", listedConversations, err)
+	}
+	if loaded, err := conversationRepository.GetConversation(context.Background(), detail.Run.ConversationID); err != nil || loaded.ID != detail.Run.ConversationID {
+		t.Fatalf("research conversation remains directly readable = %#v, %v", loaded, err)
+	}
+	if err := conversationRepository.DeleteConversation(context.Background(), detail.Run.ConversationID); err == nil {
+		t.Fatal("bound research conversation was deleted independently")
+	}
+	if err := NewConversationRepository(h.store.DB()).UpdatePermissionMode(context.Background(), detail.Run.ConversationID, "full_access", time.Now().UTC()); err == nil || !strings.Contains(err.Error(), "frozen") {
+		t.Fatalf("research conversation permission update error = %v", err)
+	}
 	if string(detail.Run.Outputs) != `{"answer":"result:alpha"}` || len(detail.Steps) != 1 || detail.Steps[0].Status != workflow.StepCompleted || detail.Steps[0].ToolCallID == "" {
 		t.Fatalf("completed Workflow = %#v", detail)
 	}
@@ -141,6 +176,191 @@ func TestWorkflowRuntimeExecutesBoundInputsAndFreezesCheckpoints(t *testing.T) {
 	}
 	if err := h.store.DB().QueryRow(`SELECT COUNT(*) FROM workflow_events WHERE workflow_run_id=?`, detail.Run.ID).Scan(&eventCount); err != nil || eventCount < 5 {
 		t.Fatalf("Workflow events = %d, %v", eventCount, err)
+	}
+	if err := h.definitions.Delete(context.Background(), h.project.ID, saved.Workflow.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewConversationRepository(h.store.DB()).GetConversation(context.Background(), detail.Run.ConversationID); err == nil {
+		t.Fatal("Workflow deletion retained its research conversation")
+	}
+	var bindings int
+	if err := h.store.DB().QueryRow(`SELECT COUNT(*) FROM workflow_conversations WHERE conversation_id=?`, detail.Run.ConversationID).Scan(&bindings); err != nil || bindings != 0 {
+		t.Fatalf("Workflow conversation bindings after deletion = %d, %v", bindings, err)
+	}
+}
+
+func TestWorkflowRuntimeSeparatesRegisteredDeliverablesFromRunArtifacts(t *testing.T) {
+	h := newWorkflowRuntimeHarness(t, runtimeFixtureTool{name: "fixture.registered", risk: tool.RiskLow, idempotent: true})
+	saved := h.save(t, workflow.Definition{
+		SchemaVersion: 1,
+		Name:          "Registered deliverable",
+		Inputs:        []workflow.Port{{Name: "topic", Type: workflow.TypeString, Required: true}},
+		Nodes:         []workflow.Node{{ID: "search", Name: "Search", Kind: workflow.NodeTool, ToolName: "fixture.registered", Arguments: json.RawMessage(`{}`)}},
+		Edges:         []workflow.Edge{{FromNode: "$input", FromPort: "topic", ToNode: "search", ToPort: "query"}},
+		Outputs:       []workflow.Output{{Name: "answer", Type: workflow.TypeString, FromNode: "search", FromPort: "structured.answer", Required: true}},
+	})
+	started, err := h.runtime.Start(context.Background(), workflow.StartCommand{ProjectID: h.project.ID, WorkflowID: saved.Workflow.ID, Inputs: json.RawMessage(`{"topic":"artifact-check"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	detail := waitWorkflowStatus(t, h.runtime, h.project.ID, started.Run.ID, workflow.RunCompleted)
+	insertWorkflowArtifactForTest(t, h.store.DB(), h.project.ID, detail.Run.ID, "analysis-file", "analysis-output/result.json", "analysis")
+	loaded, err := h.runtime.Get(context.Background(), h.project.ID, detail.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.ArtifactCount != 1 || len(loaded.RegisteredDeliverables) != 0 {
+		t.Fatalf("analysis artifact was treated as registered deliverable: count=%d registered=%v", loaded.ArtifactCount, loaded.RegisteredDeliverables)
+	}
+	insertWorkflowArtifactForTest(t, h.store.DB(), h.project.ID, detail.Run.ID, "report-file", "report.md", "report_draft")
+	loaded, err = h.runtime.Get(context.Background(), h.project.ID, detail.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.ArtifactCount != 2 || len(loaded.RegisteredDeliverables) != 1 || loaded.RegisteredDeliverables[0] != "report_draft" {
+		t.Fatalf("registered deliverable projection = count=%d registered=%v", loaded.ArtifactCount, loaded.RegisteredDeliverables)
+	}
+}
+
+func insertWorkflowArtifactForTest(t *testing.T, db *sql.DB, projectID, workflowRunID, artifactID, fileName, deliverable string) {
+	t.Helper()
+	now := formatTime(time.Now().UTC())
+	sha := fmt.Sprintf("%064x", len(artifactID)+len(fileName)+len(deliverable))
+	blobID := "blob-" + artifactID
+	versionID := "version-" + artifactID
+	lineageID := "lineage-" + artifactID
+	if _, err := db.Exec(`INSERT INTO artifact_blobs(id,project_id,sha256,size_bytes,mime_type,storage_relative_path,created_at) VALUES (?,?,?,?,?,?,?)`, blobID, projectID, sha, 1, "application/json", "objects/"+artifactID, now); err != nil {
+		t.Fatal(err)
+	}
+	provenance, err := json.Marshal(map[string]any{"extra": map[string]string{"workflowDeliverable": deliverable}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO artifacts(id,project_id,scope_kind,research_task_id,name,kind,status,current_version_id,created_at,updated_at,trashed_at) VALUES (?,?,?,? ,?,?,'active',NULL,?,?,NULL)`, artifactID, projectID, "legacy_project", "", artifactID, "document", now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO artifact_versions(id,artifact_id,blob_id,version_number,file_name,mime_type,size_bytes,sha256,source_kind,source_key,provenance_json,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`, versionID, artifactID, blobID, 1, fileName, "application/json", 1, sha, "tool", "test:"+artifactID, string(provenance), now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO artifact_lineage(id,artifact_version_id,ordinal,relation_kind,source_id_snapshot,source_run_id,source_workflow_run_id,label,metadata_json,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)`, lineageID, versionID, 0, "workflow_run", workflowRunID, nil, workflowRunID, "test", "{}", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE artifacts SET current_version_id=? WHERE id=?`, versionID, artifactID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLegacyWorkflowRunWithoutResearchConversationRemainsReadable(t *testing.T) {
+	h := newWorkflowRuntimeHarness(t)
+	saved := h.save(t, workflow.Definition{SchemaVersion: 1, Name: "Legacy", Nodes: []workflow.Node{{ID: "confirm", Name: "Confirm", Kind: workflow.NodeHumanConfirmation, Prompt: "Continue?", Arguments: json.RawMessage(`{}`)}}})
+	now := formatTime(time.Now().UTC())
+	compilation, _ := json.Marshal(saved.Version.Compilation)
+	runID := "legacy-without-conversation"
+	if _, err := h.store.DB().Exec(`INSERT INTO workflow_runs(id,project_id,workflow_id,workflow_version_id,status,permission_mode,inputs_json,inputs_sha256,compilation_json,compilation_sha256,outputs_json,current_step_ordinal,created_at,updated_at) VALUES (?,?,?,?,?,'plan','{}',?,?,?,'{}',0,?,?)`, runID, h.project.ID, saved.Workflow.ID, saved.Version.ID, workflow.RunPaused, strings.Repeat("a", 64), string(compilation), saved.Version.CompilationSHA256, now, now); err != nil {
+		t.Fatal(err)
+	}
+	detail, err := h.runtime.Get(context.Background(), h.project.ID, runID)
+	if err != nil || detail.Run.ConversationID != "" || detail.Run.Status != workflow.RunPaused {
+		t.Fatalf("legacy Workflow Run = %#v, %v", detail.Run, err)
+	}
+}
+
+func TestWorkflowRuntimeListsProjectTasksAcrossReusablePlans(t *testing.T) {
+	h := newWorkflowRuntimeHarness(t)
+	definition := func(name string) workflow.Definition {
+		return workflow.Definition{SchemaVersion: 1, Name: name, Nodes: []workflow.Node{{ID: "confirm", Name: "Confirm", Kind: workflow.NodeHumanConfirmation, Prompt: "Continue?", Arguments: json.RawMessage(`{}`)}}}
+	}
+	first := h.save(t, definition("First plan"))
+	second := h.save(t, definition("Second plan"))
+	for _, workflowID := range []string{first.Workflow.ID, second.Workflow.ID} {
+		if _, err := h.runtime.Start(context.Background(), workflow.StartCommand{ProjectID: h.project.ID, WorkflowID: workflowID, Inputs: json.RawMessage(`{}`)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	repository := NewWorkflowRuntimeRepository(h.store.DB())
+	projectRuns, err := repository.ListRuns(context.Background(), h.project.ID, "", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projectRuns) != 2 || projectRuns[0].WorkflowID == projectRuns[1].WorkflowID {
+		t.Fatalf("project task list = %#v", projectRuns)
+	}
+	filtered, err := repository.ListRuns(context.Background(), h.project.ID, first.Workflow.ID, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(filtered) != 1 || filtered[0].WorkflowID != first.Workflow.ID {
+		t.Fatalf("plan-filtered task list = %#v", filtered)
+	}
+}
+
+func TestResearchWorkflowConversationChatGateFollowsDurableStageState(t *testing.T) {
+	h := newWorkflowRuntimeHarness(t)
+	saved := h.save(t, workflow.Definition{SchemaVersion: 1, Name: "Chat gate", Nodes: []workflow.Node{{ID: "review", Name: "Review", Kind: workflow.NodeHumanConfirmation, Prompt: "Continue?", Arguments: json.RawMessage(`{}`)}}})
+	started, err := h.runtime.Start(context.Background(), workflow.StartCommand{ProjectID: h.project.ID, WorkflowID: saved.Workflow.ID, Inputs: json.RawMessage(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	detail := waitWorkflowStatus(t, h.runtime, h.project.ID, started.Run.ID, workflow.RunWaitingHumanConfirmation)
+	repository := NewRunRepository(h.store.DB())
+	assertBlocked := func(want bool) {
+		t.Helper()
+		blocked, gateErr := repository.BlocksOrdinaryChatForWorkflowConversation(context.Background(), detail.Run.ConversationID)
+		if gateErr != nil || blocked != want {
+			t.Fatalf("chat gate blocked=%v, want %v: %v", blocked, want, gateErr)
+		}
+	}
+	setState := func(runStatus workflow.RunStatus, stepKind workflow.NodeKind, stepStatus workflow.StepStatus) {
+		t.Helper()
+		if _, updateErr := h.store.DB().Exec(`UPDATE workflow_runs SET status=? WHERE id=?`, runStatus, detail.Run.ID); updateErr != nil {
+			t.Fatal(updateErr)
+		}
+		if _, updateErr := h.store.DB().Exec(`UPDATE workflow_steps SET node_kind=?,status=? WHERE id=?`, stepKind, stepStatus, detail.Steps[0].ID); updateErr != nil {
+			t.Fatal(updateErr)
+		}
+	}
+
+	assertBlocked(true) // Ordinary human confirmation.
+	setState(workflow.RunWaitingHumanConfirmation, workflow.NodeCandidateSelection, workflow.StepWaitingHumanConfirmation)
+	assertBlocked(true)
+	setState(workflow.RunWaitingHumanConfirmation, workflow.NodeCitationSelection, workflow.StepWaitingHumanConfirmation)
+	assertBlocked(true)
+	setState(workflow.RunWaitingHumanConfirmation, workflow.NodeAgentStage, workflow.StepWaitingHumanConfirmation)
+	assertBlocked(false) // Legacy Agent Stage is the only active discussion window.
+	setState(workflow.RunWaitingHumanConfirmation, workflow.NodeAgentStage, workflow.StepRunning)
+	assertBlocked(true) // Inconsistent persistence fails closed.
+	setState(workflow.RunRunning, workflow.NodeAgentStage, workflow.StepRunning)
+	assertBlocked(true)
+	setState(workflow.RunCompleted, workflow.NodeAgentStage, workflow.StepCompleted)
+	assertBlocked(false)
+	setState(workflow.RunCancelled, workflow.NodeAgentStage, workflow.StepCancelled)
+	assertBlocked(false)
+}
+
+func TestProjectDeletionRejectsActiveResearchWorkflowAndCleansTerminalBinding(t *testing.T) {
+	h := newWorkflowRuntimeHarness(t)
+	saved := h.save(t, workflow.Definition{SchemaVersion: 1, Name: "Project lifecycle", Nodes: []workflow.Node{{ID: "confirm", Name: "Confirm", Kind: workflow.NodeHumanConfirmation, Prompt: "Continue?", Arguments: json.RawMessage(`{}`)}}})
+	started, err := h.runtime.Start(context.Background(), workflow.StartCommand{ProjectID: h.project.ID, WorkflowID: saved.Workflow.ID, Inputs: json.RawMessage(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	detail := waitWorkflowStatus(t, h.runtime, h.project.ID, started.Run.ID, workflow.RunWaitingHumanConfirmation)
+	projects := NewProjectRepository(h.store.DB())
+	if err := projects.Delete(context.Background(), h.project.ID); err == nil || !strings.Contains(err.Error(), "active research Workflow") {
+		t.Fatalf("active research project deletion error = %v", err)
+	}
+	if _, err := h.runtime.Cancel(context.Background(), h.project.ID, detail.Run.ID); err != nil {
+		t.Fatal(err)
+	}
+	waitWorkflowStatus(t, h.runtime, h.project.ID, detail.Run.ID, workflow.RunCancelled)
+	if err := projects.Delete(context.Background(), h.project.ID); err != nil {
+		t.Fatal(err)
+	}
+	var bindings, conversations int
+	_ = h.store.DB().QueryRow(`SELECT COUNT(*) FROM workflow_conversations WHERE workflow_run_id=?`, detail.Run.ID).Scan(&bindings)
+	_ = h.store.DB().QueryRow(`SELECT COUNT(*) FROM conversations WHERE id=?`, detail.Run.ConversationID).Scan(&conversations)
+	if bindings != 0 || conversations != 0 {
+		t.Fatalf("project deletion retained research binding=%d conversation=%d", bindings, conversations)
 	}
 }
 
@@ -586,6 +806,66 @@ func TestWorkflowRuntimeHumanContextAndCitationSelectionAreCommittedData(t *test
 	}
 }
 
+func TestWorkflowRuntimeAllowsExplicitEmptyCitationRecoveryOnlyForDataOrDesignRoutes(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		substantive workflow.Node
+		allowed     bool
+	}{
+		{name: "design route", substantive: workflow.Node{ID: "research_design", Name: "Design", Kind: workflow.NodeAgentStage, Arguments: json.RawMessage(`{}`), Prompt: "Form a research design.", PromptVersion: "test-v1", ReviewPolicy: workflow.AIReviewAuto, OutputSchema: json.RawMessage(`{"type":"object"}`)}, allowed: true},
+		{name: "evidence only", substantive: workflow.Node{ID: "draft", Name: "Draft", Kind: workflow.NodeHumanConfirmation, Prompt: "Confirm the evidence draft.", Arguments: json.RawMessage(`{}`)}, allowed: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			h := newWorkflowRuntimeHarness(t, runtimeFixtureTool{
+				name: "fixture.empty-citations", risk: tool.RiskLow, idempotent: true,
+				invoke: func(context.Context, tool.Invocation) (tool.Result, error) {
+					return tool.Result{Status: tool.ResultSuccess, Structured: json.RawMessage(`{"answer":"no matches"}`), Artifacts: []tool.ArtifactRef{}, Citations: []tool.CitationRef{}}, nil
+				},
+			})
+			nodes := []workflow.Node{
+				{ID: "search", Name: "Search", Kind: workflow.NodeTool, ToolName: "fixture.empty-citations", Arguments: json.RawMessage(`{}`)},
+				{ID: "select", Name: "Select citations", Kind: workflow.NodeCitationSelection, Arguments: json.RawMessage(`{}`)},
+				test.substantive,
+			}
+			substantivePort := "context"
+			if test.substantive.Kind == workflow.NodeAgentStage {
+				substantivePort = "evidenceContext"
+			}
+			saved := h.save(t, workflow.Definition{
+				SchemaVersion: 1, Name: "Empty evidence recovery", Inputs: []workflow.Port{{Name: "topic", Type: workflow.TypeString, Required: true}}, Nodes: nodes,
+				Edges: []workflow.Edge{
+					{FromNode: "$input", FromPort: "topic", ToNode: "search", ToPort: "query"},
+					{FromNode: "$input", FromPort: "topic", ToNode: "select", ToPort: "query"},
+					{FromNode: "search", FromPort: "citations", ToNode: "select", ToPort: "candidates"},
+					{FromNode: "select", FromPort: "citations", ToNode: test.substantive.ID, ToPort: substantivePort},
+				},
+			})
+			started, err := h.runtime.Start(context.Background(), workflow.StartCommand{ProjectID: h.project.ID, WorkflowID: saved.Workflow.ID, Inputs: json.RawMessage(`{"topic":"alpha"}`), ModelProfileID: "profile", ModelID: "model"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			detail := waitWorkflowStatus(t, h.runtime, h.project.ID, started.Run.ID, workflow.RunWaitingHumanConfirmation)
+			if detail.Steps[1].NodeID != "select" {
+				t.Fatalf("citation step = %#v", detail.Steps[1])
+			}
+			updated, decideErr := h.runtime.Decide(context.Background(), workflow.HumanDecisionCommand{
+				ProjectID: h.project.ID, RunID: detail.Run.ID, StepID: detail.Steps[1].ID, Approved: true,
+				ContinueWithoutCitations: true, Context: json.RawMessage(`[]`),
+			})
+			if test.allowed {
+				if decideErr != nil {
+					t.Fatalf("recoverable empty evidence was rejected: %v", decideErr)
+				}
+				if updated.Steps[1].Status != workflow.StepCompleted || !strings.Contains(string(updated.Steps[1].Output), `"evidenceStatus":"no_verified_citations"`) {
+					t.Fatalf("empty evidence decision = %s", updated.Steps[1].Output)
+				}
+			} else if decideErr == nil || !strings.Contains(decideErr.Error(), "requires at least one verified citation") {
+				t.Fatalf("evidence-only route accepted empty citations: %v", decideErr)
+			}
+		})
+	}
+}
+
 func TestWorkflowRuntimeCandidateSelectionRejectsUnknownAndDuplicateIDs(t *testing.T) {
 	h := newWorkflowRuntimeHarness(t, runtimeFixtureTool{
 		name: "fixture.candidates", risk: tool.RiskLow, idempotent: true,
@@ -744,6 +1024,203 @@ func TestWorkflowRuntimeCancellationRejectsLateSuccessfulToolResult(t *testing.T
 	var resultCount int
 	if err := h.store.DB().QueryRow(`SELECT COUNT(*) FROM tool_results WHERE tool_call_id=?`, call.ID).Scan(&resultCount); err != nil || resultCount != 0 {
 		t.Fatalf("late ToolResult count = %d, %v", resultCount, err)
+	}
+}
+
+func TestWorkflowReviewRevisionAtomicallyResetsProducerReviewAndGate(t *testing.T) {
+	h := newWorkflowRuntimeHarness(t, runtimeFixtureTool{name: "fixture.review.revision", risk: tool.RiskLow, idempotent: true})
+	saved := h.save(t, workflow.Definition{
+		SchemaVersion: 1, Name: "Review revision reset",
+		Inputs: []workflow.Port{{Name: "topic", Type: workflow.TypeString, Required: true}},
+		Nodes: []workflow.Node{
+			{ID: "prepare", Name: "Prepare", Kind: workflow.NodeTool, ToolName: "fixture.review.revision", Arguments: json.RawMessage(`{}`)},
+			{ID: "produce", Name: "Produce", Kind: workflow.NodeTool, ToolName: "fixture.review.revision", Arguments: json.RawMessage(`{}`)},
+			{ID: "review", Name: "Review", Kind: workflow.NodeTool, ToolName: "fixture.review.revision", Arguments: json.RawMessage(`{}`)},
+			{ID: "gate", Name: "Gate", Kind: workflow.NodeTool, ToolName: "fixture.review.revision", Arguments: json.RawMessage(`{}`)},
+		},
+		Edges: []workflow.Edge{
+			{FromNode: "$input", FromPort: "topic", ToNode: "prepare", ToPort: "query"},
+			{FromNode: "prepare", FromPort: "structured.answer", ToNode: "produce", ToPort: "query"},
+			{FromNode: "produce", FromPort: "structured.answer", ToNode: "review", ToPort: "query"},
+			{FromNode: "review", FromPort: "structured.answer", ToNode: "gate", ToPort: "query"},
+		},
+		Outputs: []workflow.Output{{Name: "answer", Type: workflow.TypeString, FromNode: "gate", FromPort: "structured.answer", Required: true}},
+	})
+	started, err := h.runtime.Start(context.Background(), workflow.StartCommand{ProjectID: h.project.ID, WorkflowID: saved.Workflow.ID, Inputs: json.RawMessage(`{"topic":"revision"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed := waitWorkflowStatus(t, h.runtime, h.project.ID, started.Run.ID, workflow.RunCompleted)
+	if len(completed.Steps) != 4 {
+		t.Fatalf("steps = %#v", completed.Steps)
+	}
+	now := time.Now().UTC()
+	if _, err := h.store.DB().Exec(`UPDATE workflow_steps SET status='failed',error_code='REVIEW_REJECTED',error_message='review rejected' WHERE id=?`, completed.Steps[3].ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.store.DB().Exec(`UPDATE workflow_runs SET status='failed',current_step_ordinal=3,error_code='REVIEW_REJECTED',error_message='review rejected' WHERE id=?`, completed.Run.ID); err != nil {
+		t.Fatal(err)
+	}
+	repository := NewWorkflowRuntimeRepository(h.store.DB())
+	event := workflow.RuntimeEvent{ID: "review-revision-event", WorkflowRunID: completed.Run.ID, Type: "workflow.review_revision_queued", Payload: json.RawMessage(`{"producerStepId":"` + completed.Steps[1].ID + `"}`), CreatedAt: now}
+	if err := repository.ResetStepsForReviewRevision(context.Background(), completed.Run.ID, completed.Steps[1].ID, completed.Steps[3].ID, now, event); err != nil {
+		t.Fatal(err)
+	}
+	reset, err := repository.GetRun(context.Background(), h.project.ID, completed.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reset.Run.Status != workflow.RunQueued || reset.Run.CurrentStep != 1 || string(reset.Run.Outputs) != `{}` || reset.Steps[0].Status != workflow.StepCompleted {
+		t.Fatalf("reset run = %#v", reset)
+	}
+	for _, step := range reset.Steps[1:] {
+		if step.Status != workflow.StepQueued || string(step.Input) != `{}` || string(step.Output) != `{}` || step.ToolCallID != "" || step.ErrorCode != "" {
+			t.Fatalf("reset step = %#v", step)
+		}
+	}
+	if reset.Events[len(reset.Events)-1].Type != "workflow.review_revision_queued" {
+		t.Fatalf("events = %#v", reset.Events)
+	}
+}
+
+func TestWorkflowUpstreamRevisionResetsOnlyProducerThroughFailure(t *testing.T) {
+	h := newWorkflowRuntimeHarness(t, runtimeFixtureTool{name: "fixture.upstream.revision", risk: tool.RiskLow, idempotent: true})
+	saved := h.save(t, workflow.Definition{
+		SchemaVersion: 1, Name: "Upstream revision reset",
+		Inputs: []workflow.Port{{Name: "topic", Type: workflow.TypeString, Required: true}},
+		Nodes: []workflow.Node{
+			{ID: "keep", Name: "Keep", Kind: workflow.NodeTool, ToolName: "fixture.upstream.revision", Arguments: json.RawMessage(`{}`)},
+			{ID: "produce", Name: "Produce", Kind: workflow.NodeTool, ToolName: "fixture.upstream.revision", Arguments: json.RawMessage(`{}`)},
+			{ID: "prepare", Name: "Prepare", Kind: workflow.NodeTool, ToolName: "fixture.upstream.revision", Arguments: json.RawMessage(`{}`)},
+			{ID: "consume", Name: "Consume", Kind: workflow.NodeTool, ToolName: "fixture.upstream.revision", Arguments: json.RawMessage(`{}`)},
+		},
+		Edges: []workflow.Edge{
+			{FromNode: "$input", FromPort: "topic", ToNode: "keep", ToPort: "query"},
+			{FromNode: "keep", FromPort: "structured.answer", ToNode: "produce", ToPort: "query"},
+			{FromNode: "produce", FromPort: "structured.answer", ToNode: "prepare", ToPort: "query"},
+			{FromNode: "prepare", FromPort: "structured.answer", ToNode: "consume", ToPort: "query"},
+		},
+		Outputs: []workflow.Output{{Name: "answer", Type: workflow.TypeString, FromNode: "consume", FromPort: "structured.answer", Required: true}},
+	})
+	started, err := h.runtime.Start(context.Background(), workflow.StartCommand{ProjectID: h.project.ID, WorkflowID: saved.Workflow.ID, Inputs: json.RawMessage(`{"topic":"revision"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed := waitWorkflowStatus(t, h.runtime, h.project.ID, started.Run.ID, workflow.RunCompleted)
+	if _, err := h.store.DB().Exec(`UPDATE workflow_steps SET status='failed',error_code='EXEC_FAILED',error_message='failed' WHERE id=?`, completed.Steps[3].ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.store.DB().Exec(`UPDATE workflow_runs SET status='failed',current_step_ordinal=3,error_code='EXEC_FAILED',error_message='failed',outputs_json='{}' WHERE id=?`, completed.Run.ID); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	repository := NewWorkflowRuntimeRepository(h.store.DB())
+	event := workflow.RuntimeEvent{ID: "upstream-revision-event", WorkflowRunID: completed.Run.ID, Type: "workflow.upstream_revision_queued", Payload: json.RawMessage(`{"producerStepId":"` + completed.Steps[1].ID + `"}`), CreatedAt: now}
+	if err := repository.ResetStepsForUpstreamRetry(context.Background(), completed.Run.ID, completed.Steps[1].ID, completed.Steps[3].ID, nil, now, event); err != nil {
+		t.Fatal(err)
+	}
+	reset, err := repository.GetRun(context.Background(), h.project.ID, completed.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reset.Run.Status != workflow.RunQueued || reset.Run.CurrentStep != 1 || reset.Steps[0].Status != workflow.StepCompleted || reset.Steps[0].ToolCallID == "" {
+		t.Fatalf("reset run = %#v", reset)
+	}
+	for _, step := range reset.Steps[1:] {
+		if step.Status != workflow.StepQueued || string(step.Input) != `{}` || string(step.Output) != `{}` || step.ToolCallID != "" || step.ErrorCode != "" {
+			t.Fatalf("reset step = %#v", step)
+		}
+	}
+	var historicalCalls int
+	if err := h.store.DB().QueryRow(`SELECT COUNT(*) FROM tool_calls WHERE workflow_run_id=?`, completed.Run.ID).Scan(&historicalCalls); err != nil || historicalCalls != 4 {
+		t.Fatalf("historical ToolCalls = %d, %v", historicalCalls, err)
+	}
+}
+
+func TestQueueAutomaticPythonRepairIsAtomicAndKeepsRunQueued(t *testing.T) {
+	h := newWorkflowRuntimeHarness(t, runtimeFixtureTool{name: "fixture.automatic.repair", risk: tool.RiskLow, idempotent: true})
+	saved := h.save(t, workflow.Definition{
+		SchemaVersion: 1, Name: "Automatic repair", Inputs: []workflow.Port{{Name: "topic", Type: workflow.TypeString, Required: true}},
+		Nodes: []workflow.Node{
+			{ID: "producer", Name: "Producer", Kind: workflow.NodeTool, ToolName: "fixture.automatic.repair", Arguments: json.RawMessage(`{}`)},
+			{ID: "prepare", Name: "Prepare", Kind: workflow.NodeTool, ToolName: "fixture.automatic.repair", Arguments: json.RawMessage(`{}`)},
+			{ID: "python", Name: "Python", Kind: workflow.NodeTool, ToolName: "fixture.automatic.repair", Arguments: json.RawMessage(`{}`)},
+		},
+		Edges: []workflow.Edge{
+			{FromNode: "$input", FromPort: "topic", ToNode: "producer", ToPort: "query"},
+			{FromNode: "producer", FromPort: "structured.answer", ToNode: "prepare", ToPort: "query"},
+			{FromNode: "prepare", FromPort: "structured.answer", ToNode: "python", ToPort: "query"},
+		},
+		Outputs: []workflow.Output{{Name: "answer", Type: workflow.TypeString, FromNode: "python", FromPort: "structured.answer", Required: true}},
+	})
+	now := time.Now().UTC()
+	runID := "automatic-repair-run"
+	producerID, failedID := "automatic-producer", "automatic-failed"
+	compilation := saved.Version.Compilation
+	encodedCompilation, _ := json.Marshal(compilation)
+	compilationHash := sha256.Sum256(encodedCompilation)
+	// Insert the minimal durable state needed to exercise the atomic repository
+	// transition without invoking a model or Python process.
+	if _, err := h.store.DB().Exec(`INSERT INTO workflow_runs(id,project_id,workflow_id,workflow_version_id,workflow_name,workflow_purpose,status,permission_mode,inputs_json,inputs_sha256,compilation_json,compilation_sha256,outputs_json,current_step_ordinal,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, runID, h.project.ID, saved.Workflow.ID, saved.Version.ID, "Automatic repair", "research_starter", workflow.RunFailed, "full_access", `{}`, strings.Repeat("0", 64), string(encodedCompilation), fmt.Sprintf("%x", compilationHash), `{}`, 2, formatTime(now), formatTime(now)); err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range []struct {
+		id, node string
+		ordinal  int
+		status   workflow.StepStatus
+	}{{producerID, "producer", 0, workflow.StepCompleted}, {"automatic-prepare", "prepare", 1, workflow.StepCompleted}, {failedID, "python", 2, workflow.StepRunning}} {
+		if _, err := h.store.DB().Exec(`INSERT INTO workflow_steps(id,workflow_run_id,node_id,ordinal,node_kind,status,attempt,input_json,input_sha256,output_json,idempotency_key,error_code,error_message,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, step.id, runID, step.node, step.ordinal, string(compilation.Nodes[step.ordinal].Kind), step.status, 1, `{}`, strings.Repeat("0", 64), `{}`, "", "", "", formatTime(now)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	event := workflow.RuntimeEvent{ID: "automatic-repair-event", WorkflowRunID: runID, Type: "workflow.upstream_revision_queued", Payload: json.RawMessage(`{"automatic":true}`), CreatedAt: now}
+	repository := NewWorkflowRuntimeRepository(h.store.DB())
+	if err := repository.QueueAutomaticPythonRepair(context.Background(), runID, producerID, failedID, now, event); err != nil {
+		t.Fatal(err)
+	}
+	reset, err := repository.GetRun(context.Background(), h.project.ID, runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reset.Run.Status != workflow.RunQueued || reset.Run.CurrentStep != 0 || reset.Run.ErrorCode != "" || reset.Run.ErrorMessage != "" {
+		t.Fatalf("automatic repair run = %#v", reset.Run)
+	}
+	for _, step := range reset.Steps {
+		if step.Status != workflow.StepQueued || step.ToolCallID != "" || step.ErrorCode != "" {
+			t.Fatalf("automatic repair step = %#v", step)
+		}
+	}
+}
+
+func TestQueueAutomaticAIOutputRepairKeepsFailedAttemptAndRequeuesStep(t *testing.T) {
+	h := newWorkflowRuntimeHarness(t)
+	saved := h.save(t, workflow.Definition{
+		SchemaVersion: 1, Name: "AI output repair", Inputs: []workflow.Port{{Name: "topic", Type: workflow.TypeString, Required: true}},
+		Nodes:   []workflow.Node{{ID: "plan", Name: "Plan", Kind: workflow.NodeAIAnalysis, Prompt: "Return JSON", PromptVersion: "plan-v1", Arguments: json.RawMessage(`{}`), OutputSchema: json.RawMessage(`{"type":"object"}`)}},
+		Edges:   []workflow.Edge{{FromNode: "$input", FromPort: "topic", ToNode: "plan", ToPort: "context"}},
+		Outputs: []workflow.Output{{Name: "plan", Type: workflow.TypeObject, FromNode: "plan", FromPort: "analysis", Required: true}},
+	})
+	now := time.Now().UTC()
+	runID, stepID := "automatic-ai-output-repair-run", "automatic-ai-output-repair-step"
+	encodedCompilation, _ := json.Marshal(saved.Version.Compilation)
+	compilationHash := sha256.Sum256(encodedCompilation)
+	if _, err := h.store.DB().Exec(`INSERT INTO workflow_runs(id,project_id,workflow_id,workflow_version_id,workflow_name,workflow_purpose,status,permission_mode,inputs_json,inputs_sha256,compilation_json,compilation_sha256,outputs_json,current_step_ordinal,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, runID, h.project.ID, saved.Workflow.ID, saved.Version.ID, "AI output repair", "user_plan", workflow.RunRunning, "full_access", `{"topic":"x"}`, strings.Repeat("0", 64), string(encodedCompilation), fmt.Sprintf("%x", compilationHash), `{}`, 0, formatTime(now), formatTime(now)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.store.DB().Exec(`INSERT INTO workflow_steps(id,workflow_run_id,node_id,ordinal,node_kind,status,attempt,input_json,input_sha256,output_json,idempotency_key,error_code,error_message,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, stepID, runID, "plan", 0, string(workflow.NodeAIAnalysis), workflow.StepRunning, 1, `{"context":"x"}`, strings.Repeat("1", 64), `{}`, "key", "", "", formatTime(now)); err != nil {
+		t.Fatal(err)
+	}
+	event := workflow.RuntimeEvent{ID: "automatic-ai-output-repair-event", WorkflowRunID: runID, Type: "workflow.ai_output_repair_queued", Payload: json.RawMessage(`{"automatic":true}`), CreatedAt: now}
+	repository := NewWorkflowRuntimeRepository(h.store.DB())
+	if err := repository.QueueAutomaticAIOutputRepair(context.Background(), runID, stepID, 1, now, event); err != nil {
+		t.Fatal(err)
+	}
+	reset, err := repository.GetRun(context.Background(), h.project.ID, runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reset.Run.Status != workflow.RunQueued || reset.Run.CurrentStep != 0 || reset.Steps[0].Status != workflow.StepQueued || reset.Steps[0].Attempt != 1 || string(reset.Steps[0].Input) != `{}` || reset.Steps[0].ErrorCode != "" {
+		t.Fatalf("automatic AI output repair state = %#v / %#v", reset.Run, reset.Steps[0])
 	}
 }
 

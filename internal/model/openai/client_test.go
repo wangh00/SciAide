@@ -337,6 +337,35 @@ func TestStreamMapsToolsAndAccumulatesFragmentedToolCalls(t *testing.T) {
 	}
 }
 
+func TestStreamResolvesExactShortBuiltinName(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var requestBody requestPayload
+		if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+			t.Fatal(err)
+		}
+		declared := providerToolName("builtin.skill.load")
+		if len(requestBody.Tools) != 1 || requestBody.Tools[0].Function.Name != declared || declared != "skill_load" {
+			t.Fatalf("tools = %#v, declared=%q", requestBody.Tools, declared)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-skill","function":{"name":"skill_load","arguments":"{\"name\":\"scientific-writing\"}"}}]},"finish_reason":"tool_calls"}]}`+"\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+	stream, err := New(modelprofile.Profile{BaseURL: server.URL, ModelID: "fixture", TimeoutSeconds: 5}, nil).Stream(context.Background(), model.ChatRequest{
+		Messages: []model.Message{{Role: model.RoleUser, Content: "加载写作方法"}},
+		Tools:    []model.ToolDefinition{{Name: "builtin.skill.load", Description: "load", InputSchema: json.RawMessage(`{"type":"object"}`)}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	event, err := stream.Recv()
+	if err != nil || event.Type != model.EventToolCall || event.ToolCall == nil || event.ToolCall.Name != "builtin.skill.load" {
+		t.Fatalf("tool event = %#v, %v", event, err)
+	}
+}
+
 func TestProviderToolNamesAreCompatibleStableAndDistinct(t *testing.T) {
 	values := []string{
 		"builtin.workspace.read_text",

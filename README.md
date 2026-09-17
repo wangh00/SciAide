@@ -2,10 +2,11 @@
 
 面向科研工作者的本地优先桌面 AI Agent，支持自定义模型、工具调用、MCP、Skill、科研知识库和可信引用。
 
-当前阶段：**P7.1～P7.6 已完成；下一阶段为 P8 发布加固**。
+当前阶段：**P7 主体已实现，正在验证科研闭环稳定性；P8 发布加固尚未完成**。最新进度与验证结果见 [当前状态](docs/CURRENT_STATE.md)。
 
 ## 当前能力
 
+- 科研资源接口：宿主提供真实资料/Skill 操作，模型选择受 enum 约束的引用；路径、附件定位、章节与分页由宿主解析，完整操作可审计
 - Wails + React + TypeScript
 - Application / Port / Adapter 边界
 - SQLite 版本化迁移与 Project / Conversation / Message / Run 持久化

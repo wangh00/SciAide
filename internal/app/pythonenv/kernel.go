@@ -58,14 +58,16 @@ type KernelError struct {
 }
 
 type KernelExecuteRequest struct {
-	ProjectID   string
-	Code        string
-	InputPaths  []string
-	InputData   json.RawMessage
-	OutputPaths []string
-	FigurePath  string
-	Timeout     time.Duration
-	Environment Environment
+	ProjectID     string
+	WorkspacePath string
+	ToolCallID    string
+	Code          string
+	InputPaths    []string
+	InputData     json.RawMessage
+	OutputPaths   []string
+	FigurePath    string
+	Timeout       time.Duration
+	Environment   Environment
 }
 
 type KernelRuntime interface {
@@ -73,6 +75,14 @@ type KernelRuntime interface {
 	Stop(projectID string) error
 	Restart(projectID string) error
 	Close() error
+}
+
+// ScopedKernelRuntime is implemented by runtimes that keep an isolated
+// interpreter per project workspace. The optional interface lets older test
+// doubles and integrations retain the original project-wide Stop/Restart API.
+type ScopedKernelRuntime interface {
+	StopScoped(projectID, workspacePath string) error
+	RestartScoped(projectID, workspacePath string) error
 }
 
 type KernelExecutionAudit struct {
@@ -108,6 +118,10 @@ type KernelService struct {
 	runtime      KernelRuntime
 	audits       KernelAuditRepository
 	mu           sync.Mutex
+}
+
+func (s *KernelService) Project(ctx context.Context, projectID string) (project.Project, error) {
+	return s.projects.Get(ctx, strings.TrimSpace(projectID))
 }
 
 type KernelRecoveryResult struct {
@@ -169,7 +183,11 @@ func (s *KernelService) ExecuteTool(ctx context.Context, request KernelExecuteRe
 	if len(request.InputData) > 256*1024 || !json.Valid(request.InputData) {
 		return KernelResult{}, fmt.Errorf("Kernel structured input is invalid or exceeds 256 KiB")
 	}
-	guard, err := pathguard.Open(selected.WorkspacePath)
+	workspaceRoot := selected.WorkspacePath
+	if strings.TrimSpace(request.WorkspacePath) != "" {
+		workspaceRoot = request.WorkspacePath
+	}
+	guard, err := pathguard.Open(workspaceRoot)
 	if err != nil {
 		return KernelResult{}, err
 	}
@@ -197,7 +215,7 @@ func (s *KernelService) ExecuteTool(ctx context.Context, request KernelExecuteRe
 		return KernelResult{}, err
 	}
 	defer restoreInputs()
-	result, runErr := s.runtime.Execute(ctx, request, selected.WorkspacePath)
+	result, runErr := s.runtime.Execute(ctx, request, workspaceRoot)
 	result.CodeSHA256 = hashKernelText(request.Code)
 	result.InputSHA256 = cloneKernelHashes(inputHashes)
 	if string(request.InputData) != "null" {
@@ -205,27 +223,27 @@ func (s *KernelService) ExecuteTool(ctx context.Context, request KernelExecuteRe
 	}
 	result.EnvironmentFingerprint = environment.EnvironmentFingerprint
 	if changed, verifyErr := verifyKernelInputs(guard, inputHashes); verifyErr != nil {
-		_ = s.runtime.Stop(request.ProjectID)
+		_ = s.stopRuntime(request)
 		return KernelResult{}, verifyErr
 	} else if changed != "" {
-		_ = s.runtime.Stop(request.ProjectID)
+		_ = s.stopRuntime(request)
 		return KernelResult{}, fmt.Errorf("Kernel modified declared read-only input %q; the Kernel was stopped", changed)
 	}
 	outputHashes := map[string]string{}
 	if runErr == nil && result.Status == "success" {
 		stagedHashes, verifyErr := collectKernelOutputs(guard, stagedOutputs, map[string]string{})
 		if verifyErr != nil {
-			_ = s.runtime.Stop(request.ProjectID)
+			_ = s.stopRuntime(request)
 			return KernelResult{}, verifyErr
 		}
 		stagedImages, stagedImageHashes, imageErr := validateKernelImages(guard, request.FigurePath, result.Images)
 		if imageErr != nil {
-			_ = s.runtime.Stop(request.ProjectID)
+			_ = s.stopRuntime(request)
 			return KernelResult{}, imageErr
 		}
 		images, imageErr := kernelImageTargets(guard, result.ExecutionID, stagedImages)
 		if imageErr != nil {
-			_ = s.runtime.Stop(request.ProjectID)
+			_ = s.stopRuntime(request)
 			return KernelResult{}, imageErr
 		}
 		for path, hash := range stagedImageHashes {
@@ -235,7 +253,7 @@ func (s *KernelService) ExecuteTool(ctx context.Context, request KernelExecuteRe
 		allOutputs := append(append([]string(nil), outputs...), images...)
 		outputHashes, verifyErr = publishKernelOutputs(guard, allStaged, allOutputs, stagedHashes)
 		if verifyErr != nil {
-			_ = s.runtime.Stop(request.ProjectID)
+			_ = s.stopRuntime(request)
 			return KernelResult{}, verifyErr
 		}
 		result.Images = images
@@ -375,6 +393,13 @@ func (s *KernelService) Stop(projectID string) error {
 }
 func (s *KernelService) Restart(projectID string) error {
 	return s.runtime.Restart(strings.TrimSpace(projectID))
+}
+
+func (s *KernelService) stopRuntime(request KernelExecuteRequest) error {
+	if scoped, ok := s.runtime.(ScopedKernelRuntime); ok && strings.TrimSpace(request.WorkspacePath) != "" {
+		return scoped.StopScoped(strings.TrimSpace(request.ProjectID), request.WorkspacePath)
+	}
+	return s.runtime.Stop(strings.TrimSpace(request.ProjectID))
 }
 func (s *KernelService) Close() error { return s.runtime.Close() }
 

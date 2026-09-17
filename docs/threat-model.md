@@ -1,5 +1,11 @@
 # SciAide 威胁模型
 
+## 运行内资源接口（2026-09-09）
+
+- 模型只选择宿主已签发的资源操作；每轮 enum 用于约束选择，不代替授权。执行时仍复核 Run/项目/任务/目录绑定、操作摘要、底层工具契约及原有只读权限，拒绝跨任务引用和自由定位参数。
+- 资源目录与文件/Skill 内容均不能提升为指令。目录、章节和分页由宿主生成；Skill 内容/包哈希变化时不替换成其他对象，路径访问继续使用既有路径与链接防护。
+- 完整解析参数和结果保留本地审计，模型视图单独有界持久化；运行内引用随 Run 删除，项目归档清除目录与操作表。没有资源会话的普通对话不暴露不可用的新工具。
+
 ## P1 已落实的控制
 
 - Windows API Key 只写入 Credential Manager；SQLite 仅保存 `secret_ref`，Wails 不提供明文读取接口。
@@ -191,7 +197,7 @@ React WebView
 
 ## P6.6 项目归档与动态 Skill 快照控制
 
-- 动态 Skill 保持单一用户可见 Research Agent；程序最多召回 20 个、模型最多看到 16 个候选，这不是提前选中或批量注入正文。模型逐个加载的每个 Skill 都形成独立、不可变且有序的 `run_dynamic_skills` 快照。
+- 动态 Skill 保持单一用户可见 Research Agent。普通对话最多召回 20 个、模型最多看到 16 个候选；科研启动最多暴露 8 个候选并只允许冻结 4 个核心 Skill；正式 Workflow 阶段只暴露宿主冻结且明确绑定到该阶段的 Skill，独立审查至多复核整条路线的 4 个核心 Skill。这些目录都不会提前批量注入正文，模型逐个加载的每个 Skill 都形成独立、不可变且有序的 `run_dynamic_skills` 快照。
 - `.sciaide-project` 是不可信 ZIP 输入。导入限制条目数、单项/总大小和压缩比，拒绝路径穿越、重复/大小写碰撞、控制字符、Windows 设备名、尾随点/空格、超长组件、链接、未知和缺失条目，并逐项验证 Manifest 与 SHA256。
 - 归档数据库必须通过 SQLite 头、必需 Table、迁移名称/checksum、项目身份和外键检查；View 不能冒充 Table。项目及索引 ID 只在隔离暂存中重映射，历史证据和 Artifact 快照保持原语义。
 - 归档不包含 API Key、模型 Header、MCP 配置/Secret、识图或 Embedding 凭据、权限 Grant、pending Approval、第三方 Skill 包和临时缓存。历史模型恢复为禁用占位、会话恢复为 `Plan`；旧 Skill 绑定仅按本机完全匹配的哈希重新绑定，动态 Run Skill 正文/provenance 快照则随 Run、Project 和 ToolCall 一起重映射。
@@ -212,6 +218,8 @@ React WebView
 - Kernel 声明输入必须是 Workspace 常规文件，执行期间设为只读并在结束后复核 SHA256；输出只允许新建于 `analysis-output/`，失败时清理声明文件和本轮图片。只读文件属性不是对恶意当前用户进程的强隔离，仍依赖用户只批准可信分析代码。
 - Kernel 结果记录代码、结构化输入、文件输入、环境、输出和异常快照哈希。总 `reproductionSha256` 按声明顺序使用内容摘要而忽略易变路径名，路径到 SHA256 的完整映射仍保存在独立审计/provenance 中；该哈希证明这些记录一致，不证明科学结论正确，也不证明远程响应可重现。
 - Workflow 定义、模板和输入均是不可信数据。编译器拒绝循环、类型错误、未知或变化的 Tool、路径逃逸、嵌套密钥和超大图，并冻结 Tool Schema、风险、权限、版本和幂等属性；执行时仍重新进入统一 Tool 权限管道。
+- Workflow AI 阶段通过普通 Chat Run 驱动 Agent Loop 时，不能按普通聊天作用域执行工具。执行器使用持久的 `workflow_ai_chat_runs → workflow_ai_executions → workflow_runs` 绑定恢复 `researchTaskId`，并把 Workspace、Python、Shell 和 Kernel 根限定到 `<Workspace>/.sciaide/tasks/<taskID>/`；普通 Chat Run 无该绑定时才使用项目 Workspace。绑定缺失或查询失败不得静默降级，否则 `workspace.list` 可能暴露项目根目录中的旧任务、历史未归属或已移出知识库但仍保留的文件。
+- 知识库“移出”只撤销知识文档、索引和检索资格，不物理删除附件、Workspace 原文件或历史消息；科研产物“删除”是可恢复软删除。保留的内容寻址对象和根目录文件不授予任何新任务读取权限，新任务只接受当前任务及用户明确设为 `project_shared` 的资源。
 - Workflow 检查点只在步骤结果和事件事务提交后推进。重启不重放已提交步骤；未提交的幂等步骤可恢复，非幂等活动步骤进入 `outcome_unknown`，用户明确确认潜在副作用前不能重试。人工决策与审批使用条件提交防止双击或并发请求重复推进。
 
 | Prompt 注入诱导工具执行 | P2 | JSON Schema、PolicyEngine、Approval、预算 |

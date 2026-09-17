@@ -22,6 +22,7 @@ import (
 	contenttype "github.com/wailsapp/mimetype"
 	appcitation "github.com/wangh00/SciAide/internal/app/citation"
 	"github.com/wangh00/SciAide/internal/app/project"
+	"github.com/wangh00/SciAide/internal/app/researchtask"
 	"github.com/wangh00/SciAide/internal/app/tool"
 	"github.com/wangh00/SciAide/internal/id"
 	"github.com/wangh00/SciAide/internal/platform/filepublish"
@@ -49,6 +50,7 @@ type RecoveryResult struct {
 type Service struct {
 	repository Repository
 	projects   ProjectLoader
+	tasks      researchtask.Validator
 	now        func() time.Time
 	newID      func() (string, error)
 	mu         sync.Mutex
@@ -56,6 +58,47 @@ type Service struct {
 
 func NewService(repository Repository, projects ProjectLoader) *Service {
 	return &Service{repository: repository, projects: projects, now: func() time.Time { return time.Now().UTC() }, newID: id.New}
+}
+
+func (s *Service) SetTaskValidator(validator researchtask.Validator) {
+	if s != nil {
+		s.tasks = validator
+	}
+}
+
+func (s *Service) validateTask(ctx context.Context, projectID, taskID string) error {
+	return researchtask.Validate(ctx, s.tasks, projectID, taskID)
+}
+
+func (s *Service) validateTaskIfConfigured(ctx context.Context, projectID, taskID string) error {
+	if s.tasks == nil {
+		return nil
+	}
+	return s.validateTask(ctx, projectID, taskID)
+}
+
+// validateArtifactTask keeps historical task artifacts addressable after a
+// task is archived. Creation and workflow execution continue to use the
+// active-task validator above.
+func (s *Service) validateArtifactTask(ctx context.Context, projectID, taskID string) error {
+	if s.tasks == nil {
+		return nil
+	}
+	if validator, ok := s.tasks.(researchtask.ArchivedValidator); ok {
+		projectID, taskID = strings.TrimSpace(projectID), strings.TrimSpace(taskID)
+		if projectID == "" || taskID == "" {
+			return fmt.Errorf("research project and task are required")
+		}
+		found, err := validator.ExistsIncludingArchived(ctx, projectID, taskID)
+		if err != nil {
+			return fmt.Errorf("validate research task ownership: %w", err)
+		}
+		if !found {
+			return fmt.Errorf("research task does not belong to the current project")
+		}
+		return nil
+	}
+	return s.validateTask(ctx, projectID, taskID)
 }
 
 func (s *Service) SaveAssistantAnswer(ctx context.Context, projectID, messageID, name, artifactID string) (SaveResult, error) {
@@ -83,6 +126,11 @@ func (s *Service) SaveAssistantAnswer(ctx context.Context, projectID, messageID,
 		ModelProfileID: source.ModelProfileID, ModelProfileName: source.ModelProfileName,
 		ModelID: source.ModelID, APIProtocol: source.APIProtocol, Skills: nonNilSkills(source.Skills),
 	}
+	if source.ResearchTaskID != "" {
+		provenance.Extra = map[string]string{"scopeKind": string(ScopeTask), "researchTaskId": source.ResearchTaskID}
+	} else {
+		provenance.Extra = map[string]string{"scopeKind": string(ScopeProjectShared)}
+	}
 	lineage := []Lineage{
 		{RelationKind: "run", SourceIDSnapshot: source.RunID, SourceRunID: source.RunID, Label: "生成回答"},
 		{RelationKind: "message", SourceIDSnapshot: source.MessageID, SourceMessageID: source.MessageID, Label: "助手最终回答"},
@@ -95,11 +143,98 @@ func (s *Service) SaveAssistantAnswer(ctx context.Context, projectID, messageID,
 	}, []byte(source.Text))
 }
 
+// SaveWorkflowDeliverable records a completed Workflow output as an immutable
+// Markdown Artifact. The Workflow facade is responsible for loading and
+// validating the frozen output and delivery gate before calling this method.
+func (s *Service) SaveWorkflowDeliverable(ctx context.Context, cmd WorkflowDeliverableCommand) (SaveResult, error) {
+	cmd.ProjectID = strings.TrimSpace(cmd.ProjectID)
+	cmd.WorkflowRunID = strings.TrimSpace(cmd.WorkflowRunID)
+	cmd.ResearchTaskID = strings.TrimSpace(cmd.ResearchTaskID)
+	if cmd.ResearchTaskID != "" {
+		if err := s.validateTaskIfConfigured(ctx, cmd.ProjectID, cmd.ResearchTaskID); err != nil {
+			return SaveResult{}, err
+		}
+	}
+	cmd.OutputName = strings.TrimSpace(cmd.OutputName)
+	cmd.OutputSHA256 = strings.TrimSpace(cmd.OutputSHA256)
+	cmd.Name = strings.TrimSpace(cmd.Name)
+	cmd.Markdown = strings.TrimSpace(cmd.Markdown)
+	if cmd.ProjectID == "" || cmd.WorkflowRunID == "" || cmd.OutputName == "" || cmd.Name == "" || cmd.Markdown == "" {
+		return SaveResult{}, fmt.Errorf("Workflow deliverable source, output, name, and Markdown are required")
+	}
+	if len(cmd.OutputName) > 64 || strings.IndexByte(cmd.OutputName, 0) >= 0 || len(cmd.OutputSHA256) != 64 || strings.ToLower(cmd.OutputSHA256) != cmd.OutputSHA256 {
+		return SaveResult{}, fmt.Errorf("Workflow deliverable identity is invalid")
+	}
+	if _, err := hex.DecodeString(cmd.OutputSHA256); err != nil {
+		return SaveResult{}, fmt.Errorf("Workflow deliverable identity is invalid")
+	}
+	if len([]rune(cmd.Markdown)) > 2_000_000 || len(cmd.Citations) > 256 {
+		return SaveResult{}, fmt.Errorf("Workflow deliverable exceeds size limits")
+	}
+	provenance := Provenance{
+		SchemaVersion: 1,
+		ProjectID:     cmd.ProjectID,
+		SourceKind:    SourceTool,
+		WorkflowRunID: cmd.WorkflowRunID,
+		ToolName:      "builtin.workflow.deliverable",
+		ToolVersion:   "1.0.0",
+		Skills:        []SkillSnapshot{},
+		Extra: map[string]string{
+			"workflowDeliverable": cmd.OutputName,
+			"outputSHA256":        cmd.OutputSHA256,
+			"scopeKind":           string(ScopeProjectShared),
+		},
+	}
+	if cmd.ResearchTaskID != "" {
+		provenance.Extra["scopeKind"] = string(ScopeTask)
+		provenance.Extra["researchTaskId"] = cmd.ResearchTaskID
+	}
+	metadata, err := json.Marshal(map[string]string{"outputName": cmd.OutputName, "outputSHA256": cmd.OutputSHA256})
+	if err != nil {
+		return SaveResult{}, fmt.Errorf("encode Workflow deliverable lineage: %w", err)
+	}
+	saved, err := s.saveBytes(ctx, saveCommand{
+		ProjectID:  cmd.ProjectID,
+		Name:       cmd.Name,
+		Kind:       KindDocument,
+		FileName:   ensureExtension(safeName(cmd.Name), ".md"),
+		MIMEType:   "text/markdown; charset=utf-8",
+		SourceKind: SourceTool,
+		SourceKey:  "workflow-deliverable:" + cmd.WorkflowRunID + ":" + cmd.OutputName + ":" + cmd.OutputSHA256,
+		Provenance: provenance,
+		Lineage: []Lineage{{
+			RelationKind:        "workflow_run",
+			SourceIDSnapshot:    cmd.WorkflowRunID,
+			SourceWorkflowRunID: cmd.WorkflowRunID,
+			Label:               "科研 Workflow Run",
+			Metadata:            metadata,
+		}},
+		Citations: cmd.Citations,
+	}, []byte(cmd.Markdown+"\n"))
+	if err != nil {
+		return SaveResult{}, err
+	}
+	if saved.Artifact.Status == StatusTrashed {
+		restored, err := s.repository.SetStatus(ctx, cmd.ProjectID, saved.Artifact.ID, StatusActive, s.now())
+		if err != nil {
+			return SaveResult{}, fmt.Errorf("restore Workflow deliverable Artifact: %w", err)
+		}
+		saved.Artifact = restored
+	}
+	return saved, nil
+}
+
 // PublishWorkflowReport is the narrow trusted entry used by SciAide's fixed
 // research report tool. Citation identity must be verified before this method
 // is called; this layer freezes provenance and creates deterministic exports.
 func (s *Service) PublishWorkflowReport(ctx context.Context, cmd WorkflowReportCommand) (WorkflowReportResult, error) {
 	cmd.ProjectID, cmd.WorkflowRunID, cmd.ToolCallID = strings.TrimSpace(cmd.ProjectID), strings.TrimSpace(cmd.WorkflowRunID), strings.TrimSpace(cmd.ToolCallID)
+	cmd.ResearchTaskID = strings.TrimSpace(cmd.ResearchTaskID)
+	if cmd.ResearchTaskID != "" {
+		if err := s.validateTaskIfConfigured(ctx, cmd.ProjectID, cmd.ResearchTaskID); err != nil {
+			return WorkflowReportResult{}, err
+		}
+	}
 	cmd.ToolName, cmd.ToolVersion, cmd.OperationKey = strings.TrimSpace(cmd.ToolName), strings.TrimSpace(cmd.ToolVersion), strings.TrimSpace(cmd.OperationKey)
 	cmd.Name, cmd.Markdown = strings.TrimSpace(cmd.Name), strings.TrimSpace(cmd.Markdown)
 	if cmd.ProjectID == "" || cmd.WorkflowRunID == "" || cmd.ToolCallID == "" || cmd.ToolName == "" || cmd.ToolVersion == "" || cmd.Name == "" || cmd.Markdown == "" {
@@ -139,7 +274,11 @@ func (s *Service) PublishWorkflowReport(ctx context.Context, cmd WorkflowReportC
 	provenance := Provenance{
 		SchemaVersion: 1, ProjectID: cmd.ProjectID, SourceKind: SourceTool,
 		WorkflowRunID: cmd.WorkflowRunID, ToolCallID: cmd.ToolCallID, ToolName: cmd.ToolName, ToolVersion: cmd.ToolVersion,
-		Skills: []SkillSnapshot{}, Extra: map[string]string{"workflowReport": "true"},
+		Skills: []SkillSnapshot{}, Extra: map[string]string{"workflowReport": "true", "scopeKind": string(ScopeProjectShared)},
+	}
+	if cmd.ResearchTaskID != "" {
+		provenance.Extra["scopeKind"] = string(ScopeTask)
+		provenance.Extra["researchTaskId"] = cmd.ResearchTaskID
 	}
 	fileName := ensureExtension(safeName(cmd.Name), ".md")
 	sourceKey := "workflow-report:" + cmd.ToolCallID
@@ -172,6 +311,16 @@ func (s *Service) RegisterWorkspaceFile(ctx context.Context, cmd RegisterWorkspa
 	if cmd.ProjectID == "" || cmd.Path == "" {
 		return SaveResult{}, fmt.Errorf("project and Workspace file are required")
 	}
+	cmd.ScopeKind = normalizeScope(cmd.ScopeKind)
+	if cmd.ScopeKind == ScopeTask {
+		cmd.ResearchTaskID = strings.TrimSpace(cmd.ResearchTaskID)
+		if cmd.ResearchTaskID == "" {
+			return SaveResult{}, fmt.Errorf("research task id is required for task-scoped Artifact")
+		}
+		if err := s.validateTaskIfConfigured(ctx, cmd.ProjectID, cmd.ResearchTaskID); err != nil {
+			return SaveResult{}, err
+		}
+	}
 	selected, err := s.projects.Get(ctx, cmd.ProjectID)
 	if err != nil {
 		return SaveResult{}, err
@@ -179,11 +328,21 @@ func (s *Service) RegisterWorkspaceFile(ctx context.Context, cmd RegisterWorkspa
 	if err := project.VerifyPrivateDataLayout(selected); err != nil {
 		return SaveResult{}, fmt.Errorf("project Artifact storage is unavailable: %w", err)
 	}
-	relative, err := workspaceRelativePath(selected.WorkspacePath, cmd.Path)
+	workspaceRoot := selected.WorkspacePath
+	if cmd.ScopeKind == ScopeTask {
+		workspaceRoot, err = project.ResearchTaskWorkspacePath(selected, cmd.ResearchTaskID)
+		if err != nil {
+			return SaveResult{}, err
+		}
+		if err := os.MkdirAll(workspaceRoot, 0o700); err != nil {
+			return SaveResult{}, fmt.Errorf("create research task workspace: %w", err)
+		}
+	}
+	relative, err := workspaceRelativePath(workspaceRoot, cmd.Path)
 	if err != nil {
 		return SaveResult{}, err
 	}
-	guard, err := pathguard.Open(selected.WorkspacePath)
+	guard, err := pathguard.Open(workspaceRoot)
 	if err != nil {
 		return SaveResult{}, err
 	}
@@ -214,6 +373,10 @@ func (s *Service) RegisterWorkspaceFile(ctx context.Context, cmd RegisterWorkspa
 		WorkspaceRelativePath: filepath.ToSlash(clean), WorkspaceModifiedAt: &modified,
 		Skills: []SkillSnapshot{},
 	}
+	provenance.Extra = map[string]string{"scopeKind": string(cmd.ScopeKind)}
+	if cmd.ScopeKind == ScopeTask {
+		provenance.Extra["researchTaskId"] = cmd.ResearchTaskID
+	}
 	lineage := []Lineage{{RelationKind: "workspace_file", SourceIDSnapshot: filepath.ToSlash(clean), Label: filepath.Base(clean)}}
 	return s.saveReader(ctx, saveCommand{
 		ProjectID: cmd.ProjectID, ArtifactID: cmd.ArtifactID, Name: name, Kind: kind,
@@ -226,6 +389,16 @@ func (s *Service) RegisterWorkspaceFile(ctx context.Context, cmd RegisterWorkspa
 		}
 		return key + filepath.ToSlash(clean) + ":" + digest
 	})
+}
+
+func normalizeScope(value ScopeKind) ScopeKind {
+	if value == ScopeTask {
+		return ScopeTask
+	}
+	if value == ScopeLegacyProject {
+		return ScopeLegacyProject
+	}
+	return ScopeProjectShared
 }
 
 // RegisterToolArtifacts turns only explicit Workspace paths into Artifacts.
@@ -254,7 +427,23 @@ func (s *Service) BindToolArtifacts(ctx context.Context, projectID string, call 
 	if err := project.VerifyPrivateDataLayout(selected); err != nil {
 		return nil, err
 	}
-	guard, err := pathguard.Open(selected.WorkspacePath)
+	workspaceRoot := selected.WorkspacePath
+	if tool.NormalizeSubjectKind(call.SubjectKind) == tool.SubjectWorkflowRun {
+		taskID := strings.TrimSpace(call.ResearchTaskID)
+		// Legacy/user-plan workflow runs may legitimately remain project-scoped.
+		// Only a run with an explicit durable task identity is resolved into the
+		// private task workspace.
+		if taskID != "" {
+			workspaceRoot, err = project.ResearchTaskWorkspacePath(selected, taskID)
+			if err != nil {
+				return nil, err
+			}
+			if err := os.MkdirAll(workspaceRoot, 0o700); err != nil {
+				return nil, fmt.Errorf("create research task workspace: %w", err)
+			}
+		}
+	}
+	guard, err := pathguard.Open(workspaceRoot)
 	if err != nil {
 		return nil, err
 	}
@@ -275,11 +464,11 @@ func (s *Service) BindToolArtifacts(ctx context.Context, projectID string, call 
 		if expectedSHA256 != "" && (len(expectedSHA256) != 64 || strings.ToLower(expectedSHA256) != expectedSHA256) {
 			return nil, fmt.Errorf("declared Workspace path contains an invalid SHA256")
 		}
-		relative, err := workspaceRelativePath(selected.WorkspacePath, reference.WorkspacePath)
+		relative, err := workspaceRelativePath(workspaceRoot, reference.WorkspacePath)
 		if err != nil {
 			return nil, err
 		}
-		if !workspacePermissionCovers(selected.WorkspacePath, call.Permissions, relative) {
+		if !workspacePermissionCovers(workspaceRoot, call.Permissions, relative) {
 			return nil, fmt.Errorf("declared Workspace path is outside the tool permission scope")
 		}
 		input, clean, err := guard.OpenFile(relative)
@@ -361,14 +550,21 @@ func (s *Service) registerToolFileLocked(ctx context.Context, source ToolSource,
 	if err := project.VerifyPrivateDataLayout(selected); err != nil {
 		return SaveResult{}, err
 	}
-	relative, err := workspaceRelativePath(selected.WorkspacePath, reference.WorkspacePath)
+	workspaceRoot := selected.WorkspacePath
+	if tool.NormalizeSubjectKind(source.SubjectKind) == tool.SubjectWorkflowRun && source.ResearchTaskID != "" {
+		workspaceRoot, err = project.ResearchTaskWorkspacePath(selected, source.ResearchTaskID)
+		if err != nil {
+			return SaveResult{}, err
+		}
+	}
+	relative, err := workspaceRelativePath(workspaceRoot, reference.WorkspacePath)
 	if err != nil {
 		return SaveResult{}, err
 	}
-	if !workspacePermissionCovers(selected.WorkspacePath, source.Permissions, relative) {
+	if !workspacePermissionCovers(workspaceRoot, source.Permissions, relative) {
 		return SaveResult{}, fmt.Errorf("declared Workspace path is outside the tool permission scope")
 	}
-	guard, err := pathguard.Open(selected.WorkspacePath)
+	guard, err := pathguard.Open(workspaceRoot)
 	if err != nil {
 		return SaveResult{}, err
 	}
@@ -429,6 +625,14 @@ func (s *Service) registerToolFileLocked(ctx context.Context, source ToolSource,
 		ModelID: source.ModelID, APIProtocol: source.APIProtocol,
 		WorkspaceRelativePath: filepath.ToSlash(clean), Skills: nonNilSkills(source.Skills),
 	}
+	if tool.NormalizeSubjectKind(source.SubjectKind) == tool.SubjectWorkflowRun && strings.TrimSpace(source.ResearchTaskID) != "" {
+		taskID := source.ResearchTaskID
+		provenance.Extra = map[string]string{"scopeKind": string(ScopeTask), "researchTaskId": taskID}
+	} else {
+		// Legacy/user-plan Workflow outputs remain project material. Only a
+		// Workflow with an explicit durable research task identity is isolated.
+		provenance.Extra = map[string]string{"scopeKind": string(ScopeProjectShared)}
+	}
 	lineage := []Lineage{
 		{RelationKind: "run", SourceIDSnapshot: source.RunID, SourceRunID: source.RunID, Label: "工具所在 Run"},
 		{RelationKind: "tool_call", SourceIDSnapshot: source.CallID, SourceToolCallID: source.CallID, Label: source.ToolName},
@@ -459,8 +663,54 @@ func (s *Service) List(ctx context.Context, projectID string, includeTrashed boo
 	return s.repository.List(ctx, projectID, includeTrashed)
 }
 
+// ListForTask exposes project-shared artifacts as read-only inputs and the
+// current task's own outputs. The task is validated before either is visible.
+func (s *Service) ListForTask(ctx context.Context, projectID, taskID string, includeTrashed bool) ([]Artifact, error) {
+	projectID, taskID = strings.TrimSpace(projectID), strings.TrimSpace(taskID)
+	if err := s.validateArtifactTask(ctx, projectID, taskID); err != nil {
+		return nil, err
+	}
+	values, err := s.List(ctx, projectID, includeTrashed)
+	if err != nil {
+		return nil, err
+	}
+	filtered := make([]Artifact, 0, len(values))
+	for _, value := range values {
+		if value.ScopeKind == ScopeProjectShared || value.ScopeKind == ScopeTask && value.ResearchTaskID == taskID {
+			filtered = append(filtered, value)
+		}
+	}
+	return filtered, nil
+}
+
 func (s *Service) Get(ctx context.Context, projectID, artifactID string) (Detail, error) {
 	return s.repository.Get(ctx, strings.TrimSpace(projectID), strings.TrimSpace(artifactID))
+}
+
+func (s *Service) GetForTask(ctx context.Context, projectID, taskID, artifactID string) (Detail, error) {
+	projectID, taskID = strings.TrimSpace(projectID), strings.TrimSpace(taskID)
+	if err := s.validateArtifactTask(ctx, projectID, taskID); err != nil {
+		return Detail{}, err
+	}
+	detail, err := s.Get(ctx, projectID, artifactID)
+	if err != nil {
+		return Detail{}, err
+	}
+	value := detail.Artifact
+	if value.ScopeKind != ScopeProjectShared && (value.ScopeKind != ScopeTask || value.ResearchTaskID != taskID) {
+		return Detail{}, fmt.Errorf("artifact does not belong to the current research task")
+	}
+	return detail, nil
+}
+
+func (s *Service) GetVersion(ctx context.Context, projectID, versionID string) (Version, error) {
+	version, _, err := s.repository.GetVersion(ctx, strings.TrimSpace(projectID), strings.TrimSpace(versionID))
+	return version, err
+}
+
+func (s *Service) GetExport(ctx context.Context, projectID, exportID string) (Export, error) {
+	value, _, err := s.repository.GetExport(ctx, strings.TrimSpace(projectID), strings.TrimSpace(exportID))
+	return value, err
 }
 
 func (s *Service) Rename(ctx context.Context, projectID, artifactID, name string) (Artifact, error) {
@@ -749,6 +999,16 @@ func (s *Service) saveReaderLocked(ctx context.Context, cmd saveCommand, input i
 		detail, err := s.repository.Get(ctx, selected.ID, artifactID)
 		if err != nil {
 			return SaveResult{}, err
+		}
+		expectedScope := ScopeProjectShared
+		if value := strings.TrimSpace(cmd.Provenance.Extra["scopeKind"]); value == string(ScopeTask) {
+			expectedScope = ScopeTask
+		}
+		if detail.Artifact.ScopeKind != "" && detail.Artifact.ScopeKind != expectedScope {
+			return SaveResult{}, fmt.Errorf("cannot add a version across research resource scopes; create a new Artifact in the current scope")
+		}
+		if expectedScope == ScopeTask && detail.Artifact.ResearchTaskID != strings.TrimSpace(cmd.Provenance.Extra["researchTaskId"]) {
+			return SaveResult{}, fmt.Errorf("Artifact does not belong to the current research task")
 		}
 		if detail.Artifact.Status != StatusActive {
 			return SaveResult{}, fmt.Errorf("restore the Artifact before adding a version")

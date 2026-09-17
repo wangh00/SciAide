@@ -18,6 +18,27 @@ type executorFixtureTool struct {
 
 type runProjectFixture struct{ projectID string }
 
+type subjectScopeFixture struct {
+	taskID        string
+	workspaceRoot string
+	subjectKind   SubjectKind
+	subjectID     string
+}
+
+func (f *subjectScopeFixture) ProjectIDForSubject(context.Context, SubjectKind, string) (string, error) {
+	return "project", nil
+}
+
+func (f *subjectScopeFixture) ResearchTaskIDForSubject(_ context.Context, kind SubjectKind, id string) (string, error) {
+	f.subjectKind, f.subjectID = kind, id
+	return f.taskID, nil
+}
+
+func (f *subjectScopeFixture) WorkspaceRootForSubject(_ context.Context, kind SubjectKind, id string) (string, error) {
+	f.subjectKind, f.subjectID = kind, id
+	return f.workspaceRoot, nil
+}
+
 type artifactRegistrarFixture struct {
 	calls []string
 	err   error
@@ -60,6 +81,19 @@ func (r *artifactRegistrarFixture) RegisterToolArtifactsForExecutor(_ context.Co
 
 func (r runProjectFixture) ProjectIDForRun(context.Context, string) (string, error) {
 	return r.projectID, nil
+}
+
+func TestCompositeProjectResolverForwardsWorkflowAIChatScope(t *testing.T) {
+	workflows := &subjectScopeFixture{taskID: "research-task", workspaceRoot: `C:\workspace\.sciaide\tasks\research-task`}
+	resolver := CompositeProjectResolver{Runs: runProjectFixture{projectID: "project"}, Workflows: workflows}
+	taskID, err := resolver.ResearchTaskIDForSubject(context.Background(), SubjectChatRun, "workflow-ai-chat-run")
+	if err != nil || taskID != "research-task" || workflows.subjectKind != SubjectChatRun || workflows.subjectID != "workflow-ai-chat-run" {
+		t.Fatalf("research scope = %q, %v; fixture = %#v", taskID, err, workflows)
+	}
+	root, err := resolver.WorkspaceRootForSubject(context.Background(), SubjectChatRun, "workflow-ai-chat-run")
+	if err != nil || root != workflows.workspaceRoot || workflows.subjectKind != SubjectChatRun || workflows.subjectID != "workflow-ai-chat-run" {
+		t.Fatalf("workspace scope = %q, %v; fixture = %#v", root, err, workflows)
+	}
 }
 
 func (t executorFixtureTool) Definition(context.Context) (Definition, error) {
@@ -110,6 +144,42 @@ func TestExecutorCompletesAndPersistsBoundedResult(t *testing.T) {
 	loaded := repository.calls[call.ID]
 	if loaded.Status != CallCompleted || loaded.Result == nil || loaded.Result.Meta.DurationMillis < 0 {
 		t.Fatalf("persisted call = %#v", loaded)
+	}
+}
+
+func TestExecutorExecuteManyPreservesOrderAndRejectsDuplicateIDs(t *testing.T) {
+	implementation := executorFixtureTool{definition: executorDefinition(), invoke: func(_ context.Context, invocation Invocation) (Result, error) {
+		return Result{Status: ResultSuccess, Text: invocation.CallID}, nil
+	}}
+	executor, repository, first := readyExecutor(t, implementation, ExecutorOptions{})
+	service := NewService(repository, JSONSchemaValidator{})
+	second, err := service.Propose(context.Background(), executorDefinition(), CreateCommand{RunID: "run", ProviderCallID: "provider-2", Arguments: json.RawMessage(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err = service.Start(context.Background(), second.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	values, err := executor.ExecuteMany(context.Background(), "project", []string{second.ID, first.ID})
+	if err != nil || len(values) != 2 || values[0].CallID != second.ID || values[1].CallID != first.ID {
+		t.Fatalf("ExecuteMany() = %#v, %v", values, err)
+	}
+	if values[0].Result.Status != ResultSuccess || values[1].Result.Status != ResultSuccess {
+		t.Fatalf("ExecuteMany results = %#v", values)
+	}
+	if _, err := executor.ExecuteMany(context.Background(), "project", []string{first.ID, first.ID}); err == nil || !strings.Contains(err.Error(), "duplicate") {
+		t.Fatalf("duplicate batch error = %v", err)
+	}
+}
+
+func TestExecutorExecuteManyDoesNotRelabelDeterministicErrorsAsUnknown(t *testing.T) {
+	implementation := executorFixtureTool{definition: executorDefinition(), invoke: func(context.Context, Invocation) (Result, error) {
+		return Result{Status: ResultSuccess}, nil
+	}}
+	executor, _, call := readyExecutor(t, implementation, ExecutorOptions{})
+	if _, err := executor.ExecuteMany(context.Background(), "project", []string{call.ID, "missing-call"}); err == nil || strings.Contains(err.Error(), "unknown") {
+		t.Fatalf("deterministic batch error = %v", err)
 	}
 }
 
@@ -382,6 +452,21 @@ func TestExecutorReturnsInvocationErrorAsPublicFailure(t *testing.T) {
 	public := execution.Result.Text + " " + loaded.ErrorMessage
 	if loaded.Status != CallFailed || loaded.ErrorCode != ErrorCodeInvocationFailed || strings.Contains(public, "filesystem") || strings.Contains(public, "secret.csv") {
 		t.Fatalf("persisted public failure leaked private details: execution=%#v call=%#v", execution, loaded)
+	}
+}
+
+func TestExecutorPersistsExplicitUserFacingInvocationError(t *testing.T) {
+	implementation := executorFixtureTool{definition: executorDefinition(), invoke: func(context.Context, Invocation) (Result, error) {
+		return Result{}, NewUserFacingError("请先检查当前步骤的引用")
+	}}
+	executor, repository, call := readyExecutor(t, implementation, ExecutorOptions{})
+	execution, err := executor.Execute(context.Background(), "project", call.ID)
+	if err != nil || execution.ErrorCode != ErrorCodeInvocationFailed || execution.Result.Text != "请先检查当前步骤的引用" {
+		t.Fatalf("Execute(user-facing error) = %#v, %v", execution, err)
+	}
+	loaded := repository.calls[call.ID]
+	if loaded.ErrorMessage != "请先检查当前步骤的引用" || loaded.Result == nil || loaded.Result.Text != loaded.ErrorMessage {
+		t.Fatalf("persisted user-facing error = %#v", loaded)
 	}
 }
 

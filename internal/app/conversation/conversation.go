@@ -58,9 +58,15 @@ const (
 )
 
 type Message struct {
-	ID             string            `json:"id"`
-	ConversationID string            `json:"conversationId"`
-	RunID          string            `json:"runId,omitempty"`
+	ID             string `json:"id"`
+	ConversationID string `json:"conversationId"`
+	RunID          string `json:"runId,omitempty"`
+	Internal       bool   `json:"internal"`
+	// WorkflowStatus is populated for messages created by a Workflow AI stage.
+	// Keeping the enclosing Workflow status with the message lets clients
+	// restore the correct live/history presentation after an app restart,
+	// without relying on an in-memory UI map.
+	WorkflowStatus string            `json:"workflowStatus,omitempty"`
 	Role           Role              `json:"role"`
 	Status         MessageStatus     `json:"status"`
 	Parts          []MessagePart     `json:"parts"`
@@ -196,6 +202,8 @@ func (s *Service) SetModelSelection(ctx context.Context, conversationID, modelPr
 }
 
 func (s *Service) List(ctx context.Context, projectID string) ([]Conversation, error) {
+	// Workflow-bound conversations are loaded explicitly by ID in research
+	// mode. The project list is the ordinary, user-managed chat surface.
 	return s.repository.ListConversations(ctx, projectID)
 }
 

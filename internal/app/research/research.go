@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 )
@@ -54,32 +55,38 @@ type Identifiers struct {
 // Work is a normalized source record. RawSnapshot is bounded source evidence,
 // not an instruction and not a trusted Citation.
 type Work struct {
-	SourceID       string          `json:"sourceId"`
-	SourceRecordID string          `json:"sourceRecordId"`
-	Title          string          `json:"title"`
-	Abstract       string          `json:"abstract,omitempty"`
-	Authors        []Author        `json:"authors"`
-	Year           int             `json:"year,omitempty"`
-	Published      string          `json:"published,omitempty"`
-	Venue          string          `json:"venue,omitempty"`
-	Volume         string          `json:"volume,omitempty"`
-	Issue          string          `json:"issue,omitempty"`
-	Pages          string          `json:"pages,omitempty"`
-	Publisher      string          `json:"publisher,omitempty"`
-	WorkType       string          `json:"workType,omitempty"`
-	Language       string          `json:"language,omitempty"`
-	Identifiers    Identifiers     `json:"identifiers"`
-	LandingURL     string          `json:"landingUrl,omitempty"`
-	PDFURL         string          `json:"pdfUrl,omitempty"`
-	OpenAccess     bool            `json:"openAccess"`
-	CitedByCount   int             `json:"citedByCount,omitempty"`
-	Score          float64         `json:"score,omitempty"`
-	RawSnapshot    json.RawMessage `json:"rawSnapshot,omitempty"`
+	PublicationYears    []int           `json:"publicationYears,omitempty"`
+	MetadataFetchStatus string          `json:"metadataFetchStatus,omitempty"`
+	MetadataFetchError  string          `json:"metadataFetchError,omitempty"`
+	SourceID            string          `json:"sourceId"`
+	SourceRecordID      string          `json:"sourceRecordId"`
+	Title               string          `json:"title"`
+	Abstract            string          `json:"abstract,omitempty"`
+	Authors             []Author        `json:"authors"`
+	Year                int             `json:"year,omitempty"`
+	Published           string          `json:"published,omitempty"`
+	Venue               string          `json:"venue,omitempty"`
+	Volume              string          `json:"volume,omitempty"`
+	Issue               string          `json:"issue,omitempty"`
+	Pages               string          `json:"pages,omitempty"`
+	Publisher           string          `json:"publisher,omitempty"`
+	WorkType            string          `json:"workType,omitempty"`
+	Language            string          `json:"language,omitempty"`
+	Identifiers         Identifiers     `json:"identifiers"`
+	LandingURL          string          `json:"landingUrl,omitempty"`
+	PDFURL              string          `json:"pdfUrl,omitempty"`
+	PDFURLs             []string        `json:"pdfUrls,omitempty"`
+	OpenAccess          bool            `json:"openAccess"`
+	CitedByCount        int             `json:"citedByCount,omitempty"`
+	Score               float64         `json:"score,omitempty"`
+	RawSnapshot         json.RawMessage `json:"rawSnapshot,omitempty"`
 }
 
 type SearchOptions struct {
-	Query string
-	Limit int
+	Years  PublicationYears
+	Offset int
+	Query  string
+	Limit  int
 }
 
 type Connector interface {
@@ -135,18 +142,30 @@ const (
 )
 
 type SourceSearch struct {
-	SourceID  string             `json:"sourceId"`
-	Status    SourceSearchStatus `json:"status"`
-	Count     int                `json:"count"`
-	ErrorCode FailureCode        `json:"errorCode,omitempty"`
-	Message   string             `json:"message,omitempty"`
-	Retryable bool               `json:"retryable"`
+	PublicationYears  PublicationYears   `json:"publicationYears"`
+	YearFilterApplied bool               `json:"yearFilterApplied"`
+	Offset            int                `json:"offset,omitempty"`
+	EffectiveQuery    string             `json:"effectiveQuery,omitempty"`
+	ProviderQuery     string             `json:"providerQuery,omitempty"`
+	QueryMode         string             `json:"queryMode,omitempty"`
+	LimitReached      bool               `json:"limitReached,omitempty"`
+	SourceID          string             `json:"sourceId"`
+	Status            SourceSearchStatus `json:"status"`
+	Count             int                `json:"count"`
+	ErrorCode         FailureCode        `json:"errorCode,omitempty"`
+	Message           string             `json:"message,omitempty"`
+	Retryable         bool               `json:"retryable"`
 }
 
 type SearchCommand struct {
-	Query     string   `json:"query"`
-	SourceIDs []string `json:"sourceIds,omitempty"`
-	Limit     int      `json:"limit,omitempty"`
+	ProviderQueries map[string]string `json:"providerQueries,omitempty"`
+	Years           PublicationYears  `json:"publicationYears"`
+	EnrichMetadata  bool              `json:"-"`
+	ResearchTaskID  string            `json:"-"`
+	Offset          int               `json:"offset,omitempty"`
+	Query           string            `json:"query"`
+	SourceIDs       []string          `json:"sourceIds,omitempty"`
+	Limit           int               `json:"limit,omitempty"`
 }
 
 type SearchResult struct {
@@ -194,6 +213,9 @@ func (s *Service) Catalog() []Source {
 }
 
 func (s *Service) Search(ctx context.Context, command SearchCommand) (SearchResult, error) {
+	if err := command.Years.Validate(); err != nil {
+		return SearchResult{}, err
+	}
 	if s == nil {
 		return SearchResult{}, fmt.Errorf("research service is not configured")
 	}
@@ -202,6 +224,9 @@ func (s *Service) Search(ctx context.Context, command SearchCommand) (SearchResu
 		return SearchResult{}, fmt.Errorf("research query must contain between 1 and %d characters", MaxQueryRunes)
 	}
 	limit := command.Limit
+	if command.Offset < 0 || command.Offset > 150 {
+		return SearchResult{}, fmt.Errorf("research offset must be between 0 and 150")
+	}
 	if limit == 0 {
 		limit = 10
 	}
@@ -213,9 +238,10 @@ func (s *Service) Search(ctx context.Context, command SearchCommand) (SearchResu
 		return SearchResult{}, err
 	}
 	type outcome struct {
-		index int
-		works []Work
-		err   error
+		index    int
+		works    []Work
+		err      error
+		returned int
 	}
 	outcomes := make(chan outcome, len(ids))
 	semaphore := make(chan struct{}, 3)
@@ -229,11 +255,39 @@ func (s *Service) Search(ctx context.Context, command SearchCommand) (SearchResu
 				return
 			}
 			defer func() { <-semaphore }()
-			works, err := connector.Search(ctx, SearchOptions{Query: query, Limit: limit})
+			effective := query
+			if sourceID == "crossref" || sourceID == "semantic-scholar" {
+				effective = RankedBibliographicQuery(query)
+			}
+			if projected := strings.TrimSpace(command.ProviderQueries[sourceID]); projected != "" {
+				effective = projected
+			}
+			works, err := connector.Search(ctx, SearchOptions{Query: effective, Limit: limit, Offset: command.Offset, Years: command.Years})
+			returned := len(works)
 			if err == nil {
 				works = normalizeWorks(sourceID, works, limit)
+				if command.EnrichMetadata {
+					fetchCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+					blocked := false
+					for i := range works {
+						if ctx.Err() != nil {
+							err = ctx.Err()
+							break
+						}
+						if works[i].Abstract != "" || works[i].WorkType == "peer-review" {
+							continue
+						}
+						if blocked || fetchCtx.Err() != nil {
+							works[i].MetadataFetchStatus = "not_completed"
+							continue
+						}
+						works[i] = s.enrichMetadata(fetchCtx, works[i])
+						blocked = works[i].MetadataFetchStatus == "failed"
+					}
+					cancel()
+				}
 			}
-			outcomes <- outcome{index: index, works: works, err: err}
+			outcomes <- outcome{index: index, works: works, err: err, returned: returned}
 		}(index, sourceID, connector)
 	}
 	collected := make([]outcome, len(ids))
@@ -248,6 +302,29 @@ func (s *Service) Search(ctx context.Context, command SearchCommand) (SearchResu
 	for index, sourceID := range ids {
 		item := collected[index]
 		status := SourceSearch{SourceID: sourceID, Count: len(item.works)}
+		status.PublicationYears = command.Years
+		switch sourceID {
+		case "pubmed", "crossref", "openalex", "europepmc", "semantic-scholar":
+			status.YearFilterApplied = command.Years.Active()
+		}
+		status.Offset = command.Offset
+		status.EffectiveQuery = query
+		status.QueryMode = "native_query"
+		if sourceID == "crossref" || sourceID == "semantic-scholar" {
+			status.EffectiveQuery = RankedBibliographicQuery(query)
+			status.QueryMode = "ranked_bibliographic"
+		}
+		if sourceID == "arxiv" {
+			if expression, err := ArXivQuery(query); err == nil {
+				status.ProviderQuery = expression
+				status.QueryMode = "arxiv_boolean"
+			}
+		}
+		if projected := strings.TrimSpace(command.ProviderQueries[sourceID]); projected != "" {
+			status.ProviderQuery = projected
+			status.QueryMode = "planned_provider_query"
+		}
+		status.LimitReached = item.err == nil && item.returned >= limit
 		switch {
 		case item.err == nil && len(item.works) > 0:
 			status.Status = SearchOK
@@ -358,6 +435,15 @@ func normalizeWorks(sourceID string, values []Work, limit int) []Work {
 		value.Identifiers.SemanticID = strings.TrimSpace(value.Identifiers.SemanticID)
 		value.LandingURL = normalizedHTTPURL(value.LandingURL)
 		value.PDFURL = normalizedHTTPURL(value.PDFURL)
+		urls := []string{}
+		seenURLs := map[string]bool{}
+		for _, candidate := range value.PDFURLs {
+			if u := normalizedHTTPURL(candidate); u != "" && !seenURLs[u] && len(urls) < 12 {
+				seenURLs[u] = true
+				urls = append(urls, u)
+			}
+		}
+		value.PDFURLs = urls
 		if value.Year < 1000 || value.Year > 3000 {
 			value.Year = 0
 		}

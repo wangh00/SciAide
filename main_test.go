@@ -1,6 +1,25 @@
 package main
 
-import "testing"
+import (
+	"os"
+	"strings"
+	"testing"
+)
+
+func TestSingleInstanceGatePrecedesApplicationBootstrap(t *testing.T) {
+	source, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate := strings.Index(string(source), "acquireApplicationInstance()")
+	bootstrap := strings.Index(string(source), "bootstrap.New(bootstrap.Options{})")
+	if gate < 0 || bootstrap < 0 || gate > bootstrap {
+		t.Fatalf("single-instance gate must run before application bootstrap: gate=%d bootstrap=%d", gate, bootstrap)
+	}
+	if !strings.Contains(string(source), "WindowClassName:                   singleInstanceWindowClass") {
+		t.Fatal("main window must keep the stable class used by second-launch activation")
+	}
+}
 
 func TestInitialWindowSizeScalesAndClamps(t *testing.T) {
 	tests := []struct {

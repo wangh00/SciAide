@@ -14,7 +14,7 @@ const (
 	legacyMarkerName     = ".sciaide-workspace.json"
 )
 
-var privateSubdirectories = []string{"attachments", "cache", "artifacts", "python", "tmp"}
+var privateSubdirectories = []string{"attachments", "cache", "artifacts", "python", "tmp", "tasks"}
 
 type projectMarker struct {
 	Version   int    `json:"version"`

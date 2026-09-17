@@ -71,6 +71,87 @@ func TestDocumentToolsExposeSectionTitlesWithoutDuplicatePageCitations(t *testin
 	}
 }
 
+func TestReadDocumentFallsBackToSoleUnitForMismatchedLocator(t *testing.T) {
+	fixture := documentFixture{
+		attachment: attachment.Attachment{ID: "note", ProjectID: "project", OriginalName: "note.md", MIMEType: "text/markdown", Format: document.FormatMarkdown, Status: attachment.StatusReady},
+		parsed: document.Parsed{SchemaVersion: document.SchemaVersion, Format: document.FormatMarkdown, Units: []document.Unit{
+			{Index: 1, Kind: "lines", Locator: "lines:1-12", Content: "verified Markdown content"},
+		}},
+	}
+	read, err := NewReadDocument(fixture).Invoke(context.Background(), tool.Invocation{ProjectID: "project", Arguments: json.RawMessage(`{"attachmentId":"note","locator":"page:1"}`)})
+	if err != nil || read.Status != tool.ResultSuccess || len(read.Citations) != 1 || read.Citations[0].Locator != "lines:1-12" || !strings.Contains(read.Text, "verified Markdown content") {
+		t.Fatalf("sole-unit fallback = %#v, %v", read, err)
+	}
+}
+
+func TestReadDocumentKeepsPreciseLocatorForMultipleUnits(t *testing.T) {
+	fixture := documentFixture{
+		attachment: attachment.Attachment{ID: "paper", ProjectID: "project", OriginalName: "paper.pdf", MIMEType: "application/pdf", Format: document.FormatPDF, Status: attachment.StatusReady},
+		parsed: document.Parsed{SchemaVersion: document.SchemaVersion, Format: document.FormatPDF, Units: []document.Unit{
+			{Index: 1, Kind: "page", Locator: "page:1", Content: "first"},
+			{Index: 2, Kind: "page", Locator: "page:2", Content: "second"},
+		}},
+	}
+	if _, err := NewReadDocument(fixture).Invoke(context.Background(), tool.Invocation{ProjectID: "project", Arguments: json.RawMessage(`{"attachmentId":"paper","locator":"page:9"}`)}); err == nil || err.Error() != "document locator was not found" {
+		t.Fatalf("ambiguous locator error = %v", err)
+	}
+}
+
+func TestDocumentToolsRejectAttachmentIDOutsideCurrentProject(t *testing.T) {
+	fixture := documentFixture{
+		attachment: attachment.Attachment{ID: "paper", ProjectID: "project", OriginalName: "paper.pdf", MIMEType: "application/pdf", Format: document.FormatPDF, Status: attachment.StatusReady},
+		parsed: document.Parsed{SchemaVersion: document.SchemaVersion, Format: document.FormatPDF, Units: []document.Unit{
+			{Index: 1, Kind: "page", Locator: "page:1", Content: "content"},
+		}},
+	}
+	invocations := []struct {
+		name   string
+		invoke func() error
+	}{
+		{name: "inspect", invoke: func() error {
+			_, err := NewInspectDocument(fixture).Invoke(context.Background(), tool.Invocation{ProjectID: "project", Arguments: json.RawMessage(`{"attachmentId":"invented"}`)})
+			return err
+		}},
+		{name: "read", invoke: func() error {
+			_, err := NewReadDocument(fixture).Invoke(context.Background(), tool.Invocation{ProjectID: "project", Arguments: json.RawMessage(`{"attachmentId":"invented"}`)})
+			return err
+		}},
+		{name: "search", invoke: func() error {
+			_, err := NewSearchDocument(fixture).Invoke(context.Background(), tool.Invocation{ProjectID: "project", Arguments: json.RawMessage(`{"attachmentId":"invented","query":"content"}`)})
+			return err
+		}},
+	}
+	for _, invocation := range invocations {
+		t.Run(invocation.name, func(t *testing.T) {
+			err := invocation.invoke()
+			if err == nil || err.Error() != "document attachment was not found" {
+				t.Fatalf("error = %v", err)
+			}
+			userFacing, ok := err.(interface{ UserFacingMessage() string })
+			if !ok || !strings.Contains(userFacing.UserFacingMessage(), "builtin.attachment.list") {
+				t.Fatalf("user-facing error = %#v", err)
+			}
+		})
+	}
+}
+
+func TestResearchToolsDoNotFallBackToProjectWideReaders(t *testing.T) {
+	fixture := documentFixture{
+		attachment: attachment.Attachment{ID: "old-task", ProjectID: "project", Status: attachment.StatusReady},
+		parsed:     document.Parsed{Units: []document.Unit{{Index: 1, Locator: "lines:1-1", Content: "old task data"}}},
+	}
+	invocation := tool.Invocation{ProjectID: "project", ResearchTaskID: "current-task", Arguments: json.RawMessage(`{"attachmentId":"old-task"}`)}
+	if _, err := NewInspectDocument(fixture).Invoke(context.Background(), invocation); err == nil || !strings.Contains(err.Error(), "task-scoped") {
+		t.Fatalf("document fallback error = %v", err)
+	}
+	if _, err := NewListAttachments(fixture).Invoke(context.Background(), tool.Invocation{ProjectID: "project", ResearchTaskID: "current-task", Arguments: json.RawMessage(`{}`)}); err == nil || !strings.Contains(err.Error(), "task-scoped") {
+		t.Fatalf("attachment fallback error = %v", err)
+	}
+	if _, err := NewSearchKnowledge(knowledgeFixture{}).Invoke(context.Background(), tool.Invocation{ProjectID: "project", ResearchTaskID: "current-task", Arguments: json.RawMessage(`{"query":"old"}`)}); err == nil || !strings.Contains(err.Error(), "task-scoped") {
+		t.Fatalf("knowledge fallback error = %v", err)
+	}
+}
+
 func TestKnowledgeSearchExposesCrossDocumentCitations(t *testing.T) {
 	fixture := knowledgeFixture{result: knowledge.SearchResult{
 		Query: "replication", TotalMatches: 2, Status: knowledge.ProjectStatus{Documents: 2, Ready: 2},

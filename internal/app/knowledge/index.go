@@ -368,10 +368,6 @@ func (i *projectIndex) RemoveDocument(ctx context.Context, documentID, attachmen
 	return nil
 }
 
-func (i *projectIndex) Search(ctx context.Context, query string, limit int) ([]Match, int, error) {
-	return i.SearchWithOptions(ctx, SearchOptions{Query: query, Limit: limit}, nil)
-}
-
 func (i *projectIndex) CachedQueryVector(ctx context.Context, query string, at time.Time) ([]float32, bool, error) {
 	if i.version.HybridStrategy != HybridRRF || i.version.EmbeddingFingerprint == "" || i.version.EmbeddingDimensions < 1 {
 		return nil, false, nil

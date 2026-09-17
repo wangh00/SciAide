@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/wangh00/SciAide/internal/app/researchtask"
 )
 
 type EvidenceLevel string
@@ -94,6 +96,7 @@ type BibliographyMaterial struct {
 	AttachmentSHA256Snapshot    string        `json:"attachmentSha256Snapshot"`
 	ImportKind                  ImportKind    `json:"importKind"`
 	EvidenceLevel               EvidenceLevel `json:"evidenceLevel"`
+	ResearchTaskID              string        `json:"researchTaskId,omitempty"`
 	CreatedAt                   time.Time     `json:"createdAt"`
 	UpdatedAt                   time.Time     `json:"updatedAt"`
 }
@@ -179,6 +182,7 @@ type EvidenceEntry struct {
 	Evidence       *EvidenceSnapshot    `json:"evidence,omitempty"`
 	CreatedAt      time.Time            `json:"createdAt"`
 	UpdatedAt      time.Time            `json:"updatedAt"`
+	ResearchTaskID string               `json:"researchTaskId,omitempty"`
 }
 
 type ReviseBibliographyCommand struct {
@@ -197,20 +201,22 @@ type SelectBibliographySourceCommand struct {
 }
 
 type SaveEvidenceCommand struct {
-	ProjectID    string               `json:"projectId"`
-	CandidateID  string               `json:"candidateId"`
-	Field        EvidenceField        `json:"field"`
-	Content      string               `json:"content"`
-	Provenance   EvidenceProvenance   `json:"provenance"`
-	ReviewStatus EvidenceReviewStatus `json:"reviewStatus"`
-	Reference    *EvidenceReference   `json:"reference,omitempty"`
+	ProjectID      string               `json:"projectId"`
+	CandidateID    string               `json:"candidateId"`
+	Field          EvidenceField        `json:"field"`
+	Content        string               `json:"content"`
+	Provenance     EvidenceProvenance   `json:"provenance"`
+	ReviewStatus   EvidenceReviewStatus `json:"reviewStatus"`
+	Reference      *EvidenceReference   `json:"reference,omitempty"`
+	ResearchTaskID string               `json:"researchTaskId,omitempty"`
 }
 
 type ReviewEvidenceCommand struct {
-	ProjectID    string               `json:"projectId"`
-	CandidateID  string               `json:"candidateId"`
-	EvidenceID   string               `json:"evidenceId"`
-	ReviewStatus EvidenceReviewStatus `json:"reviewStatus"`
+	ProjectID      string               `json:"projectId"`
+	CandidateID    string               `json:"candidateId"`
+	EvidenceID     string               `json:"evidenceId"`
+	ReviewStatus   EvidenceReviewStatus `json:"reviewStatus"`
+	ResearchTaskID string               `json:"researchTaskId,omitempty"`
 }
 
 type BibliographyRepository interface {
@@ -224,12 +230,40 @@ type BibliographyRepository interface {
 	CitationSnapshotForAttachment(ctx context.Context, projectID, attachmentID string, at time.Time) (CitationSnapshot, error)
 }
 
+// TaskBibliographyRepository exposes the task-owned material/evidence view.
+// Project-level bibliography metadata remains available through the legacy
+// methods above, while workflow citation validation must use these methods.
+type TaskBibliographyRepository interface {
+	GetBibliographyForTask(ctx context.Context, projectID, candidateID, taskID string) (Bibliography, error)
+	ListEvidenceForTask(ctx context.Context, projectID, candidateID, taskID string) ([]EvidenceEntry, error)
+	CitationSnapshotForAttachmentForTask(ctx context.Context, projectID, taskID, attachmentID string, at time.Time) (CitationSnapshot, error)
+	ReviewEvidenceForTask(ctx context.Context, command ReviewEvidenceCommand, at time.Time) (EvidenceEntry, error)
+	DeleteEvidenceForTask(ctx context.Context, projectID, candidateID, taskID, evidenceID string) error
+}
+
 type KnowledgeEvidenceVerifier interface {
 	EvidenceChunk(ctx context.Context, projectID string, reference EvidenceReference) (EvidenceSnapshot, error)
 	Search(ctx context.Context, projectID, query string, documentIDs []string) ([]EvidenceSearchMatch, error)
 }
 
+type TaskKnowledgeEvidenceVerifier interface {
+	EvidenceChunkForTask(ctx context.Context, projectID, taskID string, reference EvidenceReference) (EvidenceSnapshot, error)
+	SearchForTask(ctx context.Context, projectID, taskID, query string, documentIDs []string) ([]EvidenceSearchMatch, error)
+}
+
 func (s *BibliographyService) SearchEvidence(ctx context.Context, projectID, candidateID, query string) ([]EvidenceSearchMatch, error) {
+	return s.searchEvidence(ctx, projectID, candidateID, "", query)
+}
+
+func (s *BibliographyService) SearchEvidenceForTask(ctx context.Context, projectID, candidateID, taskID, query string) ([]EvidenceSearchMatch, error) {
+	taskID = strings.TrimSpace(taskID)
+	if err := s.validateTask(ctx, projectID, taskID); err != nil {
+		return nil, err
+	}
+	return s.searchEvidence(ctx, projectID, candidateID, taskID, query)
+}
+
+func (s *BibliographyService) searchEvidence(ctx context.Context, projectID, candidateID, taskID, query string) ([]EvidenceSearchMatch, error) {
 	projectID, candidateID, query = strings.TrimSpace(projectID), strings.TrimSpace(candidateID), strings.TrimSpace(query)
 	if _, err := s.projects.Get(ctx, projectID); err != nil {
 		return nil, err
@@ -237,18 +271,33 @@ func (s *BibliographyService) SearchEvidence(ctx context.Context, projectID, can
 	if query == "" || utf8.RuneCountInString(query) > 200 {
 		return nil, fmt.Errorf("evidence search query must contain between 1 and 200 characters")
 	}
-	bibliography, err := s.repository.GetBibliography(ctx, projectID, candidateID)
+	var bibliography Bibliography
+	var err error
+	if taskID != "" {
+		bibliography, err = s.GetForTask(ctx, projectID, candidateID, taskID)
+	} else {
+		bibliography, err = s.repository.GetBibliography(ctx, projectID, candidateID)
+	}
 	if err != nil {
 		return nil, err
 	}
 	documentIDs := []string{}
 	for _, material := range bibliography.Materials {
+		if taskID == "" && material.ResearchTaskID != "" {
+			continue
+		}
 		if material.KnowledgeDocumentID != "" {
 			documentIDs = append(documentIDs, material.KnowledgeDocumentID)
 		}
 	}
 	if len(documentIDs) == 0 {
 		return nil, fmt.Errorf("this bibliography has no active local knowledge document")
+	}
+	if taskID != "" {
+		if scoped, ok := s.knowledge.(TaskKnowledgeEvidenceVerifier); ok {
+			return scoped.SearchForTask(ctx, projectID, taskID, query, documentIDs)
+		}
+		return nil, fmt.Errorf("task-scoped evidence search is not supported")
 	}
 	return s.knowledge.Search(ctx, projectID, query, documentIDs)
 }
@@ -257,7 +306,18 @@ type BibliographyService struct {
 	repository BibliographyRepository
 	projects   DiscoveryProjectLoader
 	knowledge  KnowledgeEvidenceVerifier
+	tasks      researchtask.Validator
 	now        func() time.Time
+}
+
+func (s *BibliographyService) SetTaskValidator(validator researchtask.Validator) {
+	if s != nil {
+		s.tasks = validator
+	}
+}
+
+func (s *BibliographyService) validateTask(ctx context.Context, projectID, taskID string) error {
+	return researchtask.Validate(ctx, s.tasks, projectID, taskID)
 }
 
 func NewBibliographyService(repository BibliographyRepository, projects DiscoveryProjectLoader, knowledge KnowledgeEvidenceVerifier) (*BibliographyService, error) {
@@ -275,6 +335,23 @@ func (s *BibliographyService) Get(ctx context.Context, projectID, candidateID st
 	return s.repository.GetBibliography(ctx, projectID, candidateID)
 }
 
+func (s *BibliographyService) GetForTask(ctx context.Context, projectID, candidateID, taskID string) (Bibliography, error) {
+	projectID, candidateID, taskID = strings.TrimSpace(projectID), strings.TrimSpace(candidateID), strings.TrimSpace(taskID)
+	if _, err := s.projects.Get(ctx, projectID); err != nil {
+		return Bibliography{}, err
+	}
+	if taskID == "" {
+		return Bibliography{}, fmt.Errorf("research task id is required")
+	}
+	if err := s.validateTask(ctx, projectID, taskID); err != nil {
+		return Bibliography{}, err
+	}
+	if scoped, ok := s.repository.(TaskBibliographyRepository); ok {
+		return scoped.GetBibliographyForTask(ctx, projectID, candidateID, taskID)
+	}
+	return Bibliography{}, fmt.Errorf("task-scoped bibliography is not supported")
+}
+
 func (s *BibliographyService) CitationSnapshotForAttachment(ctx context.Context, projectID, attachmentID string) (CitationSnapshot, error) {
 	projectID, attachmentID = strings.TrimSpace(projectID), strings.TrimSpace(attachmentID)
 	if _, err := s.projects.Get(ctx, projectID); err != nil {
@@ -284,6 +361,23 @@ func (s *BibliographyService) CitationSnapshotForAttachment(ctx context.Context,
 		return CitationSnapshot{}, fmt.Errorf("citation attachment id is required")
 	}
 	return s.repository.CitationSnapshotForAttachment(ctx, projectID, attachmentID, s.now())
+}
+
+func (s *BibliographyService) CitationSnapshotForAttachmentForTask(ctx context.Context, projectID, taskID, attachmentID string) (CitationSnapshot, error) {
+	projectID, taskID, attachmentID = strings.TrimSpace(projectID), strings.TrimSpace(taskID), strings.TrimSpace(attachmentID)
+	if _, err := s.projects.Get(ctx, projectID); err != nil {
+		return CitationSnapshot{}, err
+	}
+	if taskID == "" || attachmentID == "" {
+		return CitationSnapshot{}, fmt.Errorf("citation task and attachment ids are required")
+	}
+	if err := s.validateTask(ctx, projectID, taskID); err != nil {
+		return CitationSnapshot{}, err
+	}
+	if scoped, ok := s.repository.(TaskBibliographyRepository); ok {
+		return scoped.CitationSnapshotForAttachmentForTask(ctx, projectID, taskID, attachmentID, s.now())
+	}
+	return CitationSnapshot{}, fmt.Errorf("task-scoped citation bibliography is not supported")
 }
 
 func (s *BibliographyService) Revise(ctx context.Context, command ReviseBibliographyCommand) (Bibliography, error) {
@@ -320,11 +414,34 @@ func (s *BibliographyService) ListEvidence(ctx context.Context, projectID, candi
 	return s.repository.ListEvidence(ctx, strings.TrimSpace(projectID), strings.TrimSpace(candidateID))
 }
 
+func (s *BibliographyService) ListEvidenceForTask(ctx context.Context, projectID, candidateID, taskID string) ([]EvidenceEntry, error) {
+	projectID, candidateID, taskID = strings.TrimSpace(projectID), strings.TrimSpace(candidateID), strings.TrimSpace(taskID)
+	if _, err := s.projects.Get(ctx, projectID); err != nil {
+		return nil, err
+	}
+	if taskID == "" {
+		return nil, fmt.Errorf("research task id is required")
+	}
+	if err := s.validateTask(ctx, projectID, taskID); err != nil {
+		return nil, err
+	}
+	if scoped, ok := s.repository.(TaskBibliographyRepository); ok {
+		return scoped.ListEvidenceForTask(ctx, projectID, candidateID, taskID)
+	}
+	return nil, fmt.Errorf("task-scoped evidence is not supported")
+}
+
 func (s *BibliographyService) SaveEvidence(ctx context.Context, command SaveEvidenceCommand) (EvidenceEntry, error) {
 	command.ProjectID, command.CandidateID = strings.TrimSpace(command.ProjectID), strings.TrimSpace(command.CandidateID)
 	command.Content = strings.TrimSpace(command.Content)
+	command.ResearchTaskID = strings.TrimSpace(command.ResearchTaskID)
 	if _, err := s.projects.Get(ctx, command.ProjectID); err != nil {
 		return EvidenceEntry{}, err
+	}
+	if command.ResearchTaskID != "" {
+		if err := s.validateTask(ctx, command.ProjectID, command.ResearchTaskID); err != nil {
+			return EvidenceEntry{}, err
+		}
 	}
 	if !validEvidenceField(command.Field) || (command.Provenance != EvidenceUser && command.Provenance != EvidenceModel) || (command.ReviewStatus != EvidencePending && command.ReviewStatus != EvidenceVerified && command.ReviewStatus != EvidenceRejected) || command.Content == "" || utf8.RuneCountInString(command.Content) > 20000 {
 		return EvidenceEntry{}, fmt.Errorf("evidence matrix entry is invalid")
@@ -335,17 +452,32 @@ func (s *BibliographyService) SaveEvidence(ctx context.Context, command SaveEvid
 	var snapshot *EvidenceSnapshot
 	level := EvidenceNone
 	if command.Reference != nil {
-		value, err := s.knowledge.EvidenceChunk(ctx, command.ProjectID, *command.Reference)
+		var value EvidenceSnapshot
+		var err error
+		if command.ResearchTaskID != "" {
+			if scoped, ok := s.knowledge.(TaskKnowledgeEvidenceVerifier); ok {
+				value, err = scoped.EvidenceChunkForTask(ctx, command.ProjectID, command.ResearchTaskID, *command.Reference)
+			} else {
+				err = fmt.Errorf("task-scoped evidence lookup is not supported")
+			}
+		} else {
+			value, err = s.knowledge.EvidenceChunk(ctx, command.ProjectID, *command.Reference)
+		}
 		if err != nil {
 			return EvidenceEntry{}, err
 		}
 		snapshot = &value
-		bibliography, err := s.repository.GetBibliography(ctx, command.ProjectID, command.CandidateID)
+		var bibliography Bibliography
+		if command.ResearchTaskID != "" {
+			bibliography, err = s.GetForTask(ctx, command.ProjectID, command.CandidateID, command.ResearchTaskID)
+		} else {
+			bibliography, err = s.repository.GetBibliography(ctx, command.ProjectID, command.CandidateID)
+		}
 		if err != nil {
 			return EvidenceEntry{}, err
 		}
 		for _, material := range bibliography.Materials {
-			if material.AttachmentID == value.AttachmentID || material.AttachmentIDSnapshot == value.AttachmentID {
+			if (material.ResearchTaskID == "" || material.ResearchTaskID == command.ResearchTaskID) && (material.AttachmentID == value.AttachmentID || material.AttachmentIDSnapshot == value.AttachmentID) {
 				level = material.EvidenceLevel
 				break
 			}
@@ -363,12 +495,24 @@ func (s *BibliographyService) ReviewEvidence(ctx context.Context, command Review
 	command.ProjectID = strings.TrimSpace(command.ProjectID)
 	command.CandidateID = strings.TrimSpace(command.CandidateID)
 	command.EvidenceID = strings.TrimSpace(command.EvidenceID)
+	command.ResearchTaskID = strings.TrimSpace(command.ResearchTaskID)
 	if _, err := s.projects.Get(ctx, command.ProjectID); err != nil {
 		return EvidenceEntry{}, err
+	}
+	if command.ResearchTaskID != "" {
+		if err := s.validateTask(ctx, command.ProjectID, command.ResearchTaskID); err != nil {
+			return EvidenceEntry{}, err
+		}
 	}
 	if command.CandidateID == "" || command.EvidenceID == "" ||
 		(command.ReviewStatus != EvidencePending && command.ReviewStatus != EvidenceVerified && command.ReviewStatus != EvidenceRejected) {
 		return EvidenceEntry{}, fmt.Errorf("evidence review command is invalid")
+	}
+	if command.ResearchTaskID != "" {
+		if scoped, ok := s.repository.(TaskBibliographyRepository); ok {
+			return scoped.ReviewEvidenceForTask(ctx, command, s.now())
+		}
+		return EvidenceEntry{}, fmt.Errorf("task-scoped evidence review is not supported")
 	}
 	return s.repository.ReviewEvidence(ctx, command, s.now())
 }
@@ -378,6 +522,23 @@ func (s *BibliographyService) DeleteEvidence(ctx context.Context, projectID, can
 		return err
 	}
 	return s.repository.DeleteEvidence(ctx, strings.TrimSpace(projectID), strings.TrimSpace(candidateID), strings.TrimSpace(evidenceID))
+}
+
+func (s *BibliographyService) DeleteEvidenceForTask(ctx context.Context, projectID, candidateID, taskID, evidenceID string) error {
+	projectID, candidateID, taskID, evidenceID = strings.TrimSpace(projectID), strings.TrimSpace(candidateID), strings.TrimSpace(taskID), strings.TrimSpace(evidenceID)
+	if _, err := s.projects.Get(ctx, projectID); err != nil {
+		return err
+	}
+	if taskID == "" || candidateID == "" || evidenceID == "" {
+		return fmt.Errorf("research task evidence identity is required")
+	}
+	if err := s.validateTask(ctx, projectID, taskID); err != nil {
+		return err
+	}
+	if scoped, ok := s.repository.(TaskBibliographyRepository); ok {
+		return scoped.DeleteEvidenceForTask(ctx, projectID, candidateID, taskID, evidenceID)
+	}
+	return fmt.Errorf("task-scoped evidence deletion is not supported")
 }
 
 func BibliographyFromWork(value Work) BibliographyData {

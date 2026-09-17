@@ -26,7 +26,7 @@ func (*ProtocolResolver) Resolve(_ context.Context, channel Channel, secret []by
 		APIProtocol: protocol, BaseURL: channel.BaseURL, ModelID: channel.ModelID,
 		Models:         []modelprofile.ProfileModel{{ID: channel.ModelID, Enabled: true, IsDefault: true}},
 		TimeoutSeconds: channel.TimeoutSeconds, MaxOutputTokens: &maxTokens,
-		CustomHeaders: map[string]string{"User-Agent": "SciAide Vision-Fallback"}, Enabled: true,
+		CustomHeaders: map[string]string{}, Enabled: true,
 	}
 	var chatModel model.ChatModel
 	switch protocol {

@@ -17,24 +17,40 @@ const SearchKnowledgeName = "builtin.knowledge.search"
 type KnowledgeSearcher interface {
 	SearchWithOptions(ctx context.Context, projectID string, options knowledge.SearchOptions) (knowledge.SearchResult, error)
 }
+type TaskKnowledgeSearcher interface {
+	SearchWithTask(ctx context.Context, projectID, taskID string, options knowledge.SearchOptions) (knowledge.SearchResult, error)
+}
 
 type SearchKnowledge struct{ knowledge KnowledgeSearcher }
+
+type researchEvidenceSearcher interface {
+	SearchResearchEvidence(context.Context, string, string, knowledge.SearchOptions) (knowledge.SearchResult, error)
+}
 
 func NewSearchKnowledge(searcher KnowledgeSearcher) *SearchKnowledge {
 	return &SearchKnowledge{knowledge: searcher}
 }
 
 func (*SearchKnowledge) Definition(context.Context) (tool.Definition, error) {
-	return tool.Definition{
+	d := tool.Definition{
 		QualifiedName: SearchKnowledgeName,
 		Description:   "Search all explicitly imported documents in the current research project. Uses bounded FTS5/BM25 by default and optional hybrid semantic retrieval when configured. Returns compact ranked snippets with exact source locators and stable [K-...] references. Cite evidence only with the exact reference returned for that snippet. For project-source questions, search first, reformulate once when no result is found, and use builtin.document.read for deeper reading of selected evidence.",
-		InputSchema:   json.RawMessage(`{"type":"object","additionalProperties":false,"required":["query"],"properties":{"query":{"type":"string","minLength":1,"maxLength":200},"limit":{"type":"integer","minimum":1,"maximum":20},"documentIds":{"type":"array","maxItems":20,"items":{"type":"string","minLength":1,"maxLength":128}},"formats":{"type":"array","maxItems":6,"uniqueItems":true,"items":{"type":"string","enum":["pdf","docx","xlsx","text","markdown","csv"]}}}}`),
+		InputSchema:   json.RawMessage(fmt.Sprintf(`{"type":"object","additionalProperties":false,"required":["query"],"properties":{"query":{"type":"string","minLength":1,"maxLength":%d},"limit":{"type":"integer","minimum":1,"maximum":20},"documentIds":{"type":"array","maxItems":100,"items":{"type":"string","minLength":1,"maxLength":128}},"formats":{"type":"array","maxItems":6,"uniqueItems":true,"items":{"type":"string","enum":["pdf","docx","xlsx","text","markdown","csv"]}}}}`, knowledge.MaxSearchQueryRunes)),
 		OutputSchema:  json.RawMessage(`{"type":"object","required":["query","matches","totalMatches","status"],"properties":{"query":{"type":"string"},"matches":{"type":"array","items":{"type":"object"}},"totalMatches":{"type":"integer"},"status":{"type":"object"}}}`),
 		Risk:          tool.RiskLow,
 		Permissions:   []tool.PermissionRequirement{{Kind: tool.PermissionWorkspaceRead, Resource: "."}},
 		Idempotent:    true,
-		Version:       "3",
-	}, nil
+		Version:       "6",
+	}
+	var schema map[string]any
+	_ = json.Unmarshal(d.InputSchema, &schema)
+	schema["properties"].(map[string]any)["perDocument"] = map[string]any{"type": "boolean"}
+	d.InputSchema, _ = json.Marshal(schema)
+	var out map[string]any
+	_ = json.Unmarshal(d.OutputSchema, &out)
+	out["properties"].(map[string]any)["documentCoverage"] = map[string]any{"type": "array", "items": map[string]any{"type": "object"}}
+	d.OutputSchema, _ = json.Marshal(out)
+	return d, nil
 }
 
 func (t *SearchKnowledge) Invoke(ctx context.Context, invocation tool.Invocation) (tool.Result, error) {
@@ -42,6 +58,7 @@ func (t *SearchKnowledge) Invoke(ctx context.Context, invocation tool.Invocation
 		return tool.Result{}, fmt.Errorf("knowledge search is not configured")
 	}
 	var args struct {
+		PerDocument bool              `json:"perDocument"`
 		Query       string            `json:"query"`
 		Limit       int               `json:"limit"`
 		DocumentIDs []string          `json:"documentIds"`
@@ -50,7 +67,59 @@ func (t *SearchKnowledge) Invoke(ctx context.Context, invocation tool.Invocation
 	if err := json.Unmarshal(invocation.Arguments, &args); err != nil {
 		return tool.Result{}, err
 	}
-	result, err := t.knowledge.SearchWithOptions(ctx, invocation.ProjectID, knowledge.SearchOptions{Query: args.Query, Limit: args.Limit, DocumentIDs: args.DocumentIDs, Formats: args.Formats})
+	options := knowledge.SearchOptions{Query: args.Query, Limit: args.Limit, DocumentIDs: args.DocumentIDs, Formats: args.Formats}
+	var result knowledge.SearchResult
+	var err error
+	if args.PerDocument {
+		if len(args.DocumentIDs) == 0 || len(args.DocumentIDs) > 100 {
+			return tool.Result{}, fmt.Errorf("per-document retrieval requires 1-100 explicit document IDs")
+		}
+		combined := tool.Result{Status: tool.ResultSuccess, Citations: []tool.CitationRef{}, Artifacts: []tool.ArtifactRef{}}
+		perDocumentLimit := 3
+		if len(args.DocumentIDs) > 85 {
+			perDocumentLimit = 2
+		}
+		coverage := []map[string]any{}
+		seen := map[string]bool{}
+		for _, id := range args.DocumentIDs {
+			if seen[id] {
+				continue
+			}
+			seen[id] = true
+			if err := ctx.Err(); err != nil {
+				return tool.Result{}, err
+			}
+			child := invocation
+			child.Arguments, _ = json.Marshal(map[string]any{"query": args.Query, "limit": perDocumentLimit, "documentIds": []string{id}, "formats": args.Formats})
+			var value tool.Result
+			var err error
+			if reader, ok := t.knowledge.(researchEvidenceSearcher); ok {
+				result, readErr := reader.SearchResearchEvidence(ctx, invocation.ProjectID, invocation.ResearchTaskID, knowledge.SearchOptions{Query: args.Query, Limit: perDocumentLimit, DocumentIDs: []string{id}, Formats: args.Formats})
+				if readErr != nil {
+					return tool.Result{}, readErr
+				}
+				value, err = NewSearchKnowledge(frozenResearchSearch{result}).Invoke(ctx, tool.Invocation{RunID: invocation.RunID, ProjectID: invocation.ProjectID, Arguments: child.Arguments})
+			} else {
+				value, err = t.Invoke(ctx, child)
+			}
+			if err != nil {
+				return tool.Result{}, err
+			}
+			combined.Citations = append(combined.Citations, value.Citations...)
+			combined.Artifacts = append(combined.Artifacts, value.Artifacts...)
+			coverage = append(coverage, map[string]any{"documentId": id, "excerptCount": len(value.Citations), "searchCompleted": true, "fullTextRead": false, "selectionLimited": len(value.Citations) >= perDocumentLimit, "readingUnit": "verified_index_chunk"})
+		}
+		combined.Structured, _ = json.Marshal(map[string]any{"query": args.Query, "matches": []any{}, "totalMatches": len(combined.Citations), "status": map[string]any{}, "documentCoverage": coverage})
+		combined.Text = fmt.Sprintf("Searched %d selected documents separately; returned %d excerpts. This is excerpt retrieval, not full-text reading. Documents with zero matches remain in documentCoverage.", len(coverage), len(combined.Citations))
+		return combined, nil
+	}
+	if scoped, ok := t.knowledge.(TaskKnowledgeSearcher); ok && invocation.ResearchTaskID != "" {
+		result, err = scoped.SearchWithTask(ctx, invocation.ProjectID, invocation.ResearchTaskID, options)
+	} else if invocation.ResearchTaskID != "" {
+		return tool.Result{}, fmt.Errorf("task-scoped knowledge search is not configured")
+	} else {
+		result, err = t.knowledge.SearchWithOptions(ctx, invocation.ProjectID, options)
+	}
 	if err != nil {
 		return tool.Result{}, err
 	}

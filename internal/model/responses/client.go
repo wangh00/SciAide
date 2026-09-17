@@ -41,11 +41,7 @@ func New(profile modelprofile.Profile, secret []byte, recorders ...modelcap.Reas
 	}
 	return &Client{profile: profile, secret: append([]byte(nil), secret...), http: modelutil.NewStreamingHTTPClient(timeout), recorder: recorder}
 }
-func NewWithHTTPClient(profile modelprofile.Profile, secret []byte, client *http.Client) *Client {
-	value := New(profile, secret)
-	value.http = client
-	return value
-}
+
 func (c *Client) Capabilities(context.Context) (model.Capabilities, error) {
 	return model.Capabilities{Streaming: true, ToolCalling: true, Reasoning: true, MaxContextTokens: c.profile.ContextBudget(c.profile.ModelID).WindowTokens}, nil
 }
@@ -89,17 +85,19 @@ type reasoningOptions struct {
 }
 
 type payload struct {
-	Model           string            `json:"model"`
-	Instructions    string            `json:"instructions,omitempty"`
-	Input           []inputItem       `json:"input"`
-	Tools           []toolDef         `json:"tools,omitempty"`
-	PromptCacheKey  string            `json:"prompt_cache_key,omitempty"`
-	Stream          bool              `json:"stream"`
-	Store           bool              `json:"store"`
-	Include         []string          `json:"include,omitempty"`
-	Temperature     *float64          `json:"temperature,omitempty"`
-	MaxOutputTokens *int              `json:"max_output_tokens,omitempty"`
-	Reasoning       *reasoningOptions `json:"reasoning,omitempty"`
+	Model             string            `json:"model"`
+	Instructions      string            `json:"instructions,omitempty"`
+	Input             []inputItem       `json:"input"`
+	ParallelToolCalls *bool             `json:"parallel_tool_calls,omitempty"`
+	ToolChoice        any               `json:"tool_choice,omitempty"`
+	Tools             []toolDef         `json:"tools,omitempty"`
+	PromptCacheKey    string            `json:"prompt_cache_key,omitempty"`
+	Stream            bool              `json:"stream"`
+	Store             bool              `json:"store"`
+	Include           []string          `json:"include,omitempty"`
+	Temperature       *float64          `json:"temperature,omitempty"`
+	MaxOutputTokens   *int              `json:"max_output_tokens,omitempty"`
+	Reasoning         *reasoningOptions `json:"reasoning,omitempty"`
 }
 
 type reasoningRejectedError struct {
@@ -208,20 +206,24 @@ func (c *Client) rememberPromptCacheKeyUnsupported() {
 }
 
 func (c *Client) streamOnce(ctx context.Context, request model.ChatRequest, requestSummary bool) (model.Stream, error) {
-	providerNames := map[string]string{}
-	aliases := map[string]string{}
-	for _, def := range request.Tools {
-		if err := modelutil.ValidateDefinition(def); err != nil {
-			return nil, err
-		}
-		alias := modelutil.ProviderToolName(def.Name)
-		if existing := providerNames[alias]; existing != "" && existing != def.Name {
-			return nil, fmt.Errorf("model tool name alias collision")
-		}
-		providerNames[alias] = def.Name
-		aliases[def.Name] = alias
+	aliases, providerNames, err := modelutil.BuildToolAliases(request.Tools)
+	if err != nil {
+		return nil, err
 	}
+	request = modelutil.ProjectToolReferences(request, modelutil.ToolReferenceAliases(request, aliases, modelutil.ProviderToolName))
 	value := payload{Model: c.profile.ModelID, Input: []inputItem{}, Tools: []toolDef{}, PromptCacheKey: request.PromptCacheKey, Stream: true, Store: false, Include: []string{"reasoning.encrypted_content"}, Temperature: c.profile.Temperature, MaxOutputTokens: c.profile.MaxOutputTokens}
+	if request.DisableTools {
+		value.ToolChoice = "none"
+	}
+	if request.ForcedTool != "" {
+		name := aliases[request.ForcedTool]
+		if name == "" || request.DisableTools {
+			return nil, fmt.Errorf("invalid forced tool contract")
+		}
+		value.ToolChoice = map[string]string{"type": "function", "name": name}
+		disabled := false
+		value.ParallelToolCalls = &disabled
+	}
 	if request.ResolvedReasoningLevel.Valid() {
 		value.Reasoning = &reasoningOptions{Effort: string(request.ResolvedReasoningLevel)}
 		if requestSummary {
@@ -231,9 +233,18 @@ func (c *Client) streamOnce(ctx context.Context, request model.ChatRequest, requ
 	for _, def := range request.Tools {
 		value.Tools = append(value.Tools, toolDef{Type: "function", Name: aliases[def.Name], Description: def.Description, Parameters: append(json.RawMessage(nil), def.InputSchema...)})
 	}
+	var contextTail []inputItem
 	for _, message := range request.Messages {
 		switch message.Role {
 		case model.RoleSystem:
+			if message.ContextTail {
+				contextTail = append(contextTail, inputItem{Role: "system", Content: []inputContent{{Type: "input_text", Text: message.Content}}})
+				continue
+			}
+			if message.HostToolReferences {
+				value.Input = append(value.Input, inputItem{Role: "system", Content: []inputContent{{Type: "input_text", Text: message.Content}}})
+				continue
+			}
 			if value.Instructions != "" {
 				value.Instructions += "\n\n"
 			}
@@ -277,6 +288,7 @@ func (c *Client) streamOnce(ctx context.Context, request model.ChatRequest, requ
 	if err := appendProviderTurns(&value, request.ProviderTurns); err != nil {
 		return nil, err
 	}
+	value.Input = append(value.Input, contextTail...)
 	body, err := json.Marshal(value)
 	if err != nil {
 		return nil, err
@@ -849,6 +861,7 @@ func (s *stream) Recv() (model.Event, error) {
 					completedCall.Arguments.WriteString(item.Arguments)
 				}
 				item.ID, item.CallID, item.Name, item.Arguments = completedCall.ID, completedCall.CallID, completedCall.Name, completedCall.Arguments.String()
+				item.Name = modelutil.ProviderToolAliasForQualified(modelutil.ResolveProviderToolName(item.Name, s.providerNames), s.providerNames)
 			}
 			ordinal, err := s.itemOrdinal(item, event.OutputIndex, true)
 			if err != nil {
@@ -945,9 +958,7 @@ func (s *stream) emitCall(a *callAccumulator) error {
 		id = a.ID
 	}
 	name := a.Name
-	if q := s.providerNames[name]; q != "" {
-		name = q
-	}
+	name = modelutil.ResolveProviderToolName(name, s.providerNames)
 	call := model.ToolCall{ID: id, Name: name, Arguments: json.RawMessage(a.Arguments.String())}
 	if err := modelutil.ValidateToolCall(call); err != nil {
 		return modelutil.Error("MODEL_TOOL_CALL_INVALID", "模型返回了无效的工具调用。", false, err)

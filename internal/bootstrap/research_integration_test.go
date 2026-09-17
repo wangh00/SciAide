@@ -72,6 +72,13 @@ func TestResearchCandidateMetadataImportReachesKnowledgeIndexIdempotently(t *tes
 	if err != nil || imported.Candidate.ImportStatus != appresearch.ImportImported || imported.Candidate.ImportKind != appresearch.ImportMetadataAbstract || imported.Attachment.ID == "" {
 		t.Fatalf("import = %#v, %v", imported, err)
 	}
+	if _, err := application.ResearchFacade.ImportCandidate(appresearch.ImportCandidateCommand{ProjectID: created.ID, CandidateID: candidate.ID, Mode: appresearch.MaterializeFullText}); err == nil {
+		t.Fatal("explicit full-text import must fail when only metadata is available")
+	}
+	preserved, err := repository.GetCandidate(ctx, created.ID, candidate.ID)
+	if err != nil || preserved.ImportStatus != appresearch.ImportImported || preserved.AttachmentID != imported.Attachment.ID || preserved.ImportKind != appresearch.ImportMetadataAbstract || preserved.ImportError == "" {
+		t.Fatalf("failed full-text upgrade destroyed existing material: %+v, %v", preserved, err)
+	}
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		documents, listErr := application.KnowledgeFacade.ListDocuments(created.ID)

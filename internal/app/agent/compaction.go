@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -12,7 +11,6 @@ import (
 	"github.com/wangh00/SciAide/internal/app/chat"
 	"github.com/wangh00/SciAide/internal/app/contextmemory"
 	"github.com/wangh00/SciAide/internal/app/conversation"
-	"github.com/wangh00/SciAide/internal/app/tool"
 	"github.com/wangh00/SciAide/internal/apperr"
 	"github.com/wangh00/SciAide/internal/model"
 	"github.com/wangh00/SciAide/internal/modelcap"
@@ -125,15 +123,7 @@ func (l *Loop) CompactConversation(ctx context.Context, conversationID string) (
 		if current.ID != "" {
 			prefix = append(prefix, checkpointContextMessage(current))
 		}
-		var modelTools []model.ToolDefinition
-		if l.registry != nil {
-			definitions, definitionErr := l.registry.Definitions(ctx)
-			if definitionErr != nil {
-				return contextmemory.CompactionResult{}, fmt.Errorf("load tools for conversation compaction: %w", definitionErr)
-			}
-			modelTools = modelToolDefinitions(definitions)
-		}
-		current, err = l.compactConversation(ctx, &run, resolved.Model, current, messages, targetMessageID, prefix, modelTools, false)
+		current, err = l.compactConversation(ctx, &run, resolved.Model, current, messages, targetMessageID, prefix, false)
 		if err != nil {
 			return contextmemory.CompactionResult{}, fmt.Errorf("manual conversation compaction: %w", err)
 		}
@@ -166,7 +156,7 @@ func compactionResult(value contextmemory.Checkpoint, passes int, complete bool)
 	}
 }
 
-func buildCheckpointBatch(current contextmemory.Checkpoint, messages []conversation.Message, targetMessageID string, autoCompactLimit int, stablePrefix []model.Message, tools []model.ToolDefinition) (checkpointBatch, error) {
+func buildCheckpointBatch(current contextmemory.Checkpoint, messages []conversation.Message, targetMessageID string, autoCompactLimit int, stablePrefix []model.Message) (checkpointBatch, error) {
 	targetMessageID = strings.TrimSpace(targetMessageID)
 	if targetMessageID == "" {
 		return checkpointBatch{}, fmt.Errorf("context checkpoint target is required")
@@ -201,7 +191,7 @@ func buildCheckpointBatch(current contextmemory.Checkpoint, messages []conversat
 	}
 	for _, group := range groups {
 		trial := append(append([]checkpointSourceMessage(nil), selected...), group...)
-		trialRequest, err := checkpointRequest(stablePrefix, tools, trial, summaryLimit)
+		trialRequest, err := checkpointRequest(stablePrefix, trial, summaryLimit)
 		if err != nil {
 			return checkpointBatch{}, err
 		}
@@ -218,15 +208,15 @@ func buildCheckpointBatch(current contextmemory.Checkpoint, messages []conversat
 	if len(selected) == 0 || through == "" {
 		return checkpointBatch{}, fmt.Errorf("no conversation history fits the context checkpoint input budget")
 	}
-	request, err := checkpointRequest(stablePrefix, tools, selected, summaryLimit)
+	request, err := checkpointRequest(stablePrefix, selected, summaryLimit)
 	if err != nil {
 		return checkpointBatch{}, err
 	}
 	return checkpointBatch{request: request, throughMessageID: through, messageCount: len(selected), estimatedTokens: estimated, summaryLimit: summaryLimit}, nil
 }
 
-func checkpointRequest(stablePrefix []model.Message, tools []model.ToolDefinition, selected []checkpointSourceMessage, summaryLimit int) (model.ChatRequest, error) {
-	request := model.ChatRequest{Messages: cloneModelMessages(stablePrefix), Tools: cloneModelToolDefinitions(tools)}
+func checkpointRequest(stablePrefix []model.Message, selected []checkpointSourceMessage, summaryLimit int) (model.ChatRequest, error) {
+	request := model.ChatRequest{Messages: cloneModelMessages(stablePrefix)}
 	for _, source := range selected {
 		role := model.Role(source.Role)
 		if role != model.RoleUser && role != model.RoleAssistant {
@@ -234,8 +224,13 @@ func checkpointRequest(stablePrefix []model.Message, tools []model.ToolDefinitio
 		}
 		request.Messages = append(request.Messages, model.Message{Role: role, Content: source.Content})
 	}
-	request.Messages = append(request.Messages, model.Message{Role: model.RoleUser, Content: fmt.Sprintf("%s\n\nCreate a durable checkpoint of the conversation above. Return at most %d conservative tokens. Do not call tools. Return only the checkpoint Markdown.", checkpointSystemPrompt, summaryLimit)})
+	request.Messages = append(request.Messages, model.Message{Role: model.RoleUser, Content: checkpointLengthInstruction(summaryLimit, 0)})
 	return request, nil
+}
+
+func checkpointLengthInstruction(limit, correction int) string {
+	target := max(1, limit/(2+correction))
+	return fmt.Sprintf("%s\n\nLimit: %d Unicode characters, NOT model tokens; aim <=%d. Complete Markdown only, no tools. Summarize code/tables by evidence references. Rewrite from full source. Attempt %d.", checkpointSystemPrompt, limit, target, correction)
 }
 
 func checkpointSourceTokens(values []checkpointSourceMessage) int {
@@ -244,23 +239,6 @@ func checkpointSourceTokens(values []checkpointSourceMessage) int {
 		used += len([]rune(value.Content))
 	}
 	return used
-}
-
-func modelToolDefinitions(values []tool.Definition) []model.ToolDefinition {
-	result := make([]model.ToolDefinition, 0, len(values))
-	for _, value := range values {
-		result = append(result, model.ToolDefinition{Name: value.QualifiedName, Description: value.Description, InputSchema: append(json.RawMessage(nil), value.InputSchema...)})
-	}
-	return result
-}
-
-func cloneModelToolDefinitions(values []model.ToolDefinition) []model.ToolDefinition {
-	result := make([]model.ToolDefinition, len(values))
-	for index, value := range values {
-		result[index] = value
-		result[index].InputSchema = append(json.RawMessage(nil), value.InputSchema...)
-	}
-	return result
 }
 
 func groupCheckpointMessages(messages []conversation.Message) [][]checkpointSourceMessage {
@@ -289,20 +267,41 @@ func groupCheckpointMessages(messages []conversation.Message) [][]checkpointSour
 	return groups
 }
 
-func (l *Loop) compactConversation(ctx context.Context, run *chat.Run, chatModel model.ChatModel, current contextmemory.Checkpoint, messages []conversation.Message, targetMessageID string, stablePrefix []model.Message, tools []model.ToolDefinition, persistActiveRun bool) (contextmemory.Checkpoint, error) {
-	batch, err := buildCheckpointBatch(current, messages, targetMessageID, run.AutoCompactTokenLimit, stablePrefix, tools)
+func (l *Loop) compactConversation(ctx context.Context, run *chat.Run, chatModel model.ChatModel, current contextmemory.Checkpoint, messages []conversation.Message, targetMessageID string, stablePrefix []model.Message, persistActiveRun bool) (contextmemory.Checkpoint, error) {
+	// A checkpoint request is a summarization-only model turn. It deliberately
+	// has no tool definitions: a model cannot emit a Skill, MCP or other tool
+	// call while the host is creating a durable context checkpoint.
+	batch, err := buildCheckpointBatch(current, messages, targetMessageID, run.AutoCompactTokenLimit, stablePrefix)
 	if err != nil {
 		return contextmemory.Checkpoint{}, err
 	}
 	batch.request.PromptCacheKey = run.ConversationID
-	startedAt := l.now()
-	attempt, _, err := l.runModelStream(ctx, *run, chatModel, batch.request, func(stream model.Stream) (streamAttempt, error) {
-		summary, usages, firstResponseAt, receiveErr := l.receiveCheckpointSummary(ctx, stream, batch.summaryLimit)
-		return streamAttempt{checkpointSummary: summary, usages: usages, turn: modelTurn{firstResponseAt: firstResponseAt}}, receiveErr
-	})
-	if err != nil {
-		_ = l.recordFailedRequest(run, "compaction", startedAt, l.now(), attempt.turn.firstResponseAt, err)
-		return contextmemory.Checkpoint{}, fmt.Errorf("run context checkpoint compaction: %w", err)
+	var attempt streamAttempt
+	var startedAt time.Time
+	for correction := 0; ; correction++ {
+		startedAt = l.now()
+		attempt, _, err = l.runModelStream(ctx, *run, chatModel, batch.request, func(stream model.Stream) (streamAttempt, error) {
+			summary, usages, firstResponseAt, receiveErr := l.receiveCheckpointSummary(ctx, stream, batch.summaryLimit)
+			return streamAttempt{checkpointSummary: summary, usages: usages, turn: modelTurn{firstResponseAt: firstResponseAt}}, receiveErr
+		})
+		if err == nil {
+			break
+		}
+		var appErr *apperr.Error
+		truncated := errors.As(err, &appErr) && appErr.Code == "CONTEXT_CHECKPOINT_TRUNCATED"
+		if truncated && len(attempt.usages) > 0 {
+			usage, reported := finalRequestUsage(attempt.usages)
+			_ = l.recordRequestUsage(run, "compaction", startedAt, l.now(), attempt.turn.firstResponseAt, usage, reported, 200, appErr.Code, appErr.UserMessage)
+		} else {
+			_ = l.recordFailedRequest(run, "compaction", startedAt, l.now(), attempt.turn.firstResponseAt, err)
+		}
+		if !truncated || correction >= 2 || ctx.Err() != nil {
+			return contextmemory.Checkpoint{}, fmt.Errorf("run context checkpoint compaction: %w", err)
+		}
+		// Only the length instruction changes; source and checkpoint boundary remain intact.
+		run.ModelTurns++
+		batch.request.Messages = cloneModelMessages(batch.request.Messages)
+		batch.request.Messages[len(batch.request.Messages)-1].Content = checkpointLengthInstruction(batch.summaryLimit, correction+1)
 	}
 	completedAt := l.now()
 	usage, reported := finalRequestUsage(attempt.usages)
@@ -390,10 +389,10 @@ func (l *Loop) receiveCheckpointSummary(ctx context.Context, stream model.Stream
 		}
 	}
 	if err := validateCheckpointFinish(finishReason); err != nil {
-		return "", nil, firstResponseAt, err
+		return "", usages, firstResponseAt, err
 	}
 	if overflow {
-		return "", nil, firstResponseAt, &apperr.Error{Code: "CONTEXT_CHECKPOINT_TRUNCATED", UserMessage: "上下文摘要超过本地安全上限，未替换原历史。"}
+		return "", usages, firstResponseAt, &apperr.Error{Code: "CONTEXT_CHECKPOINT_TRUNCATED", UserMessage: "上下文摘要超过本地安全上限，未替换原历史。"}
 	}
 	value := strings.TrimSpace(summary.String())
 	if value == "" {
@@ -500,23 +499,4 @@ func requestStatusForErrorCode(code string) int {
 		return 502
 	}
 	return 500
-}
-
-func applyUsage(run *chat.Run, usage model.Usage) {
-	run.InputTokens += usage.InputTokens
-	run.FreshInputTokens += usage.FreshInputTokens
-	run.OutputTokens += usage.OutputTokens
-	run.ReasoningTokens += usage.ReasoningTokens
-	if usage.ReasoningTokens > 0 {
-		run.ReasoningObserved = true
-	}
-	run.CachedInputTokens += usage.CachedInputTokens
-	run.CacheWriteTokens += usage.CacheWriteTokens
-	if usage.CacheDetailsReported {
-		run.CacheReportedTurns++
-		run.CacheReportedFreshInputTokens += usage.FreshInputTokens
-		if usage.CachedInputTokens > 0 {
-			run.CacheHitTurns++
-		}
-	}
 }

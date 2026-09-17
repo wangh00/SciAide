@@ -96,10 +96,22 @@ func (r *ProjectRepository) Delete(ctx context.Context, projectID string) error 
 	if active > 0 {
 		return fmt.Errorf("project has active knowledge indexing; wait for it to finish before removing the project")
 	}
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM workflow_runs WHERE project_id = ? AND status IN ('queued','running','waiting_approval','waiting_human_confirmation','paused')`, projectID).Scan(&active); err != nil {
+		return fmt.Errorf("check active project Workflow Runs: %w", err)
+	}
+	if active > 0 {
+		return fmt.Errorf("project has an active research Workflow; cancel it before removing the project")
+	}
 	// Delete Artifact aggregates before the project so immutable versions release
 	// their RESTRICT references to project-scoped blobs in a deterministic order.
 	if _, err := tx.ExecContext(ctx, `DELETE FROM artifacts WHERE project_id = ?`, projectID); err != nil {
 		return fmt.Errorf("delete project Artifacts: %w", err)
+	}
+	// Workflow AI Chat Runs are protected by a RESTRICT binding so their
+	// reproducibility snapshot cannot disappear independently. Remove terminal
+	// Workflow Runs first; this cascades the bindings before ordinary Chat Runs.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM workflow_runs WHERE project_id = ?`, projectID); err != nil {
+		return fmt.Errorf("delete project Workflow Runs: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM run_events WHERE aggregate_id IN (SELECT id FROM runs WHERE conversation_id IN (SELECT id FROM conversations WHERE project_id = ?))`, projectID); err != nil {
 		return fmt.Errorf("delete project run events: %w", err)

@@ -10,10 +10,11 @@ type ConversationFacade struct {
 	service   *conversation.Service
 }
 type CreateConversationRequest struct {
-	ProjectID      string `json:"projectId"`
-	Title          string `json:"title"`
-	ModelProfileID string `json:"modelProfileId"`
-	ModelID        string `json:"modelId"`
+	ProjectID      string                  `json:"projectId"`
+	Title          string                  `json:"title"`
+	ModelProfileID string                  `json:"modelProfileId"`
+	ModelID        string                  `json:"modelId"`
+	ReasoningLevel modelcap.ReasoningLevel `json:"reasoningLevel,omitempty"`
 }
 
 func NewConversationFacade(lifecycle *LifecycleContext, service *conversation.Service) *ConversationFacade {
@@ -21,10 +22,19 @@ func NewConversationFacade(lifecycle *LifecycleContext, service *conversation.Se
 }
 func (f *ConversationFacade) CreateConversation(request CreateConversationRequest) (conversation.Conversation, error) {
 	created, err := f.service.Create(f.lifecycle.Context(), request.ProjectID, request.Title)
-	if err != nil || (request.ModelProfileID == "" && request.ModelID == "") {
+	if err != nil {
 		return created, err
 	}
-	return f.service.SetModelSelection(f.lifecycle.Context(), created.ID, request.ModelProfileID, request.ModelID)
+	if request.ModelProfileID != "" || request.ModelID != "" {
+		created, err = f.service.SetModelSelection(f.lifecycle.Context(), created.ID, request.ModelProfileID, request.ModelID)
+		if err != nil {
+			return created, err
+		}
+	}
+	if request.ReasoningLevel.Valid() && request.ReasoningLevel != created.ReasoningLevel {
+		created, err = f.service.SetReasoningLevel(f.lifecycle.Context(), created.ID, request.ReasoningLevel)
+	}
+	return created, err
 }
 func (f *ConversationFacade) ListConversations(projectID string) ([]conversation.Conversation, error) {
 	return f.service.List(f.lifecycle.Context(), projectID)

@@ -30,6 +30,13 @@ func (r *ModelProfileRepository) Save(ctx context.Context, value modelprofile.Pr
 		return err
 	}
 	defer tx.Rollback()
+	var deleted int
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM model_profiles WHERE id=? AND deleted_at IS NOT NULL`, value.ID).Scan(&deleted); err != nil {
+		return err
+	}
+	if deleted != 0 {
+		return fmt.Errorf("model profile has been deleted")
+	}
 	if value.IsDefault {
 		if _, err := tx.ExecContext(ctx, `UPDATE model_profiles SET is_default = 0, updated_at = ? WHERE id <> ? AND is_default = 1`, formatTime(value.UpdatedAt), value.ID); err != nil {
 			return err
@@ -150,7 +157,7 @@ func removeReasoningLevels(values, removed []modelcap.ReasoningLevel) []modelcap
 }
 
 func (r *ModelProfileRepository) Get(ctx context.Context, id string) (modelprofile.Profile, error) {
-	value, err := scanModelProfile(r.db.QueryRowContext(ctx, `SELECT id, name, provider_type, api_protocol, base_url, model_id, secret_ref, timeout_seconds, temperature, max_output_tokens, custom_headers_json, enabled, is_default, created_at, updated_at FROM model_profiles WHERE id = ?`, id))
+	value, err := scanModelProfile(r.db.QueryRowContext(ctx, `SELECT id, name, provider_type, api_protocol, base_url, model_id, secret_ref, timeout_seconds, temperature, max_output_tokens, custom_headers_json, enabled, is_default, created_at, updated_at FROM model_profiles WHERE id = ? AND deleted_at IS NULL`, id))
 	if err != nil {
 		return value, err
 	}
@@ -159,7 +166,7 @@ func (r *ModelProfileRepository) Get(ctx context.Context, id string) (modelprofi
 }
 
 func (r *ModelProfileRepository) List(ctx context.Context) ([]modelprofile.Profile, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT id, name, provider_type, api_protocol, base_url, model_id, secret_ref, timeout_seconds, temperature, max_output_tokens, custom_headers_json, enabled, is_default, created_at, updated_at FROM model_profiles ORDER BY is_default DESC, updated_at DESC, id`)
+	rows, err := r.db.QueryContext(ctx, `SELECT id, name, provider_type, api_protocol, base_url, model_id, secret_ref, timeout_seconds, temperature, max_output_tokens, custom_headers_json, enabled, is_default, created_at, updated_at FROM model_profiles WHERE deleted_at IS NULL ORDER BY is_default DESC, updated_at DESC, id`)
 	if err != nil {
 		return nil, fmt.Errorf("list model profiles: %w", err)
 	}
@@ -190,14 +197,8 @@ func (r *ModelProfileRepository) List(ctx context.Context) ([]modelprofile.Profi
 }
 
 func (r *ModelProfileRepository) Delete(ctx context.Context, id string) error {
-	var referenced int
-	if err := r.db.QueryRowContext(ctx, `SELECT count(*) FROM runs WHERE model_profile_id = ?`, id).Scan(&referenced); err != nil {
-		return fmt.Errorf("check model profile references: %w", err)
-	}
-	if referenced > 0 {
-		return fmt.Errorf("model profile is referenced by chat history; disable it instead of deleting it")
-	}
-	result, err := r.db.ExecContext(ctx, `DELETE FROM model_profiles WHERE id = ?`, id)
+	// Retain only the source identity required by historical foreign keys.
+	result, err := r.db.ExecContext(ctx, `UPDATE model_profiles SET deleted_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'), enabled=0, is_default=0, base_url='deleted', custom_headers_json='{}' WHERE id=? AND deleted_at IS NULL`, id)
 	if err == nil {
 		if affected, _ := result.RowsAffected(); affected == 0 {
 			return fmt.Errorf("model profile not found")

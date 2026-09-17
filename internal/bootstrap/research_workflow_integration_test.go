@@ -77,23 +77,32 @@ func TestTrustedResearchWorkflowClosesAndSurvivesRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(root) })
-	options := Options{RootDir: root, ResearchConnectors: []research.Connector{researchClosureConnector{}}}
+	options := Options{RootDir: root, ResearchConnectors: []research.Connector{researchClosureConnector{}}, EventPublisher: workflowAITestPublisher{}}
+	aiServer := newWorkflowAITestServer(t)
 
 	application := openResearchClosureApplication(t, options)
+	aiProfile := saveWorkflowAITestProfile(t, application, aiServer.URL)
 	created, err := application.ProjectFacade.CreateProject(wailstransport.CreateProjectRequest{Name: "P7 trusted research closure"})
 	if err != nil {
 		application.Close()
 		t.Fatal(err)
 	}
 	template := referenceWorkflowTemplate(t, application, "trusted-research-closure")
+	for i := range template.Definition.Nodes {
+		if template.Definition.Nodes[i].ID == "knowledge" {
+			// Exercise the same abstract-only retrieval used by dynamic routes.
+			template.Definition.Nodes[i].Arguments = json.RawMessage(`{"perDocument":true}`)
+		}
+	}
 	saved, err := application.WorkflowFacade.Save(workflow.SaveCommand{ProjectID: created.ID, Definition: template.Definition})
 	if err != nil {
 		application.Close()
 		t.Fatal(err)
 	}
 	started, err := application.WorkflowFacade.Start(workflow.StartCommand{
-		ProjectID: created.ID, WorkflowID: saved.Workflow.ID, WorkflowVersionID: saved.Version.ID,
-		Inputs: json.RawMessage(`{"query":"epsilon forty two"}`),
+		ProjectID: created.ID, ResearchTaskID: workflow.NewResearchTaskID, WorkflowID: saved.Workflow.ID, WorkflowVersionID: saved.Version.ID,
+		Inputs:         json.RawMessage(`{"query":"epsilon forty two"}`),
+		ModelProfileID: aiProfile.ID, ModelID: workflowAITestModelID,
 	})
 	if err != nil {
 		application.Close()
@@ -282,6 +291,12 @@ func driveResearchClosure(t *testing.T, application *Application, projectID, run
 			}
 		case workflow.RunWaitingHumanConfirmation:
 			step := currentWorkflowStep(t, detail)
+			if step.NodeKind == workflow.NodeAgentStage {
+				if _, err := application.WorkflowFacade.Decide(workflow.HumanDecisionCommand{ProjectID: projectID, RunID: runID, StepID: step.ID, Approved: true, Note: "Accepted deterministic AI evidence review."}); err != nil {
+					t.Fatal(err)
+				}
+				continue
+			}
 			if step.NodeKind != workflow.NodeCitationSelection {
 				t.Fatalf("unexpected human step after candidate selection: %#v", step)
 			}
@@ -309,12 +324,16 @@ func driveResearchClosure(t *testing.T, application *Application, projectID, run
 func assertResearchClosureEvidence(t *testing.T, application *Application, projectID, runID, workspacePath string) {
 	t.Helper()
 	ctx := context.Background()
+	taskWorkspacePath := workspacePath
+	if detail, getErr := application.WorkflowFacade.GetRun(projectID, runID); getErr == nil && detail.Run.ResearchTaskID != "" {
+		taskWorkspacePath = filepath.Join(workspacePath, ".sciaide", "tasks", detail.Run.ResearchTaskID)
+	}
 	toolCalls, err := sqlite.NewToolRepository(application.store.DB()).ListBySubject(ctx, tool.SubjectWorkflowRun, runID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(toolCalls) != 7 {
-		t.Fatalf("Workflow ToolCalls = %d, want 7: %#v", len(toolCalls), toolCalls)
+	if len(toolCalls) != 8 {
+		t.Fatalf("Workflow ToolCalls = %d, want 8: %#v", len(toolCalls), toolCalls)
 	}
 	callIDs := make(map[string]tool.Call, len(toolCalls))
 	for _, call := range toolCalls {
@@ -332,6 +351,27 @@ func assertResearchClosureEvidence(t *testing.T, application *Application, proje
 		if approval.PermissionKind == tool.PermissionNetworkDomain || approval.Status != permission.ApprovalGranted {
 			t.Fatalf("unexpected Workflow approval: %#v", approval)
 		}
+	}
+	var aiChatRunID, seedCallID, seedCitationsJSON, messageReference, messageToolCallID string
+	if err := application.store.DB().QueryRowContext(ctx, `
+		SELECT binding.chat_run_id, seed.id, result.citations_json, citation.reference_key, citation.tool_call_id
+		FROM workflow_ai_executions execution
+		JOIN workflow_ai_chat_runs binding ON binding.execution_id=execution.id
+		JOIN tool_calls seed ON seed.run_id=binding.chat_run_id AND seed.tool_name='builtin.workflow.citation.seed' AND seed.status='completed'
+		JOIN tool_results result ON result.tool_call_id=seed.id AND result.status='success'
+		JOIN message_citations citation ON citation.run_id=binding.chat_run_id
+		WHERE execution.workflow_run_id=? AND execution.prompt_version='research-interpret-v2'`, runID).Scan(&aiChatRunID, &seedCallID, &seedCitationsJSON, &messageReference, &messageToolCallID); err != nil {
+		var executions, seeds, messageCitations int
+		var answer string
+		_ = application.store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM workflow_ai_executions WHERE workflow_run_id=?`, runID).Scan(&executions)
+		_ = application.store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM tool_calls seed JOIN workflow_ai_chat_runs binding ON binding.chat_run_id=seed.run_id JOIN workflow_ai_executions execution ON execution.id=binding.execution_id WHERE execution.workflow_run_id=? AND seed.tool_name='builtin.workflow.citation.seed'`, runID).Scan(&seeds)
+		_ = application.store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM message_citations citation JOIN workflow_ai_chat_runs binding ON binding.chat_run_id=citation.run_id JOIN workflow_ai_executions execution ON execution.id=binding.execution_id WHERE execution.workflow_run_id=?`, runID).Scan(&messageCitations)
+		_ = application.store.DB().QueryRowContext(ctx, `SELECT COALESCE(part.text_content,'') FROM workflow_ai_executions execution JOIN workflow_ai_chat_runs binding ON binding.execution_id=execution.id JOIN runs chat_run ON chat_run.id=binding.chat_run_id JOIN message_parts part ON part.message_id=chat_run.assistant_message_id AND part.ordinal=0 WHERE execution.workflow_run_id=?`, runID).Scan(&answer)
+		t.Fatalf("Workflow AI citation bridge is incomplete: %v; executions=%d seeds=%d messageCitations=%d answer=%q", err, executions, seeds, messageCitations, answer)
+	}
+	var seeded []tool.CitationRef
+	if json.Unmarshal([]byte(seedCitationsJSON), &seeded) != nil || len(seeded) != 1 || seeded[0].Reference != messageReference || seeded[0].ProjectID != projectID || messageToolCallID != seedCallID || aiChatRunID == "" {
+		t.Fatalf("Workflow AI citation bridge mismatch: run=%q seed=%#v messageReference=%q sourceCall=%q want=%q", aiChatRunID, seeded, messageReference, messageToolCallID, seedCallID)
 	}
 
 	var environmentFingerprint, inputJSON, outputJSON, reproduction, kernelCallID, auditRunID string
@@ -353,7 +393,7 @@ func assertResearchClosureEvidence(t *testing.T, application *Application, proje
 		if len(digest) != 64 {
 			t.Fatalf("invalid output hash %s=%q", path, digest)
 		}
-		contents, err := os.ReadFile(filepath.Join(workspacePath, filepath.FromSlash(path)))
+		contents, err := os.ReadFile(filepath.Join(taskWorkspacePath, filepath.FromSlash(path)))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -362,7 +402,7 @@ func assertResearchClosureEvidence(t *testing.T, application *Application, proje
 			t.Fatalf("Workspace output %s does not match its Kernel audit", path)
 		}
 	}
-	matches, err := filepath.Glob(filepath.Join(workspacePath, "analysis-output", "research-"+runID+"-1.*"))
+	matches, err := filepath.Glob(filepath.Join(taskWorkspacePath, "analysis-output", "research-"+runID+"-1.*"))
 	if err != nil || len(matches) != 2 {
 		t.Fatalf("declared analysis outputs = %#v, %v", matches, err)
 	}
@@ -403,6 +443,13 @@ func assertResearchClosureEvidence(t *testing.T, application *Application, proje
 	}
 	if callIDs[citation.SourceToolCallIDSnapshot].ToolName != "builtin.knowledge.search" {
 		t.Fatalf("Citation source ToolCall was not the local knowledge search: %#v", citation)
+	}
+	var frozenAIOutput, rawAIOutput string
+	if err := application.store.DB().QueryRowContext(ctx, `SELECT output_json,output_text FROM workflow_ai_executions WHERE workflow_run_id=? AND prompt_version='research-interpret-v2'`, runID).Scan(&frozenAIOutput, &rawAIOutput); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(rawAIOutput, messageReference) || strings.Contains(frozenAIOutput, messageReference) || !strings.Contains(frozenAIOutput, citation.Reference) {
+		t.Fatalf("Workflow AI citation domain was not restored: chat=%q workflow=%q raw=%q frozen=%q", messageReference, citation.Reference, rawAIOutput, frozenAIOutput)
 	}
 	lineageCalls := map[string]struct{}{}
 	workflowLinked := false

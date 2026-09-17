@@ -22,6 +22,14 @@ const (
 
 type Status string
 
+type ScopeKind string
+
+const (
+	ScopeTask          ScopeKind = "task"
+	ScopeProjectShared ScopeKind = "project_shared"
+	ScopeLegacyProject ScopeKind = "legacy_project"
+)
+
 const (
 	StatusActive  Status = "active"
 	StatusTrashed Status = "trashed"
@@ -38,6 +46,8 @@ const (
 type Artifact struct {
 	ID               string     `json:"id"`
 	ProjectID        string     `json:"projectId"`
+	ScopeKind        ScopeKind  `json:"scopeKind"`
+	ResearchTaskID   string     `json:"researchTaskId,omitempty"`
 	Name             string     `json:"name"`
 	Kind             Kind       `json:"kind"`
 	Status           Status     `json:"status"`
@@ -114,6 +124,7 @@ type ExportResult struct {
 type WorkflowReportCommand struct {
 	ProjectID            string
 	WorkflowRunID        string
+	ResearchTaskID       string
 	ToolCallID           string
 	ToolName             string
 	ToolVersion          string
@@ -131,6 +142,20 @@ type WorkflowReportResult struct {
 	DOCX     Export   `json:"docx"`
 	PDF      Export   `json:"pdf"`
 	Created  bool     `json:"created"`
+}
+
+// WorkflowDeliverableCommand freezes a deterministic, host-rendered output
+// from a completed Workflow Run. Callers must derive Markdown from the
+// persisted Run output instead of accepting editable client content.
+type WorkflowDeliverableCommand struct {
+	ProjectID      string
+	WorkflowRunID  string
+	ResearchTaskID string
+	OutputName     string
+	OutputSHA256   string
+	Name           string
+	Markdown       string
+	Citations      []Citation
 }
 
 type Provenance struct {
@@ -263,10 +288,12 @@ type IntegrityResult struct {
 }
 
 type RegisterWorkspaceCommand struct {
-	ProjectID  string `json:"projectId"`
-	Path       string `json:"path"`
-	ArtifactID string `json:"artifactId,omitempty"`
-	Name       string `json:"name,omitempty"`
+	ProjectID      string    `json:"projectId"`
+	Path           string    `json:"path"`
+	ArtifactID     string    `json:"artifactId,omitempty"`
+	Name           string    `json:"name,omitempty"`
+	ScopeKind      ScopeKind `json:"scopeKind,omitempty"`
+	ResearchTaskID string    `json:"researchTaskId,omitempty"`
 }
 
 type BlobRecord struct {
@@ -299,6 +326,7 @@ type AssistantSource struct {
 	ConversationTitle string
 	MessageID         string
 	RunID             string
+	ResearchTaskID    string
 	Text              string
 	ModelProfileID    string
 	ModelProfileName  string
@@ -313,6 +341,7 @@ type ToolSource struct {
 	ConversationID    string
 	ConversationTitle string
 	RunID             string
+	ResearchTaskID    string
 	SubjectKind       tool.SubjectKind
 	CallID            string
 	ToolName          string

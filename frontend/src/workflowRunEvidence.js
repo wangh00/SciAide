@@ -57,8 +57,54 @@ export function deriveWorkflowRunEvidence(detail) {
     const stepName = nodeNames.get(nodeId) || nodeId || `步骤 ${ordinal + 1}`;
     const output = record(stepRecord.output);
     const structured = record(output?.structured);
-    if (!structured) continue;
+    const input = record(stepRecord.input);
 
+    const selectedCandidateIDs = Array.isArray(output?.selectedCandidateIds) ? output.selectedCandidateIds.map(text).filter(Boolean) : [];
+    const candidates = Array.isArray(input?.candidates) ? input.candidates.filter((item) => record(item)) : [];
+    for (const [index, candidate] of candidates.entries()) {
+      const candidateId = text(candidate.id);
+      if (!candidateId || !selectedCandidateIDs.includes(candidateId)) continue;
+      const id = `candidate:${candidateId}`;
+      const authors = Array.isArray(candidate.authors) ? candidate.authors.map((author) => text(record(author)?.name)).filter(Boolean).slice(0, 3) : [];
+      addNode({
+        id,
+        stage: "source",
+        label: text(candidate.title) || `已选文献 ${index + 1}`,
+        detail: [authors.join("、"), candidate.year, text(candidate.venue), text(candidate.doi) ? `DOI ${text(candidate.doi)}` : ""].filter(Boolean).join(" · ") || stepName,
+        sha256: "",
+        sourceStepId: stepId,
+        sourceStepName: stepName,
+        ordinal,
+      });
+    }
+
+    const citations = text(stepRecord.nodeKind) === "citation_selection" && Array.isArray(output?.citations) ? output.citations.filter((item) => record(item)) : [];
+    for (const [index, citation] of citations.entries()) {
+      const citationId = text(citation.id) || text(citation.reference) || `${stepId}:${index}`;
+      const id = `citation:${citationId}`;
+      citationNodes.push(id);
+      addNode({
+        id,
+        stage: "evidence",
+        label: text(citation.title) || text(citation.sourceName) || `本地证据 ${index + 1}`,
+        detail: [text(citation.sourceName), text(citation.locator), text(citation.reference)].filter(Boolean).join(" · ") || stepName,
+        sha256: text(citation.quoteSha256),
+        sourceStepId: stepId,
+        sourceStepName: stepName,
+        ordinal,
+      });
+    }
+
+    for (const [index, ref] of artifactRefs(output?.artifacts).entries()) {
+      const idValue = text(ref.id);
+      const path = text(ref.workspacePath);
+      const name = text(ref.name) || basename(path) || `产物 ${index + 1}`;
+      const id = idValue ? `artifact:${idValue}` : path ? `workspace:${path}` : `step-artifact:${stepId}:${index}`;
+      addNode({ id, stage: path ? "analysis" : "artifact", label: name, detail: path || text(ref.mimeType) || idValue, sha256: "", sourceStepId: stepId, sourceStepName: stepName, ordinal });
+      if (path && !analysisNodes.includes(id)) analysisNodes.push(id);
+    }
+
+    if (!structured) continue;
     const environmentFingerprint = text(structured.environmentFingerprint);
     if (environmentFingerprint && text(structured.baseExecutableVersion)) {
       environment = {
@@ -97,21 +143,9 @@ export function deriveWorkflowRunEvidence(detail) {
       }
     }
 
-    const citations = Array.isArray(output.citations) ? output.citations : [];
-    if (citations.length) {
-      const id = `citations:${stepId}`;
-      citationNodes.push(id);
-      addNode({ id, stage: "evidence", label: `${citations.length} 条本地 Citation`, detail: stepName, sha256: "", sourceStepId: stepId, sourceStepName: stepName, ordinal });
-    }
-
-    for (const [index, ref] of artifactRefs(output.artifacts).entries()) {
-      const idValue = text(ref.id);
-      const path = text(ref.workspacePath);
-      const name = text(ref.name) || basename(path) || `产物 ${index + 1}`;
-      const id = idValue ? `artifact:${idValue}` : path ? `workspace:${path}` : `step-artifact:${stepId}:${index}`;
-      const matchingHash = outputHashes.find((item) => item.path === path)?.sha256 || "";
-      addNode({ id, stage: path ? "analysis" : "artifact", label: name, detail: path || text(ref.mimeType) || idValue, sha256: matchingHash, sourceStepId: stepId, sourceStepName: stepName, ordinal });
-      if (path && !analysisNodes.includes(id)) analysisNodes.push(id);
+    for (const outputHash of outputHashes) {
+      const id = `workspace:${outputHash.path}`;
+      addNode({ id, sha256: outputHash.sha256 });
     }
 
     const reportArtifact = record(structured.artifact);
@@ -144,7 +178,7 @@ export function deriveWorkflowRunEvidence(detail) {
     for (const analysisId of [...new Set(analysisNodes)]) addEdge(analysisId, reportId, "分析输入");
   }
 
-  const rank = { evidence: 0, analysis: 1, artifact: 2, report: 3, export: 4 };
+  const rank = { source: 0, evidence: 1, analysis: 2, artifact: 3, report: 4, export: 5 };
   const graphNodes = [...nodes.values()].sort((left, right) => (rank[left.stage] ?? 9) - (rank[right.stage] ?? 9) || left.ordinal - right.ordinal || left.label.localeCompare(right.label));
   return { environment, analyses, graph: { nodes: graphNodes, edges } };
 }

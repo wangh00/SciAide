@@ -19,6 +19,7 @@ import (
 	"github.com/wangh00/SciAide/internal/app/permission"
 	appskill "github.com/wangh00/SciAide/internal/app/skill"
 	"github.com/wangh00/SciAide/internal/app/tool"
+	"github.com/wangh00/SciAide/internal/app/workflow"
 	"github.com/wangh00/SciAide/internal/apperr"
 	"github.com/wangh00/SciAide/internal/events"
 	"github.com/wangh00/SciAide/internal/model"
@@ -30,6 +31,7 @@ import (
 type loopState struct {
 	mu            sync.Mutex
 	run           chat.Run
+	workflowAI    bool
 	messages      []conversation.Message
 	calls         map[string]tool.Call
 	callOrder     []string
@@ -37,6 +39,50 @@ type loopState struct {
 	runSteps      []chat.RunStep
 	requestUsage  map[int]chat.RequestUsage
 	auxUsage      map[string]chat.RequestUsage
+	journalDrafts map[int]string
+}
+
+func (s *loopState) BeginModelTurn(_ context.Context, _ string, turn int, _ time.Time) error {
+	if s.journalDrafts == nil {
+		s.journalDrafts = map[int]string{}
+	}
+	s.journalDrafts[turn] = ""
+	return nil
+}
+func (s *loopState) UpdateModelTurnDraft(_ context.Context, _ string, turn int, draft string, _ int, _ time.Time) error {
+	if len([]rune(draft)) > 200000 {
+		return fmt.Errorf("invalid model turn draft")
+	}
+	s.journalDrafts[turn] = draft
+	return nil
+}
+func (s *loopState) FinishModelTurn(context.Context, string, int, chat.ModelTurnStatus, string, int, time.Time) error {
+	return nil
+}
+
+func applyUsage(run *chat.Run, usage model.Usage) {
+	run.InputTokens += usage.InputTokens
+	run.FreshInputTokens += usage.FreshInputTokens
+	run.OutputTokens += usage.OutputTokens
+	run.ReasoningTokens += usage.ReasoningTokens
+	if usage.ReasoningTokens > 0 {
+		run.ReasoningObserved = true
+	}
+	run.CachedInputTokens += usage.CachedInputTokens
+	run.CacheWriteTokens += usage.CacheWriteTokens
+	if usage.CacheDetailsReported {
+		run.CacheReportedTurns++
+		run.CacheReportedFreshInputTokens += usage.FreshInputTokens
+		if usage.CachedInputTokens > 0 {
+			run.CacheHitTurns++
+		}
+	}
+}
+
+func (s *loopState) IsWorkflowAIRun(context.Context, string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.workflowAI, nil
 }
 
 type faultInjectingRuns struct {
@@ -380,10 +426,12 @@ func (r budgetResolver) Resolve(context.Context, string, string) (model.Resolved
 }
 
 type memoryCheckpointRepository struct {
-	latest contextmemory.Checkpoint
+	latest      contextmemory.Checkpoint
+	latestCalls int
 }
 
 func (r *memoryCheckpointRepository) Latest(context.Context, string) (contextmemory.Checkpoint, bool, error) {
+	r.latestCalls++
 	return r.latest, r.latest.ID != "", nil
 }
 
@@ -473,6 +521,31 @@ type staticDynamicSkillRouter struct {
 	calls  int
 }
 
+type staticResearchGuidance struct {
+	value workflow.ResearchGuidance
+	bound bool
+	err   error
+	calls int
+}
+
+// workflowContractRuns models the production RunRepository's durable
+// workflow_ai_chat_runs -> workflow_ai_executions lookup without changing the
+// ordinary in-memory fixture used by the free-chat tests.
+type workflowContractRuns struct {
+	*loopState
+	contract chat.WorkflowAIExecution
+	found    bool
+}
+
+func (s workflowContractRuns) WorkflowAIContract(context.Context, string) (chat.WorkflowAIExecution, bool, error) {
+	return s.contract, s.found, nil
+}
+
+func (s *staticResearchGuidance) GuidanceForConversation(context.Context, string) (workflow.ResearchGuidance, bool, error) {
+	s.calls++
+	return s.value, s.bound, s.err
+}
+
 type imageResolverFixture struct {
 	part         model.ContentPart
 	attachmentID string
@@ -484,6 +557,13 @@ func (f *imageResolverFixture) ResolveImage(_ context.Context, projectID, attach
 	}
 	f.attachmentID = attachmentID
 	return f.part, nil
+}
+
+func (f *imageResolverFixture) ResolveImageForConversation(ctx context.Context, projectID, conversationID, attachmentID string) (model.ContentPart, error) {
+	if conversationID != "conversation" {
+		return model.ContentPart{}, fmt.Errorf("unexpected conversation %q", conversationID)
+	}
+	return f.ResolveImage(ctx, projectID, attachmentID)
 }
 
 type multimodalFallbackFixture struct {
@@ -543,7 +623,7 @@ func (s *staticDynamicSkillRouter) RoutingPromptForRun(context.Context, string, 
 }
 
 func agentSkillContext(runID string) appskill.RunContext {
-	manifest := appskill.NormalizeManifest(appskill.Manifest{
+	manifest := appskill.Manifest{
 		SchemaVersion: appskill.CurrentSchemaVersion,
 		ID:            "research-review",
 		Name:          "Research review",
@@ -554,7 +634,7 @@ func agentSkillContext(runID string) appskill.RunContext {
 		Permissions:   []string{"destructive"},
 		Compatibility: appskill.Compatibility{SciAide: ">=0.2.0 <1.0.0"},
 		Context:       appskill.ContextPolicy{MaxTokens: 8_000},
-	})
+	}
 	instructions := "Always inspect the evidence before drawing conclusions."
 	contentHash := sha256.Sum256([]byte(instructions))
 	return appskill.RunContext{
@@ -909,6 +989,15 @@ func TestAgentLoopReturnsRejectedToolCallToModel(t *testing.T) {
 	}
 }
 
+func TestToolProposalFailureMessageProvidesActionableDiagnostics(t *testing.T) {
+	if got := toolProposalFailureMessage("builtin.missing", fmt.Errorf(`tool "builtin.missing" is not registered`)); !strings.Contains(got, "工具注册表中不存在") || !strings.Contains(got, "精确名称") {
+		t.Fatalf("unknown tool diagnostic = %q", got)
+	}
+	if got := toolProposalFailureMessage("builtin.workspace.read_text", fmt.Errorf("validate tool arguments: $.offset: expected integer")); !strings.Contains(got, "Schema 校验") || !strings.Contains(got, "offset") || !strings.Contains(got, "数字") {
+		t.Fatalf("schema diagnostic = %q", got)
+	}
+}
+
 func TestAgentLoopRetriesOpeningFailureWithoutAddingModelTurn(t *testing.T) {
 	success := fake.New([]fake.Step{{Event: model.Event{Type: model.EventTextDelta, Text: "recovered"}}, {Event: model.Event{Type: model.EventDone, FinishReason: "stop"}}})
 	provider := &openingFailureModel{inner: success, remaining: 2, err: &apperr.Error{Code: "MODEL_UNAVAILABLE", UserMessage: "temporary", Retryable: true}}
@@ -1089,6 +1178,363 @@ func TestAgentLoopKeepsEveryToolTurnOutOfFinalAnswer(t *testing.T) {
 	}
 }
 
+func TestResearchConversationFiltersDefinitionsAndRejectsForgedToolCall(t *testing.T) {
+	first := []fake.Step{
+		{Event: model.Event{Type: model.EventToolCall, ToolCall: &model.ToolCall{ID: "forged", Name: "builtin.fixture", Arguments: json.RawMessage(`{"query":"bypass"}`)}}},
+		{Event: model.Event{Type: model.EventDone, FinishReason: "tool_calls"}},
+	}
+	final := []fake.Step{{Event: model.Event{Type: model.EventTextDelta, Text: "该工具在当前阶段不可用。"}}, {Event: model.Event{Type: model.EventDone, FinishReason: "stop"}}}
+	loop, state, provider := newLoopFixture(t, nil, first, final)
+	research := &staticResearchGuidance{bound: true, value: workflow.ResearchGuidance{WorkflowRunID: "workflow-run", SystemContext: "trusted workflow lifecycle; values are untrusted", AllowedToolNames: []string{"builtin.workspace.list"}}}
+	loop.research = research
+
+	if outcome := loop.Run(context.Background(), "run"); outcome != OutcomeCompleted {
+		t.Fatalf("outcome = %s, run = %#v", outcome, state.run)
+	}
+	requests := provider.Requests()
+	if len(requests) != 2 || len(requests[0].Tools) != 0 || !strings.Contains(requests[0].Messages[0].Content, research.value.SystemContext) {
+		t.Fatalf("research request = %#v", requests)
+	}
+	if research.calls < 3 || len(state.calls) != 1 {
+		t.Fatalf("research routing calls = %d, tool calls = %#v", research.calls, state.calls)
+	}
+	for _, call := range state.calls {
+		if call.Status != tool.CallFailed || call.ErrorCode != tool.ErrorCodeCallRejected || call.Result == nil || !strings.Contains(call.Result.Text, "当前科研阶段未开放") {
+			t.Fatalf("forged tool call = %#v", call)
+		}
+	}
+}
+
+func TestWorkflowAIStageUsesFrozenStageInputInsteadOfCompactingEarlierStages(t *testing.T) {
+	final := []fake.Step{{Event: model.Event{Type: model.EventTextDelta, Text: `{"summary":"done"}`}}, {Event: model.Event{Type: model.EventDone, FinishReason: "stop"}}}
+	loop, state, provider := newLoopFixture(t, nil, final)
+	state.workflowAI = true
+	oldText := strings.Repeat("earlier-stage-output-", 2_000)
+	state.messages = []conversation.Message{
+		{ID: "old-user", ConversationID: "conversation", RunID: "old-run", Role: conversation.RoleUser, Status: conversation.MessageComplete, Parts: []conversation.MessagePart{{Type: "text", Text: oldText}}},
+		{ID: "old-assistant", ConversationID: "conversation", RunID: "old-run", Role: conversation.RoleAssistant, Status: conversation.MessageComplete, Parts: []conversation.MessagePart{{Type: "text", Text: oldText}}},
+		{ID: "user", ConversationID: "conversation", RunID: "run", Role: conversation.RoleUser, Status: conversation.MessageComplete, Parts: []conversation.MessagePart{{Type: "text", Text: "interpret the frozen result in this stage input"}}},
+		{ID: "assistant", ConversationID: "conversation", RunID: "run", Role: conversation.RoleAssistant, Status: conversation.MessageStreaming, Parts: []conversation.MessagePart{{Type: "text"}}},
+	}
+	repository := &memoryCheckpointRepository{}
+	loop.checkpoints = contextmemory.NewService(repository)
+	loop.models = budgetResolver{model: provider, budget: modelcap.ResolveContextBudget(5_000, 0, modelcap.ContextWindowSourceManual)}
+
+	if outcome := loop.Run(context.Background(), state.run.ID); outcome != OutcomeCompleted {
+		t.Fatalf("outcome = %s, run = %#v", outcome, state.run)
+	}
+	if repository.latestCalls != 0 || repository.latest.ID != "" || state.run.ContextCompacted {
+		t.Fatalf("Workflow stage unexpectedly compacted shared conversation: checkpoint=%#v run=%#v", repository.latest, state.run)
+	}
+	requests := provider.Requests()
+	if len(requests) != 1 {
+		t.Fatalf("request count = %d", len(requests))
+	}
+	for _, message := range requests[0].Messages {
+		if strings.Contains(message.Content, "earlier-stage-output-") {
+			t.Fatalf("earlier Workflow stage leaked into model context: %#v", requests[0].Messages)
+		}
+	}
+}
+
+func TestWorkflowAIStageKeepsCommentaryLabeledStructuredOutput(t *testing.T) {
+	final := []fake.Step{
+		{Event: model.Event{Type: model.EventTextDelta, Phase: "commentary", Text: `{"summary":"done"}`}},
+		{Event: model.Event{Type: model.EventDone, FinishReason: "stop"}},
+	}
+	loop, state, _ := newLoopFixture(t, nil, final)
+	state.workflowAI = true
+
+	if outcome := loop.Run(context.Background(), state.run.ID); outcome != OutcomeCompleted {
+		t.Fatalf("outcome = %s, run = %#v", outcome, state.run)
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.messages[1].Parts[0].Text != `{"summary":"done"}` {
+		t.Fatalf("assistant text = %q", state.messages[1].Parts[0].Text)
+	}
+	if len(state.runSteps) != 1 || state.runSteps[0].Commentary != `{"summary":"done"}` {
+		t.Fatalf("workflow raw submission audit is missing: %#v", state.runSteps)
+	}
+}
+
+func TestWorkflowAIStageContinuesAfterProgressOnlyResponse(t *testing.T) {
+	first := []fake.Step{
+		{Event: model.Event{Type: model.EventTextDelta, Text: "我会先加载相关 Skill 并检查项目资料，然后提交路线。"}},
+		{Event: model.Event{Type: model.EventDone, FinishReason: "stop"}},
+	}
+	second := []fake.Step{
+		{Event: model.Event{Type: model.EventTextDelta, Text: `{"summary":"done"}`}},
+		{Event: model.Event{Type: model.EventDone, FinishReason: "stop"}},
+	}
+	loop, state, provider := newLoopFixture(t, nil, first, second)
+	state.workflowAI = true
+	loop.research = &staticResearchGuidance{bound: true, value: workflow.ResearchGuidance{StructuredOutputRequired: true}}
+
+	if outcome := loop.Run(context.Background(), state.run.ID); outcome != OutcomeCompleted {
+		t.Fatalf("outcome = %s, run = %#v", outcome, state.run)
+	}
+	requests := provider.Requests()
+	if len(requests) != 2 {
+		t.Fatalf("request count = %d, want 2", len(requests))
+	}
+	if len(requests[1].Messages) == 0 || !strings.Contains(requests[1].Messages[len(requests[1].Messages)-1].Content, "did not submit the required Workflow result") {
+		t.Fatalf("continuation request did not contain the structured-output instruction: %#v", requests[1].Messages)
+	}
+	if got := state.messages[1].Parts[0].Text; got != `{"summary":"done"}` {
+		t.Fatalf("assistant text = %q", got)
+	}
+}
+
+func TestWorkflowAIStageAcceptsSchemaValidUnfencedJSONWithoutContinuation(t *testing.T) {
+	final := []fake.Step{
+		{Event: model.Event{Type: model.EventTextDelta, Text: "我已完成规划。\njson\n{\"summary\":\"done\"}"}},
+		{Event: model.Event{Type: model.EventDone, FinishReason: "stop"}},
+	}
+	loop, state, provider := newLoopFixture(t, nil, final)
+	state.workflowAI = true
+	loop.research = &staticResearchGuidance{bound: true, value: workflow.ResearchGuidance{
+		StructuredOutputRequired: true,
+		StructuredOutputSchema:   json.RawMessage(`{"type":"object","additionalProperties":false,"required":["summary"],"properties":{"summary":{"type":"string"}}}`),
+	}}
+
+	if outcome := loop.Run(context.Background(), state.run.ID); outcome != OutcomeCompleted {
+		t.Fatalf("outcome = %s, run = %#v", outcome, state.run)
+	}
+	if requests := provider.Requests(); len(requests) != 1 {
+		t.Fatalf("request count = %d, want 1; requests=%#v", len(requests), requests)
+	}
+	if got := state.messages[1].Parts[0].Text; got == "" || !strings.Contains(got, `{"summary":"done"}`) {
+		t.Fatalf("assistant text = %q", got)
+	}
+}
+
+func TestWorkflowAIStageDoesNotTreatProseBracesAsStructuredAttempt(t *testing.T) {
+	schema := json.RawMessage(`{"type":"object","additionalProperties":false,"required":["summary"],"properties":{"summary":{"type":"string"}}}`)
+	if workflow.HasAIStageOutputCandidate("正在检查 {字段}，随后提交结果。", schema) {
+		t.Fatal("ordinary prose braces were treated as a structured-output attempt")
+	}
+	if !workflow.HasAIStageOutputCandidate("结果：\n{\"unexpected\":true}", schema) {
+		t.Fatal("explicit JSON result was not recognized as a structured-output attempt")
+	}
+}
+
+func TestWorkflowAIStageRepairsMalformedJSONAsContentNotProgress(t *testing.T) {
+	final := []fake.Step{
+		{Event: model.Event{Type: model.EventTextDelta, Text: "```json\n{\"summary\":\"unfinished\""}},
+		{Event: model.Event{Type: model.EventDone, FinishReason: "stop"}},
+	}
+	corrected := []fake.Step{
+		{Event: model.Event{Type: model.EventTextDelta, Text: `{"summary":"corrected"}`}},
+		{Event: model.Event{Type: model.EventDone, FinishReason: "stop"}},
+	}
+	loop, state, provider := newLoopFixture(t, nil, final, corrected)
+	state.workflowAI = true
+	loop.research = &staticResearchGuidance{bound: true, value: workflow.ResearchGuidance{
+		StructuredOutputRequired: true,
+		StructuredOutputSchema:   json.RawMessage(`{"type":"object","additionalProperties":false,"required":["summary"],"properties":{"summary":{"type":"string"}}}`),
+	}}
+
+	if outcome := loop.Run(context.Background(), state.run.ID); outcome != OutcomeCompleted {
+		t.Fatalf("outcome = %s, run = %#v", outcome, state.run)
+	}
+	if requests := provider.Requests(); len(requests) != 2 || !strings.Contains(requests[1].Messages[len(requests[1].Messages)-1].Content, "Host submission validation failed") {
+		t.Fatalf("malformed JSON did not receive content-specific correction: %#v", requests)
+	}
+	if got := state.messages[1].Parts[0].Text; !strings.Contains(got, "corrected") {
+		t.Fatalf("assistant text = %q", got)
+	}
+}
+
+func TestWorkflowAIStageKeepsStructuredContractWhenGuidanceProjectionIsTransientlyUnbound(t *testing.T) {
+	first := []fake.Step{
+		{Event: model.Event{Type: model.EventTextDelta, Text: "我会先检查当前课题资料。"}},
+		{Event: model.Event{Type: model.EventDone, FinishReason: "stop"}},
+	}
+	second := []fake.Step{
+		{Event: model.Event{Type: model.EventTextDelta, Text: `{"summary":"done"}`}},
+		{Event: model.Event{Type: model.EventDone, FinishReason: "stop"}},
+	}
+	loop, state, provider := newLoopFixture(t, nil, first, second)
+	state.workflowAI = true
+	// Simulate the short startup window where the durable Chat binding exists
+	// but the Workflow conversation projection has not been returned yet.
+	loop.research = &staticResearchGuidance{bound: false}
+
+	if outcome := loop.Run(context.Background(), state.run.ID); outcome != OutcomeCompleted {
+		t.Fatalf("outcome = %s, run = %#v", outcome, state.run)
+	}
+	if len(provider.Requests()) != 2 {
+		t.Fatalf("request count = %d, want 2", len(provider.Requests()))
+	}
+	if got := state.messages[1].Parts[0].Text; got != `{"summary":"done"}` {
+		t.Fatalf("assistant text = %q", got)
+	}
+	if last := provider.Requests()[1].Messages[len(provider.Requests()[1].Messages)-1].Content; !strings.Contains(last, "did not submit the required Workflow result") {
+		t.Fatalf("transient-unbound continuation missing: %q", last)
+	}
+}
+
+func TestWorkflowAIStageUsesDurableContractWhenGuidanceIsNonStructured(t *testing.T) {
+	first := []fake.Step{
+		{Event: model.Event{Type: model.EventTextDelta, Text: "我会先检查当前课题资料。"}},
+		{Event: model.Event{Type: model.EventDone, FinishReason: "stop"}},
+	}
+	second := []fake.Step{
+		{Event: model.Event{Type: model.EventTextDelta, Text: `{"summary":"done"}`}},
+		{Event: model.Event{Type: model.EventDone, FinishReason: "stop"}},
+	}
+	loop, state, provider := newLoopFixture(t, nil, first, second)
+	state.workflowAI = true
+	loop.runs = workflowContractRuns{
+		loopState: state,
+		found:     true,
+		contract:  chat.WorkflowAIExecution{ID: "execution", AllowedTools: json.RawMessage(`[]`), OutputSchema: json.RawMessage(`{"type":"object","additionalProperties":false,"required":["summary"],"properties":{"summary":{"type":"string"}}}`)},
+	}
+	// Simulate a stale/non-AI Guidance projection. The durable execution
+	// contract must still force the structured continuation.
+	loop.research = &staticResearchGuidance{bound: true, value: workflow.ResearchGuidance{StructuredOutputRequired: false}}
+
+	if outcome := loop.Run(context.Background(), state.run.ID); outcome != OutcomeCompleted {
+		t.Fatalf("outcome = %s, run = %#v", outcome, state.run)
+	}
+	if len(provider.Requests()) != 2 {
+		t.Fatalf("request count = %d, want 2", len(provider.Requests()))
+	}
+	last := provider.Requests()[1].Messages[len(provider.Requests()[1].Messages)-1].Content
+	if !strings.Contains(last, "did not submit the required Workflow result") {
+		t.Fatalf("durable structured contract was not enforced: %q", last)
+	}
+	if got := state.messages[1].Parts[0].Text; got != `{"summary":"done"}` {
+		t.Fatalf("assistant text = %q", got)
+	}
+}
+
+func TestWorkflowAIStageFailsClosedAfterProgressOnlyResponses(t *testing.T) {
+	progress := []fake.Step{
+		{Event: model.Event{Type: model.EventTextDelta, Text: "正在准备科研阶段。"}},
+		{Event: model.Event{Type: model.EventDone, FinishReason: "stop"}},
+	}
+	scripts := make([][]fake.Step, maxStructuredContinuationAttempts+1)
+	for index := range scripts {
+		scripts[index] = progress
+	}
+	loop, state, provider := newLoopFixture(t, nil, scripts...)
+	state.workflowAI = true
+	loop.research = &staticResearchGuidance{bound: true, value: workflow.ResearchGuidance{
+		StructuredOutputRequired: true,
+		StructuredOutputSchema:   json.RawMessage(`{"type":"object","additionalProperties":false,"required":["summary"],"properties":{"summary":{"type":"string"}}}`),
+	}}
+
+	if outcome := loop.Run(context.Background(), state.run.ID); outcome != OutcomeFailed {
+		t.Fatalf("outcome = %s, want failed", outcome)
+	}
+	if got := state.messages[1].Parts[0].Text; got != "" {
+		t.Fatalf("progress-only text was committed as final answer: %q", got)
+	}
+	if state.run.ErrorCode != "WORKFLOW_AI_OUTPUT_MISSING" {
+		t.Fatalf("error code = %q, want WORKFLOW_AI_OUTPUT_MISSING", state.run.ErrorCode)
+	}
+	if len(provider.Requests()) != maxStructuredContinuationAttempts+1 {
+		t.Fatalf("request count = %d, want %d", len(provider.Requests()), maxStructuredContinuationAttempts+1)
+	}
+}
+
+func TestWorkflowAIStageKeepsContinuationThroughToolTurn(t *testing.T) {
+	first := []fake.Step{
+		{Event: model.Event{Type: model.EventTextDelta, Text: "我会先检查资料，然后提交结果。"}},
+		{Event: model.Event{Type: model.EventToolCall, ToolCall: &model.ToolCall{ID: "tool-1", Name: "builtin.fixture", Arguments: json.RawMessage(`{"query":"paper"}`)}}},
+		{Event: model.Event{Type: model.EventDone, FinishReason: "tool_calls"}},
+	}
+	second := []fake.Step{
+		{Event: model.Event{Type: model.EventTextDelta, Text: `{"summary":"done"}`}},
+		{Event: model.Event{Type: model.EventDone, FinishReason: "stop"}},
+	}
+	loop, state, provider := newLoopFixture(t, nil, first, second)
+	state.workflowAI = true
+	loop.research = &staticResearchGuidance{bound: true, value: workflow.ResearchGuidance{StructuredOutputRequired: true, AllowedToolNames: []string{"builtin.fixture"}}}
+
+	if outcome := loop.Run(context.Background(), state.run.ID); outcome != OutcomeCompleted {
+		t.Fatalf("outcome = %s, run = %#v", outcome, state.run)
+	}
+	requests := provider.Requests()
+	if len(requests) != 2 {
+		t.Fatalf("request count = %d, want 2", len(requests))
+	}
+	if len(requests[1].Messages) == 0 || !strings.Contains(requests[1].Messages[len(requests[1].Messages)-1].Content, "did not submit the required Workflow result") {
+		t.Fatalf("continuation was lost after tool turn: %#v", requests[1].Messages)
+	}
+}
+
+func TestWorkflowAIStageKeepsContinuationAfterRepeatedToolProgress(t *testing.T) {
+	first := []fake.Step{
+		{Event: model.Event{Type: model.EventTextDelta, Text: "正在读取研究资料。"}},
+		{Event: model.Event{Type: model.EventToolCall, ToolCall: &model.ToolCall{ID: "tool-1", Name: "builtin.fixture", Arguments: json.RawMessage(`{"query":"paper"}`)}}},
+		{Event: model.Event{Type: model.EventDone, FinishReason: "tool_calls"}},
+	}
+	second := []fake.Step{
+		{Event: model.Event{Type: model.EventTextDelta, Text: "资料已读取，正在整理结构化路线。"}},
+		{Event: model.Event{Type: model.EventDone, FinishReason: "stop"}},
+	}
+	third := []fake.Step{
+		{Event: model.Event{Type: model.EventTextDelta, Text: `{"summary":"done"}`}},
+		{Event: model.Event{Type: model.EventDone, FinishReason: "stop"}},
+	}
+	loop, state, provider := newLoopFixture(t, nil, first, second, third)
+	state.workflowAI = true
+	loop.research = &staticResearchGuidance{bound: true, value: workflow.ResearchGuidance{
+		StructuredOutputRequired: true, StructuredOutputSchema: json.RawMessage(`{"type":"object","additionalProperties":false,"required":["summary"],"properties":{"summary":{"type":"string"}}}`),
+		AllowedToolNames: []string{"builtin.fixture"},
+	}}
+	if outcome := loop.Run(context.Background(), state.run.ID); outcome != OutcomeCompleted {
+		t.Fatalf("outcome = %s, run = %#v", outcome, state.run)
+	}
+	if len(provider.Requests()) != 3 || state.messages[1].Parts[0].Text != `{"summary":"done"}` {
+		t.Fatalf("requests=%d assistant=%q", len(provider.Requests()), state.messages[1].Parts[0].Text)
+	}
+}
+
+func TestVisibleProviderTextRecoversCompletedResponsesMessage(t *testing.T) {
+	items := []model.ProviderItem{{Type: "message", Payload: json.RawMessage(`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"{\"summary\":\"done\"}"}]}`)}}
+	if got := visibleProviderText(items); got != `{"summary":"done"}` {
+		t.Fatalf("visibleProviderText() = %q", got)
+	}
+}
+
+func TestUnboundConversationKeepsNormalToolAccess(t *testing.T) {
+	first := []fake.Step{
+		{Event: model.Event{Type: model.EventToolCall, ToolCall: &model.ToolCall{ID: "normal", Name: "builtin.fixture", Arguments: json.RawMessage(`{"query":"paper"}`)}}},
+		{Event: model.Event{Type: model.EventDone, FinishReason: "tool_calls"}},
+	}
+	final := []fake.Step{{Event: model.Event{Type: model.EventTextDelta, Text: "完成。"}}, {Event: model.Event{Type: model.EventDone, FinishReason: "stop"}}}
+	loop, state, provider := newLoopFixture(t, nil, first, final)
+	loop.research = &staticResearchGuidance{}
+
+	if outcome := loop.Run(context.Background(), "run"); outcome != OutcomeCompleted {
+		t.Fatalf("outcome = %s, run = %#v", outcome, state.run)
+	}
+	requests := provider.Requests()
+	if len(requests) != 2 || len(requests[0].Tools) != 1 || requests[0].Tools[0].Name != "builtin.fixture" {
+		t.Fatalf("normal request tools = %#v", requests)
+	}
+	for _, call := range state.calls {
+		if call.Status != tool.CallCompleted {
+			t.Fatalf("normal tool call = %#v", call)
+		}
+	}
+}
+
+func TestResearchGuidanceFailureStopsBeforeModelRequest(t *testing.T) {
+	loop, state, provider := newLoopFixture(t, nil)
+	loop.research = &staticResearchGuidance{err: fmt.Errorf("database unavailable")}
+	if outcome := loop.Run(context.Background(), "run"); outcome != OutcomeFailed {
+		t.Fatalf("outcome = %s", outcome)
+	}
+	if len(provider.Requests()) != 0 || state.run.ErrorCode != "RESEARCH_CONTEXT_FAILED" {
+		t.Fatalf("provider requests = %d, run = %#v", len(provider.Requests()), state.run)
+	}
+}
+
 func TestVisibleModelTextRemovesLeakedThinkingOnly(t *testing.T) {
 	tests := map[string]string{
 		"<think>private chain</think>Visible answer": "Visible answer",
@@ -1242,7 +1688,7 @@ func TestAgentLoopRejectsResponsesToolCallWithoutProviderState(t *testing.T) {
 		{Event: model.Event{Type: model.EventToolCall, ToolCall: &model.ToolCall{ID: "provider-call", Name: "builtin.fixture", Arguments: json.RawMessage(`{"query":"paper"}`)}}},
 		{Event: model.Event{Type: model.EventDone, FinishReason: "tool_calls"}},
 	}
-	loop, state, provider := newLoopFixture(t, nil, first)
+	loop, state, provider := newLoopFixture(t, allowCoordinator{}, first)
 	loop.models = protocolResolver{model: provider, protocol: modelcap.ProtocolOpenAIResponses}
 	if outcome := loop.Run(context.Background(), "run"); outcome != OutcomeFailed {
 		t.Fatalf("outcome = %s", outcome)
@@ -1361,6 +1807,42 @@ func TestAgentLoopRestoresDynamicSkillRoutingAfterApproval(t *testing.T) {
 		if !found {
 			t.Fatalf("model request %d lost Run routing snapshot: %#v", index, request.Messages)
 		}
+	}
+}
+
+func TestAgentLoopPreloadsFrozenWorkflowSkillsWhenModelOmitsLoad(t *testing.T) {
+	// The host must enforce frozen Skill requirements even when a model returns
+	// a valid final answer without issuing the expected builtin.skill.load call.
+	first := []fake.Step{{Event: model.Event{Type: model.EventTextDelta, Text: "done"}}, {Event: model.Event{Type: model.EventDone, FinishReason: "stop"}}}
+	loop, state, provider := newLoopFixture(t, nil, first)
+	definition := tool.Definition{
+		QualifiedName: "builtin.skill.load", Description: "Load specialized research instructions", Version: "1",
+		InputSchema:  json.RawMessage(`{"type":"object","required":["name"],"properties":{"name":{"type":"string"}}}`),
+		OutputSchema: json.RawMessage(`{"type":"object"}`), Risk: tool.RiskLow, Permissions: []tool.PermissionRequirement{}, Idempotent: true,
+	}
+	registry, ok := loop.registry.(tool.MutableRegistry)
+	if !ok {
+		t.Fatal("fixture registry is not mutable")
+	}
+	if err := registry.Register(context.Background(), fixtureTool{definition: definition, invoke: func(tool.Invocation) tool.Result {
+		return tool.Result{Status: tool.ResultSuccess, Text: "loaded", Structured: json.RawMessage(`{"loaded":true}`), Artifacts: []tool.ArtifactRef{}, Citations: []tool.CitationRef{}}
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	loop.research = &staticResearchGuidance{bound: true, value: workflow.ResearchGuidance{
+		WorkflowRunID: "workflow-run", WorkflowStepID: "step", AllowedToolNames: []string{"builtin.skill.load"}, SkillNames: []string{"scientific-writing"},
+	}}
+	// Mark the run as a Workflow AI run so the preload path is active.
+	state.workflowAI = true
+	if outcome := loop.Run(context.Background(), "run"); outcome != OutcomeCompleted {
+		t.Fatalf("outcome = %s", outcome)
+	}
+	calls, err := loop.tools.ListByRun(context.Background(), "run")
+	if err != nil || len(calls) != 1 || calls[0].ToolName != "builtin.skill.load" || calls[0].Status != tool.CallCompleted {
+		t.Fatalf("preloaded calls = %#v, %v", calls, err)
+	}
+	if len(provider.Requests()) != 1 || len(provider.Requests()[0].Tools) != 1 {
+		t.Fatalf("model request tools = %#v", provider.Requests())
 	}
 }
 
@@ -1675,6 +2157,9 @@ func TestLoopPersistsCheckpointBeforeReplacingOldConversationHistory(t *testing.
 	if len(requests) != 3 {
 		t.Fatalf("model requests = %d, want compaction + answer", len(requests))
 	}
+	if len(requests[0].Tools) != 0 || len(requests[1].Tools) != 0 {
+		t.Fatalf("context compaction exposed tools: first=%#v second=%#v", requests[0].Tools, requests[1].Tools)
+	}
 	if requests[0].PromptCacheKey != "conversation" || requests[1].PromptCacheKey != "conversation" || requests[2].PromptCacheKey != "conversation" {
 		t.Fatalf("compaction cache keys = %q, %q, %q", requests[0].PromptCacheKey, requests[1].PromptCacheKey, requests[2].PromptCacheKey)
 	}
@@ -1844,16 +2329,127 @@ func TestManualCompactionRejectsActiveConversation(t *testing.T) {
 	}
 }
 
-func TestContextBuilderRejectsNormalizedToolCompactionWithoutCheckpointBoundary(t *testing.T) {
+func TestContextBuilderCompactsNormalizedToolResultsWithoutDroppingProtocolPairs(t *testing.T) {
 	baseTokens := len([]rune(fixedSystemRules))
 	builder := NewContextBuilder(baseTokens + len([]rune("fixture")) + len([]rune(`{}`)) + 20)
 	calls := []tool.Call{
 		{ProviderCallID: "old", ToolName: "fixture", Arguments: json.RawMessage(`{}`), Result: &tool.Result{Status: tool.ResultSuccess, Text: strings.Repeat("o", 100)}},
 		{ProviderCallID: "new", ToolName: "fixture", Arguments: json.RawMessage(`{}`), Result: &tool.Result{Status: tool.ResultSuccess, Text: "newest"}},
 	}
-	_, err := builder.Build(context.Background(), nil, "", nil, calls)
-	if err == nil || !strings.Contains(err.Error(), "cannot be safely compacted") {
-		t.Fatalf("unsafe normalized tool compaction error = %v", err)
+	request, info, err := builder.BuildWithInfo(context.Background(), nil, "", nil, calls)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(request.Messages) != 5 || !info.Compacted || info.EstimatedTokens > builder.maxChars {
+		t.Fatalf("compacted request = %#v info = %#v", request.Messages, info)
+	}
+	for index, call := range calls {
+		assistant, result := request.Messages[1+index*2], request.Messages[2+index*2]
+		if len(assistant.ToolCalls) != 1 || assistant.ToolCalls[0].ID != call.ProviderCallID || result.Role != model.RoleTool || result.ToolCallID != call.ProviderCallID {
+			t.Fatalf("tool protocol pair %d = %#v / %#v", index, assistant, result)
+		}
+	}
+}
+
+func TestContextBuilderKeepsEverySkillLoadWhenAggregateResultsExceedBudget(t *testing.T) {
+	builder := NewContextBuilder(200_000)
+	calls := make([]tool.Call, 17)
+	for index := range calls {
+		callID := fmt.Sprintf("skill-%02d", index)
+		calls[index] = tool.Call{
+			ProviderCallID: callID,
+			ToolName:       "builtin.skill.load",
+			Arguments:      json.RawMessage(fmt.Sprintf(`{"name":"method-%02d","limit":7500}`, index)),
+			Result:         &tool.Result{Status: tool.ResultSuccess, Text: strings.Repeat(fmt.Sprintf("method-%02d ", index), 900)},
+		}
+	}
+	request, info, err := builder.BuildWithInfo(context.Background(), []conversation.Message{{ID: "current", Role: conversation.RoleUser, Parts: []conversation.MessagePart{{Type: "text", Text: "综合这些方法"}}}}, "", nil, calls)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.Compacted || info.EstimatedTokens > builder.maxChars || len(request.Messages) != 2+len(calls)*2 {
+		t.Fatalf("request messages = %d info = %#v", len(request.Messages), info)
+	}
+	resultTokens := 0
+	for index, call := range calls {
+		assistant, result := request.Messages[2+index*2], request.Messages[3+index*2]
+		if len(assistant.ToolCalls) != 1 || assistant.ToolCalls[0].ID != call.ProviderCallID || result.ToolCallID != call.ProviderCallID {
+			t.Fatalf("Skill protocol pair %d was not retained", index)
+		}
+		resultTokens += len([]rune(result.Content))
+	}
+	if resultTokens > maxToolContextTokens {
+		t.Fatalf("bounded Skill result context = %d", resultTokens)
+	}
+}
+
+func TestContextBuilderKeepsEveryProviderNativeToolPairWhenResultsExceedBudget(t *testing.T) {
+	builder := NewContextBuilder(200_000)
+	calls := make([]tool.Call, 17)
+	turns := make([]model.ProviderTurn, 17)
+	for index := range calls {
+		callID := fmt.Sprintf("provider-skill-%02d", index)
+		calls[index] = tool.Call{
+			ProviderCallID: callID,
+			ToolName:       "builtin.skill.load",
+			Arguments:      json.RawMessage(fmt.Sprintf(`{"name":"method-%02d"}`, index)),
+			Result:         &tool.Result{Status: tool.ResultSuccess, Text: strings.Repeat(fmt.Sprintf("method-%02d ", index), 900)},
+		}
+		payload := json.RawMessage(fmt.Sprintf(`{"type":"function_call","id":"fc-%02d","call_id":"%s","name":"builtin.skill.load","arguments":"{\"name\":\"method-%02d\"}"}`, index, callID, index))
+		turns[index] = model.ProviderTurn{TurnIndex: index + 1, Protocol: modelcap.ProtocolOpenAIResponses, Items: []model.ProviderItem{{Ordinal: 0, Type: "function_call", CallID: callID, Payload: payload}}}
+	}
+	request, info, err := builder.BuildWithInfo(context.Background(), []conversation.Message{{ID: "current", Role: conversation.RoleUser, Parts: []conversation.MessagePart{{Type: "text", Text: "综合原生协议方法"}}}}, "", nil, calls, turns...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.Compacted || info.EstimatedTokens > builder.maxChars || len(request.ProviderTurns) != len(turns) {
+		t.Fatalf("provider turns = %d info = %#v", len(request.ProviderTurns), info)
+	}
+	resultTokens := 0
+	for index, turn := range request.ProviderTurns {
+		if len(turn.Items) != 1 || turn.Items[0].CallID != calls[index].ProviderCallID || len(turn.ToolResults) != 1 || turn.ToolResults[0].ToolCallID != calls[index].ProviderCallID {
+			t.Fatalf("provider protocol pair %d = %#v", index, turn)
+		}
+		resultTokens += len([]rune(turn.ToolResults[0].Content))
+	}
+	if resultTokens > maxToolContextTokens {
+		t.Fatalf("bounded provider result context = %d", resultTokens)
+	}
+}
+
+func TestContextBuilderSharesResultBudgetAcrossProviderAndHostToolPairs(t *testing.T) {
+	builder := NewContextBuilder(200_000)
+	calls := []tool.Call{{
+		ProviderCallID: "host-citation-seed", ToolName: "builtin.workflow.citation.seed", Arguments: json.RawMessage(`{}`),
+		Result: &tool.Result{Status: tool.ResultSuccess, Text: strings.Repeat("citation seed ", 900)},
+	}}
+	turns := make([]model.ProviderTurn, 16)
+	for index := range turns {
+		callID := fmt.Sprintf("provider-skill-%02d", index)
+		calls = append(calls, tool.Call{
+			ProviderCallID: callID, ToolName: "builtin.skill.load", Arguments: json.RawMessage(fmt.Sprintf(`{"name":"method-%02d"}`, index)),
+			Result: &tool.Result{Status: tool.ResultSuccess, Text: strings.Repeat(fmt.Sprintf("method-%02d ", index), 1_000)},
+		})
+		turns[index] = model.ProviderTurn{TurnIndex: index + 1, Protocol: modelcap.ProtocolOpenAIResponses, Items: []model.ProviderItem{{
+			Ordinal: 0, Type: "function_call", CallID: callID,
+			Payload: json.RawMessage(fmt.Sprintf(`{"type":"function_call","id":"fc-%02d","call_id":"%s","name":"builtin.skill.load","arguments":"{}"}`, index, callID)),
+		}}}
+	}
+	request, info, err := builder.BuildWithInfo(context.Background(), []conversation.Message{{ID: "current", Role: conversation.RoleUser, Parts: []conversation.MessagePart{{Type: "text", Text: "综合引用与方法"}}}}, "", nil, calls, turns...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.Compacted || info.EstimatedTokens > builder.maxChars || len(request.ProviderTurns) != 16 {
+		t.Fatalf("mixed protocol request info = %#v provider turns = %d", info, len(request.ProviderTurns))
+	}
+	last := request.Messages[len(request.Messages)-1]
+	if last.Role != model.RoleTool || last.ToolCallID != "host-citation-seed" || len([]rune(last.Content)) == 0 {
+		t.Fatalf("host result was starved by provider results: %#v", last)
+	}
+	for index, turn := range request.ProviderTurns {
+		if len(turn.ToolResults) != 1 || turn.ToolResults[0].ToolCallID != calls[index+1].ProviderCallID || len([]rune(turn.ToolResults[0].Content)) == 0 {
+			t.Fatalf("provider result %d was not retained: %#v", index, turn)
+		}
 	}
 }
 
@@ -1920,12 +2516,11 @@ func TestCheckpointRequestAppendExtendsStableConversationPrefix(t *testing.T) {
 		{Role: model.RoleSystem, Content: fixedSystemRules},
 		{Role: model.RoleUser, Content: "stable skill catalog"},
 	}
-	tools := []model.ToolDefinition{{Name: "builtin.fixture", Description: "fixture", InputSchema: json.RawMessage(`{"type":"object"}`)}}
 	messages := []conversation.Message{
 		{ID: "user", RunID: "old-run", Role: conversation.RoleUser, Status: conversation.MessageComplete, Parts: []conversation.MessagePart{{Type: "text", Text: "research question"}}},
 		{ID: "assistant", RunID: "old-run", Role: conversation.RoleAssistant, Status: conversation.MessageComplete, Parts: []conversation.MessagePart{{Type: "text", Text: "verified answer"}}},
 	}
-	batch, err := buildCheckpointBatch(contextmemory.Checkpoint{}, messages, "assistant", 20_000, prefix, tools)
+	batch, err := buildCheckpointBatch(contextmemory.Checkpoint{}, messages, "assistant", 20_000, prefix)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1940,12 +2535,12 @@ func TestCheckpointRequestAppendExtendsStableConversationPrefix(t *testing.T) {
 	if batch.request.Messages[2].Content != "research question" || batch.request.Messages[3].Content != "verified answer" || !strings.Contains(batch.request.Messages[4].Content, "durable research checkpoint") {
 		t.Fatalf("checkpoint append sequence = %#v", batch.request.Messages)
 	}
-	if len(batch.request.Tools) != 1 || batch.request.Tools[0].Name != tools[0].Name {
-		t.Fatalf("stable tools changed: %#v", batch.request.Tools)
+	if len(batch.request.Tools) != 0 {
+		t.Fatalf("checkpoint request unexpectedly exposes tools: %#v", batch.request.Tools)
 	}
 }
 
-func TestContextBuilderRejectsProviderTurnCompactionWithoutCheckpointBoundary(t *testing.T) {
+func TestContextBuilderRejectsProviderProtocolThatItselfExceedsWindow(t *testing.T) {
 	oldPayload := json.RawMessage(`{"type":"tool_use","id":"old","name":"fixture","input":{}}`)
 	newReasoning := json.RawMessage(`{"type":"thinking","thinking":"inspect","signature":"signed"}`)
 	newTool := json.RawMessage(`{"type":"tool_use","id":"new","name":"fixture","input":{}}`)
@@ -1962,8 +2557,8 @@ func TestContextBuilderRejectsProviderTurnCompactionWithoutCheckpointBoundary(t 
 		{TurnIndex: 2, Protocol: modelcap.ProtocolAnthropic, Items: []model.ProviderItem{{Ordinal: 0, Type: "thinking", Payload: newReasoning}, {Ordinal: 1, Type: "tool_use", CallID: "new", Payload: newTool}}},
 	}
 	_, _, err := builder.BuildWithInfo(context.Background(), []conversation.Message{{ID: "latest", Role: conversation.RoleUser, Parts: []conversation.MessagePart{{Type: "text", Text: latest}}}}, "", nil, calls, turns...)
-	if err == nil || !strings.Contains(err.Error(), "cannot be safely compacted") {
-		t.Fatalf("unsafe provider compaction error = %v", err)
+	if err == nil || !strings.Contains(err.Error(), "protocol history exceeds context window") {
+		t.Fatalf("provider protocol overflow error = %v", err)
 	}
 }
 

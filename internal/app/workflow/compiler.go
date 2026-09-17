@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	CompilerVersion    = "p7.4-v2"
+	CompilerVersion    = "p7.4-v3"
 	maxDefinitionBytes = 1 << 20
 	maxNodes           = 128
 	maxEdges           = 512
@@ -25,6 +25,13 @@ const (
 )
 
 var identifierPattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
+var schemaFieldPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]{0,63}$`)
+
+var workflowSkillReadTools = []string{
+	"builtin.skill.load",
+	"builtin.skill.resource.list",
+	"builtin.skill.resource.read_text",
+}
 
 type Compiler struct{ registry tool.Registry }
 
@@ -57,7 +64,7 @@ func (c *Compiler) Compile(ctx context.Context, definition Definition) (Compilat
 		if _, exists := drafts[node.ID]; exists {
 			continue
 		}
-		draft := &compiledDraft{node: CompiledNode{ID: node.ID, Name: node.Name, Kind: node.Kind, Arguments: nonEmptyObject(node.Arguments), Prompt: node.Prompt, Dependencies: []string{}}, inputs: map[string]DataType{}, outputs: map[string]DataType{}, required: map[string]bool{}}
+		draft := &compiledDraft{node: CompiledNode{ID: node.ID, Name: node.Name, Kind: node.Kind, Arguments: nonEmptyObject(node.Arguments), Prompt: node.Prompt, PromptVersion: node.PromptVersion, SkillRouting: node.SkillRouting, ReviewPolicy: node.ReviewPolicy, Dependencies: []string{}}, inputs: map[string]DataType{}, outputs: map[string]DataType{}, required: map[string]bool{}}
 		switch node.Kind {
 		case NodeTool, NodeShell, NodePython:
 			name := strings.TrimSpace(node.ToolName)
@@ -108,7 +115,9 @@ func (c *Compiler) Compile(ctx context.Context, definition Definition) (Compilat
 			draft.required["query"] = true
 			draft.inputs["candidates"] = TypeArray
 			draft.required["candidates"] = true
+			draft.inputs["screening"] = TypeObject
 			draft.outputs["selectedCandidateIds"] = TypeArray
+			draft.outputs["selectionAudit"] = TypeObject
 			diagnostics = validateArguments(node.Arguments, draft.inputs, path+".arguments", diagnostics)
 			if strings.TrimSpace(node.Prompt) == "" || len([]rune(node.Prompt)) > 2_000 {
 				diagnostics = append(diagnostics, diagnostic("error", "invalid_prompt", path+".prompt", "Candidate selection prompt must contain 1-2000 characters"))
@@ -118,8 +127,115 @@ func (c *Compiler) Compile(ctx context.Context, definition Definition) (Compilat
 			draft.required["query"] = true
 			draft.inputs["candidates"] = TypeCitations
 			draft.required["candidates"] = true
+			draft.inputs["screening"] = TypeObject
 			draft.outputs["citations"] = TypeCitations
+			draft.outputs["selectionAudit"] = TypeObject
 			diagnostics = validateArguments(node.Arguments, draft.inputs, path+".arguments", diagnostics)
+		case NodeAIAnalysis, NodeAgentStage:
+			draft.inputs["context"] = TypeAny
+			draft.inputs["researchContext"] = TypeAny
+			draft.inputs["originalRequest"] = TypeString
+			draft.inputs["researchContract"] = TypeObject
+			draft.inputs["computedResults"] = TypeObject
+			draft.inputs["sourceArtifacts"] = TypeArtifacts
+			draft.inputs["dataPreflight"] = TypeObject
+			draft.inputs["routeContext"] = TypeAny
+			draft.inputs["methodContext"] = TypeAny
+			draft.inputs["implementationContext"] = TypeObject
+			draft.inputs["dataContext"] = TypeAny
+			draft.inputs["designContext"] = TypeAny
+			draft.inputs["evidenceContext"] = TypeAny
+			draft.inputs["evidenceScreening"] = TypeAny
+			draft.inputs["evidenceSelectionAudit"] = TypeAny
+			draft.inputs["candidates"] = TypeAny
+			draft.inputs["selectedCandidateIds"] = TypeAny
+			draft.inputs["documentIds"] = TypeAny
+			draft.inputs["documentCoverage"] = TypeAny
+			draft.inputs["importedMaterials"] = TypeAny
+			draft.inputs["partialDiscovery"] = TypeAny
+			draft.outputs["analysis"] = TypeObject
+			draft.outputs["text"] = TypeString
+			if len(decodeObject(node.Arguments)) != 0 {
+				diagnostics = append(diagnostics, diagnostic("error", "unexpected_arguments", path+".arguments", "AI nodes receive context through Workflow edges and do not accept literal arguments"))
+			}
+			prompt := strings.TrimSpace(node.Prompt)
+			if prompt == "" || len([]rune(prompt)) > 20_000 {
+				diagnostics = append(diagnostics, diagnostic("error", "invalid_prompt", path+".prompt", "AI node prompt must contain 1-20000 characters"))
+			}
+			if !identifierPattern.MatchString(strings.TrimSpace(node.PromptVersion)) {
+				diagnostics = append(diagnostics, diagnostic("error", "invalid_prompt_version", path+".promptVersion", "AI node promptVersion must be a lower-case version identifier"))
+			}
+			schema := bytes.TrimSpace(node.OutputSchema)
+			if len(schema) == 0 {
+				schema = []byte(`{"type":"object","additionalProperties":true}`)
+			}
+			if len(schema) > 64*1024 || !json.Valid(schema) {
+				diagnostics = append(diagnostics, diagnostic("error", "invalid_output_schema", path+".outputSchema", "AI output Schema must be valid JSON and at most 64 KiB"))
+			} else if err := ValidateAIStageSchema(schema); err != nil {
+				diagnostics = append(diagnostics, diagnostic("error", "invalid_output_schema", path+".outputSchema", err.Error()))
+			}
+			draft.node.OutputSchema = cloneRaw(schema)
+			draft.node.OutputSchemaSHA256 = hashBytes(schema)
+			// Expose only top-level fields declared by the frozen AI output
+			// Schema. This lets a later deterministic Tool consume a specific
+			// structured field (for example analysis.code) without treating an
+			// arbitrary model-generated property as a Workflow port.
+			for name, dataType := range aiAnalysisPorts(schema) {
+				draft.outputs["analysis."+name] = dataType
+			}
+			if node.Kind == NodeAIAnalysis {
+				if node.ReviewPolicy != "" && node.ReviewPolicy != AIReviewAuto {
+					diagnostics = append(diagnostics, diagnostic("error", "invalid_review_policy", path+".reviewPolicy", "AI Analysis nodes always submit validated output automatically"))
+				}
+				draft.node.ReviewPolicy = AIReviewAuto
+			} else {
+				if node.ReviewPolicy == "" {
+					draft.node.ReviewPolicy = AIReviewHuman
+				} else if node.ReviewPolicy != AIReviewHuman && node.ReviewPolicy != AIReviewAuto {
+					diagnostics = append(diagnostics, diagnostic("error", "invalid_review_policy", path+".reviewPolicy", "Agent Stage reviewPolicy must be human or auto"))
+				}
+			}
+			if node.Kind == NodeAIAnalysis && len(node.AllowedTools) > 0 {
+				diagnostics = append(diagnostics, diagnostic("error", "analysis_tools", path+".allowedTools", "AI Analysis nodes cannot call tools; use Agent Stage for tool-assisted work"))
+			}
+			if node.Kind == NodeAIAnalysis && node.SkillRouting {
+				diagnostics = append(diagnostics, diagnostic("error", "analysis_skill_routing", path+".skillRouting", "AI Analysis nodes cannot load Skills; use Agent Stage for Skill-assisted work"))
+			}
+			seenTools := map[string]bool{}
+			allowedToolNames := append([]string(nil), node.AllowedTools...)
+			if node.Kind == NodeAgentStage && node.SkillRouting {
+				allowedToolNames = append(allowedToolNames, workflowSkillReadTools...)
+			}
+			for toolIndex, toolName := range allowedToolNames {
+				toolName = strings.TrimSpace(toolName)
+				toolPath := fmt.Sprintf("%s.allowedTools[%d]", path, toolIndex)
+				fromSkillRouting := toolIndex >= len(node.AllowedTools)
+				if toolName == "" || seenTools[toolName] {
+					if !fromSkillRouting {
+						diagnostics = append(diagnostics, diagnostic("error", "invalid_allowed_tool", toolPath, "Agent Stage tools must be non-empty and unique"))
+					}
+					continue
+				}
+				seenTools[toolName] = true
+				if strings.HasPrefix(toolName, "builtin.skill.") && !fromSkillRouting {
+					diagnostics = append(diagnostics, diagnostic("error", "forbidden_tool", toolPath, "Skill tools are controlled by skillRouting and cannot be listed directly"))
+					continue
+				}
+				definition, definitionErr := c.registry.Definition(ctx, toolName)
+				if definitionErr != nil {
+					diagnostics = append(diagnostics, diagnostic("error", "unknown_tool", toolPath, fmt.Sprintf("Tool %q is not currently registered", toolName)))
+					continue
+				}
+				if node.Kind == NodeAgentStage && !agentStageToolSafe(definition) {
+					diagnostics = append(diagnostics, diagnostic("error", "unsafe_agent_tool", toolPath, "Agent Stage tools must be idempotent observation tools and may only require Workspace read or network access; use explicit Workflow nodes for execution, writes, dependency changes, secrets or external paths"))
+					continue
+				}
+				permissions, _ := json.Marshal(definition.Permissions)
+				draft.node.AllowedTools = append(draft.node.AllowedTools, ToolSnapshot{QualifiedName: definition.QualifiedName, Version: definition.Version, Risk: string(definition.Risk), Permissions: permissions, Idempotent: definition.Idempotent, InputSchema: cloneRaw(definition.InputSchema), OutputSchema: cloneRaw(definition.OutputSchema)})
+			}
+			sort.Slice(draft.node.AllowedTools, func(i, j int) bool {
+				return draft.node.AllowedTools[i].QualifiedName < draft.node.AllowedTools[j].QualifiedName
+			})
 		default:
 			diagnostics = append(diagnostics, diagnostic("error", "unknown_node_kind", path+".kind", "Unsupported Workflow node kind"))
 		}
@@ -229,6 +345,18 @@ func (c *Compiler) Compile(ctx context.Context, definition Definition) (Compilat
 	return compiled, nil
 }
 
+func agentStageToolSafe(definition tool.Definition) bool {
+	if !definition.Idempotent || (definition.Risk != tool.RiskLow && definition.Risk != tool.RiskModerate) {
+		return false
+	}
+	for _, permission := range definition.Permissions {
+		if permission.Kind != tool.PermissionWorkspaceRead && permission.Kind != tool.PermissionNetworkDomain {
+			return false
+		}
+	}
+	return true
+}
+
 func (c *Compiler) Preview(ctx context.Context, definition Definition) Preview {
 	compiled, err := c.Compile(ctx, definition)
 	result := Preview{Valid: err == nil, DefinitionSHA256: compiled.DefinitionSHA256, CompilationSHA256: compiled.CompilationSHA256, Diagnostics: nonNilDiagnostics(compiled.Diagnostics), Nodes: []PreviewNode{}, EdgeCount: len(definition.Edges), InputCount: len(definition.Inputs), OutputCount: len(definition.Outputs)}
@@ -321,6 +449,9 @@ func (c *Compiler) validateShape(value Definition) []Diagnostic {
 		if len(trimmed) > 0 {
 			result = validateSensitiveValues(trimmed, path+".arguments", result)
 		}
+		if node.Kind != NodeAIAnalysis && node.Kind != NodeAgentStage && (strings.TrimSpace(node.PromptVersion) != "" || len(node.AllowedTools) > 0 || node.SkillRouting || node.ReviewPolicy != "" || len(bytes.TrimSpace(node.OutputSchema)) > 0) {
+			result = append(result, diagnostic("error", "unexpected_ai_fields", path, "promptVersion, allowedTools, skillRouting, reviewPolicy and outputSchema are only valid for AI nodes"))
+		}
 	}
 	for index, output := range value.Outputs {
 		path := fmt.Sprintf("outputs[%d]", index)
@@ -390,6 +521,24 @@ func resultPorts(schema json.RawMessage) map[string]DataType {
 					result["structured."+name] = schemaType(item)
 				}
 			}
+		}
+	}
+	return result
+}
+
+func aiAnalysisPorts(schema json.RawMessage) map[string]DataType {
+	result := map[string]DataType{}
+	var root map[string]any
+	if json.Unmarshal(schema, &root) != nil {
+		return result
+	}
+	properties, _ := root["properties"].(map[string]any)
+	for name, raw := range properties {
+		if !schemaFieldPattern.MatchString(name) || sensitiveName(name) {
+			continue
+		}
+		if item, ok := raw.(map[string]any); ok {
+			result[name] = schemaType(item)
 		}
 	}
 	return result
@@ -690,6 +839,20 @@ func nodeSummary(value CompiledNode) string {
 	}
 	if value.Kind == NodeCitationSelection {
 		return "从可信本地证据中选择引用"
+	}
+	if value.Kind == NodeAIAnalysis {
+		return "AI 结构化分析（不调用工具）"
+	}
+	if value.Kind == NodeAgentStage {
+		review := "自动校验并继续"
+		if value.ReviewPolicy != AIReviewAuto {
+			review = "等待人工复核"
+		}
+		skill := ""
+		if value.SkillRouting {
+			skill = " · 动态 Skill"
+		}
+		return fmt.Sprintf("阶段内 AI 协作 · %d 个限定工具 · %s%s", len(value.AllowedTools), review, skill)
 	}
 	if value.Tool == nil {
 		return string(value.Kind)

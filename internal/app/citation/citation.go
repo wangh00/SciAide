@@ -3,6 +3,7 @@ package citation
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -11,9 +12,12 @@ import (
 	"github.com/wangh00/SciAide/internal/app/tool"
 )
 
+const MaxSeededKnowledgeCitations = 256
+
 const (
-	KindKnowledgeChunk = "knowledge_chunk"
-	KnowledgeToolName  = "builtin.knowledge.search"
+	KindKnowledgeChunk   = "knowledge_chunk"
+	KnowledgeToolName    = "builtin.knowledge.search"
+	WorkflowSeedToolName = "builtin.workflow.citation.seed"
 )
 
 func KnowledgeReference(runID, indexVersionID, chunkID, quoteSHA256 string) string {
@@ -32,6 +36,29 @@ func QuoteSHA256(value string) string {
 	return hex.EncodeToString(digest[:])
 }
 
+// ReissueKnowledgeRefs verifies immutable Workflow-bound evidence and binds
+// its markers to a new Chat Run. It never accepts a marker that was not valid
+// for the source Run and project.
+func ReissueKnowledgeRefs(sourceRunID, targetRunID, projectID string, values []tool.CitationRef) ([]tool.CitationRef, error) {
+	sourceRunID, targetRunID, projectID = strings.TrimSpace(sourceRunID), strings.TrimSpace(targetRunID), strings.TrimSpace(projectID)
+	if sourceRunID == "" || targetRunID == "" || projectID == "" {
+		return nil, fmt.Errorf("citation source Run, target Run and project are required")
+	}
+	if len(values) > MaxSeededKnowledgeCitations {
+		return nil, fmt.Errorf("citation seed count exceeds %d", MaxSeededKnowledgeCitations)
+	}
+	result := make([]tool.CitationRef, 0, len(values))
+	for _, original := range values {
+		if original.ProjectID != projectID || !validKnowledgeRef(sourceRunID, original) {
+			return nil, fmt.Errorf("Workflow citation seed is not valid for its source Run and project")
+		}
+		value := original
+		value.Reference = KnowledgeReference(targetRunID, value.IndexVersionID, value.ChunkID, value.QuoteSHA256)
+		result = append(result, value)
+	}
+	return result, nil
+}
+
 func Resolve(runID, messageID, text string, calls []tool.Call, at time.Time) []conversation.Citation {
 	runID, messageID = strings.TrimSpace(runID), strings.TrimSpace(messageID)
 	if runID == "" || messageID == "" || text == "" {
@@ -45,7 +72,7 @@ func Resolve(runID, messageID, text string, calls []tool.Call, at time.Time) []c
 	candidates := make(map[string]candidate)
 	ambiguous := make(map[string]struct{})
 	for _, call := range calls {
-		if call.ID == "" || call.RunID != runID || call.ToolName != KnowledgeToolName || call.Status != tool.CallCompleted || call.Result == nil || call.Result.Status != tool.ResultSuccess {
+		if call.ID == "" || call.RunID != runID || !trustedCitationTool(call.ToolName) || call.Status != tool.CallCompleted || call.Result == nil || call.Result.Status != tool.ResultSuccess {
 			continue
 		}
 		for _, ref := range call.Result.Citations {
@@ -86,6 +113,10 @@ func Resolve(runID, messageID, text string, calls []tool.Call, at time.Time) []c
 		})
 	}
 	return result
+}
+
+func trustedCitationTool(name string) bool {
+	return name == KnowledgeToolName || name == WorkflowSeedToolName
 }
 
 func validKnowledgeRef(runID string, ref tool.CitationRef) bool {

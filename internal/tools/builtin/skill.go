@@ -3,6 +3,7 @@ package builtin
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -135,7 +136,21 @@ func (t *SkillLoad) browse(ctx context.Context, projectID string, args skillLoad
 		return tool.Result{}, err
 	}
 	if len(values) == 0 {
-		return tool.Result{}, fmt.Errorf("no enabled Skills in category %q", args.Category)
+		// A catalog query with no matches is not an execution failure. Keep the
+		// frozen Tool contract unchanged and offer actual selectable categories.
+		snapshot, catalogErr := t.skills.Catalog(ctx, projectID)
+		if catalogErr != nil {
+			return tool.Result{}, catalogErr
+		}
+		lines := []string{fmt.Sprintf("未找到分类 %q 下的可用 Skill；这不表示相关学科的 Skill 不存在。", args.Category), "CATALOG ONLY: loaded=false. No Skill instructions were loaded. Do not guess category names; select from the actual categories below or load a known exact Skill name."}
+		for _, category := range snapshot.Categories {
+			lines = append(lines, fmt.Sprintf("- %s (%d)", category.Name, category.Count))
+		}
+		if len(snapshot.Categories) == 0 {
+			lines = append(lines, "当前没有可用分类；请检查 Skill 是否已启用。")
+		}
+		metadata := skillLoadResult{Mode: "category", Category: args.Category, Count: 0, Total: 0, Skills: []skillListing{}}
+		return skillToolResult(strings.Join(lines, "\n"), metadata, false)
 	}
 	if args.Offset > len(values) {
 		return tool.Result{}, fmt.Errorf("category offset exceeds result count")
@@ -146,7 +161,7 @@ func (t *SkillLoad) browse(ctx context.Context, projectID string, args skillLoad
 	}
 	end := min(len(values), args.Offset+limit)
 	listed := make([]skillListing, 0, end-args.Offset)
-	lines := []string{fmt.Sprintf("## Skills in category: %s", args.Category), "", "Load one by exact name before applying its procedure."}
+	lines := []string{fmt.Sprintf("## Skills in category: %s", args.Category), "", "CATALOG ONLY: loaded=false. This call lists candidates; it does not load any Skill instructions. Call builtin.skill.load with an exact name before claiming or applying that Skill."}
 	for _, item := range values[args.Offset:end] {
 		description := strings.TrimSpace(item.Description)
 		if runes := []rune(description); len(runes) > 180 {
@@ -163,16 +178,20 @@ func (t *SkillLoad) browse(ctx context.Context, projectID string, args skillLoad
 }
 
 func (t *SkillLoad) load(ctx context.Context, invocation tool.Invocation, args skillLoadArguments) (tool.Result, error) {
+	requestedName := args.Name
+	if snapshot, err := t.skills.Catalog(ctx, invocation.ProjectID); err == nil {
+		args.Name = canonicalSkillChoice(args.Name, snapshot.Skills)
+	}
 	info, chunk, created, err := t.skills.LoadStructuredForRun(ctx, invocation.RunID, invocation.ProjectID, invocation.CallID, args.Name, args.Section, args.Offset, args.Limit)
 	if err != nil {
-		if strings.Contains(err.Error(), "not found") {
-			hint := "browse a category to find the exact frontmatter name"
+		if errors.Is(err, opensciskill.ErrSkillNotFound) {
+			hint := "请先按 category 浏览目录，再逐字使用返回的 name 加载；不要根据学科名称猜测 Skill 名称。"
 			if snapshot, catalogErr := t.skills.Catalog(ctx, invocation.ProjectID); catalogErr == nil {
 				if suggestions := skillNameSuggestions(args.Name, snapshot.Skills); len(suggestions) > 0 {
-					hint = "did you mean: " + strings.Join(suggestions, ", ")
+					hint += "可核对这些候选名称：" + strings.Join(suggestions, ", ") + "。"
 				}
 			}
-			return tool.Result{}, fmt.Errorf("%w; %s", err, hint)
+			return tool.Result{}, tool.NewUserFacingError(fmt.Sprintf("未找到 Skill %q，当前目录没有这个名称。%s", args.Name, hint))
 		}
 		return tool.Result{}, err
 	}
@@ -180,6 +199,9 @@ func (t *SkillLoad) load(ctx context.Context, invocation tool.Invocation, args s
 		fmt.Sprintf("## Skill: %s", info.Name), "",
 		fmt.Sprintf("**Origin**: %s", info.Origin),
 		"**Resource access**: use builtin.skill.resource.list first; use builtin.skill.resource.read_text for UTF-8 guidance, or builtin.skill.resource.materialize to copy a script/template/asset into a new Workspace file before separately invoking an approved execution tool.", "",
+	}
+	if requestedName != args.Name {
+		lines = append(lines, fmt.Sprintf("名称已按当前目录唯一匹配：%q → %q。后续引用请使用返回的规范名称。", requestedName, args.Name), "")
 	}
 	if info.Origin == opensciskill.OriginDefault {
 		lines = append(lines, fmt.Sprintf("**Capability audit**: %s (%s). %s", info.Capability, info.CapabilityAuditVersion, info.CapabilityReason))
@@ -198,7 +220,10 @@ func (t *SkillLoad) load(ctx context.Context, invocation tool.Invocation, args s
 		lines = append(lines, "")
 	}
 	if chunk.Mode == "index" {
-		lines = append(lines, "This long Skill is indexed by Markdown section. Load every section relevant to the task before acting:")
+		lines = append(lines,
+			"This long Skill is indexed by logical Markdown sections. Load every section relevant to the task before acting.",
+			"Section IDs are not package files: call builtin.skill.load with the same name and section ID. Never append .md or pass a section ID to builtin.skill.resource.read_text.",
+		)
 		for _, section := range chunk.Sections {
 			lines = append(lines, fmt.Sprintf("- `%s` (H%d, %d runes): %s", section.ID, section.Level, section.Runes, section.Heading))
 		}
@@ -340,4 +365,29 @@ func absInt(value int) int {
 		return -value
 	}
 	return value
+}
+
+// Only an exact or unique case-insensitive catalog name is compatible. No
+// edit-distance, substring or semantic guessing may change the loaded Skill.
+func canonicalSkillChoice(requested string, values []opensciskill.Info) string {
+	requested = strings.TrimSpace(requested)
+	for _, value := range values {
+		if value.Name == requested {
+			return requested
+		}
+	}
+	match := ""
+	for _, value := range values {
+		if !value.Enabled || !value.Entry || value.Capability == opensciskill.CapabilityUnavailable || !strings.EqualFold(value.Name, requested) {
+			continue
+		}
+		if match != "" && match != value.Name {
+			return requested
+		}
+		match = value.Name
+	}
+	if match != "" {
+		return match
+	}
+	return requested
 }

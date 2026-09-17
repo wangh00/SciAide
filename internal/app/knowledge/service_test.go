@@ -15,6 +15,7 @@ import (
 	"github.com/wangh00/SciAide/internal/app/embedding"
 	"github.com/wangh00/SciAide/internal/app/knowledge"
 	"github.com/wangh00/SciAide/internal/app/project"
+	"github.com/wangh00/SciAide/internal/app/researchtask"
 	"github.com/wangh00/SciAide/internal/document"
 	"github.com/wangh00/SciAide/internal/storage/sqlite"
 )
@@ -227,6 +228,14 @@ func TestProjectKnowledgeSearchSpansDocumentsAndRebuildsDeletedCache(t *testing.
 	if !seen["paper-a.txt"] || !seen["paper-b.txt"] || seen["other-project.txt"] {
 		t.Fatalf("matched documents = %#v", seen)
 	}
+	filterIDs := []string{result.Matches[0].DocumentID, result.Matches[1].DocumentID}
+	for i := 2; i < 100; i++ {
+		filterIDs = append(filterIDs, fmt.Sprintf("absent-%d", i))
+	}
+	filteredMany, err := service.SearchWithOptions(ctx, projectA.ID, knowledge.SearchOptions{Query: "alpha kinase treatment", Limit: 10, DocumentIDs: filterIDs})
+	if err != nil || len(filteredMany.Matches) != 2 {
+		t.Fatalf("100-document discovery filter: %#v %v", filteredMany, err)
+	}
 	chinese, err := service.Search(ctx, projectA.ID, "蛋白表达", 5)
 	if err != nil || len(chinese.Matches) != 1 || chinese.Matches[0].Name != "paper-a.txt" {
 		t.Fatalf("Chinese FTS search = %#v, %v", chinese, err)
@@ -420,6 +429,99 @@ func TestCancelledKnowledgeJobStaysCancelledUntilExplicitRetry(t *testing.T) {
 	result, err := service.Search(ctx, selectedProject.ID, "kinase evidence", 5)
 	if err != nil || len(result.Matches) != 1 || result.Matches[0].Name != "paper.txt" {
 		t.Fatalf("retried search = %#v, %v", result, err)
+	}
+}
+
+func TestCancelledTaskKnowledgeDocumentCanBeRetriedInItsScope(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	store, err := sqlite.Open(ctx, filepath.Join(root, "task-cancel-retry.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	projects := project.NewService(sqlite.NewProjectRepository(store.DB()), filepath.Join(root, "workspaces"), filepath.Join(root, "trash"))
+	selectedProject, err := projects.Create(ctx, "Task cancel", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskRepository := sqlite.NewResearchTaskRepository(store.DB())
+	if err := taskRepository.Upsert(ctx, researchtask.UpsertCommand{ID: "task-one", ProjectID: selectedProject.ID, Title: "Task one", OriginKind: researchtask.OriginTemplate, At: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	tasks := researchtask.NewService(taskRepository)
+	attachments := attachment.NewService(sqlite.NewAttachmentRepository(store.DB()), projects)
+	attachments.SetTaskValidator(tasks)
+	service := knowledge.NewService(sqlite.NewKnowledgeRepository(store.DB()), projects, attachments)
+	service.SetTaskValidator(tasks)
+	source := filepath.Join(root, "task-paper.txt")
+	if err := os.WriteFile(source, []byte("Task-scoped reproducible evidence."), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	batch, err := attachments.ImportPathsForTask(ctx, selectedProject.ID, []string{source}, "task-one")
+	if err != nil || len(batch.Errors) != 0 || len(batch.Attachments) != 1 {
+		t.Fatalf("task import = %#v, %v", batch, err)
+	}
+	if err := service.Enqueue(ctx, batch.Attachments[0]); err != nil {
+		t.Fatal(err)
+	}
+	documents, err := service.ListDocumentsForTask(ctx, selectedProject.ID, "task-one")
+	if err != nil || len(documents) != 1 {
+		t.Fatalf("task documents = %#v, %v", documents, err)
+	}
+	if _, err := service.CancelDocumentForTask(ctx, selectedProject.ID, "task-one", documents[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	job, err := service.RetryDocumentForTask(ctx, selectedProject.ID, "task-one", documents[0].ID)
+	if err != nil || job.Status != knowledge.JobQueued {
+		t.Fatalf("task retry = %#v, %v", job, err)
+	}
+	if _, err := service.RetryDocumentForTask(ctx, selectedProject.ID, "missing-task", documents[0].ID); err == nil {
+		t.Fatal("missing research task retried a knowledge document")
+	}
+}
+
+func TestProjectSharedKnowledgeIsReadOnlyInsideTaskView(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	store, err := sqlite.Open(ctx, filepath.Join(root, "shared-read-only.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	projects := project.NewService(sqlite.NewProjectRepository(store.DB()), filepath.Join(root, "workspaces"), filepath.Join(root, "trash"))
+	selectedProject, err := projects.Create(ctx, "Shared read only", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskRepository := sqlite.NewResearchTaskRepository(store.DB())
+	if err := taskRepository.Upsert(ctx, researchtask.UpsertCommand{ID: "task-one", ProjectID: selectedProject.ID, Title: "Task one", OriginKind: researchtask.OriginTemplate, At: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	tasks := researchtask.NewService(taskRepository)
+	attachments := attachment.NewService(sqlite.NewAttachmentRepository(store.DB()), projects)
+	service := knowledge.NewService(sqlite.NewKnowledgeRepository(store.DB()), projects, attachments)
+	service.SetTaskValidator(tasks)
+	source := filepath.Join(root, "shared.txt")
+	if err := os.WriteFile(source, []byte("Shared project evidence."), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	batch, err := attachments.ImportPaths(ctx, selectedProject.ID, []string{source})
+	if err != nil || len(batch.Attachments) != 1 {
+		t.Fatalf("shared import = %#v, %v", batch, err)
+	}
+	if err := service.Enqueue(ctx, batch.Attachments[0]); err != nil {
+		t.Fatal(err)
+	}
+	documents, err := service.ListDocumentsForTask(ctx, selectedProject.ID, "task-one")
+	if err != nil || len(documents) != 1 || documents[0].ScopeKind != attachment.ScopeProjectShared {
+		t.Fatalf("task shared view = %#v, %v", documents, err)
+	}
+	if _, err := service.RemoveDocumentForTask(ctx, selectedProject.ID, "task-one", documents[0].ID); err == nil || !strings.Contains(err.Error(), "read-only") {
+		t.Fatalf("shared task removal error = %v", err)
+	}
+	if _, err := service.RebuildDocumentForTask(ctx, selectedProject.ID, "task-one", documents[0].ID); err == nil || !strings.Contains(err.Error(), "read-only") {
+		t.Fatalf("shared task rebuild error = %v", err)
 	}
 }
 

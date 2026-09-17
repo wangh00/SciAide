@@ -17,7 +17,8 @@ type europePMCConnector struct {
 }
 
 type europePMCResponse struct {
-	Results struct {
+	NextCursor string `json:"nextCursorMark"`
+	Results    struct {
 		Items []europePMCRecord `json:"result"`
 	} `json:"resultList"`
 }
@@ -59,11 +60,32 @@ func (c *europePMCConnector) Source() appresearch.Source {
 
 func (c *europePMCConnector) Search(ctx context.Context, options appresearch.SearchOptions) ([]appresearch.Work, error) {
 	query := url.Values{"query": {options.Query}, "format": {"json"}, "resultType": {"core"}, "pageSize": {fmt.Sprint(options.Limit)}}
-	var response europePMCResponse
-	if err := c.client.getJSON(ctx, c.base+"/search?"+query.Encode(), requestOptions{SourceID: "europepmc", Host: c.host, Cache: true}, &response); err != nil {
-		return nil, err
+	applyPublicationYears("europepmc", query, options.Years)
+	if options.Limit <= 0 || options.Offset%options.Limit != 0 {
+		return nil, fmt.Errorf("Europe PMC offset must align to page size")
 	}
-	return europePMCWorks(response.Results.Items), nil
+	cursor := "*"
+	for offset := 0; offset <= options.Offset; offset += options.Limit {
+		query.Set("cursorMark", cursor)
+		var response europePMCResponse
+		if err := c.client.getJSON(ctx, c.base+"/search?"+query.Encode(), requestOptions{SourceID: "europepmc", Host: c.host, Cache: true}, &response); err != nil {
+			return nil, err
+		}
+		if offset == options.Offset {
+			if response.Results.Items == nil {
+				return nil, fmt.Errorf("Europe PMC response is missing resultList.result")
+			}
+			return europePMCWorks(response.Results.Items), nil
+		}
+		if len(response.Results.Items) == 0 {
+			return []appresearch.Work{}, nil
+		}
+		if response.NextCursor == "" || response.NextCursor == cursor {
+			return nil, &appresearch.SourceError{SourceID: "europepmc", Code: appresearch.FailureInvalidData, Message: "Europe PMC pagination did not advance"}
+		}
+		cursor = response.NextCursor
+	}
+	return []appresearch.Work{}, nil
 }
 
 func (c *europePMCConnector) Fetch(ctx context.Context, recordID string) (appresearch.Work, error) {

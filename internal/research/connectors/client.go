@@ -5,10 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/wangh00/SciAide/internal/browserhttp"
+	"github.com/wangh00/SciAide/internal/httpua"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -29,6 +32,15 @@ type cacheEntry struct {
 	header  http.Header
 	body    []byte
 	expires time.Time
+}
+
+// Credentials never enter source snapshots, query URLs, or third-party hosts.
+func applySourceCredential(request *http.Request, source string) {
+	if request.URL.Scheme == "https" && source == "semantic-scholar" && request.URL.Host == "api.semanticscholar.org" {
+		if key := strings.TrimSpace(os.Getenv("SEMANTIC_SCHOLAR_API_KEY")); key != "" {
+			request.Header.Set("x-api-key", key)
+		}
+	}
 }
 
 type Client struct {
@@ -59,7 +71,7 @@ func NewClient() *Client {
 		cache: map[string]cacheEntry{}, nextStart: map[string]time.Time{},
 	}
 	client.http = &http.Client{
-		Transport: &http.Transport{
+		Transport: browserhttp.New(&http.Transport{
 			Proxy:                 http.ProxyFromEnvironment,
 			DialContext:           (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
 			ForceAttemptHTTP2:     true,
@@ -68,7 +80,7 @@ func NewClient() *Client {
 			IdleConnTimeout:       90 * time.Second,
 			MaxIdleConns:          32,
 			MaxIdleConnsPerHost:   4,
-		},
+		}),
 		CheckRedirect: func(request *http.Request, via []*http.Request) error {
 			if len(via) >= 4 {
 				return fmt.Errorf("research source redirected too many times")
@@ -80,17 +92,6 @@ func NewClient() *Client {
 		},
 	}
 	return client
-}
-
-func newTestClient(client *http.Client) *Client {
-	if client == nil {
-		client = &http.Client{}
-	}
-	return &Client{
-		http: client, timeout: time.Second, cacheTTL: time.Minute, maxResponse: defaultMaxResponse,
-		attempts: defaultRetryAttempts, allowHTTP: true, now: func() time.Time { return time.Now().UTC() },
-		cache: map[string]cacheEntry{}, nextStart: map[string]time.Time{},
-	}
 }
 
 func (c *Client) getJSON(ctx context.Context, target string, options requestOptions, destination any) error {
@@ -145,7 +146,8 @@ func (c *Client) get(ctx context.Context, target string, options requestOptions)
 			return nil, nil, err
 		}
 		request.Header.Set("Accept", "application/json, application/atom+xml, application/xml, text/xml;q=0.9")
-		request.Header.Set("User-Agent", "SciAide/0.4 (+https://github.com/wangh00/SciAide)")
+		httpua.Apply(request)
+		applySourceCredential(request, options.SourceID)
 		response, requestErr := c.http.Do(request)
 		if requestErr != nil {
 			requestContextErr := requestCtx.Err()
@@ -193,6 +195,9 @@ func (c *Client) get(ctx context.Context, target string, options requestOptions)
 		}
 		message := fmt.Sprintf("source returned HTTP %d", response.StatusCode)
 		lastErr = &appresearch.SourceError{SourceID: options.SourceID, Code: code, Message: message, Retryable: retryable}
+		if code == appresearch.FailureRateLimited {
+			return nil, nil, lastErr
+		}
 		if retryable && attempt+1 < attempts {
 			if err := sleepContext(ctx, retryDelay(attempt, response.Header.Get("Retry-After"))); err != nil {
 				return nil, nil, err

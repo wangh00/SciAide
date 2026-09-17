@@ -20,11 +20,15 @@ const (
 )
 
 type Message struct {
-	Role       Role          `json:"role"`
-	Content    string        `json:"content,omitempty"`
-	Parts      []ContentPart `json:"parts,omitempty"`
-	ToolCalls  []ToolCall    `json:"toolCalls,omitempty"`
-	ToolCallID string        `json:"toolCallId,omitempty"`
+	// Host-authored instruction text; never set from provider/user content.
+	HostToolReferences bool `json:"-"`
+	// Host lifecycle/menu state, never inferred from message text.
+	ContextTail bool          `json:"-"`
+	Role        Role          `json:"role"`
+	Content     string        `json:"content,omitempty"`
+	Parts       []ContentPart `json:"parts,omitempty"`
+	ToolCalls   []ToolCall    `json:"toolCalls,omitempty"`
+	ToolCallID  string        `json:"toolCallId,omitempty"`
 }
 
 type ContentPart struct {
@@ -61,6 +65,11 @@ type ToolDefinition struct {
 }
 
 type ChatRequest struct {
+	// Display-only names from a preceding exchange, never additional callable tools.
+	ToolReferenceNames []string `json:"-"`
+	ForcedTool         string   `json:"forcedTool,omitempty"`
+	// DisableTools reserves a structured submission phase while retaining history schemas.
+	DisableTools            bool                    `json:"disableTools,omitempty"`
 	Messages                []Message               `json:"messages"`
 	Tools                   []ToolDefinition        `json:"tools,omitempty"`
 	ProviderTurns           []ProviderTurn          `json:"providerTurns,omitempty"`

@@ -3,7 +3,6 @@
 package skill
 
 import (
-	"encoding/json"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -14,7 +13,6 @@ import (
 
 const (
 	CurrentSchemaVersion = 1
-	DefaultContextTokens = 8_000
 	MaxContextTokens     = 32_000
 )
 
@@ -71,26 +69,6 @@ var (
 
 func ValidID(value string) bool      { return idPattern.MatchString(value) }
 func ValidVersion(value string) bool { return versionPattern.MatchString(value) }
-
-func NormalizeManifest(value Manifest) Manifest {
-	value.ID, value.Version, value.Entry = strings.TrimSpace(value.ID), strings.TrimSpace(value.Version), strings.TrimSpace(value.Entry)
-	value.Name, value.Description = normalizeSingleLine(value.Name), normalizeSingleLine(value.Description)
-	value.Activation.Mode = ActivationMode(strings.TrimSpace(string(value.Activation.Mode)))
-	if value.Activation.Mode == "" {
-		value.Activation.Mode = ActivationExplicit
-	}
-	value.Activation.Triggers = normalizeList(value.Activation.Triggers, false)
-	value.Requires.Tools = normalizeList(value.Requires.Tools, false)
-	value.Requires.OptionalTools = normalizeList(value.Requires.OptionalTools, false)
-	value.Requires.Skills = normalizeList(value.Requires.Skills, true)
-	value.Coordination.ConflictGroups = normalizeList(value.Coordination.ConflictGroups, true)
-	value.Permissions = normalizeList(value.Permissions, false)
-	value.Compatibility.SciAide = strings.TrimSpace(value.Compatibility.SciAide)
-	if value.Context.MaxTokens == 0 {
-		value.Context.MaxTokens = DefaultContextTokens
-	}
-	return value
-}
 
 func ValidateManifest(value Manifest) error {
 	if value.SchemaVersion != CurrentSchemaVersion || !ValidID(value.ID) || !ValidVersion(value.Version) || value.Entry != "SKILL.md" {
@@ -149,8 +127,6 @@ func ValidateManifest(value Manifest) error {
 	return nil
 }
 
-func CanonicalManifest(value Manifest) ([]byte, error) { return json.Marshal(value) }
-
 func validText(value string, minimum, maximum int) bool {
 	if !utf8.ValidString(value) || strings.ContainsRune(value, 0) {
 		return false
@@ -180,22 +156,6 @@ func validateUniqueList(values []string, maximumItems, maximumRunes int, pattern
 	}
 	return nil
 }
-
-func normalizeList(values []string, optional bool) []string {
-	if len(values) == 0 {
-		if optional {
-			return nil
-		}
-		return []string{}
-	}
-	result := make([]string, len(values))
-	for index, value := range values {
-		result[index] = normalizeSingleLine(value)
-	}
-	return result
-}
-
-func normalizeSingleLine(value string) string { return strings.Join(strings.Fields(value), " ") }
 
 func validateVersionConstraint(value string) error {
 	fields := strings.Fields(value)

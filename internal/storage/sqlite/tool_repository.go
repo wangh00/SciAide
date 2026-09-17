@@ -35,8 +35,8 @@ func (r *ToolRepository) create(ctx context.Context, executor sqlExecer, value t
 	} else {
 		runID = value.RunID
 	}
-	_, err = executor.ExecContext(ctx, `INSERT INTO tool_calls(id, run_id, workflow_run_id, provider_call_id, tool_name, tool_version, arguments_json, status, risk, permissions_json, idempotent, idempotency_key, error_code, error_message, created_at, started_at, completed_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		value.ID, runID, workflowRunID, value.ProviderCallID, value.ToolName, value.ToolVersion, string(value.Arguments), value.Status, value.Risk, string(permissions), value.Idempotent, nullableString(value.IdempotencyKey), value.ErrorCode, value.ErrorMessage, formatTime(value.CreatedAt), nullableTime(value.StartedAt), nullableTime(value.CompletedAt), formatTime(value.UpdatedAt))
+	_, err = executor.ExecContext(ctx, `INSERT INTO tool_calls(id, run_id, workflow_run_id, provider_call_id, tool_name, tool_version, arguments_json, status, risk, permissions_json, idempotent, idempotency_key, contract_sha256, error_code, error_message, created_at, started_at, completed_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		value.ID, runID, workflowRunID, value.ProviderCallID, value.ToolName, value.ToolVersion, string(value.Arguments), value.Status, value.Risk, string(permissions), value.Idempotent, nullableString(value.IdempotencyKey), value.ContractSHA256, value.ErrorCode, value.ErrorMessage, formatTime(value.CreatedAt), nullableTime(value.StartedAt), nullableTime(value.CompletedAt), formatTime(value.UpdatedAt))
 	if err != nil {
 		return fmt.Errorf("insert tool call: %w", err)
 	}
@@ -221,13 +221,13 @@ func appendToolEvent(ctx context.Context, tx *sql.Tx, event events.Envelope) err
 	return appendNextEventTx(ctx, tx, &event)
 }
 
-const toolCallSelect = `SELECT tc.id, COALESCE(tc.run_id,tc.workflow_run_id), CASE WHEN tc.workflow_run_id IS NULL THEN 'chat_run' ELSE 'workflow_run' END, tc.provider_call_id, tc.tool_name, tc.tool_version, tc.arguments_json, tc.status, tc.risk, tc.permissions_json, tc.idempotent, COALESCE(tc.idempotency_key, ''), tc.error_code, tc.error_message, tc.created_at, tc.started_at, tc.completed_at, tc.updated_at FROM tool_calls tc`
+const toolCallSelect = `SELECT tc.id, COALESCE(tc.run_id,tc.workflow_run_id), CASE WHEN tc.workflow_run_id IS NULL THEN 'chat_run' ELSE 'workflow_run' END, tc.provider_call_id, tc.tool_name, tc.tool_version, tc.arguments_json, tc.status, tc.risk, tc.permissions_json, tc.idempotent, COALESCE(tc.idempotency_key, ''), COALESCE(tc.contract_sha256, ''), tc.error_code, tc.error_message, tc.created_at, tc.started_at, tc.completed_at, tc.updated_at FROM tool_calls tc`
 
 func scanToolCall(row rowScanner) (tool.Call, error) {
 	var value tool.Call
 	var arguments, permissions, createdAt, updatedAt string
 	var startedAt, completedAt sql.NullString
-	if err := row.Scan(&value.ID, &value.RunID, &value.SubjectKind, &value.ProviderCallID, &value.ToolName, &value.ToolVersion, &arguments, &value.Status, &value.Risk, &permissions, &value.Idempotent, &value.IdempotencyKey, &value.ErrorCode, &value.ErrorMessage, &createdAt, &startedAt, &completedAt, &updatedAt); err != nil {
+	if err := row.Scan(&value.ID, &value.RunID, &value.SubjectKind, &value.ProviderCallID, &value.ToolName, &value.ToolVersion, &arguments, &value.Status, &value.Risk, &permissions, &value.Idempotent, &value.IdempotencyKey, &value.ContractSHA256, &value.ErrorCode, &value.ErrorMessage, &createdAt, &startedAt, &completedAt, &updatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return tool.Call{}, fmt.Errorf("tool call not found")
 		}

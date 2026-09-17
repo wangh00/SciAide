@@ -13,10 +13,14 @@ import (
 const (
 	IndexSchemaVersion = 3
 	ChunkingVersion    = "bounded-unit-v2"
-	SearchKind         = "lexical_v1" // Kept for migration-24 compatibility.
-	RetrievalEngine    = "fts5_bm25_v1"
-	HybridBM25Only     = "bm25_only_v1"
-	HybridRRF          = "rrf_v1"
+	// MaxSearchQueryRunes is shared by the public tool contract and the
+	// knowledge service. Keeping it here prevents Workflow edges from allowing
+	// a query that the downstream local search cannot accept.
+	MaxSearchQueryRunes = 200
+	SearchKind          = "lexical_v1" // Kept for migration-24 compatibility.
+	RetrievalEngine     = "fts5_bm25_v1"
+	HybridBM25Only      = "bm25_only_v1"
+	HybridRRF           = "rrf_v1"
 )
 
 type IndexSpec struct {
@@ -61,23 +65,26 @@ const (
 )
 
 type Document struct {
-	ID                  string          `json:"id"`
-	ProjectID           string          `json:"projectId"`
-	AttachmentID        string          `json:"attachmentId"`
-	IndexVersionID      string          `json:"indexVersionId"`
-	Title               string          `json:"title"`
-	AttachmentSHA256    string          `json:"attachmentSha256"`
-	Status              DocumentStatus  `json:"status"`
-	ParserSchemaVersion int             `json:"parserSchemaVersion"`
-	ChunkingVersion     string          `json:"chunkingVersion"`
-	ChunkCount          int             `json:"chunkCount"`
-	ErrorMessage        string          `json:"errorMessage,omitempty"`
-	CreatedAt           time.Time       `json:"createdAt"`
-	IndexedAt           *time.Time      `json:"indexedAt,omitempty"`
-	UpdatedAt           time.Time       `json:"updatedAt"`
-	Job                 *ImportJob      `json:"job,omitempty"`
-	Progress            int             `json:"progress"`
-	Diagnostic          ParseDiagnostic `json:"diagnostic"`
+	ID                  string                `json:"id"`
+	ProjectID           string                `json:"projectId"`
+	ScopeKind           attachment.ScopeKind  `json:"scopeKind"`
+	ResearchTaskID      string                `json:"researchTaskId,omitempty"`
+	SourceKind          attachment.SourceKind `json:"sourceKind"`
+	AttachmentID        string                `json:"attachmentId"`
+	IndexVersionID      string                `json:"indexVersionId"`
+	Title               string                `json:"title"`
+	AttachmentSHA256    string                `json:"attachmentSha256"`
+	Status              DocumentStatus        `json:"status"`
+	ParserSchemaVersion int                   `json:"parserSchemaVersion"`
+	ChunkingVersion     string                `json:"chunkingVersion"`
+	ChunkCount          int                   `json:"chunkCount"`
+	ErrorMessage        string                `json:"errorMessage,omitempty"`
+	CreatedAt           time.Time             `json:"createdAt"`
+	IndexedAt           *time.Time            `json:"indexedAt,omitempty"`
+	UpdatedAt           time.Time             `json:"updatedAt"`
+	Job                 *ImportJob            `json:"job,omitempty"`
+	Progress            int                   `json:"progress"`
+	Diagnostic          ParseDiagnostic       `json:"diagnostic"`
 }
 
 type ImportJob struct {
@@ -197,10 +204,12 @@ type SearchResult struct {
 }
 
 type SearchOptions struct {
-	Query       string
-	Limit       int
-	DocumentIDs []string
-	Formats     []document.Format
+	EvidenceMode   bool
+	Query          string
+	Limit          int
+	DocumentIDs    []string
+	Formats        []document.Format
+	ResearchTaskID string
 }
 
 type Repository interface {
@@ -233,6 +242,14 @@ type EmbeddingProvider interface {
 type AttachmentLoader interface {
 	List(ctx context.Context, projectID string) ([]attachment.Attachment, error)
 	Parsed(ctx context.Context, projectID, attachmentID string) (attachment.Attachment, document.Parsed, error)
+}
+
+type ScopedAttachmentLoader interface {
+	ListForTask(ctx context.Context, projectID, taskID string) ([]attachment.Attachment, error)
+}
+
+type TaskParsedAttachmentLoader interface {
+	ParsedForTask(ctx context.Context, projectID, taskID, attachmentID string) (attachment.Attachment, document.Parsed, error)
 }
 
 type ProjectLoader interface {

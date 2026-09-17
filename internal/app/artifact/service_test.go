@@ -29,6 +29,7 @@ type readerCaptureRepository struct {
 	record     CreateVersionRecord
 	createCall int
 	detail     Detail
+	artifacts  []Artifact
 	toolSource ToolSource
 	version    Version
 	blob       BlobRecord
@@ -41,8 +42,71 @@ func (r *readerCaptureRepository) CreateVersion(_ context.Context, record Create
 	value := Artifact{ID: record.ArtifactID, ProjectID: record.ProjectID, Name: record.Name, Kind: record.Kind, Status: StatusActive, CurrentVersionID: record.Version.ID, CurrentVersion: &record.Version, CreatedAt: record.Version.CreatedAt, UpdatedAt: record.Version.CreatedAt}
 	return SaveResult{Artifact: value, Version: record.Version, Created: true}, nil
 }
-func (*readerCaptureRepository) List(context.Context, string, bool) ([]Artifact, error) {
-	return nil, nil
+func (r *readerCaptureRepository) List(context.Context, string, bool) ([]Artifact, error) {
+	return append([]Artifact(nil), r.artifacts...), nil
+}
+
+type artifactTaskValidator struct {
+	projectID string
+	taskID    string
+}
+
+func (v artifactTaskValidator) Exists(_ context.Context, projectID, taskID string) (bool, error) {
+	return projectID == v.projectID && taskID == v.taskID, nil
+}
+
+type archivedArtifactTaskValidator struct {
+	projectID string
+	taskID    string
+}
+
+func (v archivedArtifactTaskValidator) Exists(_ context.Context, projectID, taskID string) (bool, error) {
+	return false, nil
+}
+
+func (v archivedArtifactTaskValidator) ExistsIncludingArchived(_ context.Context, projectID, taskID string) (bool, error) {
+	return projectID == v.projectID && taskID == v.taskID, nil
+}
+
+func TestTaskArtifactViewValidatesOwnerAndFiltersOtherTasks(t *testing.T) {
+	_, selected := newArtifactWorkspace(t)
+	repository := &readerCaptureRepository{artifacts: []Artifact{
+		{ID: "shared", ProjectID: selected.ID, ScopeKind: ScopeProjectShared},
+		{ID: "current", ProjectID: selected.ID, ScopeKind: ScopeTask, ResearchTaskID: "task-one"},
+		{ID: "other", ProjectID: selected.ID, ScopeKind: ScopeTask, ResearchTaskID: "task-two"},
+		{ID: "legacy", ProjectID: selected.ID, ScopeKind: ScopeLegacyProject},
+	}}
+	service := NewService(repository, projectFixture{value: selected})
+	service.SetTaskValidator(artifactTaskValidator{projectID: selected.ID, taskID: "task-one"})
+	values, err := service.ListForTask(context.Background(), selected.ID, "task-one", false)
+	if err != nil || len(values) != 2 || values[0].ID != "shared" || values[1].ID != "current" {
+		t.Fatalf("task artifacts = %#v, %v", values, err)
+	}
+	if _, err := service.ListForTask(context.Background(), selected.ID, "missing", false); err == nil {
+		t.Fatal("missing task listed shared artifacts")
+	}
+	repository.detail = Detail{Artifact: Artifact{ID: "other", ProjectID: selected.ID, ScopeKind: ScopeTask, ResearchTaskID: "task-two"}}
+	if _, err := service.GetForTask(context.Background(), selected.ID, "task-one", "other"); err == nil {
+		t.Fatal("other task artifact was read")
+	}
+}
+
+func TestArchivedTaskArtifactViewUsesHistoricalOwnership(t *testing.T) {
+	_, selected := newArtifactWorkspace(t)
+	repository := &readerCaptureRepository{artifacts: []Artifact{
+		{ID: "shared", ProjectID: selected.ID, ScopeKind: ScopeProjectShared},
+		{ID: "archived-output", ProjectID: selected.ID, ScopeKind: ScopeTask, ResearchTaskID: "archived-task"},
+	}}
+	service := NewService(repository, projectFixture{value: selected})
+	service.SetTaskValidator(archivedArtifactTaskValidator{projectID: selected.ID, taskID: "archived-task"})
+	values, err := service.ListForTask(context.Background(), selected.ID, "archived-task", false)
+	if err != nil || len(values) != 2 || values[1].ID != "archived-output" {
+		t.Fatalf("archived task artifacts = %#v, %v", values, err)
+	}
+	repository.detail = Detail{Artifact: Artifact{ID: "archived-output", ProjectID: selected.ID, ScopeKind: ScopeTask, ResearchTaskID: "archived-task"}}
+	if _, err := service.GetForTask(context.Background(), selected.ID, "archived-task", "archived-output"); err != nil {
+		t.Fatalf("archived task artifact detail: %v", err)
+	}
 }
 func (r *readerCaptureRepository) Get(context.Context, string, string) (Detail, error) {
 	return r.detail, nil
@@ -102,6 +166,44 @@ func TestRegisterWorkspaceFileConfinesSourceAndPublishesContentAddress(t *testin
 	}
 	if _, err := service.RegisterWorkspaceFile(context.Background(), RegisterWorkspaceCommand{ProjectID: selected.ID, Path: filepath.Join(workspace, ".sciaide", "project.json")}); err == nil {
 		t.Fatal("private project data was accepted")
+	}
+}
+
+func TestSaveWorkflowDeliverableFreezesHostRenderedOutput(t *testing.T) {
+	_, selected := newArtifactWorkspace(t)
+	repository := &readerCaptureRepository{}
+	service := NewService(repository, projectFixture{value: selected})
+	result, err := service.SaveWorkflowDeliverable(context.Background(), WorkflowDeliverableCommand{
+		ProjectID:     selected.ID,
+		WorkflowRunID: "workflow-run",
+		OutputName:    "research_design",
+		OutputSHA256:  strings.Repeat("a", 64),
+		Name:          "研究设计",
+		Markdown:      "# 研究设计\n\n正文",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Created || repository.record.Version.SourceKey != "workflow-deliverable:workflow-run:research_design:"+strings.Repeat("a", 64) {
+		t.Fatalf("result = %#v, source key = %q", result, repository.record.Version.SourceKey)
+	}
+	if repository.record.Version.Provenance.WorkflowRunID != "workflow-run" || repository.record.Version.Provenance.Extra["workflowDeliverable"] != "research_design" {
+		t.Fatalf("provenance = %#v", repository.record.Version.Provenance)
+	}
+	if len(repository.record.Version.Lineage) != 1 || repository.record.Version.Lineage[0].SourceWorkflowRunID != "workflow-run" {
+		t.Fatalf("lineage = %#v", repository.record.Version.Lineage)
+	}
+}
+
+func TestSaveWorkflowDeliverableRejectsInvalidFrozenIdentity(t *testing.T) {
+	_, selected := newArtifactWorkspace(t)
+	repository := &readerCaptureRepository{}
+	service := NewService(repository, projectFixture{value: selected})
+	_, err := service.SaveWorkflowDeliverable(context.Background(), WorkflowDeliverableCommand{
+		ProjectID: selected.ID, WorkflowRunID: "run", OutputName: "research_design", OutputSHA256: "client-content", Name: "研究设计", Markdown: "正文",
+	})
+	if err == nil || repository.createCall != 0 {
+		t.Fatalf("invalid frozen identity error = %v, calls = %d", err, repository.createCall)
 	}
 }
 
@@ -350,6 +452,35 @@ func TestRegisterToolArtifactsEnforcesWorkspacePermissionResource(t *testing.T) 
 				t.Fatalf("RegisterToolArtifacts() = %#v, %v, calls=%d", results, err, repository.createCall)
 			}
 		})
+	}
+}
+
+func TestRegisterTaskToolArtifactsResolvesPermissionInsideTaskWorkspace(t *testing.T) {
+	_, selected := newArtifactWorkspace(t)
+	taskRoot, err := project.ResearchTaskWorkspacePath(selected, "task-one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(taskRoot, "outputs", "result.csv")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("x,y\n1,2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	repository := &readerCaptureRepository{toolSource: ToolSource{
+		ProjectID: selected.ID, RunID: "workflow-run", ResearchTaskID: "task-one", SubjectKind: tool.SubjectWorkflowRun,
+		CallID: "call", ToolName: "fixture.tool",
+		Permissions: []tool.PermissionRequirement{{Kind: tool.PermissionWorkspaceWrite, Resource: "outputs"}},
+		Artifacts:   []tool.ArtifactRef{{WorkspacePath: "outputs/result.csv"}},
+	}}
+	service := NewService(repository, projectFixture{value: selected})
+	results, err := service.RegisterToolArtifacts(context.Background(), "call")
+	if err != nil || len(results) != 1 || repository.createCall != 1 {
+		t.Fatalf("RegisterToolArtifacts() = %#v, %v, calls=%d", results, err, repository.createCall)
+	}
+	if repository.record.Version.Provenance.Extra["scopeKind"] != string(ScopeTask) || repository.record.Version.Provenance.Extra["researchTaskId"] != "task-one" {
+		t.Fatalf("task Artifact provenance = %#v", repository.record.Version.Provenance.Extra)
 	}
 }
 

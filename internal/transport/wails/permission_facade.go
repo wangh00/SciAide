@@ -31,13 +31,15 @@ func (f *PermissionFacade) ResolveApproval(command permission.ResolveCommand) (p
 			return result, err
 		}
 	}
-	return result, nil
+	return projectApprovalCoordination(result), nil
 }
 
 func (f *PermissionFacade) ListApprovals(runID string) ([]permission.Approval, error) {
-	return f.engine.ListByRun(f.lifecycle.Context(), runID)
+	values, err := f.engine.ListByRun(f.lifecycle.Context(), runID)
+	return permission.SafeApprovals(values), err
 }
 
 func (f *PermissionFacade) ListPendingApprovals(runID string) ([]permission.Approval, error) {
-	return f.engine.ListPending(f.lifecycle.Context(), runID)
+	values, err := f.engine.ListPending(f.lifecycle.Context(), runID)
+	return permission.SafeApprovals(values), err
 }

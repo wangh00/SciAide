@@ -42,6 +42,8 @@ const (
 
 type Origin string
 
+var ErrSkillNotFound = errors.New("Skill not found")
+
 const (
 	OriginDefault   Origin = "default"
 	OriginInstalled Origin = "installed"
@@ -698,7 +700,7 @@ func (s *Service) resolve(ctx context.Context, projectID, name string) (Info, er
 			return item, nil
 		}
 	}
-	return Info{}, fmt.Errorf("Skill %q not found", name)
+	return Info{}, fmt.Errorf("Skill %q not found: %w", name, ErrSkillNotFound)
 }
 
 func (s *Service) discover(ctx context.Context, projectID string) (Snapshot, error) {

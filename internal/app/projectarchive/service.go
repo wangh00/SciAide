@@ -141,7 +141,13 @@ func (s *Service) Export(ctx context.Context, projectID, destination string) (Ex
 		if err != nil {
 			return ExportResult{}, err
 		}
-		if _, duplicate := seen[relative]; duplicate {
+		if source.Kind == FileWorkflowInput && source.TaskID != "" {
+			if err := validateTaskID(source.TaskID); err != nil {
+				return ExportResult{}, err
+			}
+		}
+		scopeKey := source.TaskID + "\x00" + relative
+		if _, duplicate := seen[scopeKey]; duplicate {
 			continue
 		}
 		absolute := strings.TrimSpace(source.SourcePath)
@@ -149,6 +155,12 @@ func (s *Service) Export(ctx context.Context, projectID, destination string) (Ex
 			root := privateRoot
 			if source.Kind == FileWorkflowInput {
 				root = selected.WorkspacePath
+				if source.TaskID != "" {
+					root, err = project.ResearchTaskWorkspacePath(selected, source.TaskID)
+					if err != nil {
+						return ExportResult{}, err
+					}
+				}
 			}
 			absolute = filepath.Join(root, filepath.FromSlash(relative))
 		}
@@ -165,13 +177,20 @@ func (s *Service) Export(ctx context.Context, projectID, destination string) (Ex
 		if source.ExpectedSHA256 != "" && !strings.EqualFold(source.ExpectedSHA256, digest.hash) {
 			return ExportResult{}, fmt.Errorf("archived %s %q no longer matches its recorded SHA256", source.Kind, relative)
 		}
-		seen[relative] = struct{}{}
-		entry := FileEntry{Path: "files/" + relative, StorageRelativePath: relative, Kind: source.Kind, SizeBytes: digest.size, SHA256: digest.hash}
+		seen[scopeKey] = struct{}{}
+		archivePath := "files/" + relative
+		if source.Kind == FileWorkflowInput && source.TaskID != "" {
+			archivePath = "files/tasks/" + source.TaskID + "/" + relative
+		}
+		entry := FileEntry{Path: archivePath, StorageRelativePath: relative, Kind: source.Kind, TaskID: source.TaskID, SizeBytes: digest.size, SHA256: digest.hash}
 		manifest.Files = append(manifest.Files, entry)
 		sources = append(sources, sourceEntry{entry: entry, path: absolute})
 	}
 	sort.Slice(manifest.Files, func(i, j int) bool { return manifest.Files[i].Path < manifest.Files[j].Path })
 	sort.Slice(sources, func(i, j int) bool { return sources[i].entry.Path < sources[j].entry.Path })
+	if err := validateExportBudget(manifest, 0); err != nil {
+		return ExportResult{}, err
+	}
 	manifestJSON, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
 		return ExportResult{}, err
@@ -179,6 +198,9 @@ func (s *Service) Export(ctx context.Context, projectID, destination string) (Ex
 	manifestJSON = append(manifestJSON, '\n')
 	if len(manifestJSON) > maxManifestBytes {
 		return ExportResult{}, fmt.Errorf("project archive manifest exceeds its size limit")
+	}
+	if err := validateExportBudget(manifest, int64(len(manifestJSON))); err != nil {
+		return ExportResult{}, err
 	}
 	if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
 		return ExportResult{}, fmt.Errorf("create archive destination directory: %w", err)
@@ -219,6 +241,12 @@ func (s *Service) Export(ctx context.Context, projectID, destination string) (Ex
 	if err := temporary.Close(); err != nil {
 		return ExportResult{}, err
 	}
+	// ZIP headers also consume space. Reject oversized output before publishing
+	// it, rather than leaving a seemingly successful but unrestorable archive.
+	resultDigest, err := fileDigest(temporaryPath, maxArchiveCompressed)
+	if err != nil {
+		return ExportResult{}, err
+	}
 	if _, err := os.Lstat(destination); err == nil {
 		return ExportResult{}, fmt.Errorf("archive destination appeared while exporting")
 	} else if !os.IsNotExist(err) {
@@ -228,11 +256,27 @@ func (s *Service) Export(ctx context.Context, projectID, destination string) (Ex
 		return ExportResult{}, fmt.Errorf("publish project archive: %w", err)
 	}
 	removeTemporary = false
-	resultDigest, err := fileDigest(destination, maxArchiveCompressed)
-	if err != nil {
-		return ExportResult{}, err
-	}
 	return ExportResult{Path: destination, SHA256: resultDigest.hash, SizeBytes: resultDigest.size, FileCount: len(manifest.Files), Manifest: manifest}, nil
+}
+
+func validateExportBudget(manifest Manifest, manifestBytes int64) error {
+	if len(manifest.Files) > maxArchiveEntries-2 {
+		return fmt.Errorf("project archive entry count exceeds its limit")
+	}
+	if manifestBytes < 0 || manifestBytes > maxManifestBytes || manifest.Database.SizeBytes < 0 || manifest.Database.SizeBytes > maxDatabaseBytes {
+		return fmt.Errorf("project archive database or manifest exceeds its size limit")
+	}
+	total := manifestBytes + manifest.Database.SizeBytes
+	for _, entry := range manifest.Files {
+		if entry.SizeBytes < 0 || entry.SizeBytes > maxArchiveFileBytes {
+			return fmt.Errorf("project archive entry exceeds its size limit")
+		}
+		total += entry.SizeBytes
+		if total > maxArchiveTotalBytes {
+			return fmt.Errorf("project archive exceeds its total extraction limit")
+		}
+	}
+	return nil
 }
 
 func (s *Service) Restore(ctx context.Context, command RestoreCommand) (RestoreReport, error) {
@@ -301,6 +345,12 @@ func (s *Service) Restore(ctx context.Context, command RestoreCommand) (RestoreR
 	}
 	privateRoot := project.PrivateDataPath(project.Project{ID: restored.ID, WorkspacePath: workspace})
 	var restoredBytes int64
+	// Rewrite identities before copying task-owned files so archive task IDs can
+	// be mapped to the freshly allocated IDs in the restored SQLite graph.
+	plan, err := s.repository.RewriteSnapshot(ctx, snapshotPath, restored)
+	if err != nil {
+		return RestoreReport{}, err
+	}
 	for _, entry := range manifest.Files {
 		if err := ctx.Err(); err != nil {
 			return RestoreReport{}, err
@@ -309,16 +359,23 @@ func (s *Service) Restore(ctx context.Context, command RestoreCommand) (RestoreR
 		targetRoot := privateRoot
 		if entry.Kind == FileWorkflowInput {
 			targetRoot = workspace
+			if entry.TaskID != "" {
+				mapped := entry.TaskID
+				if plan.TaskIDs != nil && plan.TaskIDs[mapped] != "" {
+					mapped = plan.TaskIDs[mapped]
+				}
+				var pathErr error
+				targetRoot, pathErr = project.ResearchTaskWorkspacePath(project.Project{ID: restored.ID, WorkspacePath: workspace}, mapped)
+				if pathErr != nil {
+					return RestoreReport{}, pathErr
+				}
+			}
 		}
 		target := filepath.Join(targetRoot, filepath.FromSlash(entry.StorageRelativePath))
 		if err := s.copyFile(source, target, entry.SizeBytes, entry.SHA256); err != nil {
 			return RestoreReport{}, fmt.Errorf("stage restored file %q: %w", entry.Path, err)
 		}
 		restoredBytes += entry.SizeBytes
-	}
-	plan, err := s.repository.RewriteSnapshot(ctx, snapshotPath, restored)
-	if err != nil {
-		return RestoreReport{}, err
 	}
 	if err := s.repository.RewriteKnowledgeIndexes(ctx, privateRoot, plan); err != nil {
 		return RestoreReport{}, err
@@ -464,7 +521,7 @@ func fileDigest(filePath string, maximum int64) (digestResult, error) {
 }
 
 func writeZIPBytes(writer *zip.Writer, name string, contents []byte) error {
-	header := &zip.FileHeader{Name: name, Method: zip.Deflate}
+	header := &zip.FileHeader{Name: name, Method: exportZIPMethod(int64(len(contents)))}
 	header.SetMode(0o600)
 	header.Modified = time.Unix(0, 0).UTC()
 	output, err := writer.CreateHeader(header)
@@ -485,7 +542,7 @@ func writeZIPFile(ctx context.Context, writer *zip.Writer, name, source string, 
 		return err
 	}
 	defer input.Close()
-	header := &zip.FileHeader{Name: name, Method: zip.Deflate}
+	header := &zip.FileHeader{Name: name, Method: exportZIPMethod(expectedSize)}
 	header.SetMode(0o600)
 	header.Modified = time.Unix(0, 0).UTC()
 	output, err := writer.CreateHeader(header)
@@ -522,6 +579,16 @@ func writeZIPFile(ctx context.Context, writer *zip.Writer, name, source string, 
 			return readErr
 		}
 	}
+}
+
+// Store entries subject to the importer's compression-ratio check. This
+// conservative policy guarantees round trips even for repetitive scientific
+// data without buffering large files or weakening ZIP-bomb defenses.
+func exportZIPMethod(size int64) uint16 {
+	if size > 1<<20 {
+		return zip.Store
+	}
+	return zip.Deflate
 }
 
 func extractAndVerifyArchive(ctx context.Context, archivePath, destination string) (Manifest, error) {
@@ -727,10 +794,15 @@ func validateManifest(value Manifest) error {
 			return fmt.Errorf("project archive file declaration is invalid")
 		}
 		relative, err := validateStorageRelativePath(entry.StorageRelativePath, entry.Kind)
-		if err != nil || archivePath != "files/"+relative {
-			return fmt.Errorf("project archive file path does not match its storage path")
+		if entry.TaskID != "" && (entry.Kind != FileWorkflowInput || validateTaskID(entry.TaskID) != nil) {
+			return fmt.Errorf("project archive task file declaration is invalid")
 		}
-		foldedArchive, foldedStorage := strings.ToLower(archivePath), strings.ToLower(relative)
+		if err != nil || archivePath != "files/"+relative {
+			if entry.Kind != FileWorkflowInput || entry.TaskID == "" || archivePath != "files/tasks/"+entry.TaskID+"/"+relative || validateTaskID(entry.TaskID) != nil {
+				return fmt.Errorf("project archive file path does not match its storage path")
+			}
+		}
+		foldedArchive, foldedStorage := strings.ToLower(archivePath), strings.ToLower(entry.TaskID+"\x00"+relative)
 		if _, duplicate := paths[foldedArchive]; duplicate {
 			return fmt.Errorf("project archive manifest contains colliding file paths")
 		}
@@ -807,6 +879,14 @@ func validateStorageRelativePath(value string, kind FileKind) (string, error) {
 		return "", fmt.Errorf("project archive %s path is outside its private storage prefix", kind)
 	}
 	return clean, nil
+}
+
+func validateTaskID(value string) error {
+	value = strings.TrimSpace(value)
+	if value == "" || filepath.Base(value) != value || value == "." || value == ".." || strings.ContainsRune(value, 0) {
+		return fmt.Errorf("project archive task identity is invalid")
+	}
+	return nil
 }
 
 func copyRegularFile(source, target string, expectedSize int64, expectedHash string) error {
@@ -900,10 +980,10 @@ func sameSnapshotManifest(snapshot Snapshot, manifest Manifest) bool {
 	}
 	declared := make(map[string]FileEntry, len(manifest.Files))
 	for _, entry := range manifest.Files {
-		declared[entry.StorageRelativePath] = entry
+		declared[entry.TaskID+"\x00"+entry.StorageRelativePath] = entry
 	}
 	for _, source := range snapshot.Files {
-		entry, found := declared[source.StorageRelativePath]
+		entry, found := declared[source.TaskID+"\x00"+source.StorageRelativePath]
 		if source.Required && !found {
 			return false
 		}
@@ -913,7 +993,7 @@ func sameSnapshotManifest(snapshot Snapshot, manifest Manifest) bool {
 		if entry.Kind != source.Kind || source.ExpectedSize >= 0 && entry.SizeBytes != source.ExpectedSize || source.ExpectedSHA256 != "" && entry.SHA256 != strings.ToLower(source.ExpectedSHA256) {
 			return false
 		}
-		delete(declared, source.StorageRelativePath)
+		delete(declared, source.TaskID+"\x00"+source.StorageRelativePath)
 	}
 	return len(declared) == 0
 }

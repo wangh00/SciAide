@@ -2,9 +2,11 @@ package chat
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	"github.com/wangh00/SciAide/internal/app/conversation"
+	"github.com/wangh00/SciAide/internal/app/tool"
 	"github.com/wangh00/SciAide/internal/events"
 	"github.com/wangh00/SciAide/internal/modelcap"
 )
@@ -75,6 +77,14 @@ type RunStep struct {
 	CompletedAt                time.Time `json:"completedAt"`
 }
 
+// ModelTurnJournalReader exposes only the bounded, provider-visible draft of
+// the currently streaming model turn. It is intentionally separate from the
+// normal RunStep history so callers can observe progress without receiving
+// hidden reasoning payloads or raw provider events.
+type ModelTurnJournalReader interface {
+	LatestModelTurnJournal(ctx context.Context, runID string) (ModelTurnJournal, bool, error)
+}
+
 type ModelTurnStatus string
 
 const (
@@ -110,6 +120,31 @@ type Repository interface {
 	RecordModelUsage(ctx context.Context, value RequestUsage) (Run, bool, error)
 	UsageDashboard(ctx context.Context, query UsageQuery) (UsageDashboard, error)
 	UsageRequests(ctx context.Context, query UsageRequestQuery) (UsageRequestPage, error)
+}
+
+// WorkflowAIExecution freezes the reproducibility contract for a Chat Run
+// started by a Workflow AI node. The Workflow owns stage transitions; Chat
+// owns model streaming, tools, approval and cancellation.
+type WorkflowAIExecution struct {
+	ID                 string
+	WorkflowRunID      string
+	WorkflowStepID     string
+	Attempt            int
+	NodeKind           string
+	PromptVersion      string
+	PromptText         string
+	PromptSHA256       string
+	InputSHA256        string
+	AllowedTools       json.RawMessage
+	OutputSchema       json.RawMessage
+	OutputSchemaSHA256 string
+	Citations          []tool.CitationRef
+	CitationToolCallID string
+	CreatedAt          time.Time
+}
+
+type WorkflowAIRunCreator interface {
+	CreateWorkflowAIWithMessages(ctx context.Context, value Run, userMessage, assistantMessage conversation.Message, execution WorkflowAIExecution) error
 }
 
 // UsageQuery uses local calendar dates (YYYY-MM-DD). Empty dimensions mean

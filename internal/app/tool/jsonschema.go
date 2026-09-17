@@ -8,6 +8,7 @@ import (
 	"math"
 	"reflect"
 	"regexp"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 )
@@ -18,20 +19,128 @@ import (
 // Unsupported assertion keywords fail closed instead of being ignored.
 type JSONSchemaValidator struct{}
 
-func (JSONSchemaValidator) Validate(schema, instance []byte) error {
-	var schemaValue, instanceValue any
+// NormalizeModelArguments canonicalizes the narrow argument defect seen from
+// some model providers: a value declared as an integer is returned as a JSON
+// string such as "200". Only canonical base-10 int64 strings are converted,
+// only where the frozen schema explicitly declares type=integer, and the
+// caller must still run the normal schema validator afterwards. The original
+// provider payload remains available in the provider-turn audit record.
+func NormalizeModelArguments(schema, instance json.RawMessage) (json.RawMessage, bool, error) {
+	schemaValue, err := parseSchema(schema)
+	if err != nil {
+		return nil, false, err
+	}
+	var instanceValue any
+	decoder := json.NewDecoder(bytes.NewReader(instance))
+	decoder.UseNumber()
+	if err := decoder.Decode(&instanceValue); err != nil {
+		return nil, false, fmt.Errorf("invalid instance: %w", err)
+	}
+	if err := requireJSONEOF(decoder, "instance"); err != nil {
+		return nil, false, err
+	}
+	normalized, changed := normalizeSchemaIntegers(schemaValue, instanceValue)
+	if !changed {
+		return append(json.RawMessage(nil), instance...), false, nil
+	}
+	encoded, err := json.Marshal(normalized)
+	if err != nil {
+		return nil, false, fmt.Errorf("encode normalized model arguments: %w", err)
+	}
+	return json.RawMessage(encoded), true, nil
+}
+
+func normalizeSchemaIntegers(rawSchema, value any) (any, bool) {
+	schema, ok := rawSchema.(map[string]any)
+	if !ok {
+		return value, false
+	}
+	if typeName, _ := schema["type"].(string); typeName == "integer" {
+		text, isString := value.(string)
+		if !isString || !canonicalIntegerString(text) {
+			return value, false
+		}
+		return json.Number(text), true
+	}
+	if object, ok := value.(map[string]any); ok {
+		properties, _ := schema["properties"].(map[string]any)
+		changed := false
+		for name, propertySchema := range properties {
+			child, exists := object[name]
+			if !exists {
+				continue
+			}
+			if normalized, childChanged := normalizeSchemaIntegers(propertySchema, child); childChanged {
+				object[name], changed = normalized, true
+			}
+		}
+		return object, changed
+	}
+	if array, ok := value.([]any); ok {
+		itemSchema, exists := schema["items"]
+		if !exists {
+			return array, false
+		}
+		changed := false
+		for index, child := range array {
+			if normalized, childChanged := normalizeSchemaIntegers(itemSchema, child); childChanged {
+				array[index], changed = normalized, true
+			}
+		}
+		return array, changed
+	}
+	return value, false
+}
+
+func canonicalIntegerString(value string) bool {
+	if value == "" || strings.TrimSpace(value) != value || strings.HasPrefix(value, "+") {
+		return false
+	}
+	digits := value
+	if strings.HasPrefix(digits, "-") {
+		digits = digits[1:]
+	}
+	if digits == "" || len(digits) > 19 || len(digits) > 1 && digits[0] == '0' {
+		return false
+	}
+	for _, character := range digits {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	_, err := strconv.ParseInt(value, 10, 64)
+	return err == nil
+}
+
+// ValidateSchema checks the contract itself without using a dummy instance.
+func (JSONSchemaValidator) ValidateSchema(schema []byte) error {
+	_, err := parseSchema(schema)
+	return err
+}
+
+func parseSchema(schema []byte) (any, error) {
+	var schemaValue any
 	decoder := json.NewDecoder(bytes.NewReader(schema))
 	decoder.UseNumber()
 	if err := decoder.Decode(&schemaValue); err != nil {
-		return fmt.Errorf("invalid schema: %w", err)
+		return nil, fmt.Errorf("invalid schema: %w", err)
 	}
 	if err := requireJSONEOF(decoder, "schema"); err != nil {
-		return err
+		return nil, err
 	}
 	if err := validateSchemaSyntax(schemaValue, "$schema"); err != nil {
+		return nil, err
+	}
+	return schemaValue, nil
+}
+
+func (JSONSchemaValidator) Validate(schema, instance []byte) error {
+	schemaValue, err := parseSchema(schema)
+	if err != nil {
 		return err
 	}
-	decoder = json.NewDecoder(bytes.NewReader(instance))
+	var instanceValue any
+	decoder := json.NewDecoder(bytes.NewReader(instance))
 	decoder.UseNumber()
 	if err := decoder.Decode(&instanceValue); err != nil {
 		return fmt.Errorf("invalid instance: %w", err)
@@ -99,6 +208,12 @@ func validateSchemaSyntax(rawSchema any, path string) error {
 				return fmt.Errorf("%s: required entries must be unique", path)
 			}
 			seen[name] = struct{}{}
+			if closed, exists := schema["additionalProperties"].(bool); exists && !closed {
+				properties, _ := schema["properties"].(map[string]any)
+				if _, declared := properties[name]; !declared {
+					return fmt.Errorf("%s: required property %q is forbidden by additionalProperties", path, name)
+				}
+			}
 		}
 	}
 	if raw, exists := schema["additionalProperties"]; exists {

@@ -69,7 +69,7 @@ func (t *ListWorkspace) Invoke(ctx context.Context, invocation tool.Invocation) 
 	if args.Limit < 1 || args.Limit > maxListLimit {
 		return tool.Result{}, fmt.Errorf("directory limit is invalid")
 	}
-	guard, err := guardForProject(ctx, t.projects, invocation.ProjectID)
+	guard, err := guardForInvocation(ctx, t.projects, invocation)
 	if err != nil {
 		return tool.Result{}, err
 	}
@@ -79,6 +79,9 @@ func (t *ListWorkspace) Invoke(ctx context.Context, invocation tool.Invocation) 
 	}
 	directory, clean, err := guard.OpenFile(args.Path)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return tool.Result{}, tool.NewUserFacingError(fmt.Sprintf("Workspace 目录不存在：%s。请先调用 builtin.workspace.list，或使用当前任务提供的精确路径。", filepath.ToSlash(filepath.Clean(args.Path))))
+		}
 		return tool.Result{}, err
 	}
 	defer directory.Close()
@@ -161,7 +164,7 @@ func (*ReadText) Definition(context.Context) (tool.Definition, error) {
 	return tool.Definition{
 		QualifiedName: ReadTextName,
 		Description:   "读取当前科研项目 Workspace 中一个 UTF-8 文本文件的有界内容。",
-		InputSchema:   json.RawMessage(`{"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"type":"string","minLength":1,"maxLength":4096},"maxBytes":{"type":"integer","minimum":1,"maximum":262144}}}`),
+		InputSchema:   json.RawMessage(`{"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"type":"string","minLength":1,"maxLength":4096},"offset":{"type":"integer","minimum":0,"maximum":67108864},"maxBytes":{"type":"integer","minimum":1,"maximum":262144}}}`),
 		OutputSchema:  json.RawMessage(`{"type":"object","additionalProperties":false,"required":["path","content","bytesRead","originalBytes","truncated"],"properties":{"path":{"type":"string"},"content":{"type":"string"},"bytesRead":{"type":"integer","minimum":0},"originalBytes":{"type":"integer","minimum":0},"truncated":{"type":"boolean"}}}`),
 		Risk:          tool.RiskLow,
 		Permissions:   []tool.PermissionRequirement{{Kind: tool.PermissionWorkspaceRead, Resource: "."}},
@@ -176,6 +179,7 @@ func (t *ReadText) Invoke(ctx context.Context, invocation tool.Invocation) (tool
 	}
 	var args struct {
 		Path     string `json:"path"`
+		Offset   int64  `json:"offset"`
 		MaxBytes int    `json:"maxBytes"`
 	}
 	if err := json.Unmarshal(invocation.Arguments, &args); err != nil {
@@ -187,7 +191,10 @@ func (t *ReadText) Invoke(ctx context.Context, invocation tool.Invocation) (tool
 	if args.MaxBytes < 1 || args.MaxBytes > maxReadBytes {
 		return tool.Result{}, fmt.Errorf("read limit is invalid")
 	}
-	guard, err := guardForProject(ctx, t.projects, invocation.ProjectID)
+	if args.Offset < 0 || args.Offset > 67108864 {
+		return tool.Result{}, fmt.Errorf("read offset is invalid")
+	}
+	guard, err := guardForInvocation(ctx, t.projects, invocation)
 	if err != nil {
 		return tool.Result{}, err
 	}
@@ -197,6 +204,9 @@ func (t *ReadText) Invoke(ctx context.Context, invocation tool.Invocation) (tool
 	}
 	file, clean, err := guard.OpenFile(args.Path)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return tool.Result{}, tool.NewUserFacingError(fmt.Sprintf("Workspace 文件不存在：%s。请先调用 builtin.workspace.list，或使用 workflow_state.inputs.input_paths 中的精确路径。", filepath.ToSlash(filepath.Clean(args.Path))))
+		}
 		return tool.Result{}, err
 	}
 	defer file.Close()
@@ -206,6 +216,14 @@ func (t *ReadText) Invoke(ctx context.Context, invocation tool.Invocation) (tool
 	}
 	if !info.Mode().IsRegular() {
 		return tool.Result{}, fmt.Errorf("workspace path is not a regular file")
+	}
+	if args.Offset > info.Size() {
+		return tool.Result{}, tool.NewUserFacingError(fmt.Sprintf("Workspace 文件偏移超出范围：%s 的大小为 %d 字节，offset 不能超过该值。", filepath.ToSlash(clean), info.Size()))
+	}
+	if args.Offset > 0 {
+		if _, err := file.Seek(args.Offset, io.SeekStart); err != nil {
+			return tool.Result{}, fmt.Errorf("seek workspace file: %w", err)
+		}
 	}
 	reader := bufio.NewReader(io.LimitReader(file, int64(args.MaxBytes)+1))
 	contents, err := io.ReadAll(reader)
@@ -218,10 +236,8 @@ func (t *ReadText) Invoke(ctx context.Context, invocation tool.Invocation) (tool
 	truncated := len(contents) > args.MaxBytes
 	if truncated {
 		contents = contents[:args.MaxBytes]
-		for len(contents) > 0 && !utf8.Valid(contents) {
-			contents = contents[:len(contents)-1]
-		}
 	}
+	contents = trimUTF8Window(contents, args.Offset > 0)
 	if !utf8.Valid(contents) || containsBinary(contents) {
 		return tool.Result{}, fmt.Errorf("workspace file is not supported UTF-8 text")
 	}
@@ -237,6 +253,72 @@ func (t *ReadText) Invoke(ctx context.Context, invocation tool.Invocation) (tool
 		return tool.Result{}, err
 	}
 	return tool.Result{Status: tool.ResultSuccess, Text: string(contents), Structured: structured, Truncated: truncated, Meta: tool.ResultMeta{OriginalBytes: info.Size()}}, nil
+}
+
+// trimUTF8Window removes only incomplete UTF-8 runes introduced by a byte
+// offset or the bounded read. Invalid bytes in the middle of a file are left
+// intact and rejected by the caller instead of being silently skipped.
+func trimUTF8Window(contents []byte, allowPartialPrefix bool) []byte {
+	if utf8.Valid(contents) {
+		return contents
+	}
+	// A page may begin on a UTF-8 continuation byte when the caller uses a
+	// byte offset. Only continuation bytes are safe to discard at the prefix;
+	// an invalid lead byte must remain visible and be rejected below.
+	start := 0
+	if allowPartialPrefix {
+		for start < len(contents) && start < 3 && contents[start]&0xc0 == 0x80 {
+			start++
+		}
+	}
+	if start > 0 {
+		contents = contents[start:]
+	}
+	if utf8.Valid(contents) {
+		return contents
+	}
+	// A bounded page can end in an incomplete multi-byte rune. Remove only a
+	// suffix that is provably a valid UTF-8 prefix; an invalid lead byte such
+	// as 0xff remains and is rejected by the caller.
+	for cut := 1; cut <= 3 && cut < len(contents); cut++ {
+		candidate := contents[:len(contents)-cut]
+		tail := contents[len(contents)-cut:]
+		if utf8.Valid(candidate) && isIncompleteUTF8Prefix(tail) {
+			return candidate
+		}
+	}
+	return contents
+}
+
+func isIncompleteUTF8Prefix(value []byte) bool {
+	if len(value) == 0 || len(value) > 3 {
+		return false
+	}
+	width := utf8RuneWidth(value[0])
+	if width == 0 || width <= len(value) {
+		return false
+	}
+	for _, item := range value[1:] {
+		if item&0xc0 != 0x80 {
+			return false
+		}
+	}
+	return true
+}
+
+func utf8RuneWidth(value byte) int {
+	switch {
+	case value < 0x80:
+		return 1
+	case value >= 0xc2 && value <= 0xdf:
+		return 2
+	case value >= 0xe0 && value <= 0xef:
+		return 3
+	case value >= 0xf0 && value <= 0xf4:
+		return 4
+	default:
+		return 0
+	}
 }
 
 func rejectPrivateProjectPath(guard *pathguard.Guard, value string) error {
@@ -264,6 +346,27 @@ func guardForProject(ctx context.Context, projects ProjectLoader, projectID stri
 		return nil, err
 	}
 	return pathguard.Open(value.WorkspacePath)
+}
+
+func guardForInvocation(ctx context.Context, projects ProjectLoader, invocation tool.Invocation) (*pathguard.Guard, error) {
+	if strings.TrimSpace(invocation.WorkspaceRoot) != "" {
+		return pathguard.Open(invocation.WorkspaceRoot)
+	}
+	if taskID := strings.TrimSpace(invocation.ResearchTaskID); taskID != "" {
+		selected, err := projects.Get(ctx, invocation.ProjectID)
+		if err != nil {
+			return nil, err
+		}
+		root, err := project.ResearchTaskWorkspacePath(selected, taskID)
+		if err != nil {
+			return nil, err
+		}
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			return nil, fmt.Errorf("create research task workspace: %w", err)
+		}
+		return pathguard.Open(root)
+	}
+	return guardForProject(ctx, projects, invocation.ProjectID)
 }
 
 func containsBinary(contents []byte) bool {

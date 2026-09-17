@@ -5,9 +5,11 @@ package tool
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
@@ -79,6 +81,54 @@ type Definition struct {
 	Version       string                  `json:"version"`
 }
 
+// DefinitionFingerprint is the immutable contract identity stored with a
+// proposed call.  A call must execute against the same schema, permissions
+// and execution characteristics that the model was shown.  Keeping this
+// identity on the call also makes registry replacement safe across retries.
+func DefinitionFingerprint(value Definition) string {
+	value = SnapshotDefinition(value)
+	permissions := append([]PermissionRequirement(nil), value.Permissions...)
+	sort.Slice(permissions, func(i, j int) bool {
+		if permissions[i].Kind != permissions[j].Kind {
+			return permissions[i].Kind < permissions[j].Kind
+		}
+		return permissions[i].Resource < permissions[j].Resource
+	})
+	payload := struct {
+		QualifiedName string                  `json:"qualifiedName"`
+		InputSchema   json.RawMessage         `json:"inputSchema"`
+		OutputSchema  json.RawMessage         `json:"outputSchema,omitempty"`
+		Risk          RiskLevel               `json:"risk"`
+		Permissions   []PermissionRequirement `json:"permissions"`
+		Idempotent    bool                    `json:"idempotent"`
+		Version       string                  `json:"version"`
+	}{value.QualifiedName, canonicalJSON(value.InputSchema), canonicalJSON(value.OutputSchema), value.Risk, permissions, value.Idempotent, value.Version}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return ""
+	}
+	hash := sha256.Sum256(encoded)
+	return fmt.Sprintf("%x", hash[:])
+}
+
+// canonicalJSON removes insignificant whitespace and object-key ordering from
+// Schema snapshots. Registry adapters and Workflow compilation can serialize
+// equivalent JSON differently; that must not look like a changed contract.
+func canonicalJSON(value json.RawMessage) json.RawMessage {
+	if len(value) == 0 {
+		return nil
+	}
+	var decoded any
+	if json.Unmarshal(value, &decoded) != nil {
+		return append(json.RawMessage(nil), value...)
+	}
+	encoded, err := json.Marshal(decoded)
+	if err != nil {
+		return append(json.RawMessage(nil), value...)
+	}
+	return encoded
+}
+
 type Invocation struct {
 	CallID      string      `json:"callId"`
 	RunID       string      `json:"runId"`
@@ -86,15 +136,44 @@ type Invocation struct {
 	// ProviderCallID and IdempotencyKey are trusted execution metadata copied
 	// from the persisted ToolCall. They let a tool derive stable operation
 	// identity without accepting caller-controlled fields in its JSON schema.
-	ProviderCallID string          `json:"providerCallId,omitempty"`
-	IdempotencyKey string          `json:"idempotencyKey,omitempty"`
-	ProjectID      string          `json:"projectId"`
+	ProviderCallID string `json:"providerCallId,omitempty"`
+	IdempotencyKey string `json:"idempotencyKey,omitempty"`
+	ProjectID      string `json:"projectId"`
+	// ResearchTaskID and WorkspaceRoot are trusted execution metadata. They are
+	// populated by the executor from the persisted Workflow subject, never from
+	// model arguments.
+	ResearchTaskID string          `json:"researchTaskId,omitempty"`
+	WorkspaceRoot  string          `json:"workspaceRoot,omitempty"`
 	Arguments      json.RawMessage `json:"arguments"`
 }
 
 type Tool interface {
 	Definition(ctx context.Context) (Definition, error)
 	Invoke(ctx context.Context, invocation Invocation) (Result, error)
+}
+
+// UserFacingError marks a bounded message as safe to persist and show to the
+// user/model. Arbitrary invocation errors remain private and are only logged.
+type UserFacingError struct{ message string }
+
+func (e UserFacingError) Error() string             { return e.message }
+func (e UserFacingError) UserFacingMessage() string { return e.message }
+
+func NewUserFacingError(message string) error {
+	message = strings.TrimSpace(message)
+	if message == "" {
+		message = "工具执行失败"
+	}
+	return UserFacingError{message: message}
+}
+
+func userFacingMessage(err error) (string, bool) {
+	var safe interface{ UserFacingMessage() string }
+	if !errors.As(err, &safe) {
+		return "", false
+	}
+	message := strings.TrimSpace(safe.UserFacingMessage())
+	return message, message != ""
 }
 
 type Registry interface {
@@ -135,9 +214,13 @@ type Call struct {
 	Permissions    []PermissionRequirement `json:"permissions"`
 	Idempotent     bool                    `json:"idempotent"`
 	IdempotencyKey string                  `json:"idempotencyKey,omitempty"`
-	ErrorCode      string                  `json:"errorCode,omitempty"`
-	ErrorMessage   string                  `json:"errorMessage,omitempty"`
-	Result         *Result                 `json:"result,omitempty"`
+	ContractSHA256 string                  `json:"contractSha256,omitempty"`
+	// Resolved task scope used only during in-memory artifact freezing. The
+	// executor derives it from the Workflow subject; callers cannot provide it.
+	ResearchTaskID string  `json:"-"`
+	ErrorCode      string  `json:"errorCode,omitempty"`
+	ErrorMessage   string  `json:"errorMessage,omitempty"`
+	Result         *Result `json:"result,omitempty"`
 	// ModelContext is the immutable, bounded representation originally exposed
 	// to the model. It is deliberately excluded from UI snapshots because the
 	// complete Result remains the user-facing and audit source of truth.
@@ -222,6 +305,15 @@ type Result struct {
 	Truncated  bool            `json:"truncated"`
 	Meta       ResultMeta      `json:"meta"`
 	CreatedAt  time.Time       `json:"createdAt"`
+	// ModelProjection is an optional host-generated view for the immutable
+	// model_context_text snapshot. Full Text/Structured remain the UI/audit
+	// source. It is never accepted from model arguments or serialized to UI.
+	ModelProjection *ModelResultProjection `json:"-"`
+}
+
+type ModelResultProjection struct {
+	Text       string
+	Structured json.RawMessage
 }
 
 // BuildModelContextSnapshot freezes the exact bounded result representation
@@ -229,6 +321,10 @@ type Result struct {
 // encoding/json orders map keys deterministically, preserving the legacy wire
 // representation used by the agent context builder.
 func BuildModelContextSnapshot(callID, errorCode string, result Result) string {
+	if result.ModelProjection != nil {
+		result.Text = result.ModelProjection.Text
+		result.Structured = result.ModelProjection.Structured
+	}
 	payload := map[string]any{
 		"status":     result.Status,
 		"text":       result.Text,
@@ -377,6 +473,11 @@ func ValidateResult(value Result) error {
 	}
 	if len(value.Structured) > 0 && !json.Valid(value.Structured) {
 		return fmt.Errorf("tool structured result must be valid JSON")
+	}
+	if p := value.ModelProjection; p != nil {
+		if len(p.Text) > 256*1024 || len(p.Structured) > 256*1024 || (len(p.Structured) > 0 && !json.Valid(p.Structured)) {
+			return fmt.Errorf("tool model projection is invalid or exceeds bounds")
+		}
 	}
 	if value.Meta.DurationMillis < 0 || value.Meta.OriginalBytes < 0 {
 		return fmt.Errorf("tool result metadata must not be negative")

@@ -23,6 +23,23 @@ import (
 	"github.com/wangh00/SciAide/internal/storage/sqlite"
 )
 
+func likelySkills(message string, skills []Info) []Info {
+	return recallSkills(message, "", skills, nil)
+}
+
+func recallSkills(current, recent string, skills []Info, continuity []string) []Info {
+	values := make([]routingContinuity, 0, len(continuity))
+	for _, name := range continuity {
+		values = append(values, routingContinuity{name: name})
+	}
+	scored := scoreSkills(current, recent, skills, values)
+	result := make([]Info, 0, len(scored))
+	for _, value := range scored {
+		result = append(result, value.info)
+	}
+	return result
+}
+
 func TestBundledCatalogParsesEveryOpenScienceSkill(t *testing.T) {
 	ctx := context.Background()
 	service, store, projects := newTestService(t)
@@ -423,6 +440,33 @@ func TestRoutingPromptUsesBoundedEnabledCandidatesAndExplicitSelection(t *testin
 	invoked := explicitlyInvokedSkills("(/first-skill) /second-skill, /first-skill/path and Use the second-skill skill:", byName)
 	if strings.Join(invoked, ",") != "first-skill,second-skill" {
 		t.Fatalf("explicitly invoked Skills = %#v", invoked)
+	}
+}
+
+func TestWorkflowRoutingUsesOnlyFrozenStageSkills(t *testing.T) {
+	ctx := context.Background()
+	service, store, _ := newTestService(t)
+	defer store.Close()
+
+	prompt, err := service.RoutingPromptForRun(ctx, "", RoutingInput{
+		Current:          "复核当前方法的适用条件，不要重新选择研究方法",
+		CandidateNames:   []string{"scientific-writing", "citation-management"},
+		CandidateLimit:   2,
+		StrictCandidates: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(prompt, "exact host-frozen shortlist") || !strings.Contains(prompt, "- scientific-writing:") || !strings.Contains(prompt, "- citation-management:") {
+		t.Fatalf("frozen Workflow routing prompt = %s", prompt)
+	}
+	if strings.Contains(prompt, "scientific-schematics") || strings.Contains(prompt, "browse a category") || strings.Contains(prompt, "user explicitly selected") || strings.Contains(prompt, "model re-ranking") || strings.Contains(prompt, "<skill_routing>") {
+		t.Fatalf("unrelated Skill leaked into frozen Workflow routing: %s", prompt)
+	}
+
+	empty, err := service.RoutingPromptForRun(ctx, "", RoutingInput{StrictCandidates: true})
+	if err != nil || !strings.Contains(empty, "no frozen Skill requirement") {
+		t.Fatalf("empty frozen Workflow routing = %q, %v", empty, err)
 	}
 }
 

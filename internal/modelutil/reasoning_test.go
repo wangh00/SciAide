@@ -6,16 +6,16 @@ import (
 )
 
 func TestReasoningControlRejected(t *testing.T) {
-	if !ReasoningControlRejected(http.StatusBadRequest, []byte(`{"error":{"message":"Unsupported parameter: reasoning_effort"}}`)) {
+	if ClassifyReasoningRejection(http.StatusBadRequest, []byte(`{"error":{"message":"Unsupported parameter: reasoning_effort"}}`)) == ReasoningRejectionNone {
 		t.Fatal("expected reasoning parameter rejection")
 	}
-	if !ReasoningControlRejected(http.StatusUnprocessableEntity, []byte(`{"message":"thinking is not supported by this model"}`)) {
+	if ClassifyReasoningRejection(http.StatusUnprocessableEntity, []byte(`{"message":"thinking is not supported by this model"}`)) == ReasoningRejectionNone {
 		t.Fatal("expected thinking rejection")
 	}
-	if ReasoningControlRejected(http.StatusBadRequest, []byte(`{"error":{"message":"Invalid tools schema"}}`)) {
+	if ClassifyReasoningRejection(http.StatusBadRequest, []byte(`{"error":{"message":"Invalid tools schema"}}`)) != ReasoningRejectionNone {
 		t.Fatal("tool schema error must not trigger reasoning fallback")
 	}
-	if ReasoningControlRejected(http.StatusUnauthorized, []byte(`{"error":{"message":"reasoning_effort denied"}}`)) {
+	if ClassifyReasoningRejection(http.StatusUnauthorized, []byte(`{"error":{"message":"reasoning_effort denied"}}`)) != ReasoningRejectionNone {
 		t.Fatal("non-client capability error must not trigger fallback")
 	}
 }

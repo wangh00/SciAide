@@ -80,6 +80,39 @@ type Approval struct {
 	ResolvedAt     *time.Time          `json:"resolvedAt,omitempty"`
 }
 
+const (
+	// ApprovalProjectionResourceLimit and ApprovalProjectionReasonLimit bound
+	// the approval fields that cross a UI/API projection boundary. The full
+	// values remain in the durable approval and event records for audit.
+	ApprovalProjectionResourceLimit = 512
+	ApprovalProjectionReasonLimit   = 1000
+)
+
+// SafeApproval returns a user-facing copy of an approval. Approval resources
+// are often paths, URLs or command targets and reasons can contain provider
+// error text; both must be redacted and bounded before crossing a transport or
+// activity boundary. This function deliberately leaves the authoritative
+// approval unchanged.
+func SafeApproval(value Approval) Approval {
+	value.Resource = tool.SafeActivityText(value.Resource, ApprovalProjectionResourceLimit)
+	value.Reason = tool.SafeActivityText(value.Reason, ApprovalProjectionReasonLimit)
+	return value
+}
+
+// SafeApprovals projects a collection without exposing the backing slice or
+// mutating persisted domain values. A non-nil empty input remains non-nil so
+// JSON consumers can reliably distinguish an empty list from an omitted field.
+func SafeApprovals(values []Approval) []Approval {
+	if len(values) == 0 {
+		return []Approval{}
+	}
+	result := make([]Approval, len(values))
+	for index, value := range values {
+		result[index] = SafeApproval(value)
+	}
+	return result
+}
+
 type EvaluationRequest struct {
 	ProjectID   string           `json:"projectId"`
 	RunID       string           `json:"runId"`

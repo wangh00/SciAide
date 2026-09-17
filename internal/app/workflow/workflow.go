@@ -11,6 +11,17 @@ import (
 
 const SchemaVersion = 1
 
+type Purpose string
+
+const (
+	PurposeUserPlan        Purpose = "user_plan"
+	PurposeResearchStarter Purpose = "research_starter"
+)
+
+func (value Purpose) Valid() bool {
+	return value == PurposeUserPlan || value == PurposeResearchStarter
+}
+
 type NodeKind string
 
 const (
@@ -20,6 +31,15 @@ const (
 	NodeHumanConfirmation  NodeKind = "human_confirmation"
 	NodeCandidateSelection NodeKind = "candidate_selection"
 	NodeCitationSelection  NodeKind = "citation_selection"
+	NodeAIAnalysis         NodeKind = "ai_analysis"
+	NodeAgentStage         NodeKind = "agent_stage"
+)
+
+type AIReviewPolicy string
+
+const (
+	AIReviewHuman AIReviewPolicy = "human"
+	AIReviewAuto  AIReviewPolicy = "auto"
 )
 
 type DataType string
@@ -49,12 +69,17 @@ type Port struct {
 }
 
 type Node struct {
-	ID        string          `json:"id"`
-	Name      string          `json:"name"`
-	Kind      NodeKind        `json:"kind"`
-	ToolName  string          `json:"toolName,omitempty"`
-	Arguments json.RawMessage `json:"arguments"`
-	Prompt    string          `json:"prompt,omitempty"`
+	ID            string          `json:"id"`
+	Name          string          `json:"name"`
+	Kind          NodeKind        `json:"kind"`
+	ToolName      string          `json:"toolName,omitempty"`
+	Arguments     json.RawMessage `json:"arguments"`
+	Prompt        string          `json:"prompt,omitempty"`
+	PromptVersion string          `json:"promptVersion,omitempty"`
+	AllowedTools  []string        `json:"allowedTools,omitempty"`
+	SkillRouting  bool            `json:"skillRouting,omitempty"`
+	ReviewPolicy  AIReviewPolicy  `json:"reviewPolicy,omitempty"`
+	OutputSchema  json.RawMessage `json:"outputSchema,omitempty"`
 }
 
 type Edge struct {
@@ -108,14 +133,20 @@ type ToolSnapshot struct {
 }
 
 type CompiledNode struct {
-	ID           string          `json:"id"`
-	Name         string          `json:"name"`
-	Kind         NodeKind        `json:"kind"`
-	Tool         *ToolSnapshot   `json:"tool,omitempty"`
-	Arguments    json.RawMessage `json:"arguments"`
-	Prompt       string          `json:"prompt,omitempty"`
-	Dependencies []string        `json:"dependencies"`
-	SideEffect   bool            `json:"sideEffect"`
+	ID                 string          `json:"id"`
+	Name               string          `json:"name"`
+	Kind               NodeKind        `json:"kind"`
+	Tool               *ToolSnapshot   `json:"tool,omitempty"`
+	Arguments          json.RawMessage `json:"arguments"`
+	Prompt             string          `json:"prompt,omitempty"`
+	PromptVersion      string          `json:"promptVersion,omitempty"`
+	AllowedTools       []ToolSnapshot  `json:"allowedTools,omitempty"`
+	SkillRouting       bool            `json:"skillRouting,omitempty"`
+	ReviewPolicy       AIReviewPolicy  `json:"reviewPolicy,omitempty"`
+	OutputSchema       json.RawMessage `json:"outputSchema,omitempty"`
+	OutputSchemaSHA256 string          `json:"outputSchemaSha256,omitempty"`
+	Dependencies       []string        `json:"dependencies"`
+	SideEffect         bool            `json:"sideEffect"`
 }
 
 type Compilation struct {
@@ -157,14 +188,16 @@ type Preview struct {
 }
 
 type Workflow struct {
-	ID               string    `json:"id"`
-	ProjectID        string    `json:"projectId"`
-	Name             string    `json:"name"`
-	Description      string    `json:"description,omitempty"`
-	CurrentVersionID string    `json:"currentVersionId"`
-	Version          int       `json:"version"`
-	CreatedAt        time.Time `json:"createdAt"`
-	UpdatedAt        time.Time `json:"updatedAt"`
+	ID                      string    `json:"id"`
+	ProjectID               string    `json:"projectId"`
+	Purpose                 Purpose   `json:"purpose"`
+	Name                    string    `json:"name"`
+	Description             string    `json:"description,omitempty"`
+	CurrentVersionID        string    `json:"currentVersionId"`
+	CurrentDefinitionSHA256 string    `json:"currentDefinitionSha256,omitempty"`
+	Version                 int       `json:"version"`
+	CreatedAt               time.Time `json:"createdAt"`
+	UpdatedAt               time.Time `json:"updatedAt"`
 }
 
 type Version struct {

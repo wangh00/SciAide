@@ -72,6 +72,27 @@ func TestRenderDocumentsAreDeterministicAndReadable(t *testing.T) {
 	}
 }
 
+func TestCitationRenderingPreservesStoredMarkersAndEvidence(t *testing.T) {
+	marker := "[K-ABCDEF123456]"
+	source := []byte("Evidence " + marker)
+	version := SourceVersion{Citations: []Citation{{Ordinal: 0, Reference: marker, SourceName: "paper.pdf", Title: "Evidence", Quote: "Evidence"}}}
+	for _, style := range []CitationStyle{CitationGB7714, CitationAPA7} {
+		doc, err := BuildDocument("Report", source, version, style)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(doc.Blocks) != 1 || strings.Contains(doc.Blocks[0].Text, marker) {
+			t.Fatalf("reader-facing citation was not rendered: %#v", doc.Blocks)
+		}
+		if string(source) != "Evidence "+marker || version.Citations[0].Reference != marker {
+			t.Fatal("rendering changed the stored source or citation snapshot")
+		}
+		if len(doc.References) != 1 || doc.References[0].Marker != marker || doc.References[0].Quote != "Evidence" {
+			t.Fatalf("rendering lost the evidence mapping: %#v", doc.References)
+		}
+	}
+}
+
 func TestWideAndTallTablesRenderInBoundedSegments(t *testing.T) {
 	header := make([]string, 64)
 	row := make([]string, 64)

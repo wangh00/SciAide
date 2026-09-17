@@ -88,7 +88,7 @@ func (t *ShellExecute) Invoke(ctx context.Context, invocation tool.Invocation) (
 	if err != nil {
 		return tool.Result{}, err
 	}
-	prepared, err := prepareExecution(ctx, t.projects, invocation.ProjectID, args.Workdir, args.ArtifactPaths)
+	prepared, err := prepareExecutionForInvocation(ctx, t.projects, invocation, args.Workdir, args.ArtifactPaths)
 	if err != nil {
 		return tool.Result{}, err
 	}
@@ -158,7 +158,7 @@ func (t *PythonExecute) Invoke(ctx context.Context, invocation tool.Invocation) 
 	if err != nil {
 		return tool.Result{}, err
 	}
-	prepared, err := prepareExecution(ctx, t.projects, invocation.ProjectID, args.Workdir, args.ArtifactPaths)
+	prepared, err := prepareExecutionForInvocation(ctx, t.projects, invocation, args.Workdir, args.ArtifactPaths)
 	if err != nil {
 		return tool.Result{}, err
 	}
@@ -238,17 +238,33 @@ type fileSnapshot struct {
 }
 
 func prepareExecution(ctx context.Context, projects ProjectLoader, projectID, workdir string, artifacts []string) (preparedExecution, error) {
+	return prepareExecutionForInvocation(ctx, projects, tool.Invocation{ProjectID: projectID}, workdir, artifacts)
+}
+
+func prepareExecutionForInvocation(ctx context.Context, projects ProjectLoader, invocation tool.Invocation, workdir string, artifacts []string) (preparedExecution, error) {
 	if len(artifacts) > maxArtifactPaths {
 		return preparedExecution{}, fmt.Errorf("too many declared Artifact paths")
 	}
-	selected, err := projects.Get(ctx, strings.TrimSpace(projectID))
+	selected, err := projects.Get(ctx, strings.TrimSpace(invocation.ProjectID))
 	if err != nil {
 		return preparedExecution{}, err
 	}
 	if err := project.VerifyPrivateDataLayout(selected); err != nil {
 		return preparedExecution{}, err
 	}
-	guard, err := pathguard.Open(selected.WorkspacePath)
+	workspaceRoot := selected.WorkspacePath
+	if strings.TrimSpace(invocation.WorkspaceRoot) != "" {
+		workspaceRoot = invocation.WorkspaceRoot
+	} else if taskID := strings.TrimSpace(invocation.ResearchTaskID); taskID != "" {
+		workspaceRoot, err = project.ResearchTaskWorkspacePath(selected, taskID)
+		if err != nil {
+			return preparedExecution{}, err
+		}
+		if err := os.MkdirAll(workspaceRoot, 0o700); err != nil {
+			return preparedExecution{}, fmt.Errorf("create research task workspace: %w", err)
+		}
+	}
+	guard, err := pathguard.Open(workspaceRoot)
 	if err != nil {
 		return preparedExecution{}, err
 	}

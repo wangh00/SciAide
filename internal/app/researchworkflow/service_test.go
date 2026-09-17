@@ -110,14 +110,21 @@ func TestPublishReportRevalidatesKnowledgeAndFreezesBibliography(t *testing.T) {
 	ref := tool.CitationRef{ID: "attachment", Kind: citation.KindKnowledgeChunk, ProjectID: "project", IndexVersionID: chunk.IndexVersionID, DocumentID: chunk.DocumentID, AttachmentID: chunk.AttachmentID, ChunkID: chunk.ChunkID, SourceName: chunk.SourceName, MIMEType: chunk.MIMEType, Locator: chunk.Locator, Title: chunk.Title, Quote: quote, QuoteSHA256: citation.QuoteSHA256(quote), SourceStart: chunk.SourceStart, SourceEnd: chunk.SourceEnd}
 	ref.Reference = citation.KnowledgeReference("workflow-run", ref.IndexVersionID, ref.ChunkID, ref.QuoteSHA256)
 	result := tool.Result{Status: tool.ResultSuccess, Citations: []tool.CitationRef{ref}, Artifacts: []tool.ArtifactRef{{Name: "analysis.csv", WorkspacePath: "analysis-output/analysis.csv"}}}
-	calls := []tool.Call{{ID: "search-call", RunID: "workflow-run", SubjectKind: tool.SubjectWorkflowRun, ToolName: citation.KnowledgeToolName, Status: tool.CallCompleted, Result: &result}}
+	analysis := json.RawMessage(`{"summary":"verified"}`)
+	reviewGate := json.RawMessage(`{"approved":true,"reviewedInputSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","reviewSha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","confidence":"high","verifiedClaimCount":1,"limitations":[]}`)
+	gateArguments, _ := json.Marshal(map[string]any{"subject": json.RawMessage(analysis), "review": map[string]any{}})
+	gateResult := tool.Result{Status: tool.ResultSuccess, Structured: reviewGate, Artifacts: []tool.ArtifactRef{}, Citations: []tool.CitationRef{}}
+	calls := []tool.Call{
+		{ID: "search-call", RunID: "workflow-run", SubjectKind: tool.SubjectWorkflowRun, ToolName: citation.KnowledgeToolName, Status: tool.CallCompleted, Result: &result},
+		{ID: "review-gate-call", RunID: "workflow-run", SubjectKind: tool.SubjectWorkflowRun, ToolName: ReviewGateToolName, Arguments: gateArguments, Status: tool.CallCompleted, Result: &gateResult},
+	}
 	bibliography, _ := json.Marshal(map[string]any{"schemaVersion": 1, "bibliographyId": "bibliography", "revision": 1, "capturedAt": time.Now().UTC()})
 	artifacts := &workflowArtifactsFixture{}
 	service, err := New(unusedDiscovery{}, workflowKnowledgeFixture{chunk}, workflowBibliographyFixture{research.CitationSnapshot{BibliographyID: "bibliography", Bibliography: bibliography, EvidenceLevel: research.EvidenceFullText}}, unusedEnvironment{}, workflowCallsFixture{calls}, artifacts)
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := ReportRequest{ProjectID: "project", WorkflowRunID: "workflow-run", ToolCallID: "report-call", IdempotencyKey: "stable", Name: "Report", Markdown: "# Result\n\nVerified. " + ref.Reference, Citations: []tool.CitationRef{ref}, SourceArtifacts: result.Artifacts}
+	request := ReportRequest{ProjectID: "project", WorkflowRunID: "workflow-run", ToolCallID: "report-call", IdempotencyKey: "stable", Name: "Report", Markdown: "# Result\n\nVerified. " + ref.Reference, Citations: []tool.CitationRef{ref}, Analysis: analysis, SourceArtifacts: result.Artifacts, ReviewGate: reviewGate}
 	value, err := service.PublishReport(context.Background(), request)
 	if err != nil || value.Artifact.ID != "artifact" {
 		t.Fatalf("PublishReport()=%#v, %v", value, err)
@@ -136,6 +143,11 @@ func TestPublishReportRevalidatesKnowledgeAndFreezesBibliography(t *testing.T) {
 		t.Fatal("tampered citation was accepted")
 	}
 	request.Citations = []tool.CitationRef{ref}
+	request.Analysis = json.RawMessage(`{"summary":"different result"}`)
+	if _, err := service.PublishReport(context.Background(), request); err == nil || !strings.Contains(err.Error(), "does not cover") {
+		t.Fatalf("mismatched review subject error=%v", err)
+	}
+	request.Analysis = analysis
 	request.Markdown += " [K-FFFFFFFFFFFF]"
 	if _, err := service.PublishReport(context.Background(), request); err == nil || !strings.Contains(err.Error(), "unverified marker") {
 		t.Fatalf("unverified marker error=%v", err)
@@ -143,6 +155,10 @@ func TestPublishReportRevalidatesKnowledgeAndFreezesBibliography(t *testing.T) {
 	request.Markdown = "# Missing marker"
 	if _, err := service.PublishReport(context.Background(), request); err == nil || !strings.Contains(err.Error(), "does not cite") {
 		t.Fatalf("missing marker error=%v", err)
+	}
+	request.Markdown = "# Report\n\nThe verified result is reproducible. [1]"
+	if _, err := service.PublishReport(context.Background(), request); err == nil || !strings.Contains(err.Error(), "does not cite") {
+		t.Fatalf("manual numbering bypassed the stored citation contract: %v", err)
 	}
 }
 
@@ -153,5 +169,52 @@ func TestPublishReportRejectsCitationFromAnotherWorkflowRun(t *testing.T) {
 	_, err := service.PublishReport(context.Background(), ReportRequest{ProjectID: "project", WorkflowRunID: "workflow-run", ToolCallID: "report", Name: "Report", Markdown: ref.Reference, Citations: []tool.CitationRef{ref}})
 	if err == nil {
 		t.Fatal("cross-Workflow citation was accepted")
+	}
+}
+
+func TestAbstractCitationTitleRecoveryRetainsEvidenceChecks(t *testing.T) {
+	chunk := knowledge.EvidenceChunk{IndexVersionID: "index", DocumentID: "document", AttachmentID: "attachment", ChunkID: "chunk", SourceName: "research-paper-metadata.md", MIMEType: "text/markdown", Locator: "lines:1-24", Content: "## Abstract\nVerified result.\n## Source records", SourceEnd: 51}
+	ref := tool.CitationRef{ID: "attachment", Kind: citation.KindKnowledgeChunk, ProjectID: "project", IndexVersionID: chunk.IndexVersionID, DocumentID: chunk.DocumentID, AttachmentID: chunk.AttachmentID, ChunkID: chunk.ChunkID, SourceName: chunk.SourceName, MIMEType: chunk.MIMEType, Locator: chunk.Locator, Title: "Abstract", Quote: "Verified result.", QuoteSHA256: citation.QuoteSHA256("Verified result."), SourceEnd: chunk.SourceEnd}
+	ref.Reference = citation.KnowledgeReference("workflow", ref.IndexVersionID, ref.ChunkID, ref.QuoteSHA256)
+	call := tool.Call{ID: "search", ToolName: citation.KnowledgeToolName, ToolVersion: "6", Arguments: json.RawMessage(`{"perDocument":true,"documentIds":["document"]}`)}
+	s := &Service{knowledge: workflowKnowledgeFixture{chunk}, bibliography: workflowBibliographyFixture{research.CitationSnapshot{EvidenceLevel: research.EvidenceMetadataAbstract}}}
+	if _, err := s.verifyCitation(context.Background(), "project", "workflow", "", call, ref); err != nil {
+		t.Fatal(err)
+	}
+	call.RunID, call.SubjectKind, call.Status = "workflow", tool.SubjectWorkflowRun, tool.CallCompleted
+	call.Result = &tool.Result{Status: tool.ResultSuccess, Citations: []tool.CitationRef{ref}}
+	gate := tool.Call{ID: "gate", RunID: "workflow", SubjectKind: tool.SubjectWorkflowRun, ToolName: ReviewGateToolName, Status: tool.CallCompleted, Arguments: json.RawMessage(`{"subject":{"summary":"verified"}}`), Result: &tool.Result{Status: tool.ResultSuccess, Structured: json.RawMessage(`{"approved":true}`)}}
+	s.toolCalls = workflowCallsFixture{[]tool.Call{call, gate}}
+	s.artifacts = &workflowArtifactsFixture{}
+	request := ReportRequest{ProjectID: "project", WorkflowRunID: "workflow", ToolCallID: "publish", Name: "Recovered report", Markdown: "Finding " + ref.Reference, Citations: []tool.CitationRef{ref}, Analysis: json.RawMessage(`{"summary":"verified"}`), ReviewGate: gate.Result.Structured}
+	if _, err := s.PublishReport(context.Background(), request); err != nil {
+		t.Fatal("legacy snapshot publication failed", err)
+	}
+	request.Citations = append([]tool.CitationRef(nil), request.Citations...)
+	request.Citations[0].Title = ""
+	if _, err := s.PublishReport(context.Background(), request); err == nil {
+		t.Fatal("publication accepted a rewritten historical snapshot")
+	}
+	for _, mutate := range []func(*tool.CitationRef, *tool.Call){
+		func(r *tool.CitationRef, _ *tool.Call) { r.Title = "Invented" },
+		func(r *tool.CitationRef, _ *tool.Call) { r.SourceStart++ },
+		func(r *tool.CitationRef, _ *tool.Call) { r.Locator = "changed" },
+		func(r *tool.CitationRef, _ *tool.Call) { r.Quote = "Invented" },
+		func(r *tool.CitationRef, _ *tool.Call) { r.Reference = "[K-AAAAAAAAAAAA]" },
+		func(_ *tool.CitationRef, c *tool.Call) { c.ToolVersion = "7" },
+		func(_ *tool.CitationRef, c *tool.Call) { c.Arguments = json.RawMessage(`{"perDocument":false}`) },
+		func(_ *tool.CitationRef, c *tool.Call) {
+			c.Arguments = json.RawMessage(`{"perDocument":true,"documentIds":["other"]}`)
+		},
+	} {
+		r, c := ref, call
+		mutate(&r, &c)
+		if _, err := s.verifyCitation(context.Background(), "project", "workflow", "", c, r); err == nil {
+			t.Fatal("mismatched evidence accepted")
+		}
+	}
+	ref.Title = chunk.Title
+	if _, err := s.verifyCitation(context.Background(), "project", "workflow", "", call, ref); err != nil {
+		t.Fatal("canonical new citation rejected", err)
 	}
 }

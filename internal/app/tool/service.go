@@ -50,6 +50,13 @@ func (s *Service) propose(ctx context.Context, definition Definition, cmd Create
 	if err := ValidateArguments(cmd.Arguments); err != nil {
 		return Call{}, err
 	}
+	// Providers sometimes encode JSON integer fields as canonical decimal
+	// strings. Normalize this at the provider-independent tool boundary so
+	// Agent, Workflow and direct host callers share identical behavior. The
+	// frozen provider payload remains available in the model-turn audit record.
+	if normalized, changed, normalizeErr := NormalizeModelArguments(definition.InputSchema, cmd.Arguments); normalizeErr == nil && changed {
+		cmd.Arguments = normalized
+	}
 	if validateSchema {
 		if s.validator == nil {
 			return Call{}, fmt.Errorf("tool argument schema validator is not configured")
@@ -64,7 +71,13 @@ func (s *Service) propose(ctx context.Context, definition Definition, cmd Create
 	}
 	now := s.now()
 	permissions := append([]PermissionRequirement(nil), definition.Permissions...)
-	value := Call{ID: callID, RunID: cmd.RunID, SubjectKind: cmd.SubjectKind, ProviderCallID: cmd.ProviderCallID, ToolName: definition.QualifiedName, ToolVersion: definition.Version, Arguments: append(json.RawMessage(nil), cmd.Arguments...), Status: CallPending, Risk: definition.Risk, Permissions: permissions, Idempotent: definition.Idempotent, IdempotencyKey: cmd.IdempotencyKey, CreatedAt: now, UpdatedAt: now}
+	contractSHA256 := ""
+	if cmd.IdempotencyKey != "" {
+		// A keyed call is a model/Workflow execution plan. Ad-hoc host calls
+		// without an intent key retain the older field-level validation path.
+		contractSHA256 = DefinitionFingerprint(definition)
+	}
+	value := Call{ID: callID, RunID: cmd.RunID, SubjectKind: cmd.SubjectKind, ProviderCallID: cmd.ProviderCallID, ToolName: definition.QualifiedName, ToolVersion: definition.Version, Arguments: append(json.RawMessage(nil), cmd.Arguments...), Status: CallPending, Risk: definition.Risk, Permissions: permissions, Idempotent: definition.Idempotent, IdempotencyKey: cmd.IdempotencyKey, ContractSHA256: contractSHA256, CreatedAt: now, UpdatedAt: now}
 	event, err := newToolEvent(value.SubjectKind, value.RunID, "tool.proposed", map[string]any{"toolCall": value})
 	if err != nil {
 		return Call{}, err
@@ -96,6 +109,7 @@ func (s *Service) RejectProviderCall(ctx context.Context, registry Registry, too
 	}
 	toolName = strings.TrimSpace(toolName)
 	definition, err := registry.Definition(ctx, toolName)
+	definitionErr := err
 	if err != nil {
 		definition = Definition{
 			QualifiedName: toolName,
@@ -112,10 +126,32 @@ func (s *Service) RejectProviderCall(ctx context.Context, registry Registry, too
 		return Call{}, err
 	}
 	message = strings.TrimSpace(message)
+	// Keep rejected model calls useful for the next model turn. The original
+	// proposal error is safe to expose here because it contains only bounded
+	// tool/schema diagnostics, never tool output or credentials.
+	if definitionErr != nil {
+		if message == "" {
+			message = "工具 " + toolName + " 不在当前工具列表中，请使用宿主提供的精确工具名称。"
+		} else if !strings.Contains(message, "不在当前工具列表") {
+			message += " 原因：工具 " + toolName + " 不在当前工具列表中，请使用宿主提供的精确工具名称。"
+		}
+	} else if s.validator != nil && !strings.Contains(message, "Schema 校验") && !strings.Contains(message, "原因：") {
+		if validationErr := s.validator.Validate(definition.InputSchema, cmd.Arguments); validationErr != nil {
+			message += " 原因：" + boundedToolDiagnostic(validationErr.Error())
+		}
+	}
 	if message == "" {
 		message = "工具调用无法执行，请检查可用工具和参数后重试。"
 	}
 	return s.Finish(context.Background(), call.ID, Result{Status: ResultError, Text: message}, ErrorCodeCallRejected, strings.TrimSuffix(message, "。"))
+}
+
+func boundedToolDiagnostic(value string) string {
+	value = strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(value, "\r", " "), "\n", " "))
+	if len([]rune(value)) > 500 {
+		value = string([]rune(value)[:500]) + "..."
+	}
+	return value
 }
 
 func (s *Service) Get(ctx context.Context, callID string) (Call, error) {

@@ -19,6 +19,102 @@ import (
 	"github.com/wangh00/SciAide/internal/platform/localexec"
 )
 
+func TestKernelEnvironmentBoundsNativeNumericThreadPools(t *testing.T) {
+	environment, names := kernelEnvironment()
+	values := make(map[string]string, len(environment))
+	for _, entry := range environment {
+		name, value, ok := strings.Cut(entry, "=")
+		if ok {
+			values[strings.ToUpper(name)] = value
+		}
+	}
+	for _, name := range []string{
+		"OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS",
+		"BLIS_NUM_THREADS", "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS",
+	} {
+		if values[name] != "1" {
+			t.Fatalf("%s = %q, want 1; names=%v", name, values[name], names)
+		}
+	}
+}
+
+func TestKernelTerminalResultAssignmentDoesNotReuseOldResult(t *testing.T) {
+	python, err := exec.LookPath("python")
+	if err != nil {
+		t.Skip("Python is not installed")
+	}
+	python, _ = filepath.Abs(python)
+	runner := localexec.NewRunner(localexec.Options{})
+	kernels := New(runner)
+	defer func() { _ = kernels.Close(); _ = runner.Close() }()
+	workspace := t.TempDir()
+	request := pythonenv.KernelExecuteRequest{ProjectID: "result-contract", Environment: pythonenv.Environment{EnvironmentPythonPath: python, EnvironmentFingerprint: "fixture"}, Timeout: 15 * time.Second}
+	for _, tc := range []struct {
+		name, code string
+		want       bool
+		number     float64
+	}{
+		{"assignment", "summary = {'rows': 90}\nresult = summary", true, 90},
+		{"print does not return old result", "print('finished')", false, 0},
+		{"unrelated assignment", "other = {'rows': 99}", false, 0},
+		{"annotation without value", "result: dict", false, 0},
+		{"annotated assignment", "result: dict = {'rows': 84}", true, 84},
+		{"comments", "result = {'rows': 81}\n# trailing comment\n", true, 81},
+		{"expression precedence", "result = {'rows': 1}\n{'rows': 2}", true, 2},
+		{"single evaluation", "calls = 0\ndef compute():\n    global calls\n    calls += 1\n    return {'rows': calls}\nresult = compute()", true, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			request.Code = tc.code
+			r, err := kernels.Execute(context.Background(), request, workspace)
+			if err != nil || r.Status != "success" {
+				t.Fatalf("execution=%#v err=%v", r, err)
+			}
+			if !tc.want {
+				if r.Value != nil {
+					t.Fatalf("stale value returned: %#v", r.Value)
+				}
+				return
+			}
+			v, ok := r.Value.(map[string]any)
+			if !ok || v["rows"] != tc.number {
+				t.Fatalf("result=%#v", r.Value)
+			}
+		})
+	}
+}
+
+func TestRuntimeImportsConfiguredNumericStackUnderMemoryBudget(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows Job Object numeric stack test")
+	}
+	python := strings.TrimSpace(os.Getenv("SCIAIDE_TEST_NUMERIC_PYTHON"))
+	if python == "" {
+		t.Skip("SCIAIDE_TEST_NUMERIC_PYTHON is not configured")
+	}
+	if _, err := os.Stat(python); err != nil {
+		t.Fatalf("configured numeric Python is unavailable: %v", err)
+	}
+	runner := localexec.NewRunner(localexec.Options{})
+	kernels := NewWithOptions(runner, Options{MemoryLimitBytes: kernelMemoryLimitBytes})
+	defer func() { _ = kernels.Close(); _ = runner.Close() }()
+	request := pythonenv.KernelExecuteRequest{
+		ProjectID: "numeric-project",
+		Environment: pythonenv.Environment{
+			EnvironmentPythonPath:  python,
+			EnvironmentFingerprint: "numeric-fixture",
+		},
+		Timeout: 30 * time.Second,
+		Code: `import os
+import numpy as np
+from scipy import stats
+{"threads": os.environ["OPENBLAS_NUM_THREADS"], "mean": float(np.mean([1, 2, 3])), "rho": float(stats.spearmanr([1, 2, 3], [1, 3, 2]).statistic)}`,
+	}
+	result, err := kernels.Execute(context.Background(), request, t.TempDir())
+	if err != nil || result.Status != "success" {
+		t.Fatalf("numeric Kernel execution = %#v, %v", result, err)
+	}
+}
+
 func TestRuntimePersistsStateAndResetsAfterTimeout(t *testing.T) {
 	name := "python"
 	if runtime.GOOS != "windows" {
@@ -115,9 +211,8 @@ func TestRuntimeProducesDeclaredWorkspaceFile(t *testing.T) {
 	request := pythonenv.KernelExecuteRequest{
 		ProjectID: "project", Environment: pythonenv.Environment{EnvironmentPythonPath: python, EnvironmentFingerprint: "fixture"},
 		Timeout: 10 * time.Second, OutputPaths: []string{"analysis-output/result.csv"},
-		Code: `import os
-os.makedirs("analysis-output", exist_ok=True)
-open("analysis-output/result.csv", "w", encoding="utf-8").write("x,y\n1,2\n")`,
+		Code: `from pathlib import Path
+Path(SCIAIDE_OUTPUTS[0]).write_text("x,y\n1,2\n", encoding="utf-8")`,
 	}
 	result, err := kernels.Execute(context.Background(), request, workspace)
 	if err != nil || result.Status != "success" {

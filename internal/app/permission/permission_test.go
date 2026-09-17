@@ -3,6 +3,7 @@ package permission
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -10,6 +11,30 @@ import (
 	"github.com/wangh00/SciAide/internal/app/tool"
 	"github.com/wangh00/SciAide/internal/events"
 )
+
+func TestSafeApprovalRedactsAndBoundsUIFields(t *testing.T) {
+	value := Approval{
+		Resource: "https://example.test/api?token=should-not-leak",
+		Reason:   "authorization: Bearer should-not-leak " + strings.Repeat("x", 1200),
+	}
+	projected := SafeApproval(value)
+	if strings.Contains(projected.Resource, "should-not-leak") || strings.Contains(projected.Reason, "should-not-leak") {
+		t.Fatalf("approval projection leaked secret: %#v", projected)
+	}
+	if len([]rune(projected.Resource)) > ApprovalProjectionResourceLimit+16 || len([]rune(projected.Reason)) > ApprovalProjectionReasonLimit+16 {
+		t.Fatalf("approval projection is not bounded: resource=%d reason=%d", len([]rune(projected.Resource)), len([]rune(projected.Reason)))
+	}
+	if value.Resource == projected.Resource || value.Reason == projected.Reason {
+		t.Fatalf("projection unexpectedly mutated or did not redact source values: original=%#v projected=%#v", value, projected)
+	}
+}
+
+func TestSafeApprovalsKeepsNonNilEmptySlice(t *testing.T) {
+	projected := SafeApprovals([]Approval{})
+	if projected == nil || len(projected) != 0 {
+		t.Fatalf("empty approval projection = %#v", projected)
+	}
+}
 
 type memoryRepository struct {
 	approvals map[string]Approval

@@ -75,7 +75,7 @@ func TestArXivPubMedAndEuropePMCFixtures(t *testing.T) {
 	}
 	pubmed := newPubMed(client, server.URL+"/pubmed", 0)
 	pubmedWorks, err := pubmed.Search(ctx, searchOptions("q"))
-	if err != nil || len(pubmedWorks) != 1 || pubmedWorks[0].Identifiers.DOI != "10.1000/abc" {
+	if err != nil || len(pubmedWorks) != 1 || pubmedWorks[0].Identifiers.DOI != "10.1000/abc" || pubmedWorks[0].Abstract != "BACKGROUND: Evidence" {
 		t.Fatalf("PubMed search=%#v err=%v", pubmedWorks, err)
 	}
 	full, err := pubmed.Fetch(ctx, "123")

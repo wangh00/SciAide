@@ -44,6 +44,9 @@ jobs:
       - name: Frontend type check
         working-directory: frontend
         run: npm run typecheck
+      - name: Frontend regression tests
+        working-directory: frontend
+        run: npm test
       - name: Frontend build
         working-directory: frontend
         run: npm run build

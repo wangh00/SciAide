@@ -23,12 +23,14 @@ func TestDelimitedAnalysisWorkflowProducesReplayableResearchArtifacts(t *testing
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(root) })
-	application, err := New(Options{RootDir: root})
+	application, err := New(Options{RootDir: root, EventPublisher: workflowAITestPublisher{}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer application.Close()
 	application.Startup(context.Background())
+	aiServer := newWorkflowAITestServer(t)
+	aiProfile := saveWorkflowAITestProfile(t, application, aiServer.URL)
 	discovery, err := application.PythonFacade.DetectInterpreters()
 	if err != nil || len(discovery.Interpreters) == 0 {
 		t.Skipf("64-bit Python 3 with venv is not installed: %v (%s)", err, discovery.Message)
@@ -57,12 +59,12 @@ func TestDelimitedAnalysisWorkflowProducesReplayableResearchArtifacts(t *testing
 		"input_paths":      []string{inputName},
 		"analysis_request": map[string]any{"goal": "检查缺失值并概览主要数值字段", "method": "data_quality"},
 	})
-	started, err := application.WorkflowFacade.Start(workflow.StartCommand{ProjectID: selected.ID, WorkflowID: saved.Workflow.ID, WorkflowVersionID: saved.Version.ID, Inputs: inputs})
+	started, err := application.WorkflowFacade.Start(workflow.StartCommand{ProjectID: selected.ID, ResearchTaskID: workflow.NewResearchTaskID, WorkflowID: saved.Workflow.ID, WorkflowVersionID: saved.Version.ID, Inputs: inputs, ModelProfileID: aiProfile.ID, ModelID: workflowAITestModelID})
 	if err != nil {
 		t.Fatal(err)
 	}
 	completed := completeApprovedWorkflow(t, application, selected.ID, started.Run.ID, 3*time.Minute)
-	if completed.Run.Status != workflow.RunCompleted || len(completed.Steps) != 2 {
+	if completed.Run.Status != workflow.RunCompleted || len(completed.Steps) != 5 || len(completed.AIExecutions) != 2 || completed.ArtifactCount != 5 {
 		t.Fatalf("delimited Workflow = %#v", completed.Run)
 	}
 	var analysisStep workflow.Step
@@ -117,11 +119,13 @@ func TestDelimitedAnalysisWorkflowProducesReplayableResearchArtifacts(t *testing
 			t.Fatalf("missing %s Artifact: %#v", role, roles)
 		}
 	}
-	cleaned, err := os.ReadFile(filepath.Join(selected.WorkspacePath, filepath.FromSlash(roles["cleaned"])))
+	taskWorkspace := filepath.Join(selected.WorkspacePath, ".sciaide", "tasks", completed.Run.ResearchTaskID)
+	selected.WorkspacePath = taskWorkspace
+	cleaned, err := os.ReadFile(filepath.Join(taskWorkspace, filepath.FromSlash(roles["cleaned"])))
 	if err != nil || !strings.Contains(string(cleaned), "'=2+2") {
 		t.Fatalf("cleaned CSV did not neutralize formula-like cells: %q, %v", cleaned, err)
 	}
-	methods, err := os.ReadFile(filepath.Join(selected.WorkspacePath, filepath.FromSlash(roles["methods"])))
+	methods, err := os.ReadFile(filepath.Join(taskWorkspace, filepath.FromSlash(roles["methods"])))
 	if err != nil || !strings.Contains(string(methods), "检查缺失值") || !strings.Contains(string(methods), "描述性探索") {
 		t.Fatalf("methods evidence = %q, %v", methods, err)
 	}

@@ -1,6 +1,6 @@
 # SciAide 开发环境
 
-> 当前阶段：P6.0 已完成，正在进行 P6 前的对话稳定性与模型请求诊断加固。真实进度见 [`CURRENT_STATE.md`](CURRENT_STATE.md)，开发/验证仍使用 P0 建立的统一门禁脚本。
+> 本文只记录开发操作；当前进度、验证和构建信息见 [`CURRENT_STATE.md`](CURRENT_STATE.md)，不在此重复维护。
 
 前端不得直接导入被忽略的 `frontend/wailsjs`。Wails 运行时调用通过已提交的 `frontend/src/lib/wailsRuntime.ts` Bridge，后端 Facade 通过 `window.go` 动态边界访问，从而保证 GitHub Actions 的干净检出也能独立完成 TypeScript/Vite 构建。
 
@@ -15,9 +15,10 @@
 - WebView2 Runtime
 - 本项目使用 `modernc.org/sqlite`，`CGO_ENABLED=0`，不需要 GCC
 
-当前机器的 Go 全局环境被设置为 `windows/386`。不要修改用户的全局 Go 环境；使用项目脚本，或在当前 PowerShell 会话执行：
+不要依赖或修改用户的全局 Go 目标；使用项目脚本，或在当前 PowerShell 会话显式设置：
 
 ```powershell
+$env:GOOS = "windows"
 $env:GOARCH = "amd64"
 $env:CGO_ENABLED = "0"
 ```
@@ -64,7 +65,9 @@ npm --version
 .\scripts\build-release.ps1
 ```
 
-不要直接运行裸 `wails build` 生成发布文件；当前机器的 Go 默认目标是 `386`，发布脚本会在不修改用户全局环境的前提下强制使用 `windows/amd64`。
+发布脚本显式使用 `windows/amd64`。执行前先按 [AGENTS.md](../AGENTS.md) 关闭经完整路径确认的本项目 EXE；脚本本身不负责关闭进程。只覆盖 `build/bin/SciAide.exe` 并更新配套 SHA256，不生成版本名或备份名 EXE。
+
+内存紧张时可使用 `$env:GOMAXPROCS = "2"` 与 `go test -p 1 ./...` 降低测试并发；前端单独运行 `npm test` 和 `npm run typecheck`。局部检查不代替正式发布门禁。
 
 为验证不会意外联网，可在依赖安装完成后执行离线检查：
 

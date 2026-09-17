@@ -7,6 +7,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/wangh00/SciAide/internal/browserhttp"
+	"github.com/wangh00/SciAide/internal/httpua"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -426,10 +428,6 @@ func (m *Manager) refreshOnce(serverID string, value *connection) {
 	}
 }
 
-func buildTransport(server mcpserver.Server, secretEnv map[string]string) (mcpsdk.Transport, error) {
-	return buildTransportWithLogger(server, secretEnv, nil)
-}
-
 func buildTransportWithLogger(server mcpserver.Server, secretEnv map[string]string, logger *slog.Logger) (mcpsdk.Transport, error) {
 	switch server.Transport {
 	case mcpserver.TransportStdio:
@@ -446,7 +444,7 @@ func buildTransportWithLogger(server mcpserver.Server, secretEnv map[string]stri
 		baseTransport.Proxy = http.ProxyFromEnvironment
 		client := &http.Client{
 			Timeout:   time.Duration(server.TimeoutSeconds) * time.Second,
-			Transport: &headerTransport{base: baseTransport, headers: cloneMap(server.Headers)},
+			Transport: &headerTransport{base: browserhttp.New(baseTransport), headers: cloneMap(server.Headers)},
 			CheckRedirect: func(request *http.Request, via []*http.Request) error {
 				if len(via) >= 5 {
 					return fmt.Errorf("too many MCP HTTP redirects")
@@ -761,6 +759,7 @@ func (t *headerTransport) RoundTrip(request *http.Request) (*http.Response, erro
 	for key, value := range t.headers {
 		cloned.Header.Set(key, value)
 	}
+	httpua.Apply(cloned)
 	return t.base.RoundTrip(cloned)
 }
 

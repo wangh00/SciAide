@@ -48,6 +48,9 @@ func fixtureRegistry(t *testing.T, version string) *tool.MemoryRegistry {
 			InputSchema:   json.RawMessage(`{"type":"object","additionalProperties":false,"required":["code"],"properties":{"code":{"type":"string"}}}`),
 			OutputSchema:  json.RawMessage(`{"type":"object","properties":{"stdout":{"type":"string"}}}`),
 		},
+		{QualifiedName: "builtin.skill.load", Description: "Load Skill", Version: "1", Risk: tool.RiskLow, Idempotent: true, InputSchema: json.RawMessage(`{"type":"object"}`), OutputSchema: json.RawMessage(`{"type":"object"}`)},
+		{QualifiedName: "builtin.skill.resource.list", Description: "List Skill resources", Version: "1", Risk: tool.RiskLow, Idempotent: true, InputSchema: json.RawMessage(`{"type":"object"}`), OutputSchema: json.RawMessage(`{"type":"object"}`)},
+		{QualifiedName: "builtin.skill.resource.read_text", Description: "Read Skill resource", Version: "1", Risk: tool.RiskLow, Idempotent: true, InputSchema: json.RawMessage(`{"type":"object"}`), OutputSchema: json.RawMessage(`{"type":"object"}`)},
 	}
 	for _, definition := range definitions {
 		if err := registry.Register(context.Background(), fixtureTool{definition: definition}); err != nil {
@@ -55,6 +58,68 @@ func fixtureRegistry(t *testing.T, version string) *tool.MemoryRegistry {
 		}
 	}
 	return registry
+}
+
+func TestCompilerFreezesAgentAutonomyAndSkillRoutingDefaults(t *testing.T) {
+	base := Node{ID: "review", Name: "Review", Kind: NodeAgentStage, Arguments: json.RawMessage(`{}`), Prompt: "Review the evidence.", PromptVersion: "review-v1", OutputSchema: json.RawMessage(`{"type":"object"}`)}
+	defaultNode, err := NewCompiler(fixtureRegistry(t, "1")).Compile(context.Background(), Definition{SchemaVersion: SchemaVersion, Name: "Default review", Nodes: []Node{base}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if defaultNode.Nodes[0].ReviewPolicy != AIReviewHuman || defaultNode.Nodes[0].SkillRouting || len(defaultNode.Nodes[0].AllowedTools) != 0 {
+		t.Fatalf("default Agent Stage policy changed: %#v", defaultNode.Nodes[0])
+	}
+	base.ReviewPolicy, base.SkillRouting = AIReviewAuto, true
+	autonomous, err := NewCompiler(fixtureRegistry(t, "1")).Compile(context.Background(), Definition{SchemaVersion: SchemaVersion, Name: "Autonomous review", Nodes: []Node{base}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	node := autonomous.Nodes[0]
+	if node.ReviewPolicy != AIReviewAuto || !node.SkillRouting || !hasFrozenTool(node.AllowedTools, "builtin.skill.load") || len(node.AllowedTools) != len(workflowSkillReadTools) {
+		t.Fatalf("autonomous Agent Stage snapshot = %#v", node)
+	}
+	base.AllowedTools = []string{"builtin.skill.load"}
+	preview := NewCompiler(fixtureRegistry(t, "1")).Preview(context.Background(), Definition{SchemaVersion: SchemaVersion, Name: "Invalid Skill declaration", Nodes: []Node{base}})
+	assertDiagnostic(t, preview, "forbidden_tool")
+	base.SkillRouting = false
+	base.AllowedTools = []string{"builtin.shell.execute"}
+	preview = NewCompiler(fixtureRegistry(t, "1")).Preview(context.Background(), Definition{SchemaVersion: SchemaVersion, Name: "Unsafe autonomous execution", Nodes: []Node{base}})
+	assertDiagnostic(t, preview, "unsafe_agent_tool")
+}
+
+func TestCompilerValidatesOutputContractWithoutDummyInstance(t *testing.T) {
+	for _, schema := range []string{`{"type":"array"}`, `{"type":"string"}`, `{"type":"object","required":["x","x"]}`, `{"type":"object","properties":{"nested":{"required":["x","x"]}}}`} {
+		node := Node{ID: "analysis", Kind: NodeAIAnalysis, Name: "Analysis", Prompt: "Analyze", PromptVersion: "analysis-v1", OutputSchema: raw(schema)}
+		preview := NewCompiler(fixtureRegistry(t, "1")).Preview(context.Background(), Definition{SchemaVersion: SchemaVersion, Name: "Invalid contract", Nodes: []Node{node}})
+		assertDiagnostic(t, preview, "invalid_output_schema")
+	}
+	node := Node{ID: "analysis", Kind: NodeAIAnalysis, Name: "Analysis", Prompt: "Analyze", PromptVersion: "analysis-v1", OutputSchema: raw(`{"type":"object","required":["x"],"properties":{"x":{"type":"string"}}}`)}
+	if _, err := NewCompiler(fixtureRegistry(t, "1")).Compile(context.Background(), Definition{SchemaVersion: SchemaVersion, Name: "Valid contract", Nodes: []Node{node}}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAgentStageToolSafetyAllowsOnlyIdempotentObservation(t *testing.T) {
+	allowed := []tool.Definition{
+		{QualifiedName: "workspace", Version: "1", Risk: tool.RiskLow, Idempotent: true, Permissions: []tool.PermissionRequirement{{Kind: tool.PermissionWorkspaceRead}}},
+		{QualifiedName: "search", Version: "1", Risk: tool.RiskModerate, Idempotent: true, Permissions: []tool.PermissionRequirement{{Kind: tool.PermissionNetworkDomain}}},
+	}
+	for _, definition := range allowed {
+		if !agentStageToolSafe(definition) {
+			t.Fatalf("observation tool was rejected: %#v", definition)
+		}
+	}
+	blocked := []tool.Definition{
+		{QualifiedName: "write", Version: "1", Risk: tool.RiskModerate, Idempotent: true, Permissions: []tool.PermissionRequirement{{Kind: tool.PermissionWorkspaceWrite}}},
+		{QualifiedName: "python", Version: "1", Risk: tool.RiskHigh, Idempotent: true, Permissions: []tool.PermissionRequirement{{Kind: tool.PermissionProcessExecute}}},
+		{QualifiedName: "external", Version: "1", Risk: tool.RiskLow, Idempotent: true, Permissions: []tool.PermissionRequirement{{Kind: tool.PermissionFilesystemExternal}}},
+		{QualifiedName: "unstable", Version: "1", Risk: tool.RiskLow, Idempotent: false},
+	}
+	for _, definition := range blocked {
+		if agentStageToolSafe(definition) {
+			t.Fatalf("unsafe Agent Stage tool was accepted: %#v", definition)
+		}
+	}
 }
 
 func validDefinition() Definition {

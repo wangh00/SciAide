@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -18,13 +19,46 @@ import (
 )
 
 type memoryRepo struct {
-	mu               sync.Mutex
-	run              Run
-	messages         []conversation.Message
-	envelopes        []events.Envelope
-	conversationMode conversation.PermissionMode
-	modelProfileID   string
-	modelID          string
+	mu                  sync.Mutex
+	run                 Run
+	messages            []conversation.Message
+	envelopes           []events.Envelope
+	conversationMode    conversation.PermissionMode
+	modelProfileID      string
+	modelID             string
+	workflowAI          bool
+	workflowChatBlocked bool
+}
+
+func buildRequest(messages []conversation.Message, excludedMessageID string, maxChars int) model.ChatRequest {
+	reversed := make([]model.Message, 0, len(messages))
+	used := 0
+	for index := len(messages) - 1; index >= 0; index-- {
+		message := messages[index]
+		if message.ID == excludedMessageID {
+			continue
+		}
+		var text strings.Builder
+		for _, part := range message.Parts {
+			if part.Type == "text" {
+				text.WriteString(part.Text)
+			}
+		}
+		if text.Len() == 0 {
+			continue
+		}
+		length := len([]rune(text.String()))
+		if used > 0 && used+length > maxChars {
+			break
+		}
+		reversed = append(reversed, model.Message{Role: model.Role(message.Role), Content: text.String()})
+		used += length
+	}
+	request := model.ChatRequest{Messages: make([]model.Message, len(reversed))}
+	for index := range reversed {
+		request.Messages[len(reversed)-1-index] = reversed[index]
+	}
+	return request
 }
 
 func TestNormalizeUsageQueryValidatesSingleDayTimeRange(t *testing.T) {
@@ -63,6 +97,16 @@ func (m *memoryRepo) LatestForConversation(context.Context, string) (Run, bool, 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.run, m.run.ID != "", nil
+}
+func (m *memoryRepo) IsWorkflowAIRun(context.Context, string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.workflowAI, nil
+}
+func (m *memoryRepo) BlocksOrdinaryChatForWorkflowConversation(context.Context, string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.workflowChatBlocked, nil
 }
 func (m *memoryRepo) Update(_ context.Context, run Run) error {
 	m.mu.Lock()
@@ -172,12 +216,6 @@ func (m *memoryRepo) AppendNext(_ context.Context, event events.Envelope) (event
 	return event, nil
 }
 
-type resolver struct{ model model.ChatModel }
-
-func (r resolver) Resolve(context.Context, string, string) (model.ResolvedChatModel, error) {
-	return model.ResolvedChatModel{Model: r.model}, nil
-}
-
 type testRunner struct {
 	repo     *memoryRepo
 	provider model.ChatModel
@@ -235,6 +273,13 @@ func (attachmentResolverFixture) Resolve(_ context.Context, projectID string, id
 		return nil, fmt.Errorf("unexpected attachment resolution")
 	}
 	return []attachment.MessageReference{{AttachmentID: "paper", OriginalName: "paper.pdf", MIMEType: "application/pdf", Format: document.FormatPDF, SizeBytes: 42, UnitCount: 2}}, nil
+}
+
+func (f attachmentResolverFixture) ResolveForConversation(ctx context.Context, projectID, conversationID string, ids []string) ([]attachment.MessageReference, error) {
+	if conversationID != "conversation" {
+		return nil, fmt.Errorf("unexpected conversation resolution")
+	}
+	return f.Resolve(ctx, projectID, ids)
 }
 
 func (r *blockingRunner) Execute(context.Context, string) {
@@ -479,6 +524,46 @@ func TestSteerRejectsStaleTerminalRunID(t *testing.T) {
 	}
 	if len(repo.envelopes) != 0 {
 		t.Fatalf("terminal run produced cancellation events: %#v", repo.envelopes)
+	}
+}
+
+func TestSteerDoesNotInterruptWorkflowAIRun(t *testing.T) {
+	repo := &memoryRepo{
+		run:              Run{ID: "workflow-ai", ConversationID: "conversation", Status: RunRunning},
+		conversationMode: conversation.PermissionFullAccess,
+		workflowAI:       true,
+	}
+	service := NewService(repo, repo, repo, nil)
+	if err := service.SetRunner(&blockingStartRunner{started: make(chan struct{})}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.SetTerminator(NewTerminator(repo, nil)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Steer(context.Background(), "workflow-ai", StartCommand{ConversationID: "conversation", ModelProfileID: "profile", ModelID: "model", Text: "旁路问题"}); err == nil || !strings.Contains(err.Error(), "不能用普通对话中断") {
+		t.Fatalf("Workflow AI steer error = %v", err)
+	}
+	if len(repo.envelopes) != 0 || repo.run.Status != RunRunning {
+		t.Fatalf("Workflow AI run was mutated: run=%#v events=%#v", repo.run, repo.envelopes)
+	}
+	snapshot, err := service.Snapshot(context.Background(), "workflow-ai")
+	if err != nil || !snapshot.WorkflowAI {
+		t.Fatalf("Workflow AI snapshot = %#v, %v", snapshot, err)
+	}
+}
+
+func TestStartDoesNotOccupyActiveWorkflowConversation(t *testing.T) {
+	repo := &memoryRepo{conversationMode: conversation.PermissionFullAccess, workflowChatBlocked: true}
+	service := NewService(repo, repo, repo, nil)
+	if err := service.SetRunner(noopRunner{}); err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	if _, err := service.Start(context.Background(), StartCommand{ConversationID: "conversation", ModelProfileID: "profile", ModelID: "model", Text: "研究进行到哪里了？"}); err == nil || !strings.Contains(err.Error(), "科研任务仍在执行") {
+		t.Fatalf("active Workflow conversation start error = %v", err)
+	}
+	if repo.run.ID != "" || len(repo.messages) != 0 {
+		t.Fatalf("active Workflow conversation was mutated: run=%#v messages=%#v", repo.run, repo.messages)
 	}
 }
 

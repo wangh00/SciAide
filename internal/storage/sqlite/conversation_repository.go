@@ -37,7 +37,18 @@ func (r *ConversationRepository) GetConversation(ctx context.Context, id string)
 }
 
 func (r *ConversationRepository) ListConversations(ctx context.Context, projectID string) ([]conversation.Conversation, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT id, project_id, title, model_profile_id, model_id, permission_mode, reasoning_level, created_at, updated_at FROM conversations WHERE project_id = ? ORDER BY updated_at DESC, id`, projectID)
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT conversation.id, conversation.project_id, conversation.title,
+			conversation.model_profile_id, conversation.model_id,
+			conversation.permission_mode, conversation.reasoning_level,
+			conversation.created_at, conversation.updated_at
+		FROM conversations conversation
+		WHERE conversation.project_id = ?
+		AND NOT EXISTS (
+			SELECT 1 FROM workflow_conversations binding
+			WHERE binding.conversation_id = conversation.id
+		)
+		ORDER BY conversation.updated_at DESC, conversation.id`, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("list conversations: %w", err)
 	}
@@ -59,6 +70,13 @@ func (r *ConversationRepository) DeleteConversation(ctx context.Context, convers
 		return fmt.Errorf("begin conversation delete: %w", err)
 	}
 	defer tx.Rollback()
+	var researchRuns int
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM workflow_conversations WHERE conversation_id=?`, conversationID).Scan(&researchRuns); err != nil {
+		return fmt.Errorf("check research conversation binding: %w", err)
+	}
+	if researchRuns > 0 {
+		return fmt.Errorf("research conversation is managed by its Workflow Run and cannot be removed separately")
+	}
 	var active int
 	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM runs WHERE conversation_id = ? AND status IN ('queued', 'running', 'waiting_approval')`, conversationID).Scan(&active); err != nil {
 		return fmt.Errorf("check active conversation runs: %w", err)
@@ -86,7 +104,7 @@ func (r *ConversationRepository) UpdatePermissionMode(ctx context.Context, conve
 	if !mode.Valid() {
 		return fmt.Errorf("invalid permission mode")
 	}
-	result, err := r.db.ExecContext(ctx, `UPDATE conversations SET permission_mode=?, updated_at=? WHERE id=? AND NOT EXISTS (SELECT 1 FROM runs WHERE conversation_id=? AND status IN ('queued','running','waiting_approval'))`, mode, formatTime(updatedAt), conversationID, conversationID)
+	result, err := r.db.ExecContext(ctx, `UPDATE conversations SET permission_mode=?, updated_at=? WHERE id=? AND NOT EXISTS (SELECT 1 FROM runs WHERE conversation_id=? AND status IN ('queued','running','waiting_approval')) AND NOT EXISTS (SELECT 1 FROM workflow_conversations WHERE conversation_id=?)`, mode, formatTime(updatedAt), conversationID, conversationID, conversationID)
 	if err != nil {
 		return fmt.Errorf("update conversation permission mode: %w", err)
 	}
@@ -97,6 +115,13 @@ func (r *ConversationRepository) UpdatePermissionMode(ctx context.Context, conve
 		}
 		if exists == 0 {
 			return fmt.Errorf("conversation not found")
+		}
+		var researchRuns int
+		if err := r.db.QueryRowContext(ctx, `SELECT count(*) FROM workflow_conversations WHERE conversation_id=?`, conversationID).Scan(&researchRuns); err != nil {
+			return err
+		}
+		if researchRuns > 0 {
+			return fmt.Errorf("research conversation permission mode is frozen by its Workflow Run")
 		}
 		return fmt.Errorf("permission mode cannot change during an active run")
 	}
@@ -194,6 +219,25 @@ func (r *ConversationRepository) UpdateMessageText(ctx context.Context, messageI
 }
 
 func (r *ConversationRepository) ListMessages(ctx context.Context, conversationID string, limit int) ([]conversation.Message, error) {
+	return r.listMessagesWhere(ctx, "m.conversation_id = ?", []any{conversationID}, limit)
+}
+
+func (r *ConversationRepository) ListMessagesForRun(ctx context.Context, conversationID, runID string) ([]conversation.Message, error) {
+	return r.listMessagesWhere(ctx, "m.conversation_id = ? AND m.run_id = ?", []any{conversationID, runID}, -1)
+}
+
+func (r *ConversationRepository) GetTimelineMessage(ctx context.Context, messageID, conversationID string) (conversation.Message, error) {
+	values, err := r.listMessagesWhere(ctx, "m.conversation_id = ? AND m.id = ?", []any{conversationID, messageID}, 1)
+	if err != nil {
+		return conversation.Message{}, err
+	}
+	if len(values) != 1 {
+		return conversation.Message{}, fmt.Errorf("timeline message not found")
+	}
+	return values[0], nil
+}
+
+func (r *ConversationRepository) listMessagesWhere(ctx context.Context, condition string, args []any, limit int) ([]conversation.Message, error) {
 	if limit < 0 {
 		// Agent context and checkpoint construction must see the complete durable
 		// history; SQLite still streams rows so this does not require one giant
@@ -205,17 +249,23 @@ func (r *ConversationRepository) ListMessages(ctx context.Context, conversationI
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT selected.id, selected.conversation_id, COALESCE(selected.run_id, ''), selected.role, selected.status, selected.created_at, selected.updated_at,
 			COALESCE(r.status, ''), COALESCE(r.requested_reasoning_level, ''), COALESCE(r.resolved_reasoning_level, ''),
-			COALESCE(r.reasoning_observed, 0), COALESCE(r.reasoning_signature_observed, 0), COALESCE(r.reasoning_tokens, 0), COALESCE(r.reasoning_summary, '')
+			COALESCE(r.reasoning_observed, 0), COALESCE(r.reasoning_signature_observed, 0), COALESCE(r.reasoning_tokens, 0), COALESCE(r.reasoning_summary, ''),
+			COALESCE((SELECT workflow_run.status
+				FROM workflow_ai_chat_runs binding
+				JOIN workflow_ai_executions execution ON execution.id=binding.execution_id
+				JOIN workflow_runs workflow_run ON workflow_run.id=execution.workflow_run_id
+				WHERE binding.chat_run_id=selected.run_id LIMIT 1), ''),
+			EXISTS(SELECT 1 FROM workflow_ai_chat_runs binding WHERE binding.chat_run_id=selected.run_id)
 		FROM (
 			SELECT m.*,
 				CASE WHEN m.role = 'user' THEN 0 WHEN m.role = 'assistant' THEN 1 ELSE 2 END AS role_order
 			FROM messages m
-			WHERE m.conversation_id = ?
+			WHERE `+condition+`
 			ORDER BY m.created_at DESC, role_order DESC, m.id DESC
 			LIMIT ?
 		) selected
 		LEFT JOIN runs r ON r.id = selected.run_id
-		ORDER BY selected.created_at, selected.role_order, selected.id`, conversationID, limit)
+		ORDER BY selected.created_at, selected.role_order, selected.id`, append(args, limit)...)
 	if err != nil {
 		return nil, fmt.Errorf("list messages: %w", err)
 	}
@@ -225,7 +275,7 @@ func (r *ConversationRepository) ListMessages(ctx context.Context, conversationI
 		var reasoning conversation.MessageReasoning
 		var createdAt, updatedAt string
 		if err := rows.Scan(&value.ID, &value.ConversationID, &value.RunID, &value.Role, &value.Status, &createdAt, &updatedAt,
-			&reasoning.Status, &reasoning.RequestedLevel, &reasoning.ResolvedLevel, &reasoning.Observed, &reasoning.SignatureObserved, &reasoning.Tokens, &reasoning.Summary); err != nil {
+			&reasoning.Status, &reasoning.RequestedLevel, &reasoning.ResolvedLevel, &reasoning.Observed, &reasoning.SignatureObserved, &reasoning.Tokens, &reasoning.Summary, &value.WorkflowStatus, &value.Internal); err != nil {
 			return nil, err
 		}
 		if value.Role == conversation.RoleAssistant && value.RunID != "" {
@@ -305,11 +355,11 @@ func completeAssistantMessageWithCitations(ctx context.Context, tx *sql.Tx, mess
 			SELECT count(*)
 			FROM tool_calls tc
 			JOIN tool_results tr ON tr.tool_call_id=tc.id
-			WHERE tc.id=? AND tc.run_id=? AND tc.tool_name=? AND tc.status='completed' AND tr.status='success'`, value.ToolCallID, runID, citation.KnowledgeToolName).Scan(&trustedCall); err != nil {
+			WHERE tc.id=? AND tc.run_id=? AND tc.tool_name IN (?,?) AND tc.status='completed' AND tr.status='success'`, value.ToolCallID, runID, citation.KnowledgeToolName, citation.WorkflowSeedToolName).Scan(&trustedCall); err != nil {
 			return fmt.Errorf("verify citation tool call: %w", err)
 		}
 		if trustedCall != 1 {
-			return fmt.Errorf("citation tool call is not a successful knowledge search")
+			return fmt.Errorf("citation tool call is not a successful trusted evidence source")
 		}
 		bibliographyID, snapshot, level, snapshotErr := bibliographySnapshotForAttachment(ctx, tx, projectID, value.AttachmentID, updatedAt)
 		if snapshotErr != nil {

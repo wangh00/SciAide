@@ -42,12 +42,12 @@ func TestConfigureBackgroundCommandAllowsStdioPipes(t *testing.T) {
 }
 
 func TestBuildTransportConfiguresWindowsStdioProcessAsBackground(t *testing.T) {
-	transport, err := buildTransport(mcpserver.Server{
+	transport, err := buildTransportWithLogger(mcpserver.Server{
 		Transport:      mcpserver.TransportStdio,
 		Command:        "npx.cmd",
 		Args:           []string{"-y", "fixture"},
 		TimeoutSeconds: 30,
-	}, nil)
+	}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

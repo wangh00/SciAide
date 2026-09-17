@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/wangh00/SciAide/internal/skillrun"
 )
 
 var ErrRunSkillNotFound = errors.New("dynamic Run Skill not found")
@@ -112,6 +114,18 @@ func (s *Service) ListRunSkills(ctx context.Context, runID string) ([]RunSkill, 
 		values = append(values, value)
 	}
 	return values, rows.Err()
+}
+
+func (s *Service) ListRunSkillSnapshots(ctx context.Context, runID string) ([]skillrun.Snapshot, error) {
+	values, err := s.ListRunSkills(ctx, runID)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]skillrun.Snapshot, 0, len(values))
+	for _, value := range values {
+		result = append(result, skillrun.Snapshot{Name: value.Name, ContentHash: value.ContentHash, PackageHash: value.PackageHash})
+	}
+	return result, nil
 }
 
 type rowScanner interface{ Scan(...any) error }

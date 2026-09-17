@@ -52,38 +52,6 @@ func TestValidateRuntimeInputsRejectsEmptyRequiredResearchValues(t *testing.T) {
 	}
 }
 
-func TestEffectiveRuntimePortsOnlyUpgradesLegacyBuiltInAnalysisGraphs(t *testing.T) {
-	legacy := Compilation{CompilerVersion: "p7.4-v1", Inputs: []Port{
-		{Name: "input_paths", Type: TypeArray, Required: true},
-		{Name: "analysis_request", Type: TypeObject, Required: true},
-	}, Nodes: []CompiledNode{{ID: "analysis", Kind: NodePython}}, Edges: []Edge{
-		{FromNode: "$input", FromPort: "input_paths", ToNode: "analysis", ToPort: "inputPaths"},
-		{FromNode: "$input", FromPort: "analysis_request", ToNode: "analysis", ToPort: "inputData"},
-	}}
-	for hash, kind := range legacyAnalysisDefinitionKinds {
-		if kind == "delimited" {
-			legacy.DefinitionSHA256 = hash
-		}
-	}
-	ports := effectiveRuntimePorts(legacy)
-	if ports[0].FileKind != "delimited" || ports[0].MinItems != 1 || ports[0].MaxItems != 1 || ports[1].Control != "analysis_request" {
-		t.Fatalf("legacy effective ports = %#v", ports)
-	}
-	custom := legacy
-	custom.DefinitionSHA256 = strings.Repeat("0", 64)
-	custom.Nodes = []CompiledNode{{ID: "custom", Kind: NodePython}}
-	ports = effectiveRuntimePorts(custom)
-	if ports[0].FileKind != "" || ports[1].Control != "" {
-		t.Fatalf("custom graph was coupled to legacy names: %#v", ports)
-	}
-	current := legacy
-	current.CompilerVersion = CompilerVersion
-	ports = effectiveRuntimePorts(current)
-	if ports[0].FileKind != "" || ports[1].Control != "" {
-		t.Fatalf("current compiler inferred an undeclared contract: %#v", ports)
-	}
-}
-
 func TestRuntimeWorkspaceInputPreflightRejectsMissingDirectoryAndPrivateFiles(t *testing.T) {
 	workspace := t.TempDir()
 	if err := os.WriteFile(filepath.Join(workspace, "data.csv"), []byte("value\n1\n"), 0o600); err != nil {
@@ -126,10 +94,10 @@ func TestRuntimeWorkspaceInputPreflightDetectsModifiedContentAddressedSnapshot(t
 	}
 }
 
-func TestFrozenWorkflowInputsRejectLegacyMutablePaths(t *testing.T) {
+func TestFrozenWorkflowInputsRejectUnaddressedPaths(t *testing.T) {
 	ports := []Port{{Name: "data", Type: TypeArray, FileKind: "delimited", Required: true}}
-	if err := validateFrozenWorkflowInputs(ports, json.RawMessage(`{"data":["data.csv"]}`)); err == nil || !strings.Contains(err.Error(), "旧版本") {
-		t.Fatalf("legacy mutable input error = %v", err)
+	if err := validateFrozenWorkflowInputs(ports, json.RawMessage(`{"data":["data.csv"]}`)); err == nil || !strings.Contains(err.Error(), "不可变内容快照") {
+		t.Fatalf("unaddressed input error = %v", err)
 	}
 	digest := strings.Repeat("a", 64)
 	if err := validateFrozenWorkflowInputs(ports, json.RawMessage(`{"data":["research-inputs/data-`+digest+`.csv"]}`)); err != nil {
@@ -164,6 +132,29 @@ func TestStageInputFileCopiesExternalDataByContentAndFailsClosedOnCollision(t *t
 	}
 	if _, err := service.StageInputFile(context.Background(), "project", source, "xlsx"); err == nil {
 		t.Fatal("CSV was accepted for an XLSX-only Workflow")
+	}
+}
+
+func TestStageInputFileForTaskWritesOnlyToPrivateTaskWorkspace(t *testing.T) {
+	workspace, external := t.TempDir(), t.TempDir()
+	source := filepath.Join(external, "sleep-study.csv")
+	if err := os.WriteFile(source, []byte("exercise_minutes,sleep_score\n120,4\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service := &Service{projects: fixedProjectLoader{project.Project{ID: "project", WorkspacePath: workspace}}}
+	staged, err := service.StageInputFileForTask(context.Background(), "project", source, "tabular", "starter-task")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(staged.RelativePath, "research-inputs/") {
+		t.Fatalf("task input path = %q", staged.RelativePath)
+	}
+	taskFile := filepath.Join(workspace, ".sciaide", "tasks", "starter-task", filepath.FromSlash(staged.RelativePath))
+	if _, err := os.Stat(taskFile); err != nil {
+		t.Fatalf("private task input is unavailable: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(workspace, filepath.FromSlash(staged.RelativePath))); !os.IsNotExist(err) {
+		t.Fatalf("task input leaked into the project-level input directory: %v", err)
 	}
 }
 

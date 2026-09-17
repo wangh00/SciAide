@@ -18,6 +18,16 @@ type resourceLoaderFixture struct {
 	runID, skillID, path string
 }
 
+type sectionResourceLoaderFixture struct {
+	resourceLoaderFixture
+	section string
+}
+
+func (f *sectionResourceLoaderFixture) LoadStructuredForRun(_ context.Context, runID, projectID, toolCallID, name, section string, offset, limit int) (opensciskill.Info, opensciskill.Chunk, bool, error) {
+	f.runID, f.skillID, f.section = runID, name, section
+	return opensciskill.Info{Name: name}, opensciskill.Chunk{Name: name, Mode: "section", Section: section, Content: "## Evidence review\nUse bounded evidence.", TotalRunes: 39}, false, nil
+}
+
 type resourceMaterializerFixture struct {
 	value opensciskill.MaterializedResource
 	runID string
@@ -51,6 +61,21 @@ func TestReadSkillResourceUsesInvocationRunBoundary(t *testing.T) {
 	}
 	if loader.runID != "run-snapshot" || loader.skillID != "review-skill" || loader.path != "references/paper.md" || result.Status != tool.ResultSuccess || result.Text != "evidence" {
 		t.Fatalf("resource invocation = loader:%#v result:%#v", loader, result)
+	}
+}
+
+func TestReadSkillResourceRedirectsLogicalSectionPath(t *testing.T) {
+	loader := &sectionResourceLoaderFixture{}
+	implementation := NewReadSkillResource(loader)
+	result, err := implementation.Invoke(context.Background(), tool.Invocation{CallID: "call", RunID: "run-snapshot", ProjectID: "project", Arguments: json.RawMessage(`{"name":"review-skill","path":"section-9.md"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loader.section != "section-9" || loader.path != "" || result.Status != tool.ResultSuccess || !strings.Contains(result.Text, "logical SKILL.md section") || !strings.Contains(result.Text, "Use bounded evidence") {
+		t.Fatalf("section redirect = loader:%#v result:%#v", loader, result)
+	}
+	if !strings.Contains(string(result.Structured), `"path":"section-9"`) {
+		t.Fatalf("structured result = %s", result.Structured)
 	}
 }
 

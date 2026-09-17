@@ -26,10 +26,12 @@ import (
 	"github.com/wangh00/SciAide/internal/app/projectarchive"
 	"github.com/wangh00/SciAide/internal/app/pythonenv"
 	"github.com/wangh00/SciAide/internal/app/research"
+	"github.com/wangh00/SciAide/internal/app/researchtask"
 	"github.com/wangh00/SciAide/internal/app/researchworkflow"
 	"github.com/wangh00/SciAide/internal/app/skill"
 	"github.com/wangh00/SciAide/internal/app/tool"
 	"github.com/wangh00/SciAide/internal/app/workflow"
+	"github.com/wangh00/SciAide/internal/app/workflowai"
 	mcpadapter "github.com/wangh00/SciAide/internal/mcp"
 	"github.com/wangh00/SciAide/internal/model/gateway"
 	"github.com/wangh00/SciAide/internal/observability"
@@ -53,6 +55,7 @@ const Version = "0.4.0"
 type Options struct {
 	RootDir            string
 	ResearchConnectors []research.Connector
+	EventPublisher     chat.Publisher
 }
 
 type Application struct {
@@ -165,6 +168,7 @@ func New(options Options) (*Application, error) {
 	}
 	conversationRepository := sqlite.NewConversationRepository(store.DB())
 	attachmentService := attachment.NewService(sqlite.NewAttachmentRepository(store.DB()), projectService)
+	attachmentService.SetConversationValidator(conversationRepository)
 	artifactService := artifact.NewService(sqlite.NewArtifactRepository(store.DB()), projectService)
 	knowledgeService := knowledge.NewService(sqlite.NewKnowledgeRepository(store.DB()), projectService, attachmentService)
 	conversationService := conversation.NewService(conversationRepository)
@@ -270,9 +274,11 @@ func New(options Options) (*Application, error) {
 		builtin.NewSearchKnowledge(knowledgeService),
 		builtin.NewResearchCatalog(researchService), builtin.NewResearchSearch(researchService),
 		builtin.NewResearchFetch(researchService),
+		builtin.NewResearchFullTextRead(researchDiscovery),
 		builtin.NewResearchWorkflowSearch(researchWorkflowService), builtin.NewResearchWorkflowImport(researchWorkflowService),
 		builtin.NewResearchWorkflowSync(researchWorkflowService), builtin.NewResearchWorkflowPython(researchWorkflowService),
-		builtin.NewResearchWorkflowReport(researchWorkflowService),
+		builtin.NewResearchWorkflowPreparePython(researchWorkflowService),
+		builtin.NewResearchWorkflowReviewGate(), builtin.NewResearchWorkflowReport(researchWorkflowService),
 	} {
 		if err := toolRegistry.Register(context.Background(), builtinTool); err != nil {
 			_ = store.Close()
@@ -322,6 +328,20 @@ func New(options Options) (*Application, error) {
 		return fail(fmt.Errorf("configure Workflows: %w", err))
 	}
 	workflowRuntimeRepository := sqlite.NewWorkflowRuntimeRepository(store.DB())
+	resourceActions := builtin.NewResourceActions(sqlite.NewModelResourceRepository(store.DB()), toolRegistry, tool.CompositeProjectResolver{Runs: runRepository, Workflows: workflowRuntimeRepository}, dynamicSkills)
+	for _, resourceTool := range []tool.Tool{resourceActions.OpenTool(), resourceActions.SearchTool()} {
+		if err := toolRegistry.Register(context.Background(), resourceTool); err != nil {
+			_ = store.Close()
+			return fail(fmt.Errorf("register resource interface: %w", err))
+		}
+	}
+	researchTaskService := researchtask.NewService(sqlite.NewResearchTaskRepository(store.DB()))
+	attachmentService.SetTaskValidator(researchTaskService)
+	artifactService.SetTaskValidator(researchTaskService)
+	knowledgeService.SetTaskValidator(researchTaskService)
+	researchDiscovery.SetTaskValidator(researchTaskService)
+	researchBibliography.SetTaskValidator(researchTaskService)
+	researchWorkflowService.SetTaskValidator(researchTaskService)
 	toolExecutor := tool.NewExecutor(toolRegistry, toolService, tool.CompositeProjectResolver{Runs: runRepository, Workflows: workflowRuntimeRepository}, tool.ExecutorOptions{
 		OnInvocationError: func(call tool.Call, err error) {
 			logger.Error("tool invocation failed", "toolCallId", call.ID, "tool", call.ToolName, "error", err)
@@ -339,8 +359,33 @@ func New(options Options) (*Application, error) {
 		_ = store.Close()
 		return fail(fmt.Errorf("configure Workflow Runtime: %w", err))
 	}
+	workflowRuntime.SetTaskValidator(researchTaskService)
+	for _, value := range builtin.NewResearchDiscussionTools(workflowRuntime) {
+		if err := toolRegistry.Register(context.Background(), value); err != nil {
+			_ = store.Close()
+			return fail(fmt.Errorf("register research discussion tool: %w", err))
+		}
+	}
+	if err := workflowRuntime.SetSkillLoader(dynamicSkills); err != nil {
+		_ = store.Close()
+		return fail(fmt.Errorf("bind Workflow Skill snapshots: %w", err))
+	}
+	// Resource managers use durable task metadata rather than reconstructing
+	// labels from ephemeral Workflow Run history.
+	// The facade is already allocated below; binding is completed after the
+	// application value is constructed.
+	workflowRuntime.SetProcessRuntimeReader(localProcessRunner)
+	workflowRuntime.AddProcessRuntimeReader(pythonProcessRunner)
+	workflowStarter, err := workflow.NewStarterService(workflowService, workflowRuntime, projectService, attachmentService, knowledgeService, dynamicSkills)
+	if err != nil {
+		_ = store.Close()
+		return fail(fmt.Errorf("configure research starter: %w", err))
+	}
 	approvalCoordinator := permission.NewCoordinator(permissionEngine, toolService, runRepository)
-	publisher := wailstransport.NewEventPublisher(lifecycle)
+	var publisher chat.Publisher = options.EventPublisher
+	if publisher == nil {
+		publisher = wailstransport.NewEventPublisher(lifecycle)
+	}
 	chatService := chat.NewService(runRepository, conversationRepository, runRepository, publisher)
 	if err := chatService.SetAttachmentResolver(attachmentService); err != nil {
 		_ = store.Close()
@@ -363,10 +408,22 @@ func New(options Options) (*Application, error) {
 	modelResolver := gateway.NewResolver(profileService)
 	multimodalService := multimodal.NewService(sqlite.NewVisionFallbackRepository(store.DB()), secrets, multimodal.NewProtocolResolver())
 	historicalSkills := skill.NewHistoricalRunContexts(sqlite.NewSkillRepository(store.DB()))
-	agentLoop := agent.NewLoop(runRepository, conversationRepository, toolService, toolRegistry, approvalCoordinator, toolExecutor, modelResolver, agent.NewEventObserver(chatService), agent.Options{Terminator: terminator, Checkpoints: contextCheckpointService, SkillContexts: historicalSkills, SkillRouter: dynamicSkills, Images: attachmentService, Multimodal: multimodalService})
+	agentLoop := agent.NewLoop(runRepository, conversationRepository, toolService, toolRegistry, approvalCoordinator, toolExecutor, modelResolver, agent.NewEventObserver(chatService), agent.Options{Terminator: terminator, Checkpoints: contextCheckpointService, SkillContexts: historicalSkills, SkillRouter: dynamicSkills, Images: attachmentService, Multimodal: multimodalService, Research: workflowRuntime, Resources: resourceActions})
 	if err := chatService.SetRunner(agent.NewRunner(agentLoop)); err != nil {
 		_ = store.Close()
 		return fail(fmt.Errorf("configure agent loop: %w", err))
+	}
+	workflowAIBridge, err := workflowai.New(chatService, conversationRepository, permissionEngine)
+	if err != nil {
+		_ = store.Close()
+		return fail(fmt.Errorf("configure Workflow AI bridge: %w", err))
+	}
+	workflowAIBridge.SetProcessRuntimeReader(localProcessRunner)
+	workflowRuntime.SetLiteratureCandidateReader(researchWorkflowService)
+	workflowAIBridge.AddProcessRuntimeReader(pythonProcessRunner)
+	if err := workflowRuntime.SetAIStageExecutor(workflowAIBridge); err != nil {
+		_ = store.Close()
+		return fail(fmt.Errorf("bind Workflow AI bridge: %w", err))
 	}
 	if expired, err := permissionEngine.Recover(context.Background()); err != nil {
 		_ = store.Close()
@@ -380,12 +437,6 @@ func New(options Options) (*Application, error) {
 	} else if interrupted > 0 {
 		logger.Warn("interrupted unfinished tool calls", "count", interrupted)
 	}
-	if recovered, err := workflowRuntime.Recover(context.Background()); err != nil {
-		_ = store.Close()
-		return fail(fmt.Errorf("recover Workflow Runs: %w", err))
-	} else if recovered > 0 {
-		logger.Warn("recovered Workflow Runs", "count", recovered)
-	}
 	if interrupted, err := sqlite.NewProcessExecutionRepository(store.DB()).InterruptActive(context.Background(), time.Now().UTC()); err != nil {
 		_ = store.Close()
 		return fail(fmt.Errorf("recover local process execution audits: %w", err))
@@ -397,6 +448,15 @@ func New(options Options) (*Application, error) {
 		return fail(fmt.Errorf("recover chat runs: %w", err))
 	} else if interrupted > 0 {
 		logger.Warn("interrupted unfinished chat runs", "count", interrupted)
+	}
+	// Workflow AI nodes project durable Chat Run outcomes. Recover Chat first so
+	// an unfinished model/tool turn is terminal before Workflow recovery decides
+	// whether the stage can be committed or must wait for an explicit retry.
+	if recovered, err := workflowRuntime.Recover(context.Background()); err != nil {
+		_ = store.Close()
+		return fail(fmt.Errorf("recover Workflow Runs: %w", err))
+	} else if recovered > 0 {
+		logger.Warn("recovered Workflow Runs", "count", recovered)
 	}
 	if recovered, err := artifactService.Recover(context.Background()); err != nil {
 		_ = store.Close()
@@ -417,7 +477,7 @@ func New(options Options) (*Application, error) {
 	} else if recovered > 0 {
 		logger.Warn("recovered unfinished knowledge indexing jobs", "count", recovered)
 	}
-	return &Application{
+	application := &Application{
 		Logger:               logger,
 		SystemFacade:         wailstransport.NewSystemFacade(Version),
 		ProjectFacade:        wailstransport.NewProjectFacade(lifecycle, projectService, pythonEnvironmentService),
@@ -434,7 +494,7 @@ func New(options Options) (*Application, error) {
 		ArtifactFacade:       wailstransport.NewArtifactFacade(lifecycle, artifactService),
 		ResearchFacade:       wailstransport.NewResearchFacade(lifecycle, researchDiscovery, researchBibliography),
 		PythonFacade:         wailstransport.NewPythonFacade(lifecycle, pythonEnvironmentService, pythonKernelService),
-		WorkflowFacade:       wailstransport.NewWorkflowFacade(lifecycle, workflowService, workflowRuntime, projectService),
+		WorkflowFacade:       wailstransport.NewWorkflowFacade(lifecycle, workflowService, workflowRuntime, workflowStarter, artifactService, projectService),
 		lifecycle:            lifecycle,
 		chat:                 chatService,
 		knowledge:            knowledgeService,
@@ -446,7 +506,9 @@ func New(options Options) (*Application, error) {
 		mcp:                  mcpManager,
 		store:                store,
 		transientRoot:        transientRoot,
-	}, nil
+	}
+	application.WorkflowFacade.SetResearchTaskService(researchTaskService)
+	return application, nil
 }
 
 func retireBuiltinSkillPackages(ctx context.Context, db *sql.DB, skillsRoot, backupRoot string) (int, error) {

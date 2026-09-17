@@ -21,8 +21,14 @@ func (r *AttachmentRepository) Create(ctx context.Context, value attachment.Atta
 	if err != nil {
 		return fmt.Errorf("encode attachment parse metadata: %w", err)
 	}
-	_, err = r.db.ExecContext(ctx, `INSERT INTO attachments(id,project_id,original_name,mime_type,document_format,size_bytes,sha256,storage_relative_path,cache_relative_path,status,unit_count,extracted_runes,truncated,parse_metadata_json,error_message,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		value.ID, value.ProjectID, value.OriginalName, value.MIMEType, value.Format, value.SizeBytes, value.SHA256, value.StorageRelativePath, value.CacheRelativePath, value.Status, value.UnitCount, value.ExtractedRunes, value.Truncated, string(metadata), value.ErrorMessage, formatTime(value.CreatedAt), formatTime(value.UpdatedAt))
+	if value.ScopeKind == "" {
+		value.ScopeKind = attachment.ScopeProjectShared
+	}
+	if value.SourceKind == "" {
+		value.SourceKind = attachment.SourceUnknown
+	}
+	_, err = r.db.ExecContext(ctx, `INSERT INTO attachments(id,project_id,scope_kind,research_task_id,source_kind,original_name,mime_type,document_format,size_bytes,sha256,storage_relative_path,cache_relative_path,status,unit_count,extracted_runes,truncated,parse_metadata_json,error_message,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		value.ID, value.ProjectID, value.ScopeKind, value.ResearchTaskID, value.SourceKind, value.OriginalName, value.MIMEType, value.Format, value.SizeBytes, value.SHA256, value.StorageRelativePath, value.CacheRelativePath, value.Status, value.UnitCount, value.ExtractedRunes, value.Truncated, string(metadata), value.ErrorMessage, formatTime(value.CreatedAt), formatTime(value.UpdatedAt))
 	if err != nil {
 		return fmt.Errorf("insert attachment: %w", err)
 	}
@@ -35,6 +41,14 @@ func (r *AttachmentRepository) Get(ctx context.Context, id string) (attachment.A
 
 func (r *AttachmentRepository) FindByHash(ctx context.Context, projectID, sha256 string) (attachment.Attachment, bool, error) {
 	value, err := scanAttachment(r.db.QueryRowContext(ctx, attachmentSelect+` WHERE project_id=? AND sha256=?`, projectID, sha256))
+	if errors.Is(err, sql.ErrNoRows) {
+		return attachment.Attachment{}, false, nil
+	}
+	return value, err == nil, err
+}
+
+func (r *AttachmentRepository) FindByHashInScope(ctx context.Context, projectID, sha256 string, scopeKind attachment.ScopeKind, researchTaskID string) (attachment.Attachment, bool, error) {
+	value, err := scanAttachment(r.db.QueryRowContext(ctx, attachmentSelect+` WHERE project_id=? AND sha256=? AND scope_kind=? AND research_task_id=?`, projectID, sha256, scopeKind, researchTaskID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return attachment.Attachment{}, false, nil
 	}
@@ -74,12 +88,12 @@ func (r *AttachmentRepository) UpdateParse(ctx context.Context, value attachment
 	return nil
 }
 
-const attachmentSelect = `SELECT id,project_id,original_name,mime_type,document_format,size_bytes,sha256,storage_relative_path,cache_relative_path,status,unit_count,extracted_runes,truncated,parse_metadata_json,error_message,created_at,updated_at FROM attachments`
+const attachmentSelect = `SELECT id,project_id,scope_kind,research_task_id,COALESCE(source_kind,'unknown'),original_name,mime_type,document_format,size_bytes,sha256,storage_relative_path,cache_relative_path,status,unit_count,extracted_runes,truncated,parse_metadata_json,error_message,created_at,updated_at FROM attachments`
 
 func scanAttachment(row rowScanner) (attachment.Attachment, error) {
 	var value attachment.Attachment
 	var createdAt, updatedAt, metadataJSON string
-	if err := row.Scan(&value.ID, &value.ProjectID, &value.OriginalName, &value.MIMEType, &value.Format, &value.SizeBytes, &value.SHA256, &value.StorageRelativePath, &value.CacheRelativePath, &value.Status, &value.UnitCount, &value.ExtractedRunes, &value.Truncated, &metadataJSON, &value.ErrorMessage, &createdAt, &updatedAt); err != nil {
+	if err := row.Scan(&value.ID, &value.ProjectID, &value.ScopeKind, &value.ResearchTaskID, &value.SourceKind, &value.OriginalName, &value.MIMEType, &value.Format, &value.SizeBytes, &value.SHA256, &value.StorageRelativePath, &value.CacheRelativePath, &value.Status, &value.UnitCount, &value.ExtractedRunes, &value.Truncated, &metadataJSON, &value.ErrorMessage, &createdAt, &updatedAt); err != nil {
 		return attachment.Attachment{}, err
 	}
 	if err := json.Unmarshal([]byte(metadataJSON), &value.ParseMetadata); err != nil {

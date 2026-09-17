@@ -121,14 +121,6 @@ type ReasoningRecorder interface {
 	RecordReasoningResult(ctx context.Context, profileID, modelID string, result ReasoningResult) error
 }
 
-// InferredReasoningLevels keeps the legacy OpenAI-compatible inference entry
-// point. New code should use InferredReasoningLevelsForProtocol so adapters can
-// expose one stable five-step preference while still mapping it to the subset
-// understood by the selected protocol/model family.
-func InferredReasoningLevels(modelID string) []ReasoningLevel {
-	return InferredReasoningLevelsForProtocol(ProtocolOpenAIChat, modelID)
-}
-
 // InferredReasoningLevelsForProtocol returns adjustable reasoning tiers from
 // weakest to strongest. An empty result does not mean that the model cannot
 // reason: it means SciAide must omit an explicit effort parameter and let the

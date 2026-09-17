@@ -49,15 +49,31 @@ type pubMedArticleSet struct {
 	Articles []pubMedArticle `xml:"PubmedArticle"`
 }
 
+type pubMedText string
+
+func (value *pubMedText) UnmarshalXML(decoder *xml.Decoder, start xml.StartElement) error {
+	var content struct {
+		Inner string `xml:",innerxml"`
+	}
+	if err := decoder.DecodeElement(&content, &start); err != nil {
+		return err
+	}
+	*value = pubMedText(plainText(content.Inner))
+	return nil
+}
+
 type pubMedArticle struct {
 	Citation struct {
 		PMID    string `xml:"PMID"`
 		Article struct {
-			Title    string `xml:"ArticleTitle"`
+			Dates []struct {
+				Year int `xml:"Year"`
+			} `xml:"ArticleDate"`
+			Title    pubMedText `xml:"ArticleTitle"`
 			Abstract struct {
 				Texts []struct {
 					Label string `xml:"Label,attr"`
-					Text  string `xml:",chardata"`
+					Text  string `xml:",innerxml"`
 				} `xml:"AbstractText"`
 			} `xml:"Abstract"`
 			Journal struct {
@@ -106,6 +122,10 @@ func (c *pubMedConnector) Source() appresearch.Source {
 
 func (c *pubMedConnector) Search(ctx context.Context, options appresearch.SearchOptions) ([]appresearch.Work, error) {
 	query := url.Values{"db": {"pubmed"}, "retmode": {"json"}, "sort": {"relevance"}, "retmax": {fmt.Sprint(options.Limit)}, "term": {options.Query}}
+	applyPublicationYears("pubmed", query, options.Years)
+	if options.Offset > 0 {
+		query.Set("retstart", fmt.Sprint(options.Offset))
+	}
 	var search pubMedSearchResponse
 	if err := c.client.getJSON(ctx, c.base+"/esearch.fcgi?"+query.Encode(), requestOptions{SourceID: "pubmed", Host: c.host, MinSpacing: c.spacing, Cache: true}, &search); err != nil {
 		return nil, err
@@ -113,7 +133,28 @@ func (c *pubMedConnector) Search(ctx context.Context, options appresearch.Search
 	if len(search.Result.IDs) == 0 {
 		return []appresearch.Work{}, nil
 	}
-	return c.summaries(ctx, search.Result.IDs)
+	query = url.Values{"db": {"pubmed"}, "retmode": {"xml"}, "id": {strings.Join(search.Result.IDs, ",")}}
+	body, _, err := c.client.get(ctx, c.base+"/efetch.fcgi?"+query.Encode(), requestOptions{SourceID: "pubmed", Host: c.host, MinSpacing: c.spacing, Cache: true})
+	if err != nil {
+		return nil, err
+	}
+	var set pubMedArticleSet
+	if err := xml.Unmarshal(body, &set); err != nil {
+		return nil, &appresearch.SourceError{SourceID: "pubmed", Code: appresearch.FailureInvalidData, Message: "PubMed returned malformed abstract XML", Cause: err}
+	}
+	byID := map[string]pubMedArticle{}
+	for _, article := range set.Articles {
+		byID[article.Citation.PMID] = article
+	}
+	works := []appresearch.Work{}
+	for _, id := range search.Result.IDs {
+		article, ok := byID[id]
+		if !ok {
+			return nil, &appresearch.SourceError{SourceID: "pubmed", Code: appresearch.FailureInvalidData, Message: "PubMed abstract response omitted a requested PMID"}
+		}
+		works = append(works, pubMedArticleWork(article))
+	}
+	return works, nil
 }
 
 func (c *pubMedConnector) Fetch(ctx context.Context, recordID string) (appresearch.Work, error) {
@@ -221,13 +262,17 @@ func pubMedArticleWork(record pubMedArticle) appresearch.Work {
 	}
 	identifiers.DOI = appresearch.NormalizeDOI(identifiers.DOI)
 	date := article.Journal.JournalIssue.PubDate
+	years := []int{}
+	for _, date := range article.Dates {
+		years = append(years, date.Year)
+	}
 	published := strings.TrimSpace(strings.Join([]string{date.Year, date.Month, date.Day}, " "))
 	if published == "" {
 		published = date.Medline
 	}
 	return appresearch.Work{
-		SourceRecordID: record.Citation.PMID, Title: plainText(article.Title), Abstract: strings.Join(abstracts, "\n\n"),
-		Authors: authors, Year: yearFrom(published), Published: dateString(published), Venue: firstNonEmpty(article.Journal.Title, article.Journal.ISO),
+		SourceRecordID: record.Citation.PMID, Title: string(article.Title), Abstract: strings.Join(abstracts, "\n\n"),
+		Authors: authors, Year: yearFrom(published), PublicationYears: years, Published: dateString(published), Venue: firstNonEmpty(article.Journal.Title, article.Journal.ISO),
 		Volume: article.Journal.JournalIssue.Volume, Issue: article.Journal.JournalIssue.Issue, Pages: article.Pagination.Pages,
 		WorkType: "journal-article", Identifiers: identifiers,
 		LandingURL: "https://pubmed.ncbi.nlm.nih.gov/" + record.Citation.PMID + "/", RawSnapshot: rawSnapshot(record),

@@ -93,6 +93,8 @@ type Runtime interface {
 	Discover(ctx context.Context, preferredPath string) (Discovery, error)
 	Probe(ctx context.Context, executablePath string) (Interpreter, error)
 	CreateEnvironment(ctx context.Context, baseExecutablePath, destination string) error
+	FinalizeEnvironment(ctx context.Context, environmentPythonPath, previousRoot string) error
+	ValidateEnvironmentScripts(ctx context.Context, environmentPythonPath string) error
 	InstallPackages(ctx context.Context, environmentPythonPath string, packages []string) error
 	Freeze(ctx context.Context, environmentPythonPath string) ([]string, error)
 }

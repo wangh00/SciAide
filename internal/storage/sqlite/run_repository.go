@@ -11,8 +11,10 @@ import (
 	"time"
 
 	"github.com/wangh00/SciAide/internal/app/chat"
+	"github.com/wangh00/SciAide/internal/app/citation"
 	"github.com/wangh00/SciAide/internal/app/conversation"
 	"github.com/wangh00/SciAide/internal/app/modelprofile"
+	"github.com/wangh00/SciAide/internal/app/tool"
 	"github.com/wangh00/SciAide/internal/events"
 	"github.com/wangh00/SciAide/internal/model"
 	"github.com/wangh00/SciAide/internal/modelcap"
@@ -79,6 +81,39 @@ func (r *RunRepository) UpdateModelTurnDraft(ctx context.Context, runID string, 
 		return fmt.Errorf("model turn draft was not updated")
 	}
 	return nil
+}
+
+func (r *RunRepository) LatestModelTurnJournal(ctx context.Context, runID string) (chat.ModelTurnJournal, bool, error) {
+	var value chat.ModelTurnJournal
+	var completedAt sql.NullString
+	var startedAt, updatedAt string
+	var status chat.ModelTurnStatus
+	err := r.db.QueryRowContext(ctx, `SELECT run_id,turn_index,status,draft_text,finish_reason,provider_item_count,started_at,completed_at,updated_at FROM model_turn_journal WHERE run_id=? ORDER BY turn_index DESC LIMIT 1`, strings.TrimSpace(runID)).Scan(
+		&value.RunID, &value.TurnIndex, &status, &value.DraftText, &value.FinishReason, &value.ProviderItemCount, &startedAt, &completedAt, &updatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return chat.ModelTurnJournal{}, false, nil
+	}
+	if err != nil {
+		return chat.ModelTurnJournal{}, false, fmt.Errorf("read latest model turn journal: %w", err)
+	}
+	value.Status = status
+	var parseErr error
+	value.StartedAt, parseErr = parseTime(startedAt)
+	if parseErr != nil {
+		return chat.ModelTurnJournal{}, false, parseErr
+	}
+	value.UpdatedAt, parseErr = parseTime(updatedAt)
+	if parseErr != nil {
+		return chat.ModelTurnJournal{}, false, parseErr
+	}
+	if completedAt.Valid && completedAt.String != "" {
+		completed, parseErr := parseTime(completedAt.String)
+		if parseErr != nil {
+			return chat.ModelTurnJournal{}, false, parseErr
+		}
+		value.CompletedAt = &completed
+	}
+	return value, true, nil
 }
 
 func (r *RunRepository) FinishModelTurn(ctx context.Context, runID string, turnIndex int, status chat.ModelTurnStatus, finishReason string, providerItemCount int, at time.Time) error {
@@ -300,6 +335,14 @@ func (r *RunRepository) ListProviderTurns(ctx context.Context, runID string) ([]
 }
 
 func (r *RunRepository) CreateWithMessages(ctx context.Context, value chat.Run, userMessage, assistantMessage conversation.Message) error {
+	return r.createWithMessages(ctx, value, userMessage, assistantMessage, nil)
+}
+
+func (r *RunRepository) CreateWorkflowAIWithMessages(ctx context.Context, value chat.Run, userMessage, assistantMessage conversation.Message, execution chat.WorkflowAIExecution) error {
+	return r.createWithMessages(ctx, value, userMessage, assistantMessage, &execution)
+}
+
+func (r *RunRepository) createWithMessages(ctx context.Context, value chat.Run, userMessage, assistantMessage conversation.Message, workflowAI *chat.WorkflowAIExecution) error {
 	if !value.PermissionMode.Valid() {
 		value.PermissionMode = conversation.PermissionPlan
 	}
@@ -321,6 +364,15 @@ func (r *RunRepository) CreateWithMessages(ctx context.Context, value chat.Run, 
 		return fmt.Errorf("begin run: %w", err)
 	}
 	defer tx.Rollback()
+	if workflowAI == nil {
+		blocked, err := blocksOrdinaryWorkflowChat(ctx, tx, value.ConversationID)
+		if err != nil {
+			return err
+		}
+		if blocked {
+			return fmt.Errorf("科研任务已恢复执行，请等待当前阶段完成后再对话")
+		}
+	}
 	if err := insertMessage(ctx, tx, userMessage); err != nil {
 		return err
 	}
@@ -335,7 +387,48 @@ func (r *RunRepository) CreateWithMessages(ctx context.Context, value chat.Run, 
 	if _, err := tx.ExecContext(ctx, `UPDATE conversations SET updated_at=? WHERE id=?`, formatTime(value.UpdatedAt), value.ConversationID); err != nil {
 		return err
 	}
+	if workflowAI != nil {
+		if len(workflowAI.PromptText) == 0 || len(workflowAI.PromptText) > 262144 || len(workflowAI.PromptSHA256) != 64 || len(workflowAI.InputSHA256) != 64 || len(workflowAI.OutputSchemaSHA256) != 64 || !json.Valid(workflowAI.AllowedTools) || !json.Valid(workflowAI.OutputSchema) {
+			return fmt.Errorf("invalid Workflow AI execution snapshot")
+		}
+		_, err = tx.ExecContext(ctx, `INSERT INTO workflow_ai_executions(
+			id,workflow_run_id,workflow_step_id,attempt,node_kind,model_profile_id,model_id,reasoning_level,
+			prompt_version,prompt_text,prompt_sha256,input_sha256,allowed_tools_json,output_schema_json,output_schema_sha256,
+			status,created_at,started_at,updated_at
+		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'running',?,?,?)`, workflowAI.ID, workflowAI.WorkflowRunID, workflowAI.WorkflowStepID, workflowAI.Attempt, workflowAI.NodeKind,
+			value.ModelProfileID, value.ModelID, value.RequestedReasoningLevel, workflowAI.PromptVersion, workflowAI.PromptText, workflowAI.PromptSHA256,
+			workflowAI.InputSHA256, string(workflowAI.AllowedTools), string(workflowAI.OutputSchema), workflowAI.OutputSchemaSHA256, formatTime(workflowAI.CreatedAt), formatTime(workflowAI.CreatedAt), formatTime(workflowAI.CreatedAt))
+		if err != nil {
+			return fmt.Errorf("insert Workflow AI execution: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO workflow_ai_chat_runs(execution_id,chat_run_id,created_at) VALUES (?,?,?)`, workflowAI.ID, value.ID, formatTime(workflowAI.CreatedAt)); err != nil {
+			return fmt.Errorf("bind Workflow AI Chat Run: %w", err)
+		}
+		if len(workflowAI.Citations) > 0 {
+			if strings.TrimSpace(workflowAI.CitationToolCallID) == "" {
+				return fmt.Errorf("Workflow AI citation seed call identity is required")
+			}
+			seed := workflowCitationSeedResult(workflowAI.Citations, workflowAI.CreatedAt)
+			call := tool.Call{ID: workflowAI.CitationToolCallID, RunID: value.ID, SubjectKind: tool.SubjectChatRun, ProviderCallID: "workflow-citation-seed:" + workflowAI.ID, ToolName: citation.WorkflowSeedToolName, ToolVersion: "1", Arguments: json.RawMessage(`{}`), Status: tool.CallPending, Risk: tool.RiskLow, Permissions: []tool.PermissionRequirement{}, Idempotent: true, IdempotencyKey: "workflow-citation-seed:" + workflowAI.ID, CreatedAt: workflowAI.CreatedAt, UpdatedAt: workflowAI.CreatedAt}
+			if err := (&ToolRepository{db: r.db}).create(ctx, tx, call); err != nil {
+				return fmt.Errorf("create Workflow AI citation seed: %w", err)
+			}
+			if err := finishToolCall(ctx, tx, call.ID, tool.CallPending, tool.CallCompleted, seed, "", "", workflowAI.CreatedAt); err != nil {
+				return fmt.Errorf("finish Workflow AI citation seed: %w", err)
+			}
+		}
+	}
 	return tx.Commit()
+}
+
+func workflowCitationSeedResult(values []tool.CitationRef, at time.Time) tool.Result {
+	var text strings.Builder
+	text.WriteString("Host-verified evidence selected earlier in this Workflow follows. Cite only these reissued markers in this Chat Run; source-Run markers shown elsewhere will not validate here.\n\n")
+	for _, value := range values {
+		fmt.Fprintf(&text, "%s | %s | %s\n%s\n\n", value.Reference, value.SourceName, value.Locator, value.Quote)
+	}
+	structured, _ := json.Marshal(map[string]any{"source": "workflow_citation_selection", "count": len(values)})
+	return tool.Result{Status: tool.ResultSuccess, Text: strings.TrimSpace(text.String()), Structured: structured, Artifacts: []tool.ArtifactRef{}, Citations: append([]tool.CitationRef(nil), values...), CreatedAt: at}
 }
 
 func (r *RunRepository) Get(ctx context.Context, id string) (chat.Run, error) {
@@ -351,6 +444,81 @@ func (r *RunRepository) LatestForConversation(ctx context.Context, conversationI
 		return chat.Run{}, false, err
 	}
 	return value, true, nil
+}
+
+// IsWorkflowAIRun identifies host-created Workflow stage requests from their
+// durable binding. Prompt text is untrusted and must never be used for this
+// decision.
+func (r *RunRepository) IsWorkflowAIRun(ctx context.Context, runID string) (bool, error) {
+	var found int
+	if err := r.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM workflow_ai_chat_runs WHERE chat_run_id=?)`, strings.TrimSpace(runID)).Scan(&found); err != nil {
+		return false, fmt.Errorf("inspect Workflow AI Chat Run binding: %w", err)
+	}
+	return found == 1, nil
+}
+
+// WorkflowAIContract reads the immutable contract captured when a Workflow
+// stage created its Chat Run. It intentionally resolves by the durable Chat
+// binding instead of the current Workflow conversation projection: the latter
+// can be briefly unavailable while a newly created stage is being projected.
+func (r *RunRepository) WorkflowAIContract(ctx context.Context, runID string) (chat.WorkflowAIExecution, bool, error) {
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return chat.WorkflowAIExecution{}, false, nil
+	}
+	var value chat.WorkflowAIExecution
+	var allowedTools, outputSchema, createdAt string
+	err := r.db.QueryRowContext(ctx, `SELECT execution.id,execution.workflow_run_id,execution.workflow_step_id,execution.attempt,execution.node_kind,execution.prompt_version,execution.prompt_text,execution.prompt_sha256,execution.input_sha256,execution.allowed_tools_json,execution.output_schema_json,execution.output_schema_sha256,execution.created_at
+		FROM workflow_ai_chat_runs binding
+		JOIN workflow_ai_executions execution ON execution.id=binding.execution_id
+		WHERE binding.chat_run_id=?`, runID).Scan(
+		&value.ID, &value.WorkflowRunID, &value.WorkflowStepID, &value.Attempt, &value.NodeKind,
+		&value.PromptVersion, &value.PromptText, &value.PromptSHA256, &value.InputSHA256,
+		&allowedTools, &outputSchema, &value.OutputSchemaSHA256, &createdAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return chat.WorkflowAIExecution{}, false, nil
+	}
+	if err != nil {
+		return chat.WorkflowAIExecution{}, false, fmt.Errorf("read Workflow AI contract: %w", err)
+	}
+	if !json.Valid([]byte(allowedTools)) || !json.Valid([]byte(outputSchema)) {
+		return chat.WorkflowAIExecution{}, false, fmt.Errorf("Workflow AI contract contains invalid JSON")
+	}
+	value.AllowedTools = json.RawMessage(allowedTools)
+	value.OutputSchema = json.RawMessage(outputSchema)
+	if value.CreatedAt, err = parseTime(createdAt); err != nil {
+		return chat.WorkflowAIExecution{}, false, fmt.Errorf("parse Workflow AI contract timestamp: %w", err)
+	}
+	return value, true, nil
+}
+
+// BlocksOrdinaryChatForWorkflowConversation keeps one execution owner while
+// a Workflow advances. An Agent Stage review is the only active window where
+// a completed stage may be discussed before explicit adoption.
+func (r *RunRepository) BlocksOrdinaryChatForWorkflowConversation(ctx context.Context, conversationID string) (bool, error) {
+	return blocksOrdinaryWorkflowChat(ctx, r.db, conversationID)
+}
+
+func blocksOrdinaryWorkflowChat(ctx context.Context, reader interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}, conversationID string) (bool, error) {
+	var found int
+	if err := reader.QueryRowContext(ctx, `SELECT EXISTS(
+		SELECT 1 FROM workflow_conversations binding
+		JOIN workflow_runs workflow_run ON workflow_run.id=binding.workflow_run_id
+		LEFT JOIN workflow_steps current_step ON current_step.workflow_run_id=workflow_run.id
+			AND current_step.ordinal=workflow_run.current_step_ordinal
+		WHERE binding.conversation_id=?
+		AND workflow_run.status NOT IN ('completed','failed','cancelled','interrupted')
+		AND NOT (
+			workflow_run.status='waiting_human_confirmation'
+			AND COALESCE(current_step.node_kind,'')='agent_stage'
+			AND COALESCE(current_step.status,'')='waiting_human_confirmation'
+		)
+	)`, strings.TrimSpace(conversationID)).Scan(&found); err != nil {
+		return false, fmt.Errorf("inspect active research Workflow conversation: %w", err)
+	}
+	return found == 1, nil
 }
 
 func (r *RunRepository) IncrementModelTurns(ctx context.Context, runID string, at time.Time) (chat.Run, error) {

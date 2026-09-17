@@ -64,6 +64,22 @@ func TestReadTextSupportsUTF8AndTruncatesAtRuneBoundary(t *testing.T) {
 	}
 }
 
+func TestReadTextSupportsByteOffsetPagination(t *testing.T) {
+	workspace := t.TempDir()
+	contents := "甲乙丙丁戊己"
+	if err := os.WriteFile(filepath.Join(workspace, "paper.md"), []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	value := NewReadText(projectFixture{value: project.Project{ID: "project", WorkspacePath: workspace}})
+	// Offset 4 lands in the middle of the second three-byte rune. A page beginning in
+	// the middle of a rune must drop only that incomplete prefix and remain
+	// valid UTF-8.
+	result, err := value.Invoke(context.Background(), tool.Invocation{ProjectID: "project", Arguments: json.RawMessage(`{"path":"paper.md","offset":4,"maxBytes":8}`)})
+	if err != nil || result.Status != tool.ResultSuccess || result.Text != "丙丁" {
+		t.Fatalf("offset read = %#v, %v", result, err)
+	}
+}
+
 func TestReadTextRejectsBinaryAndTraversal(t *testing.T) {
 	workspace := t.TempDir()
 	if err := os.WriteFile(filepath.Join(workspace, "binary.dat"), []byte{'a', 0, 'b'}, 0o600); err != nil {
@@ -74,6 +90,15 @@ func TestReadTextRejectsBinaryAndTraversal(t *testing.T) {
 		if _, err := value.Invoke(context.Background(), tool.Invocation{ProjectID: "project", Arguments: json.RawMessage(arguments)}); err == nil {
 			t.Fatalf("unsafe read %s accepted", arguments)
 		}
+	}
+}
+
+func TestReadTextMissingPathExplainsHowToRecover(t *testing.T) {
+	workspace := t.TempDir()
+	value := NewReadText(projectFixture{value: project.Project{ID: "project", WorkspacePath: workspace}})
+	_, err := value.Invoke(context.Background(), tool.Invocation{ProjectID: "project", Arguments: json.RawMessage(`{"path":"analysis-input/missing.csv"}`)})
+	if err == nil || !strings.Contains(err.Error(), "builtin.workspace.list") || !strings.Contains(err.Error(), "精确路径") {
+		t.Fatalf("missing path error = %v", err)
 	}
 }
 

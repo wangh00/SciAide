@@ -26,6 +26,44 @@ type DocumentLoader interface {
 	Parsed(ctx context.Context, projectID, attachmentID string) (attachment.Attachment, document.Parsed, error)
 }
 
+type TaskDocumentLoader interface {
+	ListForTask(ctx context.Context, projectID, taskID string) ([]attachment.Attachment, error)
+}
+
+type TaskParsedDocumentLoader interface {
+	ParsedForTask(ctx context.Context, projectID, taskID, attachmentID string) (attachment.Attachment, document.Parsed, error)
+}
+
+func parseScopedDocument(ctx context.Context, documents DocumentLoader, invocation tool.Invocation, attachmentID string) (attachment.Attachment, document.Parsed, error) {
+	if invocation.ResearchTaskID != "" {
+		if scoped, ok := documents.(TaskParsedDocumentLoader); ok {
+			return scoped.ParsedForTask(ctx, invocation.ProjectID, invocation.ResearchTaskID, attachmentID)
+		}
+		return attachment.Attachment{}, document.Parsed{}, fmt.Errorf("task-scoped document reader is not configured")
+	}
+	return documents.Parsed(ctx, invocation.ProjectID, attachmentID)
+}
+
+type documentReadLocatorError struct{}
+
+func (documentReadLocatorError) Error() string {
+	return "document locator was not found"
+}
+
+func (documentReadLocatorError) UserFacingMessage() string {
+	return "未找到指定的文档定位符；请先调用 builtin.document.inspect 获取该附件的可用定位符"
+}
+
+type documentAttachmentNotFoundError struct{}
+
+func (documentAttachmentNotFoundError) Error() string {
+	return "document attachment was not found"
+}
+
+func (documentAttachmentNotFoundError) UserFacingMessage() string {
+	return "当前项目中不存在该附件；请重新调用 builtin.attachment.list，并逐字使用返回的真实 attachmentId"
+}
+
 type ListAttachments struct{ documents DocumentLoader }
 type InspectDocument struct{ documents DocumentLoader }
 type ReadDocument struct{ documents DocumentLoader }
@@ -42,6 +80,39 @@ func NewReadDocument(documents DocumentLoader) *ReadDocument {
 }
 func NewSearchDocument(documents DocumentLoader) *SearchDocument {
 	return &SearchDocument{documents: documents}
+}
+
+func requireProjectAttachment(ctx context.Context, documents DocumentLoader, projectID, attachmentID string) error {
+	values, err := documents.List(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	for _, value := range values {
+		if value.ID == attachmentID {
+			return nil
+		}
+	}
+	return documentAttachmentNotFoundError{}
+}
+
+func requireScopedAttachment(ctx context.Context, documents DocumentLoader, invocation tool.Invocation, attachmentID string) error {
+	if invocation.ResearchTaskID == "" {
+		return requireProjectAttachment(ctx, documents, invocation.ProjectID, attachmentID)
+	}
+	scoped, ok := documents.(TaskDocumentLoader)
+	if !ok {
+		return fmt.Errorf("task-scoped attachment reader is not configured")
+	}
+	values, err := scoped.ListForTask(ctx, invocation.ProjectID, invocation.ResearchTaskID)
+	if err != nil {
+		return err
+	}
+	for _, value := range values {
+		if value.ID == attachmentID {
+			return nil
+		}
+	}
+	return documentAttachmentNotFoundError{}
 }
 
 func documentReadDefinition(name, description string, input, output json.RawMessage) tool.Definition {
@@ -63,7 +134,15 @@ func (t *ListAttachments) Invoke(ctx context.Context, invocation tool.Invocation
 	if t == nil || t.documents == nil {
 		return tool.Result{}, fmt.Errorf("document loader is not configured")
 	}
-	values, err := t.documents.List(ctx, invocation.ProjectID)
+	var values []attachment.Attachment
+	var err error
+	if scoped, ok := t.documents.(TaskDocumentLoader); ok && invocation.ResearchTaskID != "" {
+		values, err = scoped.ListForTask(ctx, invocation.ProjectID, invocation.ResearchTaskID)
+	} else if invocation.ResearchTaskID != "" {
+		return tool.Result{}, fmt.Errorf("task-scoped attachment reader is not configured")
+	} else {
+		values, err = t.documents.List(ctx, invocation.ProjectID)
+	}
 	if err != nil {
 		return tool.Result{}, err
 	}
@@ -104,7 +183,10 @@ func (t *InspectDocument) Invoke(ctx context.Context, invocation tool.Invocation
 	if err := json.Unmarshal(invocation.Arguments, &args); err != nil {
 		return tool.Result{}, err
 	}
-	value, parsed, err := t.documents.Parsed(ctx, invocation.ProjectID, args.AttachmentID)
+	if err := requireScopedAttachment(ctx, t.documents, invocation, args.AttachmentID); err != nil {
+		return tool.Result{}, err
+	}
+	value, parsed, err := parseScopedDocument(ctx, t.documents, invocation, args.AttachmentID)
 	if err != nil {
 		return tool.Result{}, err
 	}
@@ -157,7 +239,10 @@ func (t *ReadDocument) Invoke(ctx context.Context, invocation tool.Invocation) (
 	if args.MaxChars < 1 || args.MaxChars > maxDocumentRead || args.Offset < 0 {
 		return tool.Result{}, fmt.Errorf("document read bounds are invalid")
 	}
-	value, parsed, err := t.documents.Parsed(ctx, invocation.ProjectID, args.AttachmentID)
+	if err := requireScopedAttachment(ctx, t.documents, invocation, args.AttachmentID); err != nil {
+		return tool.Result{}, err
+	}
+	value, parsed, err := parseScopedDocument(ctx, t.documents, invocation, args.AttachmentID)
 	if err != nil {
 		return tool.Result{}, err
 	}
@@ -168,7 +253,15 @@ func (t *ReadDocument) Invoke(ctx context.Context, invocation tool.Invocation) (
 		}
 	}
 	if len(selected) == 0 {
-		return tool.Result{}, fmt.Errorf("document locator was not found")
+		// A one-unit text/Markdown attachment has no ambiguous read target. Models
+		// commonly carry a PDF-style page:1 locator across adjacent attachments;
+		// accepting the sole unit keeps the bounded read deterministic without
+		// weakening locator precision for multi-unit documents.
+		if len(parsed.Units) == 1 {
+			selected = append(selected, parsed.Units[0])
+		} else {
+			return tool.Result{}, documentReadLocatorError{}
+		}
 	}
 	var content strings.Builder
 	locators := make([]string, 0, len(selected))
@@ -233,7 +326,10 @@ func (t *SearchDocument) Invoke(ctx context.Context, invocation tool.Invocation)
 	if args.Limit < 1 || args.Limit > 20 {
 		return tool.Result{}, fmt.Errorf("search result limit is invalid")
 	}
-	value, parsed, err := t.documents.Parsed(ctx, invocation.ProjectID, args.AttachmentID)
+	if err := requireScopedAttachment(ctx, t.documents, invocation, args.AttachmentID); err != nil {
+		return tool.Result{}, err
+	}
+	value, parsed, err := parseScopedDocument(ctx, t.documents, invocation, args.AttachmentID)
 	if err != nil {
 		return tool.Result{}, err
 	}

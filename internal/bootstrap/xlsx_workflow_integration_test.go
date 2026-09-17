@@ -38,12 +38,14 @@ func TestXLSXWorkflowReproducesAcrossCleanProjectsAndPublishesArtifacts(t *testi
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(root) })
-	application, err := New(Options{RootDir: root})
+	application, err := New(Options{RootDir: root, EventPublisher: workflowAITestPublisher{}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer application.Close()
 	application.Startup(context.Background())
+	aiServer := newWorkflowAITestServer(t)
+	aiProfile := saveWorkflowAITestProfile(t, application, aiServer.URL)
 
 	discovery, err := application.PythonFacade.DetectInterpreters()
 	if err != nil || len(discovery.Interpreters) == 0 {
@@ -77,13 +79,14 @@ func TestXLSXWorkflowReproducesAcrossCleanProjectsAndPublishesArtifacts(t *testi
 		}
 		inputs, _ := json.Marshal(map[string]any{"input_paths": []string{inputName}})
 		started, startErr := application.WorkflowFacade.Start(workflow.StartCommand{
-			ProjectID: selected.ID, WorkflowID: saved.Workflow.ID, WorkflowVersionID: saved.Version.ID, Inputs: inputs,
+			ProjectID: selected.ID, ResearchTaskID: workflow.NewResearchTaskID, WorkflowID: saved.Workflow.ID, WorkflowVersionID: saved.Version.ID, Inputs: inputs,
+			ModelProfileID: aiProfile.ID, ModelID: workflowAITestModelID,
 		})
 		if startErr != nil {
 			t.Fatal(startErr)
 		}
 		completed := completeApprovedWorkflow(t, application, selected.ID, started.Run.ID, 3*time.Minute)
-		if completed.Run.Status != workflow.RunCompleted || len(completed.Steps) != 2 {
+		if completed.Run.Status != workflow.RunCompleted || len(completed.Steps) != 5 || len(completed.AIExecutions) != 2 || completed.ArtifactCount != 4 {
 			t.Fatalf("XLSX Workflow = %#v", completed.Run)
 		}
 		if after := fileDigest(t, inputPath); after != before {
@@ -147,7 +150,9 @@ func TestXLSXWorkflowReproducesAcrossCleanProjectsAndPublishesArtifacts(t *testi
 		if len(artifactHashes) != 4 {
 			t.Fatalf("XLSX Artifact roles = %#v", artifactHashes)
 		}
-		cleaned, readErr := os.ReadFile(filepath.Join(selected.WorkspacePath, filepath.FromSlash(artifactPaths["cleaned"])))
+		taskWorkspace := filepath.Join(selected.WorkspacePath, ".sciaide", "tasks", completed.Run.ResearchTaskID)
+		selected.WorkspacePath = taskWorkspace
+		cleaned, readErr := os.ReadFile(filepath.Join(taskWorkspace, filepath.FromSlash(artifactPaths["cleaned"])))
 		if readErr != nil || !strings.Contains(string(cleaned), "'=2+2") {
 			t.Fatalf("XLSX cleaned CSV did not neutralize formula-like cells: %q, %v", cleaned, readErr)
 		}
@@ -164,7 +169,7 @@ func TestXLSXWorkflowReproducesAcrossCleanProjectsAndPublishesArtifacts(t *testi
 		scriptPath := ""
 		for path := range result.OutputSHA256 {
 			if strings.HasSuffix(path, "-analysis.py") {
-				scriptPath = filepath.Join(selected.WorkspacePath, filepath.FromSlash(path))
+				scriptPath = filepath.Join(taskWorkspace, filepath.FromSlash(path))
 			}
 		}
 		if scriptPath == "" {
@@ -205,6 +210,14 @@ func completeApprovedWorkflow(t *testing.T, application *Application, projectID,
 				t.Fatalf("XLSX Workflow unexpectedly requested network approval: %#v", approval)
 			}
 			if _, err := application.WorkflowFacade.ResolveApproval(permission.ResolveCommand{ApprovalID: approval.ID, Allow: true, Scope: permission.ScopeCall}); err != nil {
+				t.Fatal(err)
+			}
+		case workflow.RunWaitingHumanConfirmation:
+			step := currentWorkflowStep(t, detail)
+			if step.NodeKind != workflow.NodeAgentStage {
+				t.Fatalf("unexpected Workflow human checkpoint: %#v", step)
+			}
+			if _, err := application.WorkflowFacade.Decide(workflow.HumanDecisionCommand{ProjectID: projectID, RunID: runID, StepID: step.ID, Approved: true, Note: "Accepted deterministic AI interpretation."}); err != nil {
 				t.Fatal(err)
 			}
 		case workflow.RunFailed, workflow.RunCancelled, workflow.RunInterrupted:

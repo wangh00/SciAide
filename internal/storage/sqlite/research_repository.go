@@ -48,6 +48,13 @@ func (r *ResearchRepository) SaveSearch(ctx context.Context, projectID, queryKey
 		_, err = tx.ExecContext(ctx, `INSERT INTO research_queries(id,project_id,query_text,query_key,source_ids_json,limit_per_source,source_statuses_json,partial,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)`,
 			queryID, projectID, result.Query, queryKey, string(sourceJSON), command.Limit, string(statusesJSON), result.Partial, formatTime(at), formatTime(at))
 	} else if err == nil {
+		var version int
+		if err := tx.QueryRowContext(ctx, `SELECT snapshot_version FROM research_queries WHERE id=?`, queryID).Scan(&version); err != nil {
+			return appresearch.Query{}, err
+		}
+		if version > 0 {
+			return scanResearchQuery(tx.QueryRowContext(ctx, `SELECT q.id,q.project_id,q.query_text,q.source_ids_json,q.limit_per_source,q.source_statuses_json,q.partial,q.created_at,q.updated_at,(SELECT COUNT(*) FROM research_query_records WHERE query_id=q.id) FROM research_queries q WHERE q.id=?`, queryID))
+		}
 		_, err = tx.ExecContext(ctx, `UPDATE research_queries SET query_text=?,source_ids_json=?,limit_per_source=?,source_statuses_json=?,partial=?,updated_at=? WHERE id=? AND project_id=?`,
 			result.Query, string(sourceJSON), command.Limit, string(statusesJSON), result.Partial, formatTime(at), queryID, projectID)
 	} else {
@@ -56,10 +63,20 @@ func (r *ResearchRepository) SaveSearch(ctx context.Context, projectID, queryKey
 	if err != nil {
 		return appresearch.Query{}, fmt.Errorf("save research query: %w", err)
 	}
+	if command.ResearchTaskID != "" {
+		result, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO research_query_origins(query_id,task_id,task_title) SELECT ?,id,title FROM research_tasks WHERE id=? AND project_id=? AND archived_at IS NULL`, queryID, command.ResearchTaskID, projectID)
+		if err != nil {
+			return appresearch.Query{}, err
+		}
+		if n, _ := result.RowsAffected(); n != 1 {
+			return appresearch.Query{}, fmt.Errorf("query task ownership is invalid")
+		}
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM research_query_records WHERE query_id=?`, queryID); err != nil {
 		return appresearch.Query{}, fmt.Errorf("reset research query results: %w", err)
 	}
 	touchedCandidates := map[string]struct{}{}
+	snapshots := map[string]appresearch.Candidate{}
 	for ordinal, work := range result.Works {
 		recordID, existingCandidateID, aliases, err := saveResearchSourceRecord(ctx, tx, projectID, work, at)
 		if err != nil {
@@ -76,6 +93,13 @@ func (r *ResearchRepository) SaveSearch(ctx context.Context, projectID, queryKey
 			return appresearch.Query{}, err
 		}
 		touchedCandidates[candidateID] = struct{}{}
+		snapshot := snapshots[candidateID]
+		snapshot.ID, snapshot.ProjectID = candidateID, projectID
+		snapshot.CreatedAt, snapshot.UpdatedAt = at, at
+		snapshot.Records = append(snapshot.Records, appresearch.SourceRecord{ID: recordID, ProjectID: projectID, Work: work, FirstSeenAt: at, UpdatedAt: at})
+		snapshot.Aliases = append(snapshot.Aliases, aliases...)
+		snapshot.Preferred = appresearch.PreferredWork(snapshot.Records)
+		snapshots[candidateID] = snapshot
 		for _, alias := range aliases {
 			if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO research_candidate_aliases(candidate_id,project_id,alias_kind,alias_value,created_at) VALUES (?,?,?,?,?)`, candidateID, projectID, alias.Kind, alias.Value, formatTime(at)); err != nil {
 				return appresearch.Query{}, fmt.Errorf("save research candidate alias: %w", err)
@@ -84,6 +108,18 @@ func (r *ResearchRepository) SaveSearch(ctx context.Context, projectID, queryKey
 		if _, err := tx.ExecContext(ctx, `INSERT INTO research_query_records(query_id,source_record_id,ordinal) VALUES (?,?,?)`, queryID, recordID, ordinal); err != nil {
 			return appresearch.Query{}, fmt.Errorf("save research query result: %w", err)
 		}
+	}
+	for candidateID, snapshot := range snapshots {
+		encoded, err := json.Marshal(snapshot)
+		if err != nil {
+			return appresearch.Query{}, err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO research_query_candidates(query_id,candidate_id,snapshot_json) VALUES(?,?,?)`, queryID, candidateID, string(encoded)); err != nil {
+			return appresearch.Query{}, err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE research_queries SET snapshot_version=1 WHERE id=?`, queryID); err != nil {
+		return appresearch.Query{}, err
 	}
 	for candidateID := range touchedCandidates {
 		if err := syncResearchBibliography(ctx, tx, projectID, candidateID, at); err != nil {
@@ -100,20 +136,7 @@ func (r *ResearchRepository) ListQueries(ctx context.Context, projectID string, 
 	if limit < 1 || limit > 100 {
 		limit = 50
 	}
-	rows, err := r.db.QueryContext(ctx, `SELECT q.id,q.project_id,q.query_text,q.source_ids_json,q.limit_per_source,q.source_statuses_json,q.partial,q.created_at,q.updated_at,COUNT(qr.source_record_id) FROM research_queries q LEFT JOIN research_query_records qr ON qr.query_id=q.id WHERE q.project_id=? GROUP BY q.id ORDER BY q.updated_at DESC,q.id LIMIT ?`, strings.TrimSpace(projectID), limit)
-	if err != nil {
-		return nil, fmt.Errorf("list research queries: %w", err)
-	}
-	defer rows.Close()
-	values := []appresearch.Query{}
-	for rows.Next() {
-		value, err := scanResearchQuery(rows)
-		if err != nil {
-			return nil, err
-		}
-		values = append(values, value)
-	}
-	return values, rows.Err()
+	return r.QueryHistory(ctx, appresearch.QueryPageCommand{ProjectID: strings.TrimSpace(projectID), Limit: limit})
 }
 
 func (r *ResearchRepository) ListCandidates(ctx context.Context, projectID, queryID string) ([]appresearch.Candidate, error) {
@@ -163,7 +186,91 @@ func (r *ResearchRepository) GetCandidate(ctx context.Context, projectID, candid
 	return value, nil
 }
 
+func (r *ResearchRepository) GetCandidateTaskImport(ctx context.Context, projectID, candidateID, researchTaskID string) (appresearch.CandidateTaskImport, bool, error) {
+	var value appresearch.CandidateTaskImport
+	var createdAt, updatedAt string
+	err := r.db.QueryRowContext(ctx, `SELECT id,project_id,candidate_id,research_task_id,import_status,import_kind,COALESCE(attachment_id,''),import_error,created_at,updated_at FROM research_candidate_task_imports WHERE project_id=? AND candidate_id=? AND research_task_id=?`, strings.TrimSpace(projectID), strings.TrimSpace(candidateID), strings.TrimSpace(researchTaskID)).Scan(&value.ID, &value.ProjectID, &value.CandidateID, &value.ResearchTaskID, &value.Status, &value.Kind, &value.AttachmentID, &value.ErrorMessage, &createdAt, &updatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return appresearch.CandidateTaskImport{}, false, nil
+	}
+	if err != nil {
+		return appresearch.CandidateTaskImport{}, false, fmt.Errorf("read research task candidate import: %w", err)
+	}
+	var parseErr error
+	value.CreatedAt, parseErr = parseTime(createdAt)
+	if parseErr == nil {
+		value.UpdatedAt, parseErr = parseTime(updatedAt)
+	}
+	if parseErr != nil {
+		return appresearch.CandidateTaskImport{}, false, parseErr
+	}
+	return value, true, nil
+}
+
+func (r *ResearchRepository) UpdateCandidateTaskImport(ctx context.Context, command appresearch.ImportStateCommand) (appresearch.CandidateTaskImport, error) {
+	projectID, candidateID, taskID := strings.TrimSpace(command.ProjectID), strings.TrimSpace(command.CandidateID), strings.TrimSpace(command.ResearchTaskID)
+	if projectID == "" || candidateID == "" || taskID == "" {
+		return appresearch.CandidateTaskImport{}, fmt.Errorf("research task candidate import identity is required")
+	}
+	if command.Status != appresearch.ImportNotImported && command.Status != appresearch.ImportImporting && command.Status != appresearch.ImportImported && command.Status != appresearch.ImportFailed {
+		return appresearch.CandidateTaskImport{}, fmt.Errorf("research task candidate import status is invalid")
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return appresearch.CandidateTaskImport{}, fmt.Errorf("begin research task candidate import update: %w", err)
+	}
+	defer tx.Rollback()
+	var importID string
+	err = tx.QueryRowContext(ctx, `SELECT id FROM research_candidate_task_imports WHERE project_id=? AND candidate_id=? AND research_task_id=?`, projectID, candidateID, taskID).Scan(&importID)
+	if errors.Is(err, sql.ErrNoRows) {
+		importID, err = id.New()
+		if err != nil {
+			return appresearch.CandidateTaskImport{}, err
+		}
+		_, err = tx.ExecContext(ctx, `INSERT INTO research_candidate_task_imports(id,project_id,candidate_id,research_task_id,import_status,import_kind,attachment_id,import_error,created_at,updated_at) VALUES (?,?,?,?,?,?,NULLIF(?,''),?,?,?)`, importID, projectID, candidateID, taskID, command.Status, command.Kind, command.AttachmentID, command.ErrorMessage, formatTime(command.At), formatTime(command.At))
+	} else if err == nil {
+		_, err = tx.ExecContext(ctx, `UPDATE research_candidate_task_imports SET import_status=?,import_kind=?,attachment_id=NULLIF(?,''),import_error=?,updated_at=? WHERE id=? AND project_id=?`, command.Status, command.Kind, command.AttachmentID, command.ErrorMessage, formatTime(command.At), importID, projectID)
+	} else {
+		return appresearch.CandidateTaskImport{}, fmt.Errorf("read research task candidate import: %w", err)
+	}
+	if err != nil {
+		return appresearch.CandidateTaskImport{}, fmt.Errorf("save research task candidate import: %w", err)
+	}
+	if command.Status == appresearch.ImportImported && command.AttachmentID != "" {
+		if err := syncBibliographyMaterialForAttachment(ctx, tx, projectID, candidateID, command.AttachmentID, taskID, command.Kind, command.At); err != nil {
+			return appresearch.CandidateTaskImport{}, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return appresearch.CandidateTaskImport{}, fmt.Errorf("commit research task candidate import: %w", err)
+	}
+	value, found, err := r.GetCandidateTaskImport(ctx, projectID, candidateID, taskID)
+	if err != nil {
+		return appresearch.CandidateTaskImport{}, err
+	}
+	if !found {
+		return appresearch.CandidateTaskImport{}, fmt.Errorf("research task candidate import disappeared")
+	}
+	return value, nil
+}
+
 func (r *ResearchRepository) UpdateReview(ctx context.Context, command appresearch.ReviewCommand, at time.Time) (appresearch.Candidate, error) {
+	if command.ResearchTaskID != "" {
+		var writable bool
+		if err := r.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM research_tasks WHERE id=? AND project_id=? AND archived_at IS NULL)`, command.ResearchTaskID, command.ProjectID).Scan(&writable); err != nil {
+			return appresearch.Candidate{}, err
+		}
+		if !writable {
+			return appresearch.Candidate{}, fmt.Errorf("research review task is read only")
+		}
+		value, err := r.CandidateForTask(ctx, command.ProjectID, command.CandidateID, command.ResearchTaskID)
+		if err != nil {
+			return appresearch.Candidate{}, err
+		}
+		_, err = r.db.ExecContext(ctx, `INSERT INTO research_candidate_reviews(project_id,task_id,candidate_id,review_status,exclusion_reason,note,updated_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(project_id,task_id,candidate_id) DO UPDATE SET review_status=excluded.review_status,exclusion_reason=excluded.exclusion_reason,note=excluded.note,updated_at=excluded.updated_at`, command.ProjectID, command.ResearchTaskID, command.CandidateID, command.Status, command.ExclusionReason, command.Note, formatTime(at))
+		value.ReviewStatus, value.ExclusionReason, value.Note = command.Status, command.ExclusionReason, command.Note
+		return value, err
+	}
 	result, err := r.db.ExecContext(ctx, `UPDATE research_candidates SET review_status=?,exclusion_reason=?,note=?,updated_at=? WHERE id=? AND project_id=?`, command.Status, command.ExclusionReason, command.Note, formatTime(at), command.CandidateID, command.ProjectID)
 	if err != nil {
 		return appresearch.Candidate{}, fmt.Errorf("update research candidate review: %w", err)

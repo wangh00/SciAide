@@ -8,8 +8,10 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/wangh00/SciAide/internal/app/project"
@@ -36,6 +38,7 @@ type Service struct {
 	repository Repository
 	projects   ProjectLoader
 	compiler   *Compiler
+	saveMu     sync.Mutex
 	now        func() time.Time
 	newID      func() (string, error)
 }
@@ -55,11 +58,21 @@ func (s *Service) Validate(ctx context.Context, projectID string, definition Def
 }
 
 func (s *Service) Save(ctx context.Context, command SaveCommand) (SaveResult, error) {
+	return s.save(ctx, command, PurposeUserPlan)
+}
+
+func (s *Service) save(ctx context.Context, command SaveCommand, purpose Purpose) (SaveResult, error) {
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
+
 	command.ProjectID = strings.TrimSpace(command.ProjectID)
 	command.WorkflowID = strings.TrimSpace(command.WorkflowID)
 	command.ExpectedCurrentVersionID = strings.TrimSpace(command.ExpectedCurrentVersionID)
 	if command.ProjectID == "" {
 		return SaveResult{}, fmt.Errorf("project is required")
+	}
+	if !purpose.Valid() {
+		return SaveResult{}, fmt.Errorf("invalid Workflow purpose")
 	}
 	if command.WorkflowID == "" && command.ExpectedCurrentVersionID != "" {
 		return SaveResult{}, fmt.Errorf("a new Workflow cannot have an expected current version")
@@ -87,7 +100,7 @@ func (s *Service) Save(ctx context.Context, command SaveCommand) (SaveResult, er
 		return SaveResult{}, err
 	}
 	now := s.now()
-	value := Workflow{ID: workflowID, ProjectID: command.ProjectID, Name: strings.TrimSpace(command.Definition.Name), Description: strings.TrimSpace(command.Definition.Description), CurrentVersionID: versionID, CreatedAt: now, UpdatedAt: now}
+	value := Workflow{ID: workflowID, ProjectID: command.ProjectID, Purpose: purpose, Name: strings.TrimSpace(command.Definition.Name), Description: strings.TrimSpace(command.Definition.Description), CurrentVersionID: versionID, CreatedAt: now, UpdatedAt: now}
 	version := Version{
 		ID:                versionID,
 		WorkflowID:        workflowID,
@@ -113,7 +126,7 @@ func (s *Service) Get(ctx context.Context, projectID, workflowID string) (Detail
 		return detail, err
 	}
 	for index := range detail.Versions {
-		detail.Versions[index].RuntimeInputs = effectiveRuntimePorts(detail.Versions[index].Compilation)
+		detail.Versions[index].RuntimeInputs = append([]Port(nil), detail.Versions[index].Compilation.Inputs...)
 	}
 	return detail, nil
 }
@@ -129,13 +142,44 @@ func (s *Service) Delete(ctx context.Context, projectID, workflowID string) erro
 	if _, err := s.projects.Get(ctx, projectID); err != nil {
 		return err
 	}
+	detail, err := s.repository.Get(ctx, projectID, workflowID)
+	if err != nil {
+		return err
+	}
+	if detail.Workflow.Purpose != PurposeUserPlan {
+		return fmt.Errorf("system Workflow cannot be deleted as a saved plan")
+	}
 	return s.repository.Delete(ctx, projectID, workflowID)
+}
+
+// deleteUnstarted removes only a just-created Workflow that has never had a
+// Run. It is intentionally narrower than Delete, which also removes
+// equivalent saved plans and terminal history. Starter adoption uses this
+// rollback path when creating the formal Run fails after the plan was saved.
+func (s *Service) deleteUnstarted(ctx context.Context, projectID, workflowID, versionID string) error {
+	if deleter, ok := s.repository.(interface {
+		DeleteUnstarted(context.Context, string, string, string) error
+	}); ok {
+		return deleter.DeleteUnstarted(ctx, strings.TrimSpace(projectID), strings.TrimSpace(workflowID), strings.TrimSpace(versionID))
+	}
+	return fmt.Errorf("Workflow repository does not support unstarted rollback")
 }
 
 // StageInputFile turns an explicitly selected tabular file into a stable
 // Workspace input. Both external and existing Workspace files are copied into
 // a content-addressed snapshot without modifying their source.
 func (s *Service) StageInputFile(ctx context.Context, projectID, sourcePath, kind string) (InputFile, error) {
+	return s.stageInputFile(ctx, projectID, sourcePath, kind, "")
+}
+
+// StageInputFileForTask creates the immutable input snapshot inside the
+// private workspace of one research task. The selected source may still be a
+// normal project file, but the resulting snapshot is never shared implicitly.
+func (s *Service) StageInputFileForTask(ctx context.Context, projectID, sourcePath, kind, taskID string) (InputFile, error) {
+	return s.stageInputFile(ctx, projectID, sourcePath, kind, taskID)
+}
+
+func (s *Service) stageInputFile(ctx context.Context, projectID, sourcePath, kind, taskID string) (InputFile, error) {
 	selected, err := s.projects.Get(ctx, strings.TrimSpace(projectID))
 	if err != nil {
 		return InputFile{}, err
@@ -198,18 +242,18 @@ func (s *Service) StageInputFile(ctx context.Context, projectID, sourcePath, kin
 		return InputFile{}, fmt.Errorf("hash input file: %w", err)
 	}
 	sha := hex.EncodeToString(digest.Sum(nil))
-	guard, err := pathguard.Open(selected.WorkspacePath)
+	projectGuard, err := pathguard.Open(selected.WorkspacePath)
 	if err != nil {
 		return InputFile{}, err
 	}
-	defer guard.Close()
+	defer projectGuard.Close()
 	if relative, relErr := filepath.Rel(selected.WorkspacePath, absSource); relErr == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-		clean, cleanErr := guard.Relative(relative)
+		clean, cleanErr := projectGuard.Relative(relative)
 		if cleanErr != nil || clean == "." || workflowPrivatePath(clean) {
 			return InputFile{}, fmt.Errorf("Workspace input must be a regular project file outside .sciaide")
 		}
 		if clean != "." {
-			guarded, _, openErr := guard.OpenFile(clean)
+			guarded, _, openErr := projectGuard.OpenFile(clean)
 			if openErr != nil {
 				return InputFile{}, fmt.Errorf("validate Workspace input: %w", openErr)
 			}
@@ -222,6 +266,21 @@ func (s *Service) StageInputFile(ctx context.Context, projectID, sourcePath, kin
 			}
 		}
 	}
+	destinationRoot := selected.WorkspacePath
+	if strings.TrimSpace(taskID) != "" {
+		destinationRoot, err = project.ResearchTaskWorkspacePath(selected, taskID)
+		if err != nil {
+			return InputFile{}, err
+		}
+		if err := os.MkdirAll(destinationRoot, 0o700); err != nil {
+			return InputFile{}, err
+		}
+	}
+	guard, err := pathguard.Open(destinationRoot)
+	if err != nil {
+		return InputFile{}, err
+	}
+	defer guard.Close()
 	if _, err := guard.MkdirAll("research-inputs", 0o700); err != nil {
 		return InputFile{}, err
 	}

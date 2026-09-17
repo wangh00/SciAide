@@ -210,14 +210,19 @@ func TestApplicationRegistersFixedResearchToolSurface(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := map[string]bool{
-		"builtin.research.catalog":                false,
-		"builtin.research.search":                 false,
-		"builtin.research.fetch":                  false,
-		"builtin.research.workflow.search":        false,
-		"builtin.research.workflow.import":        false,
-		"builtin.research.workflow.sync":          false,
-		"builtin.research.workflow.python.ensure": false,
-		"builtin.research.workflow.report":        false,
+		"builtin.research.task.read":               false,
+		"builtin.research.revision.propose":        false,
+		"builtin.research.catalog":                 false,
+		"builtin.research.search":                  false,
+		"builtin.research.fetch":                   false,
+		"builtin.research.full_text.read":          false,
+		"builtin.research.workflow.search":         false,
+		"builtin.research.workflow.import":         false,
+		"builtin.research.workflow.sync":           false,
+		"builtin.research.workflow.python.ensure":  false,
+		"builtin.research.workflow.python.prepare": false,
+		"builtin.research.workflow.review.gate":    false,
+		"builtin.research.workflow.report":         false,
 	}
 	for _, definition := range definitions {
 		if !strings.HasPrefix(definition.QualifiedName, "builtin.research.") {

@@ -223,7 +223,7 @@ func (r *ProjectArchiveRepository) RewriteSnapshot(ctx context.Context, filePath
 	if err := allocateArchiveIDs(ctx, db, maps); err != nil {
 		return projectarchive.RewritePlan{}, err
 	}
-	plan := projectarchive.RewritePlan{Indexes: []projectarchive.IndexRewrite{}}
+	plan := projectarchive.RewritePlan{Indexes: []projectarchive.IndexRewrite{}, TaskIDs: cloneStringMap(maps.values["research_tasks"])}
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM model_profiles`).Scan(&plan.HistoricalProfiles); err != nil {
 		return plan, err
 	}
@@ -313,6 +313,29 @@ func (r *ProjectArchiveRepository) MergeSnapshot(ctx context.Context, filePath s
 		}
 		quoted := quoteColumns(columns)
 		selected := quoted
+		if table == "research_timeline" {
+			// Source rows may have fired capture triggers during merge. Replace only
+			// this imported task's projection, preserving its durable relative order.
+			if _, err := tx.ExecContext(ctx, `DELETE FROM main.research_timeline WHERE research_task_id IN (SELECT id FROM archive.research_tasks)`); err != nil {
+				return result, err
+			}
+			columns = columns[1:] // Allocate new database-local sequence values.
+			quoted = quoteColumns(columns)
+			if _, err := tx.ExecContext(ctx, `INSERT INTO main.research_timeline(`+quoted+`) SELECT `+quoted+` FROM archive.research_timeline ORDER BY sequence`); err != nil {
+				return result, err
+			}
+			continue
+		}
+		if table == "research_tasks" {
+			parts := make([]string, len(columns))
+			for index, column := range columns {
+				parts[index] = quoteIdentifier(column)
+				if column == "status" {
+					parts[index] = `CASE WHEN status='archived' THEN 'active' ELSE status END`
+				}
+			}
+			selected = strings.Join(parts, ",")
+		}
 		if table == "research_evidence_entries" {
 			parts := make([]string, len(columns))
 			for index, column := range columns {
@@ -360,6 +383,16 @@ func (r *ProjectArchiveRepository) MergeSnapshot(ctx context.Context, filePath s
 		}
 	}
 	var projectID string
+	// Run insertion refreshes task summaries. Restore the archived metadata
+	// only after its owned history is present, including final archive status.
+	if _, err := tx.ExecContext(ctx, `UPDATE main.research_tasks SET
+		status=(SELECT source.status FROM archive.research_tasks source WHERE source.id=research_tasks.id),
+		latest_run_id=(SELECT source.latest_run_id FROM archive.research_tasks source WHERE source.id=research_tasks.id),
+		latest_run_status=(SELECT source.latest_run_status FROM archive.research_tasks source WHERE source.id=research_tasks.id),
+		updated_at=(SELECT source.updated_at FROM archive.research_tasks source WHERE source.id=research_tasks.id)
+		WHERE id IN (SELECT id FROM archive.research_tasks)`); err != nil {
+		return result, fmt.Errorf("restore research task summaries: %w", err)
+	}
 	if err := tx.QueryRowContext(ctx, `SELECT id FROM archive.projects`).Scan(&projectID); err != nil {
 		return result, err
 	}
@@ -462,6 +495,17 @@ func pruneArchiveSnapshot(ctx context.Context, db *sql.DB, projectID string) err
 		}
 		if _, err := tx.ExecContext(ctx, statement, arguments...); err != nil {
 			return fmt.Errorf("sanitize project archive: %w", err)
+		}
+	}
+	var schemaVersion int
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(version),0) FROM schema_migrations`).Scan(&schemaVersion); err != nil {
+		return err
+	}
+	if schemaVersion >= 82 {
+		for _, table := range []string{"model_resource_actions", "model_resource_sessions"} {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM `+quoteIdentifier(table)); err != nil {
+				return fmt.Errorf("sanitize resource capabilities: %w", err)
+			}
 		}
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE conversations SET permission_mode='plan'`); err != nil {
@@ -672,7 +716,16 @@ func readArchiveSkillBindings(ctx context.Context, db *sql.DB) ([]projectarchive
 }
 
 func validateArchiveSanitization(ctx context.Context, db *sql.DB) error {
+	var schemaVersion int
+	if err := db.QueryRowContext(ctx, `SELECT COALESCE(MAX(version),0) FROM schema_migrations`).Scan(&schemaVersion); err != nil {
+		return err
+	}
 	for _, table := range archiveSanitizedTables {
+		// Older archives are schema-verified before this check, then migrated
+		// in isolation. Capabilities did not exist before migration 82.
+		if schemaVersion < 82 && (table == "model_resource_actions" || table == "model_resource_sessions") {
+			continue
+		}
 		var count int
 		if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+quoteIdentifier(table)).Scan(&count); err != nil {
 			return fmt.Errorf("verify sanitized project archive table %s: %w", table, err)
@@ -822,15 +875,15 @@ func appendArtifactFiles(ctx context.Context, db *sql.DB, snapshot *projectarchi
 }
 
 func appendWorkflowInputFiles(ctx context.Context, db *sql.DB, snapshot *projectarchive.Snapshot) error {
-	rows, err := db.QueryContext(ctx, `SELECT inputs_json,compilation_json FROM workflow_runs ORDER BY id`)
+	rows, err := db.QueryContext(ctx, `SELECT COALESCE(research_task_id,''),inputs_json,compilation_json FROM workflow_runs ORDER BY id`)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
 	seen := map[string]struct{}{}
 	for rows.Next() {
-		var inputsJSON, compilationJSON string
-		if err := rows.Scan(&inputsJSON, &compilationJSON); err != nil {
+		var taskID, inputsJSON, compilationJSON string
+		if err := rows.Scan(&taskID, &inputsJSON, &compilationJSON); err != nil {
 			return err
 		}
 		var compilation workflow.Compilation
@@ -842,17 +895,20 @@ func appendWorkflowInputFiles(ctx context.Context, db *sql.DB, snapshot *project
 			return fmt.Errorf("inspect archived Workflow inputs: %w", err)
 		}
 		for _, relative := range paths {
-			if _, duplicate := seen[relative]; duplicate {
+			taskID = strings.TrimSpace(taskID)
+			key := taskID + "\x00" + relative
+			if _, duplicate := seen[key]; duplicate {
 				continue
 			}
-			seen[relative] = struct{}{}
+			seen[key] = struct{}{}
 			expectedHash, ok := workflow.FrozenInputSHA256(relative)
 			if !ok {
 				return fmt.Errorf("archived Workflow input path is not content-addressed")
 			}
 			snapshot.Files = append(snapshot.Files, projectarchive.FileSource{
 				StorageRelativePath: relative,
-				SourcePath:          filepath.Join(snapshot.Project.WorkspacePath, filepath.FromSlash(relative)),
+				SourcePath:          workflowInputSourcePath(snapshot.Project, taskID, relative),
+				TaskID:              taskID,
 				Kind:                projectarchive.FileWorkflowInput,
 				Required:            true,
 				ExpectedSize:        -1,
@@ -861,6 +917,16 @@ func appendWorkflowInputFiles(ctx context.Context, db *sql.DB, snapshot *project
 		}
 	}
 	return rows.Err()
+}
+
+func workflowInputSourcePath(value project.Project, taskID, relative string) string {
+	root := value.WorkspacePath
+	if strings.TrimSpace(taskID) != "" {
+		if scoped, err := project.ResearchTaskWorkspacePath(value, taskID); err == nil {
+			root = scoped
+		}
+	}
+	return filepath.Join(root, filepath.FromSlash(relative))
 }
 
 type archiveIDMaps struct {
@@ -898,13 +964,15 @@ func (m *archiveIDMaps) get(table, old string) string {
 }
 
 var idTables = []string{
+	"research_revision_proposals",
 	"model_profiles", "conversations", "messages", "message_parts", "runs", "tool_calls", "approvals", "permission_grants",
 	"conversation_context_checkpoints", "attachments", "knowledge_index_versions", "knowledge_documents", "knowledge_import_jobs",
 	"model_request_usage", "artifact_blobs", "artifacts", "artifact_versions", "artifact_lineage", "artifact_citations", "artifact_exports",
-	"workflows", "workflow_versions", "workflow_runs", "workflow_steps", "workflow_human_decisions", "workflow_events",
-	"research_queries", "research_source_records", "research_candidates", "research_bibliographies", "research_bibliography_field_sources",
+	"workflows", "workflow_versions", "workflow_runs", "workflow_steps", "workflow_human_decisions", "workflow_events", "workflow_ai_executions",
+	"research_queries", "research_source_records", "research_candidates", "research_candidate_task_imports", "research_bibliographies", "research_bibliography_field_sources",
 	"research_bibliography_revisions", "research_bibliography_materials", "research_evidence_entries", "message_citations",
 	"python_environments", "python_kernel_executions",
+	"research_tasks",
 }
 
 func allocateArchiveIDs(ctx context.Context, db *sql.DB, maps *archiveIDMaps) error {
@@ -997,8 +1065,18 @@ func rewriteProjectSnapshot(ctx context.Context, db *sql.DB, oldProjectID string
 		{"knowledge_documents", "attachment_id", "attachments"},
 		{"knowledge_import_jobs", "attachment_id", "attachments"},
 		{"research_candidates", "attachment_id", "attachments"},
+		{"research_candidate_task_imports", "id", "research_candidate_task_imports"},
+		{"research_candidate_task_imports", "candidate_id", "research_candidates"},
+		{"research_candidate_task_imports", "attachment_id", "attachments"},
+		{"research_candidate_task_imports", "research_task_id", "research_tasks"},
 		{"research_bibliography_materials", "attachment_id", "attachments"},
+		{"research_bibliography_materials", "research_task_id", "research_tasks"},
 		{"research_evidence_entries", "attachment_id", "attachments"},
+		{"research_evidence_entries", "research_task_id", "research_tasks"},
+		{"workflow_runs", "research_task_id", "research_tasks"},
+		{"attachments", "research_task_id", "research_tasks"},
+		{"knowledge_documents", "research_task_id", "research_tasks"},
+		{"artifacts", "research_task_id", "research_tasks"},
 		{"knowledge_index_versions", "id", "knowledge_index_versions"},
 		{"knowledge_documents", "index_version_id", "knowledge_index_versions"},
 		{"knowledge_import_jobs", "index_version_id", "knowledge_index_versions"},
@@ -1028,6 +1106,14 @@ func rewriteProjectSnapshot(ctx context.Context, db *sql.DB, oldProjectID string
 		{"workflow_runs", "id", "workflow_runs"},
 		{"workflow_runs", "workflow_id", "workflows"},
 		{"workflow_runs", "workflow_version_id", "workflow_versions"},
+		{"workflow_conversations", "workflow_run_id", "workflow_runs"},
+		{"workflow_conversations", "conversation_id", "conversations"},
+		{"workflow_ai_executions", "id", "workflow_ai_executions"},
+		{"workflow_ai_executions", "workflow_run_id", "workflow_runs"},
+		{"workflow_ai_executions", "workflow_step_id", "workflow_steps"},
+		{"workflow_ai_executions", "model_profile_id", "model_profiles"},
+		{"workflow_ai_chat_runs", "execution_id", "workflow_ai_executions"},
+		{"workflow_ai_chat_runs", "chat_run_id", "runs"},
 		{"workflow_steps", "id", "workflow_steps"},
 		{"workflow_steps", "workflow_run_id", "workflow_runs"},
 		{"workflow_steps", "tool_call_id", "tool_calls"},
@@ -1036,8 +1122,21 @@ func rewriteProjectSnapshot(ctx context.Context, db *sql.DB, oldProjectID string
 		{"workflow_human_decisions", "workflow_step_id", "workflow_steps"},
 		{"workflow_events", "id", "workflow_events"},
 		{"workflow_events", "workflow_run_id", "workflow_runs"},
+		{"research_revision_proposals", "id", "research_revision_proposals"},
+		{"research_revision_proposals", "workflow_run_id", "workflow_runs"},
+		{"research_revision_proposals", "chat_run_id", "runs"},
+		{"research_revision_proposals", "user_message_id", "messages"},
+		{"research_revision_proposals", "source_call_id", "tool_calls"},
+		{"research_timeline", "research_task_id", "research_tasks"},
+		{"research_timeline", "workflow_run_id", "workflow_runs"},
 		{"research_queries", "id", "research_queries"},
 		{"research_query_records", "query_id", "research_queries"},
+		{"research_query_origins", "query_id", "research_queries"},
+		{"research_query_origins", "task_id", "research_tasks"},
+		{"research_query_candidates", "query_id", "research_queries"},
+		{"research_query_candidates", "candidate_id", "research_candidates"},
+		{"research_candidate_reviews", "candidate_id", "research_candidates"},
+		{"research_candidate_reviews", "task_id", "research_tasks"},
 		{"research_source_records", "id", "research_source_records"},
 		{"research_candidate_records", "source_record_id", "research_source_records"},
 		{"research_query_records", "source_record_id", "research_source_records"},
@@ -1093,6 +1192,9 @@ func rewriteProjectSnapshot(ctx context.Context, db *sql.DB, oldProjectID string
 	if err := rewriteResearchPointers(ctx, tx, maps); err != nil {
 		return err
 	}
+	if err := rewriteDiscoverySnapshots(ctx, tx, maps, restored.ID); err != nil {
+		return err
+	}
 	if err := rewriteRunEvents(ctx, tx, maps); err != nil {
 		return err
 	}
@@ -1109,6 +1211,9 @@ func rewriteProjectSnapshot(ctx context.Context, db *sql.DB, oldProjectID string
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE workflow_runs SET status='interrupted',error_code='ARCHIVE_RESTORED',error_message='从项目归档恢复的 Workflow Run 不会自动继续',completed_at=COALESCE(completed_at,updated_at),resume_status='' WHERE status IN ('queued','running','waiting_approval','waiting_human_confirmation','paused')`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE workflow_ai_executions SET status='interrupted',error_code='ARCHIVE_RESTORED',error_message='从项目归档恢复的 AI 阶段不会自动继续',completed_at=COALESCE(completed_at,updated_at),updated_at=COALESCE(completed_at,updated_at) WHERE status IN ('prepared','running')`); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE knowledge_import_jobs SET status='cancelled',stage='cancelled',error_message='restored historical job',completed_at=COALESCE(completed_at,updated_at) WHERE status IN ('queued','running')`); err != nil {
@@ -1146,13 +1251,14 @@ func updateMappedColumn(ctx context.Context, tx *sql.Tx, table, column string, v
 var projectScopedTables = []string{
 	"conversations", "attachments", "knowledge_index_versions", "knowledge_documents", "knowledge_import_jobs",
 	"artifact_blobs", "artifacts", "artifact_exports", "research_queries", "research_source_records", "research_candidates",
-	"research_candidate_aliases", "research_bibliographies", "research_bibliography_materials", "research_evidence_entries", "message_citations",
+	"research_candidate_aliases", "research_candidate_task_imports", "research_candidate_reviews", "research_bibliographies", "research_bibliography_materials", "research_evidence_entries", "message_citations",
 	"run_dynamic_skills", "run_skill_routing", "run_skill_routing_audits",
 	"process_execution_audits",
 	"python_environments",
 	"python_kernel_executions",
 	"workflows",
 	"workflow_runs",
+	"research_tasks",
 }
 
 func remapProjectColumns(ctx context.Context, tx *sql.Tx, oldProjectID, newProjectID string) error {
@@ -1252,6 +1358,37 @@ func (m *archiveIDMaps) getFirst(old string, tables ...string) string {
 }
 
 func rewriteWorkflowRunSnapshots(ctx context.Context, tx *sql.Tx, maps *archiveIDMaps, oldProjectID, projectID string) error {
+	creationRows, err := tx.QueryContext(ctx, `SELECT id,creation_key FROM workflow_runs WHERE creation_key<>'' ORDER BY id`)
+	if err != nil {
+		return err
+	}
+	type creationUpdate struct{ id, key string }
+	creationUpdates := []creationUpdate{}
+	for creationRows.Next() {
+		var item creationUpdate
+		if err := creationRows.Scan(&item.id, &item.key); err != nil {
+			creationRows.Close()
+			return err
+		}
+		const prefix = "research-route:"
+		if strings.HasPrefix(item.key, prefix) {
+			parts := strings.SplitN(strings.TrimPrefix(item.key, prefix), ":", 2)
+			if len(parts) == 2 {
+				item.key = prefix + maps.get("workflow_runs", parts[0]) + ":" + parts[1]
+			}
+		}
+		creationUpdates = append(creationUpdates, item)
+	}
+	if err := creationRows.Err(); err != nil {
+		creationRows.Close()
+		return err
+	}
+	creationRows.Close()
+	for _, item := range creationUpdates {
+		if _, err := tx.ExecContext(ctx, `UPDATE workflow_runs SET creation_key=? WHERE id=?`, item.key, item.id); err != nil {
+			return fmt.Errorf("rewrite Workflow Run creation key: %w", err)
+		}
+	}
 	rows, err := tx.QueryContext(ctx, `SELECT id,inputs_json,outputs_json FROM workflow_runs ORDER BY id`)
 	if err != nil {
 		return err
@@ -1325,10 +1462,30 @@ func rewriteWorkflowRunSnapshots(ctx context.Context, tx *sql.Tx, maps *archiveI
 		{`SELECT id,arguments_json FROM tool_calls WHERE workflow_run_id IS NOT NULL ORDER BY id`, `UPDATE tool_calls SET arguments_json=? WHERE id=?`, "Workflow ToolCall arguments"},
 		{`SELECT id,context_json FROM workflow_human_decisions ORDER BY id`, `UPDATE workflow_human_decisions SET context_json=? WHERE id=?`, "Workflow human decision context"},
 		{`SELECT id,payload_json FROM workflow_events ORDER BY id`, `UPDATE workflow_events SET payload_json=? WHERE id=?`, "Workflow event payload"},
+		{`SELECT id,proposal_json FROM research_revision_proposals ORDER BY id`, `UPDATE research_revision_proposals SET proposal_json=? WHERE id=?`, "Research revision proposal"},
+		{`SELECT CAST(sequence AS TEXT),snapshot_json FROM research_timeline ORDER BY sequence`, `UPDATE research_timeline SET snapshot_json=? WHERE sequence=?`, "Research timeline snapshot"},
 	} {
 		if err := rewriteWorkflowJSONColumn(ctx, tx, target.query, target.update, target.label, maps, oldProjectID, projectID); err != nil {
 			return err
 		}
+	}
+	// Restored projects need fresh user consent. Historical delivery snapshots
+	// retain their original identities as audit evidence, not executable state.
+	for kind, table := range map[string]string{"message": "messages", "event": "workflow_events", "proposal": "research_revision_proposals", "registration": "artifact_lineage"} {
+		for oldID, newID := range maps.values[table] {
+			if _, err := tx.ExecContext(ctx, `UPDATE research_timeline SET source_id=? WHERE kind=? AND source_id=?`, newID, kind, oldID); err != nil {
+				return err
+			}
+		}
+	}
+	for oldID, newID := range maps.values["workflow_steps"] {
+		if _, err := tx.ExecContext(ctx, `UPDATE research_timeline SET snapshot_json=json_set(snapshot_json,'$.step.id',?) WHERE json_extract(snapshot_json,'$.step.id')=?`, newID, oldID); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE research_revision_proposals SET status=CASE WHEN status='pending' THEN 'superseded' ELSE status END,
+		proposal_json=json_set(proposal_json,'$.id',id,'$.runId',workflow_run_id,'$.chatRunId',chat_run_id,'$.userMessageId',user_message_id,'$.canConfirm',json('false'),'$.status',CASE WHEN status='pending' THEN 'superseded' ELSE status END)`); err != nil {
+		return err
 	}
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE workflow_events
@@ -1442,10 +1599,12 @@ func rewriteWorkflowPayload(raw []byte, maps *archiveIDMaps, oldProjectID, proje
 				return projectID
 			}
 			table := map[string]string{
+				"proposalId": "research_revision_proposals", "userMessageId": "messages",
 				"id": "artifacts", "artifactId": "artifacts", "artifactVersionId": "artifact_versions",
 				"toolCallId": "tool_calls", "workflowId": "workflows", "workflowVersionId": "workflow_versions",
-				"workflowRunId": "workflow_runs", "workflowStepId": "workflow_steps", "stepId": "workflow_steps",
-				"approvalId": "approvals", "decisionId": "workflow_human_decisions", "runId": "runs",
+				"workflowRunId": "workflow_runs", "formalRunId": "workflow_runs", "workflowStepId": "workflow_steps", "stepId": "workflow_steps",
+				"executionId": "workflow_ai_executions", "chatRunId": "runs", "revisionChatRunId": "runs", "adoptedChatRunId": "runs",
+				"approvalId": "approvals", "decisionId": "workflow_human_decisions", "runId": "runs", "conversationId": "conversations", "modelProfileId": "model_profiles",
 				"attachmentId": "attachments", "documentId": "knowledge_documents", "indexVersionId": "knowledge_index_versions",
 				"bibliographyId": "research_bibliographies", "candidateId": "research_candidates",
 			}[key]
@@ -1559,6 +1718,9 @@ func rewriteArtifactProvenance(ctx context.Context, tx *sql.Tx, maps *archiveIDM
 		value.MessageID = maps.get("messages", value.MessageID)
 		value.ToolCallID = maps.get("tool_calls", value.ToolCallID)
 		value.ModelProfileID = maps.get("model_profiles", value.ModelProfileID)
+		if value.Extra["researchTaskId"] != "" {
+			value.Extra["researchTaskId"] = maps.get("research_tasks", value.Extra["researchTaskId"])
+		}
 		encoded, _ := json.Marshal(value)
 		item.encoded = string(encoded)
 		updates = append(updates, item)
@@ -1602,6 +1764,12 @@ func rewriteArtifactSourceKeys(ctx context.Context, tx *sql.Tx, maps *archiveIDM
 			item.key = strings.Join(parts, ":")
 		} else if strings.HasPrefix(item.key, "workspace:"+oldProjectID+":") {
 			item.key = "workspace:" + projectID + strings.TrimPrefix(item.key, "workspace:"+oldProjectID)
+		} else if strings.HasPrefix(item.key, "workflow-deliverable:") {
+			parts := strings.Split(item.key, ":")
+			if len(parts) == 4 {
+				parts[1] = maps.get("workflow_runs", parts[1])
+			}
+			item.key = strings.Join(parts, ":")
 		}
 		updates = append(updates, item)
 	}
@@ -1946,17 +2114,21 @@ func validateAttachedArchive(ctx context.Context, tx *sql.Tx) error {
 
 var archiveMergeOrder = []string{
 	"projects", "model_profiles", "model_profile_models", "conversations", "messages", "message_parts", "runs", "run_events", "run_event_sequences",
-	"workflows", "workflow_versions", "workflow_runs",
+	"research_tasks",
+	"workflows", "workflow_versions", "workflow_runs", "workflow_conversations",
 	"tool_calls", "tool_results", "process_execution_audits", "provider_turn_items", "run_steps", "model_turn_journal", "model_request_usage", "run_skill_contexts", "run_skills", "run_dynamic_skills", "run_skill_routing", "run_skill_routing_audits", "run_skill_routing_candidates",
 	"conversation_context_checkpoints", "attachments", "knowledge_index_versions", "knowledge_documents", "knowledge_import_jobs", "message_citations",
 	"artifact_blobs", "artifacts", "artifact_versions", "artifact_lineage", "artifact_citations", "artifact_exports",
-	"workflow_steps", "workflow_human_decisions", "workflow_events",
-	"research_queries", "research_source_records", "research_candidates", "research_candidate_records", "research_candidate_aliases", "research_query_records",
+	"workflow_steps", "workflow_human_decisions", "workflow_events", "workflow_ai_executions", "workflow_ai_chat_runs",
+	"research_revision_proposals", "research_timeline",
+	"research_queries", "research_source_records", "research_candidates", "research_candidate_records", "research_candidate_aliases", "research_candidate_task_imports", "research_query_records",
+	"research_query_origins", "research_query_candidates", "research_candidate_reviews",
 	"research_bibliographies", "research_bibliography_field_sources", "research_bibliography_revisions", "research_bibliography_materials", "research_evidence_entries",
 	"python_environments", "python_kernel_executions",
 }
 
 var archiveSanitizedTables = []string{
+	"model_resource_actions", "model_resource_sessions",
 	"approvals", "permission_grants", "mcp_servers", "vision_fallback_channels", "knowledge_embedding_config", "settings",
 	"project_skills", "installed_skills", "skill_package_sources", "retired_builtin_skill_packages", "skill_policies",
 	"python_environment_operations",

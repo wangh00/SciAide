@@ -234,15 +234,91 @@ func syncBibliographyMaterialFromCandidate(ctx context.Context, executor researc
 	if kind == appresearch.ImportFullText {
 		level = appresearch.EvidenceFullText
 	}
-	_, err = executor.ExecContext(ctx, `INSERT INTO research_bibliography_materials(id,bibliography_id,project_id,attachment_id,knowledge_document_id,attachment_id_snapshot,knowledge_document_id_snapshot,attachment_sha256_snapshot,import_kind,evidence_level,created_at,updated_at) VALUES (?,?,?,?,NULLIF(?,''),?,?,?,?,?,?,?) ON CONFLICT(bibliography_id,attachment_sha256_snapshot) DO UPDATE SET attachment_id=excluded.attachment_id,knowledge_document_id=excluded.knowledge_document_id,knowledge_document_id_snapshot=CASE WHEN excluded.knowledge_document_id_snapshot<>'' THEN excluded.knowledge_document_id_snapshot ELSE research_bibliography_materials.knowledge_document_id_snapshot END,updated_at=CASE WHEN COALESCE(research_bibliography_materials.attachment_id,'')<>excluded.attachment_id_snapshot OR COALESCE(research_bibliography_materials.knowledge_document_id,'')<>excluded.knowledge_document_id_snapshot THEN excluded.updated_at ELSE research_bibliography_materials.updated_at END`,
-		materialID, bibliographyID, projectID, attachmentID, documentID, attachmentID, documentID, attachmentSHA, kind, level, formatTime(at), formatTime(at))
+	// The task-scope migration makes attachment_id_snapshot part of the
+	// uniqueness boundary. Use an explicit lookup so this legacy/project-level
+	// import path remains compatible with both upgraded and fresh databases.
+	var existingID string
+	lookupErr := executor.QueryRowContext(ctx, `SELECT id FROM research_bibliography_materials WHERE bibliography_id=? AND research_task_id='' AND ((attachment_sha256_snapshot=? AND attachment_id_snapshot=?) OR attachment_id=?) ORDER BY CASE WHEN attachment_id=? THEN 0 ELSE 1 END, id LIMIT 1`, bibliographyID, attachmentSHA, attachmentID, attachmentID, attachmentID).Scan(&existingID)
+	if errors.Is(lookupErr, sql.ErrNoRows) {
+		_, err = executor.ExecContext(ctx, `INSERT INTO research_bibliography_materials(id,bibliography_id,project_id,attachment_id,knowledge_document_id,attachment_id_snapshot,knowledge_document_id_snapshot,attachment_sha256_snapshot,import_kind,evidence_level,created_at,updated_at) VALUES (?,?,?,?,NULLIF(?,''),?,?,?,?,?,?,?)`,
+			materialID, bibliographyID, projectID, attachmentID, documentID, attachmentID, documentID, attachmentSHA, kind, level, formatTime(at), formatTime(at))
+	} else if lookupErr == nil {
+		_, err = executor.ExecContext(ctx, `UPDATE research_bibliography_materials SET attachment_id=?,knowledge_document_id=NULLIF(?,''),knowledge_document_id_snapshot=?,import_kind=?,evidence_level=?,updated_at=? WHERE id=? AND project_id=? AND research_task_id=''`,
+			attachmentID, documentID, documentID, kind, level, formatTime(at), existingID, projectID)
+	} else {
+		return fmt.Errorf("read research bibliography material: %w", lookupErr)
+	}
 	if err != nil {
 		return fmt.Errorf("bind research bibliography material: %w", err)
 	}
 	return nil
 }
 
+// syncBibliographyMaterialForAttachment binds a task-owned attachment to the
+// shared candidate bibliography without reading the candidate's legacy global
+// attachment_id column. This is the critical boundary when one work is
+// imported into more than one research task.
+func syncBibliographyMaterialForAttachment(ctx context.Context, executor researchSQLExecutor, projectID, candidateID, attachmentID, researchTaskID string, kind appresearch.ImportKind, at time.Time) error {
+	projectID, candidateID, attachmentID, researchTaskID = strings.TrimSpace(projectID), strings.TrimSpace(candidateID), strings.TrimSpace(attachmentID), strings.TrimSpace(researchTaskID)
+	if projectID == "" || candidateID == "" || attachmentID == "" || (kind != appresearch.ImportFullText && kind != appresearch.ImportMetadataAbstract) {
+		return fmt.Errorf("research task bibliography material identity is invalid")
+	}
+	var bibliographyID string
+	if err := executor.QueryRowContext(ctx, `SELECT id FROM research_bibliographies WHERE project_id=? AND candidate_id=?`, projectID, candidateID).Scan(&bibliographyID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			if err := syncResearchBibliography(ctx, executor, projectID, candidateID, at); err != nil {
+				return err
+			}
+			if err := executor.QueryRowContext(ctx, `SELECT id FROM research_bibliographies WHERE project_id=? AND candidate_id=?`, projectID, candidateID).Scan(&bibliographyID); err != nil {
+				return err
+			}
+		} else {
+			return fmt.Errorf("read research task bibliography: %w", err)
+		}
+	}
+	var sha string
+	if err := executor.QueryRowContext(ctx, `SELECT sha256 FROM attachments WHERE id=? AND project_id=? AND (scope_kind='project_shared' OR (scope_kind='task' AND research_task_id=?))`, attachmentID, projectID, researchTaskID).Scan(&sha); err != nil {
+		return fmt.Errorf("read research task attachment: %w", err)
+	}
+	var documentID string
+	_ = executor.QueryRowContext(ctx, `SELECT id FROM knowledge_documents WHERE project_id=? AND attachment_id=? AND (scope_kind='project_shared' OR (scope_kind='task' AND research_task_id=?)) ORDER BY created_at DESC LIMIT 1`, projectID, attachmentID, researchTaskID).Scan(&documentID)
+	level := appresearch.EvidenceMetadataAbstract
+	if kind == appresearch.ImportFullText {
+		level = appresearch.EvidenceFullText
+	}
+	// Do not rely on a conflict target here: databases created before the
+	// task-scope migration may still carry the older unique index shape. An
+	// explicit lookup/update keeps upgrades and freshly-created databases
+	// behaviorally identical.
+	var materialID string
+	var writeErr error
+	lookupErr := executor.QueryRowContext(ctx, `SELECT id FROM research_bibliography_materials WHERE bibliography_id=? AND research_task_id=? AND ((attachment_sha256_snapshot=? AND attachment_id_snapshot=?) OR attachment_id=?) ORDER BY CASE WHEN attachment_id=? THEN 0 ELSE 1 END, id LIMIT 1`, bibliographyID, researchTaskID, sha, attachmentID, attachmentID, attachmentID).Scan(&materialID)
+	if errors.Is(lookupErr, sql.ErrNoRows) {
+		materialID, writeErr = id.New()
+		if writeErr != nil {
+			return writeErr
+		}
+		_, writeErr = executor.ExecContext(ctx, `INSERT INTO research_bibliography_materials(id,bibliography_id,project_id,attachment_id,knowledge_document_id,attachment_id_snapshot,knowledge_document_id_snapshot,attachment_sha256_snapshot,import_kind,evidence_level,research_task_id,created_at,updated_at) VALUES (?,?,?,?,NULLIF(?,''),?,?,?,?,?,?,?,?)`, materialID, bibliographyID, projectID, attachmentID, documentID, attachmentID, documentID, sha, kind, level, researchTaskID, formatTime(at), formatTime(at))
+	} else if lookupErr == nil {
+		_, writeErr = executor.ExecContext(ctx, `UPDATE research_bibliography_materials SET attachment_id=?,knowledge_document_id=NULLIF(?,''),knowledge_document_id_snapshot=?,import_kind=?,evidence_level=?,updated_at=? WHERE id=? AND project_id=? AND research_task_id=?`, attachmentID, documentID, documentID, kind, level, formatTime(at), materialID, projectID, researchTaskID)
+	} else {
+		return fmt.Errorf("read research task bibliography material: %w", lookupErr)
+	}
+	if writeErr != nil {
+		return fmt.Errorf("bind research bibliography material: %w", writeErr)
+	}
+	return nil
+}
+
 func (r *ResearchRepository) GetBibliography(ctx context.Context, projectID, candidateID string) (appresearch.Bibliography, error) {
+	return r.getBibliography(ctx, projectID, candidateID, false)
+}
+
+// getBibliography controls whether task-owned material rows are included.
+// Bibliography metadata is project-wide, but material/evidence rows are not:
+// the ordinary project view must never expose another research task's imported
+// attachment or knowledge document.
+func (r *ResearchRepository) getBibliography(ctx context.Context, projectID, candidateID string, includeTaskMaterials bool) (appresearch.Bibliography, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return appresearch.Bibliography{}, err
@@ -258,6 +334,15 @@ func (r *ResearchRepository) GetBibliography(ctx context.Context, projectID, can
 	if err := tx.Commit(); err != nil {
 		return value, err
 	}
+	if !includeTaskMaterials {
+		shared := value.Materials[:0]
+		for _, material := range value.Materials {
+			if strings.TrimSpace(material.ResearchTaskID) == "" {
+				shared = append(shared, material)
+			}
+		}
+		value.Materials = shared
+	}
 	return value, nil
 }
 
@@ -266,7 +351,7 @@ func (r *ResearchRepository) CitationSnapshotForAttachment(ctx context.Context, 
 	var bibliographyID, canonicalJSON string
 	var revision int
 	var level appresearch.EvidenceLevel
-	err := r.db.QueryRowContext(ctx, `SELECT b.id,b.revision_number,b.canonical_json,m.evidence_level FROM research_bibliography_materials m JOIN research_bibliographies b ON b.id=m.bibliography_id AND b.project_id=m.project_id WHERE m.project_id=? AND (m.attachment_id=? OR m.attachment_id_snapshot=?) ORDER BY m.updated_at DESC,m.id LIMIT 1`, projectID, attachmentID, attachmentID).Scan(&bibliographyID, &revision, &canonicalJSON, &level)
+	err := r.db.QueryRowContext(ctx, `SELECT b.id,b.revision_number,b.canonical_json,m.evidence_level FROM research_bibliography_materials m JOIN research_bibliographies b ON b.id=m.bibliography_id AND b.project_id=m.project_id JOIN attachments a ON a.id=m.attachment_id AND a.project_id=m.project_id WHERE m.project_id=? AND m.research_task_id='' AND a.scope_kind IN ('project_shared','legacy_project') AND (m.attachment_id=? OR m.attachment_id_snapshot=?) ORDER BY m.updated_at DESC,m.id LIMIT 1`, projectID, attachmentID, attachmentID).Scan(&bibliographyID, &revision, &canonicalJSON, &level)
 	if errors.Is(err, sql.ErrNoRows) {
 		return appresearch.CitationSnapshot{}, fmt.Errorf("citation attachment is not bound to a research bibliography")
 	}
@@ -285,6 +370,74 @@ func (r *ResearchRepository) CitationSnapshotForAttachment(ctx context.Context, 
 		return appresearch.CitationSnapshot{}, err
 	}
 	return appresearch.CitationSnapshot{BibliographyID: bibliographyID, Bibliography: encoded, EvidenceLevel: level}, nil
+}
+
+// CitationSnapshotForAttachmentForTask only resolves material explicitly
+// owned by the requested task or project-shared material. It never falls
+// back to another task's attachment row.
+func (r *ResearchRepository) CitationSnapshotForAttachmentForTask(ctx context.Context, projectID, taskID, attachmentID string, at time.Time) (appresearch.CitationSnapshot, error) {
+	projectID, taskID, attachmentID = strings.TrimSpace(projectID), strings.TrimSpace(taskID), strings.TrimSpace(attachmentID)
+	var bibliographyID, canonicalJSON string
+	var revision int
+	var level appresearch.EvidenceLevel
+	err := r.db.QueryRowContext(ctx, `SELECT b.id,b.revision_number,b.canonical_json,m.evidence_level FROM research_bibliography_materials m JOIN research_bibliographies b ON b.id=m.bibliography_id AND b.project_id=m.project_id LEFT JOIN attachments a ON a.id=m.attachment_id AND a.project_id=m.project_id WHERE m.project_id=? AND (m.attachment_id=? OR m.attachment_id_snapshot=?) AND (m.research_task_id=? OR (m.research_task_id='' AND a.scope_kind='project_shared')) ORDER BY CASE WHEN m.research_task_id=? THEN 0 ELSE 1 END,m.updated_at DESC,m.id LIMIT 1`, projectID, attachmentID, attachmentID, taskID, taskID).Scan(&bibliographyID, &revision, &canonicalJSON, &level)
+	if errors.Is(err, sql.ErrNoRows) {
+		return appresearch.CitationSnapshot{}, fmt.Errorf("citation attachment is not bound to the current research task")
+	}
+	if err != nil {
+		return appresearch.CitationSnapshot{}, fmt.Errorf("load task citation bibliography snapshot: %w", err)
+	}
+	var data appresearch.BibliographyData
+	if json.Unmarshal([]byte(canonicalJSON), &data) != nil {
+		return appresearch.CitationSnapshot{}, fmt.Errorf("citation bibliography snapshot is invalid")
+	}
+	encoded, err := json.Marshal(appresearch.BibliographySnapshot{SchemaVersion: 1, BibliographyID: bibliographyID, Revision: revision, Data: data, CapturedAt: at.UTC()})
+	if err != nil {
+		return appresearch.CitationSnapshot{}, err
+	}
+	return appresearch.CitationSnapshot{BibliographyID: bibliographyID, Bibliography: encoded, EvidenceLevel: level}, nil
+}
+
+func (r *ResearchRepository) GetBibliographyForTask(ctx context.Context, projectID, candidateID, taskID string) (appresearch.Bibliography, error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return appresearch.Bibliography{}, fmt.Errorf("research task id is required")
+	}
+	value, err := r.getBibliography(ctx, projectID, candidateID, true)
+	if err != nil {
+		return value, err
+	}
+	rows, err := r.db.QueryContext(ctx, `SELECT id FROM attachments WHERE project_id=? AND (scope_kind='project_shared' OR (scope_kind='task' AND research_task_id=?))`, strings.TrimSpace(projectID), taskID)
+	if err != nil {
+		return value, err
+	}
+	allowed := map[string]struct{}{}
+	for rows.Next() {
+		var id string
+		if scanErr := rows.Scan(&id); scanErr != nil {
+			_ = rows.Close()
+			return value, scanErr
+		}
+		allowed[id] = struct{}{}
+	}
+	if err := rows.Close(); err != nil {
+		return value, err
+	}
+	filtered := value.Materials[:0]
+	for _, material := range value.Materials {
+		// A material row is visible only when its attachment is visible in the
+		// requested task. Checking the attachment for task-owned rows as well
+		// prevents stale or tampered rows from crossing task boundaries.
+		_, attachmentAllowed := allowed[material.AttachmentID]
+		if !attachmentAllowed {
+			_, attachmentAllowed = allowed[material.AttachmentIDSnapshot]
+		}
+		if attachmentAllowed && (material.ResearchTaskID == taskID || material.ResearchTaskID == "") {
+			filtered = append(filtered, material)
+		}
+	}
+	value.Materials = filtered
+	return value, nil
 }
 
 func (r *ResearchRepository) ReviseBibliography(ctx context.Context, command appresearch.ReviseBibliographyCommand, at time.Time) (appresearch.Bibliography, error) {
@@ -478,7 +631,7 @@ func loadBibliographyRelations(ctx context.Context, queryer artifactTxQueryer, v
 	if err := rows.Close(); err != nil {
 		return err
 	}
-	rows, err = queryer.QueryContext(ctx, `SELECT id,COALESCE(attachment_id,''),COALESCE(knowledge_document_id,''),attachment_id_snapshot,knowledge_document_id_snapshot,attachment_sha256_snapshot,import_kind,evidence_level,created_at,updated_at FROM research_bibliography_materials WHERE bibliography_id=? ORDER BY created_at,id`, value.ID)
+	rows, err = queryer.QueryContext(ctx, `SELECT id,COALESCE(attachment_id,''),COALESCE(knowledge_document_id,''),attachment_id_snapshot,knowledge_document_id_snapshot,attachment_sha256_snapshot,import_kind,evidence_level,COALESCE(research_task_id,''),created_at,updated_at FROM research_bibliography_materials WHERE bibliography_id=? ORDER BY created_at,id`, value.ID)
 	if err != nil {
 		return err
 	}
@@ -486,7 +639,7 @@ func loadBibliographyRelations(ctx context.Context, queryer artifactTxQueryer, v
 	for rows.Next() {
 		var item appresearch.BibliographyMaterial
 		var created, updated string
-		if err := rows.Scan(&item.ID, &item.AttachmentID, &item.KnowledgeDocumentID, &item.AttachmentIDSnapshot, &item.KnowledgeDocumentIDSnapshot, &item.AttachmentSHA256Snapshot, &item.ImportKind, &item.EvidenceLevel, &created, &updated); err != nil {
+		if err := rows.Scan(&item.ID, &item.AttachmentID, &item.KnowledgeDocumentID, &item.AttachmentIDSnapshot, &item.KnowledgeDocumentIDSnapshot, &item.AttachmentSHA256Snapshot, &item.ImportKind, &item.EvidenceLevel, &item.ResearchTaskID, &created, &updated); err != nil {
 			_ = rows.Close()
 			return err
 		}
@@ -504,11 +657,30 @@ func loadBibliographyRelations(ctx context.Context, queryer artifactTxQueryer, v
 }
 
 func (r *ResearchRepository) ListEvidence(ctx context.Context, projectID, candidateID string) ([]appresearch.EvidenceEntry, error) {
+	return r.listEvidence(ctx, projectID, candidateID, "")
+}
+
+func (r *ResearchRepository) ListEvidenceForTask(ctx context.Context, projectID, candidateID, taskID string) ([]appresearch.EvidenceEntry, error) {
+	return r.listEvidence(ctx, projectID, candidateID, strings.TrimSpace(taskID))
+}
+
+func (r *ResearchRepository) listEvidence(ctx context.Context, projectID, candidateID, taskID string) ([]appresearch.EvidenceEntry, error) {
 	bibliography, err := r.GetBibliography(ctx, projectID, candidateID)
 	if err != nil {
 		return nil, err
 	}
-	rows, err := r.db.QueryContext(ctx, `SELECT id,project_id,bibliography_id,field_kind,content,provenance,review_status,evidence_level,COALESCE(attachment_id,''),COALESCE(knowledge_document_id,''),attachment_id_snapshot,knowledge_document_id_snapshot,index_version_id_snapshot,chunk_id_snapshot,source_name_snapshot,locator_snapshot,quote_text_snapshot,quote_sha256,source_start,source_end,created_at,updated_at FROM research_evidence_entries WHERE project_id=? AND bibliography_id=? ORDER BY field_kind,created_at,id`, projectID, bibliography.ID)
+	query := `SELECT id,project_id,bibliography_id,field_kind,content,provenance,review_status,evidence_level,COALESCE(attachment_id,''),COALESCE(knowledge_document_id,''),attachment_id_snapshot,knowledge_document_id_snapshot,index_version_id_snapshot,chunk_id_snapshot,source_name_snapshot,locator_snapshot,quote_text_snapshot,quote_sha256,source_start,source_end,COALESCE(research_task_id,''),created_at,updated_at FROM research_evidence_entries WHERE project_id=? AND bibliography_id=?`
+	args := []any{projectID, bibliography.ID}
+	if taskID != "" {
+		query += ` AND research_task_id=?`
+		args = append(args, taskID)
+	} else {
+		// The project view is intentionally limited to project-shared evidence.
+		// Task evidence is visible only through ListEvidenceForTask.
+		query += ` AND research_task_id=''`
+	}
+	query += ` ORDER BY field_kind,created_at,id`
+	rows, err := r.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -545,12 +717,17 @@ func (r *ResearchRepository) SaveEvidence(ctx context.Context, command appresear
 	if err != nil {
 		return appresearch.EvidenceEntry{}, err
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO research_evidence_entries(id,project_id,bibliography_id,field_kind,content,provenance,review_status,evidence_level,attachment_id,knowledge_document_id,attachment_id_snapshot,knowledge_document_id_snapshot,index_version_id_snapshot,chunk_id_snapshot,source_name_snapshot,locator_snapshot,quote_text_snapshot,quote_sha256,source_start,source_end,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,NULLIF(?,''),NULLIF(?,''),?,?,?,?,?,?,?,?,?,?,?,?)`,
-		evidenceID, command.ProjectID, bibliographyID, command.Field, command.Content, command.Provenance, command.ReviewStatus, level, value.AttachmentID, value.DocumentID, value.AttachmentID, value.DocumentID, value.IndexVersionID, value.ChunkID, value.SourceName, value.Locator, value.Quote, value.QuoteSHA256, value.SourceStart, value.SourceEnd, formatTime(at), formatTime(at))
+	_, err = tx.ExecContext(ctx, `INSERT INTO research_evidence_entries(
+		id,project_id,bibliography_id,field_kind,content,provenance,review_status,evidence_level,
+		attachment_id,knowledge_document_id,attachment_id_snapshot,knowledge_document_id_snapshot,
+		index_version_id_snapshot,chunk_id_snapshot,source_name_snapshot,locator_snapshot,
+		quote_text_snapshot,quote_sha256,source_start,source_end,research_task_id,created_at,updated_at
+	) VALUES (?,?,?,?,?,?,?,?,NULLIF(?,''),NULLIF(?,''),?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		evidenceID, command.ProjectID, bibliographyID, command.Field, command.Content, command.Provenance, command.ReviewStatus, level, value.AttachmentID, value.DocumentID, value.AttachmentID, value.DocumentID, value.IndexVersionID, value.ChunkID, value.SourceName, value.Locator, value.Quote, value.QuoteSHA256, value.SourceStart, value.SourceEnd, command.ResearchTaskID, formatTime(at), formatTime(at))
 	if err != nil {
 		return appresearch.EvidenceEntry{}, fmt.Errorf("save evidence matrix entry: %w", err)
 	}
-	result := appresearch.EvidenceEntry{ID: evidenceID, ProjectID: command.ProjectID, BibliographyID: bibliographyID, Field: command.Field, Content: command.Content, Provenance: command.Provenance, ReviewStatus: command.ReviewStatus, EvidenceLevel: level, CreatedAt: at, UpdatedAt: at}
+	result := appresearch.EvidenceEntry{ID: evidenceID, ProjectID: command.ProjectID, BibliographyID: bibliographyID, Field: command.Field, Content: command.Content, Provenance: command.Provenance, ReviewStatus: command.ReviewStatus, EvidenceLevel: level, ResearchTaskID: command.ResearchTaskID, CreatedAt: at, UpdatedAt: at}
 	if snapshot != nil {
 		copyValue := *snapshot
 		result.Evidence = &copyValue
@@ -562,6 +739,14 @@ func (r *ResearchRepository) SaveEvidence(ctx context.Context, command appresear
 }
 
 func (r *ResearchRepository) ReviewEvidence(ctx context.Context, command appresearch.ReviewEvidenceCommand, at time.Time) (appresearch.EvidenceEntry, error) {
+	return r.reviewEvidence(ctx, command, at, "")
+}
+
+func (r *ResearchRepository) ReviewEvidenceForTask(ctx context.Context, command appresearch.ReviewEvidenceCommand, at time.Time) (appresearch.EvidenceEntry, error) {
+	return r.reviewEvidence(ctx, command, at, strings.TrimSpace(command.ResearchTaskID))
+}
+
+func (r *ResearchRepository) reviewEvidence(ctx context.Context, command appresearch.ReviewEvidenceCommand, at time.Time, taskID string) (appresearch.EvidenceEntry, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return appresearch.EvidenceEntry{}, err
@@ -574,15 +759,22 @@ func (r *ResearchRepository) ReviewEvidence(ctx context.Context, command apprese
 		}
 		return appresearch.EvidenceEntry{}, err
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE research_evidence_entries SET review_status=?,updated_at=? WHERE id=? AND project_id=? AND bibliography_id=?`,
-		command.ReviewStatus, formatTime(at), command.EvidenceID, command.ProjectID, bibliographyID)
+	query := `UPDATE research_evidence_entries SET review_status=?,updated_at=? WHERE id=? AND project_id=? AND bibliography_id=?`
+	args := []any{command.ReviewStatus, formatTime(at), command.EvidenceID, command.ProjectID, bibliographyID}
+	if taskID != "" {
+		query += ` AND research_task_id=?`
+		args = append(args, taskID)
+	} else {
+		query += ` AND research_task_id=''`
+	}
+	result, err := tx.ExecContext(ctx, query, args...)
 	if err != nil {
 		return appresearch.EvidenceEntry{}, fmt.Errorf("review evidence matrix entry: %w", err)
 	}
 	if affected, _ := result.RowsAffected(); affected != 1 {
 		return appresearch.EvidenceEntry{}, fmt.Errorf("evidence matrix entry not found")
 	}
-	row := tx.QueryRowContext(ctx, `SELECT id,project_id,bibliography_id,field_kind,content,provenance,review_status,evidence_level,COALESCE(attachment_id,''),COALESCE(knowledge_document_id,''),attachment_id_snapshot,knowledge_document_id_snapshot,index_version_id_snapshot,chunk_id_snapshot,source_name_snapshot,locator_snapshot,quote_text_snapshot,quote_sha256,source_start,source_end,created_at,updated_at FROM research_evidence_entries WHERE id=? AND project_id=? AND bibliography_id=?`, command.EvidenceID, command.ProjectID, bibliographyID)
+	row := tx.QueryRowContext(ctx, `SELECT id,project_id,bibliography_id,field_kind,content,provenance,review_status,evidence_level,COALESCE(attachment_id,''),COALESCE(knowledge_document_id,''),attachment_id_snapshot,knowledge_document_id_snapshot,index_version_id_snapshot,chunk_id_snapshot,source_name_snapshot,locator_snapshot,quote_text_snapshot,quote_sha256,source_start,source_end,COALESCE(research_task_id,''),created_at,updated_at FROM research_evidence_entries WHERE id=? AND project_id=? AND bibliography_id=?`, command.EvidenceID, command.ProjectID, bibliographyID)
 	value, err := scanEvidenceEntry(row)
 	if err != nil {
 		return appresearch.EvidenceEntry{}, err
@@ -594,7 +786,7 @@ func (r *ResearchRepository) ReviewEvidence(ctx context.Context, command apprese
 }
 
 func (r *ResearchRepository) DeleteEvidence(ctx context.Context, projectID, candidateID, evidenceID string) error {
-	result, err := r.db.ExecContext(ctx, `DELETE FROM research_evidence_entries WHERE id=? AND project_id=? AND bibliography_id=(SELECT id FROM research_bibliographies WHERE project_id=? AND candidate_id=?)`, evidenceID, projectID, projectID, candidateID)
+	result, err := r.db.ExecContext(ctx, `DELETE FROM research_evidence_entries WHERE id=? AND project_id=? AND research_task_id='' AND bibliography_id=(SELECT id FROM research_bibliographies WHERE project_id=? AND candidate_id=?)`, evidenceID, projectID, projectID, candidateID)
 	if err != nil {
 		return err
 	}
@@ -604,13 +796,25 @@ func (r *ResearchRepository) DeleteEvidence(ctx context.Context, projectID, cand
 	return nil
 }
 
+func (r *ResearchRepository) DeleteEvidenceForTask(ctx context.Context, projectID, candidateID, taskID, evidenceID string) error {
+	result, err := r.db.ExecContext(ctx, `DELETE FROM research_evidence_entries WHERE id=? AND project_id=? AND research_task_id=? AND bibliography_id=(SELECT id FROM research_bibliographies WHERE project_id=? AND candidate_id=?)`, evidenceID, projectID, taskID, projectID, candidateID)
+	if err != nil {
+		return err
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return fmt.Errorf("task evidence matrix entry not found")
+	}
+	return nil
+}
+
 func scanEvidenceEntry(row rowScanner) (appresearch.EvidenceEntry, error) {
 	var item appresearch.EvidenceEntry
-	var liveAttachmentID, liveDocumentID, attachmentID, documentID, indexID, chunkID, sourceName, locator, quote, quoteSHA, created, updated string
+	var liveAttachmentID, liveDocumentID, attachmentID, documentID, indexID, chunkID, sourceName, locator, quote, quoteSHA, researchTaskID, created, updated string
 	var sourceStart, sourceEnd int
-	if err := row.Scan(&item.ID, &item.ProjectID, &item.BibliographyID, &item.Field, &item.Content, &item.Provenance, &item.ReviewStatus, &item.EvidenceLevel, &liveAttachmentID, &liveDocumentID, &attachmentID, &documentID, &indexID, &chunkID, &sourceName, &locator, &quote, &quoteSHA, &sourceStart, &sourceEnd, &created, &updated); err != nil {
+	if err := row.Scan(&item.ID, &item.ProjectID, &item.BibliographyID, &item.Field, &item.Content, &item.Provenance, &item.ReviewStatus, &item.EvidenceLevel, &liveAttachmentID, &liveDocumentID, &attachmentID, &documentID, &indexID, &chunkID, &sourceName, &locator, &quote, &quoteSHA, &sourceStart, &sourceEnd, &researchTaskID, &created, &updated); err != nil {
 		return item, err
 	}
+	item.ResearchTaskID = researchTaskID
 	if chunkID != "" || quote != "" {
 		item.Evidence = &appresearch.EvidenceSnapshot{IndexVersionID: indexID, DocumentID: documentID, AttachmentID: attachmentID, ChunkID: chunkID, SourceName: sourceName, Locator: locator, Quote: quote, QuoteSHA256: quoteSHA, SourceStart: sourceStart, SourceEnd: sourceEnd}
 	}

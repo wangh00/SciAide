@@ -2,18 +2,20 @@ package chat
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/wangh00/SciAide/internal/app/attachment"
+	"github.com/wangh00/SciAide/internal/app/citation"
 	"github.com/wangh00/SciAide/internal/app/conversation"
 	"github.com/wangh00/SciAide/internal/app/tool"
 	"github.com/wangh00/SciAide/internal/events"
 	"github.com/wangh00/SciAide/internal/id"
-	"github.com/wangh00/SciAide/internal/model"
 	"github.com/wangh00/SciAide/internal/modelcap"
 )
 
@@ -23,29 +25,60 @@ type RunExecutor interface {
 }
 
 type StartCommand struct {
-	ConversationID string                  `json:"conversationId"`
-	ModelProfileID string                  `json:"modelProfileId"`
-	ModelID        string                  `json:"modelId"`
-	ReasoningLevel modelcap.ReasoningLevel `json:"reasoningLevel"`
-	Text           string                  `json:"text"`
-	AttachmentIDs  []string                `json:"attachmentIds,omitempty"`
+	ConversationID  string                  `json:"conversationId"`
+	ModelProfileID  string                  `json:"modelProfileId"`
+	ModelID         string                  `json:"modelId"`
+	ReasoningLevel  modelcap.ReasoningLevel `json:"reasoningLevel"`
+	Text            string                  `json:"text"`
+	AttachmentIDs   []string                `json:"attachmentIds,omitempty"`
+	ClientMessageID string                  `json:"clientMessageId,omitempty"`
 }
 
+var clientMessageIDPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+
 const maxUserMessageChars = 100_000
+
+// Match the persisted Workflow AI prompt bound; model budgets are checked later.
+const maxWorkflowMessageChars = 262_144
+
+func validateStartMessageLength(text string, workflowAI *WorkflowAIExecution) error {
+	limit := maxUserMessageChars
+	if workflowAI != nil {
+		limit = maxWorkflowMessageChars
+	}
+	if len([]rune(text)) > limit {
+		if workflowAI != nil {
+			return fmt.Errorf("科研阶段输入超过 %d 字符的存储上限，请减少重复结果或拆分阶段输入；内容未截断", limit)
+		}
+		return fmt.Errorf("message is too long")
+	}
+	return nil
+}
+
 const defaultContextWindowTokens = modelcap.DefaultContextWindowTokens
 
 // Snapshot is the durable UI recovery view. Events improve latency, but this
 // snapshot remains the source of truth after lost or out-of-order UI events.
 type Snapshot struct {
-	Sequence  int64                  `json:"sequence"`
-	Run       Run                    `json:"run"`
-	Messages  []conversation.Message `json:"messages"`
-	ToolCalls []tool.Call            `json:"toolCalls"`
-	RunSteps  []RunStep              `json:"runSteps"`
+	Sequence   int64                  `json:"sequence"`
+	Run        Run                    `json:"run"`
+	WorkflowAI bool                   `json:"workflowAI"`
+	Messages   []conversation.Message `json:"messages"`
+	ToolCalls  []tool.Call            `json:"toolCalls"`
+	RunSteps   []RunStep              `json:"runSteps"`
+	// These primitive fields are the safe UI projection of the active model
+	// turn. Keep the persistence journal type private to avoid exposing a
+	// database-shaped type through Wails bindings.
+	ModelTurnDraft     string `json:"modelTurnDraft,omitempty"`
+	ModelTurnStreaming bool   `json:"modelTurnStreaming,omitempty"`
 }
 
 type eventSequenceReader interface {
 	LatestEventSequence(ctx context.Context, runID string) (int64, error)
+}
+
+type workflowConversationChatGate interface {
+	BlocksOrdinaryChatForWorkflowConversation(ctx context.Context, conversationID string) (bool, error)
 }
 
 type ToolCallReader interface {
@@ -58,6 +91,10 @@ type RunStepReader interface {
 
 type AttachmentResolver interface {
 	Resolve(ctx context.Context, projectID string, ids []string) ([]attachment.MessageReference, error)
+}
+
+type ConversationAttachmentResolver interface {
+	ResolveForConversation(ctx context.Context, projectID, conversationID string, ids []string) ([]attachment.MessageReference, error)
 }
 
 type Service struct {
@@ -157,19 +194,32 @@ func (s *Service) Recover(ctx context.Context) (int64, error) {
 }
 
 func (s *Service) Start(ctx context.Context, cmd StartCommand) (Run, error) {
-	return s.start(ctx, cmd, "")
+	return s.start(ctx, cmd, "", nil)
 }
 
-func (s *Service) start(ctx context.Context, cmd StartCommand, replacedRunID string) (Run, error) {
+func (s *Service) StartWorkflowAI(ctx context.Context, cmd StartCommand, execution WorkflowAIExecution) (Run, error) {
+	if strings.TrimSpace(execution.ID) == "" || strings.TrimSpace(execution.WorkflowRunID) == "" || strings.TrimSpace(execution.WorkflowStepID) == "" || execution.Attempt <= 0 {
+		return Run{}, fmt.Errorf("invalid Workflow AI execution identity")
+	}
+	if _, ok := s.runs.(WorkflowAIRunCreator); !ok {
+		return Run{}, fmt.Errorf("Workflow AI run storage is not configured")
+	}
+	return s.start(ctx, cmd, "", &execution)
+}
+
+func (s *Service) start(ctx context.Context, cmd StartCommand, replacedRunID string, workflowAI *WorkflowAIExecution) (Run, error) {
 	cmd.ConversationID = strings.TrimSpace(cmd.ConversationID)
 	cmd.ModelProfileID = strings.TrimSpace(cmd.ModelProfileID)
 	cmd.ModelID = strings.TrimSpace(cmd.ModelID)
 	cmd.Text = strings.TrimSpace(cmd.Text)
+	if cmd.ClientMessageID != "" && (workflowAI != nil || !clientMessageIDPattern.MatchString(cmd.ClientMessageID)) {
+		return Run{}, fmt.Errorf("invalid client message identity")
+	}
 	if cmd.ConversationID == "" || cmd.ModelProfileID == "" || cmd.ModelID == "" || (cmd.Text == "" && len(cmd.AttachmentIDs) == 0) {
 		return Run{}, fmt.Errorf("conversation, model profile, model and message content are required")
 	}
-	if len([]rune(cmd.Text)) > maxUserMessageChars {
-		return Run{}, fmt.Errorf("message is too long")
+	if err := validateStartMessageLength(cmd.Text, workflowAI); err != nil {
+		return Run{}, err
 	}
 	if s.currentRunner() == nil {
 		return Run{}, fmt.Errorf("chat run executor is not configured")
@@ -177,6 +227,17 @@ func (s *Service) start(ctx context.Context, cmd StartCommand, replacedRunID str
 	selectedConversation, err := s.conversations.GetConversation(ctx, cmd.ConversationID)
 	if err != nil {
 		return Run{}, fmt.Errorf("load conversation: %w", err)
+	}
+	if workflowAI == nil {
+		if gate, ok := s.runs.(workflowConversationChatGate); ok {
+			blocked, detectErr := gate.BlocksOrdinaryChatForWorkflowConversation(ctx, selectedConversation.ID)
+			if detectErr != nil {
+				return Run{}, fmt.Errorf("inspect research Workflow conversation: %w", detectErr)
+			}
+			if blocked {
+				return Run{}, fmt.Errorf("科研任务仍在执行；为保持阶段快照和单一执行所有者，请使用科研模式中的暂停、取消或检查点操作，任务结束后再继续提问")
+			}
+		}
 	}
 	if !selectedConversation.PermissionMode.Valid() {
 		return Run{}, fmt.Errorf("conversation has an invalid permission mode")
@@ -196,7 +257,11 @@ func (s *Service) start(ctx context.Context, cmd StartCommand, replacedRunID str
 		if resolver == nil {
 			return Run{}, fmt.Errorf("chat attachments are not configured")
 		}
-		attachmentReferences, err = resolver.Resolve(ctx, selectedConversation.ProjectID, cmd.AttachmentIDs)
+		if scoped, ok := resolver.(ConversationAttachmentResolver); ok {
+			attachmentReferences, err = scoped.ResolveForConversation(ctx, selectedConversation.ProjectID, selectedConversation.ID, cmd.AttachmentIDs)
+		} else {
+			return Run{}, fmt.Errorf("conversation-scoped attachments are not configured")
+		}
 		if err != nil {
 			return Run{}, err
 		}
@@ -229,9 +294,35 @@ func (s *Service) start(ctx context.Context, cmd StartCommand, replacedRunID str
 	if err != nil {
 		return Run{}, err
 	}
+	if workflowAI != nil && len(workflowAI.Citations) > 0 {
+		reissued, citationErr := citation.ReissueKnowledgeRefs(workflowAI.WorkflowRunID, runID, selectedConversation.ProjectID, workflowAI.Citations)
+		if citationErr != nil {
+			return Run{}, fmt.Errorf("prepare Workflow AI citations: %w", citationErr)
+		}
+		for index := range workflowAI.Citations {
+			if index < len(reissued) {
+				cmd.Text = strings.ReplaceAll(cmd.Text, workflowAI.Citations[index].Reference, reissued[index].Reference)
+			}
+		}
+		workflowAI.Citations = reissued
+		cmd.Text += workflowCitationPrompt(reissued)
+		if err := validateStartMessageLength(cmd.Text, workflowAI); err != nil {
+			return Run{}, fmt.Errorf("绑定引用后：%w", err)
+		}
+		workflowAI.PromptText = cmd.Text
+		digest := sha256.Sum256([]byte(cmd.Text))
+		workflowAI.PromptSHA256 = fmt.Sprintf("%x", digest[:])
+		workflowAI.CitationToolCallID, err = id.New()
+		if err != nil {
+			return Run{}, err
+		}
+	}
 	userID, err := id.New()
 	if err != nil {
 		return Run{}, err
+	}
+	if cmd.ClientMessageID != "" {
+		userID = cmd.ClientMessageID
 	}
 	assistantID, err := id.New()
 	if err != nil {
@@ -266,7 +357,12 @@ func (s *Service) start(ctx context.Context, cmd StartCommand, replacedRunID str
 		Parts: []conversation.MessagePart{{ID: assistantPartID, MessageID: assistantID, Ordinal: 0, Type: "text", CreatedAt: now.Add(time.Nanosecond)}}}
 	defaultContextBudget := modelcap.ResolveContextBudget(defaultContextWindowTokens, 0, modelcap.ContextWindowSourceFallback)
 	run := Run{ID: runID, ConversationID: cmd.ConversationID, UserMessageID: userID, AssistantMessageID: assistantID, ModelProfileID: cmd.ModelProfileID, ModelID: cmd.ModelID, RequestedReasoningLevel: cmd.ReasoningLevel, ContextWindowTokens: defaultContextBudget.WindowTokens, ContextBudgetTokens: defaultContextBudget.EffectiveTokens, AutoCompactTokenLimit: defaultContextBudget.AutoCompactTokens, ContextWindowSource: defaultContextBudget.Source, PermissionMode: selectedConversation.PermissionMode, Status: RunQueued, CreatedAt: now, UpdatedAt: now}
-	if err := s.runs.CreateWithMessages(ctx, run, user, assistant); err != nil {
+	if workflowAI != nil {
+		workflowAI.CreatedAt = now
+		if err := s.runs.(WorkflowAIRunCreator).CreateWorkflowAIWithMessages(ctx, run, user, assistant, *workflowAI); err != nil {
+			return Run{}, fmt.Errorf("create Workflow AI chat run: %w", err)
+		}
+	} else if err := s.runs.CreateWithMessages(ctx, run, user, assistant); err != nil {
 		return Run{}, fmt.Errorf("create chat run: %w", err)
 	}
 	if err := s.launch(run.ID, false); err != nil {
@@ -275,11 +371,27 @@ func (s *Service) start(ctx context.Context, cmd StartCommand, replacedRunID str
 	return run, nil
 }
 
+func workflowCitationPrompt(values []tool.CitationRef) string {
+	if len(values) == 0 {
+		return ""
+	}
+	var text strings.Builder
+	text.WriteString("\n\n<trusted_workflow_citations>\nThe host reissued the following exact knowledge markers for this Chat Run. Cite only the markers listed below; knowledge markers elsewhere in Workflow state belong to another Run and will not validate here. Full excerpts and provenance are available in the host-generated builtin.workflow.citation.seed result.\n")
+	for index, value := range values {
+		fmt.Fprintf(&text, "- %d: %s\n", index+1, value.Reference)
+	}
+	text.WriteString("</trusted_workflow_citations>")
+	return text.String()
+}
+
 // Steer intentionally means "cancel current work, preserve its partial text,
 // then start a fresh durable Run with the new user instruction". This keeps
 // one execution owner per conversation and gives the user a predictable
 // interrupt-and-continue interaction without mutating an in-flight request.
 func (s *Service) Steer(ctx context.Context, activeRunID string, cmd StartCommand) (Run, error) {
+	if cmd.ClientMessageID != "" && !clientMessageIDPattern.MatchString(cmd.ClientMessageID) {
+		return Run{}, fmt.Errorf("invalid client message identity")
+	}
 	activeRunID = strings.TrimSpace(activeRunID)
 	if activeRunID == "" {
 		return Run{}, fmt.Errorf("active run id is required")
@@ -294,6 +406,17 @@ func (s *Service) Steer(ctx context.Context, activeRunID string, cmd StartComman
 	if isTerminal(active.Status) {
 		return Run{}, fmt.Errorf("run is no longer active")
 	}
+	if detector, ok := s.runs.(interface {
+		IsWorkflowAIRun(context.Context, string) (bool, error)
+	}); ok {
+		workflowAI, detectErr := detector.IsWorkflowAIRun(ctx, active.ID)
+		if detectErr != nil {
+			return Run{}, fmt.Errorf("inspect Workflow AI run: %w", detectErr)
+		}
+		if workflowAI {
+			return Run{}, fmt.Errorf("科研阶段 AI 正在自主执行，不能用普通对话中断或替换；请等待当前阶段完成，或使用科研任务的暂停/取消操作")
+		}
+	}
 	if latest, exists, latestErr := s.runs.LatestForConversation(ctx, active.ConversationID); latestErr != nil {
 		return Run{}, latestErr
 	} else if !exists || latest.ID != active.ID || isTerminal(latest.Status) {
@@ -305,7 +428,7 @@ func (s *Service) Steer(ctx context.Context, activeRunID string, cmd StartComman
 	if err := s.waitInactive(ctx, active.ID, 5*time.Second); err != nil {
 		return Run{}, err
 	}
-	return s.start(ctx, cmd, active.ID)
+	return s.start(ctx, cmd, active.ID, nil)
 }
 
 func (s *Service) waitInactive(ctx context.Context, runID string, maximum time.Duration) error {
@@ -400,15 +523,68 @@ func (s *Service) Cancel(ctx context.Context, runID string) error {
 }
 
 func (s *Service) Snapshot(ctx context.Context, runID string) (Snapshot, error) {
+	return s.readSnapshot(ctx, runID, "conversation")
+}
+
+// Activity needs status, the current draft and tools, not conversation history.
+func (s *Service) ActivitySnapshot(ctx context.Context, runID string) (Snapshot, error) {
+	return s.readSnapshot(ctx, runID, "activity")
+}
+
+// A version check still loads the authoritative Run, so deleted runs never hit
+// a stale view cache. Event sequence covers tool results and approval changes.
+func (s *Service) ActivityRevision(ctx context.Context, runID string) (string, error) {
+	run, err := s.runs.Get(ctx, runID)
+	if err != nil {
+		return "", err
+	}
+	reader, ok := s.events.(eventSequenceReader)
+	if !ok || !isTerminal(run.Status) {
+		return "", nil
+	}
+	sequence, err := reader.LatestEventSequence(ctx, runID)
+	if err != nil {
+		return "", err
+	}
+	data, err := json.Marshal(run)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x:%d", sha256.Sum256(data), sequence), nil
+}
+
+// Stage recovery still reads the full result, but only for this execution.
+func (s *Service) StageSnapshot(ctx context.Context, runID string) (Snapshot, error) {
+	return s.readSnapshot(ctx, runID, "stage")
+}
+
+func (s *Service) readSnapshot(ctx context.Context, runID, mode string) (Snapshot, error) {
 	run, err := s.runs.Get(ctx, runID)
 	if err != nil {
 		return Snapshot{}, err
 	}
-	messages, err := s.conversations.ListMessages(ctx, run.ConversationID, 200)
-	if err != nil {
-		return Snapshot{}, err
+	var messages []conversation.Message
+	if mode != "activity" {
+		if reader, ok := s.conversations.(interface {
+			ListMessagesForRun(context.Context, string, string) ([]conversation.Message, error)
+		}); ok && mode == "stage" {
+			messages, err = reader.ListMessagesForRun(ctx, run.ConversationID, run.ID)
+		} else {
+			messages, err = s.conversations.ListMessages(ctx, run.ConversationID, 200)
+		}
+		if err != nil {
+			return Snapshot{}, err
+		}
 	}
 	snapshot := Snapshot{Run: run, Messages: messages, ToolCalls: []tool.Call{}, RunSteps: []RunStep{}}
+	if detector, ok := s.runs.(interface {
+		IsWorkflowAIRun(context.Context, string) (bool, error)
+	}); ok {
+		snapshot.WorkflowAI, err = detector.IsWorkflowAIRun(ctx, run.ID)
+		if err != nil {
+			return Snapshot{}, err
+		}
+	}
 	if reader, ok := s.events.(eventSequenceReader); ok {
 		snapshot.Sequence, err = reader.LatestEventSequence(ctx, run.ID)
 		if err != nil {
@@ -425,10 +601,20 @@ func (s *Service) Snapshot(ctx context.Context, runID string) (Snapshot, error) 
 			return Snapshot{}, err
 		}
 	}
-	if runSteps != nil {
+	if runSteps != nil && mode != "activity" {
 		snapshot.RunSteps, err = runSteps.ListRunSteps(ctx, run.ID)
 		if err != nil {
 			return Snapshot{}, err
+		}
+	}
+	if reader, ok := s.runs.(ModelTurnJournalReader); ok {
+		journal, exists, journalErr := reader.LatestModelTurnJournal(ctx, run.ID)
+		if journalErr != nil {
+			return Snapshot{}, journalErr
+		}
+		if exists && journal.Status == ModelTurnStreaming {
+			snapshot.ModelTurnDraft = journal.DraftText
+			snapshot.ModelTurnStreaming = true
 		}
 	}
 	return snapshot, nil
@@ -622,37 +808,4 @@ func isTerminal(status RunStatus) bool {
 
 func (s *Service) PublishRunEvent(runID, eventType string, payload any) {
 	s.emit(context.Background(), runID, eventType, payload)
-}
-
-// Kept package-local for focused context-window regression tests. Production
-// requests are built by agent.ContextBuilder.
-func buildRequest(messages []conversation.Message, excludedMessageID string, maxChars int) model.ChatRequest {
-	reversed := make([]model.Message, 0, len(messages))
-	used := 0
-	for index := len(messages) - 1; index >= 0; index-- {
-		message := messages[index]
-		if message.ID == excludedMessageID {
-			continue
-		}
-		var text strings.Builder
-		for _, part := range message.Parts {
-			if part.Type == "text" {
-				text.WriteString(part.Text)
-			}
-		}
-		if text.Len() == 0 {
-			continue
-		}
-		length := len([]rune(text.String()))
-		if used > 0 && used+length > maxChars {
-			break
-		}
-		reversed = append(reversed, model.Message{Role: model.Role(message.Role), Content: text.String()})
-		used += length
-	}
-	request := model.ChatRequest{Messages: make([]model.Message, len(reversed))}
-	for index := range reversed {
-		request.Messages[len(reversed)-1-index] = reversed[index]
-	}
-	return request
 }

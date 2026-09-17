@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -13,6 +14,8 @@ import (
 
 	"github.com/wangh00/SciAide/internal/app/attachment"
 	"github.com/wangh00/SciAide/internal/app/project"
+	"github.com/wangh00/SciAide/internal/app/researchtask"
+	"github.com/wangh00/SciAide/internal/id"
 )
 
 type ReviewStatus string
@@ -40,16 +43,20 @@ const (
 )
 
 type Query struct {
-	ID             string         `json:"id"`
-	ProjectID      string         `json:"projectId"`
-	Text           string         `json:"text"`
-	SourceIDs      []string       `json:"sourceIds"`
-	LimitPerSource int            `json:"limitPerSource"`
-	Sources        []SourceSearch `json:"sources"`
-	Partial        bool           `json:"partial"`
-	ResultCount    int            `json:"resultCount"`
-	CreatedAt      time.Time      `json:"createdAt"`
-	UpdatedAt      time.Time      `json:"updatedAt"`
+	TaskDeleted       bool           `json:"taskDeleted,omitempty"`
+	LegacySnapshot    bool           `json:"legacySnapshot,omitempty"`
+	ResearchTaskID    string         `json:"researchTaskId,omitempty"`
+	ResearchTaskTitle string         `json:"researchTaskTitle,omitempty"`
+	ID                string         `json:"id"`
+	ProjectID         string         `json:"projectId"`
+	Text              string         `json:"text"`
+	SourceIDs         []string       `json:"sourceIds"`
+	LimitPerSource    int            `json:"limitPerSource"`
+	Sources           []SourceSearch `json:"sources"`
+	Partial           bool           `json:"partial"`
+	ResultCount       int            `json:"resultCount"`
+	CreatedAt         time.Time      `json:"createdAt"`
+	UpdatedAt         time.Time      `json:"updatedAt"`
 }
 
 type SourceRecord struct {
@@ -84,20 +91,27 @@ type Candidate struct {
 }
 
 type DiscoverySearchCommand struct {
-	ProjectID string   `json:"projectId"`
-	Query     string   `json:"query"`
-	SourceIDs []string `json:"sourceIds,omitempty"`
-	Limit     int      `json:"limit,omitempty"`
+	ProviderQueries map[string]string `json:"providerQueries,omitempty"`
+	Years           PublicationYears  `json:"publicationYears"`
+	EnrichMetadata  bool              `json:"-"`
+	SnapshotKey     string            `json:"-"`
+	Offset          int               `json:"offset,omitempty"`
+	ProjectID       string            `json:"projectId"`
+	Query           string            `json:"query"`
+	SourceIDs       []string          `json:"sourceIds,omitempty"`
+	Limit           int               `json:"limit,omitempty"`
+	ResearchTaskID  string            `json:"researchTaskId,omitempty"`
 }
 
 type CandidateListCommand struct {
-	ProjectID string       `json:"projectId"`
-	QueryID   string       `json:"queryId,omitempty"`
-	Status    ReviewStatus `json:"status,omitempty"`
-	Search    string       `json:"search,omitempty"`
-	Sort      string       `json:"sort,omitempty"`
-	Offset    int          `json:"offset,omitempty"`
-	Limit     int          `json:"limit,omitempty"`
+	ProjectID      string       `json:"projectId"`
+	QueryID        string       `json:"queryId,omitempty"`
+	Status         ReviewStatus `json:"status,omitempty"`
+	Search         string       `json:"search,omitempty"`
+	Sort           string       `json:"sort,omitempty"`
+	Offset         int          `json:"offset,omitempty"`
+	Limit          int          `json:"limit,omitempty"`
+	ResearchTaskID string       `json:"researchTaskId,omitempty"`
 }
 
 type CandidatePage struct {
@@ -113,6 +127,7 @@ type DiscoverySearchResult struct {
 }
 
 type ReviewCommand struct {
+	ResearchTaskID  string       `json:"researchTaskId,omitempty"`
 	ProjectID       string       `json:"projectId"`
 	CandidateID     string       `json:"candidateId"`
 	Status          ReviewStatus `json:"status"`
@@ -121,13 +136,30 @@ type ReviewCommand struct {
 }
 
 type ImportStateCommand struct {
-	ProjectID    string
-	CandidateID  string
-	Status       ImportStatus
-	Kind         ImportKind
-	AttachmentID string
-	ErrorMessage string
-	At           time.Time
+	ProjectID      string
+	CandidateID    string
+	ResearchTaskID string
+	Status         ImportStatus
+	Kind           ImportKind
+	AttachmentID   string
+	ErrorMessage   string
+	At             time.Time
+}
+
+// CandidateTaskImport is the task-owned import state for a discovered work.
+// The candidate itself is project-wide discovery metadata; this record keeps
+// materialization and attachment ownership isolated for each research task.
+type CandidateTaskImport struct {
+	ID             string       `json:"id"`
+	ProjectID      string       `json:"projectId"`
+	CandidateID    string       `json:"candidateId"`
+	ResearchTaskID string       `json:"researchTaskId"`
+	Status         ImportStatus `json:"status"`
+	Kind           ImportKind   `json:"kind,omitempty"`
+	AttachmentID   string       `json:"attachmentId,omitempty"`
+	ErrorMessage   string       `json:"errorMessage,omitempty"`
+	CreatedAt      time.Time    `json:"createdAt"`
+	UpdatedAt      time.Time    `json:"updatedAt"`
 }
 
 type DiscoveryRepository interface {
@@ -138,6 +170,15 @@ type DiscoveryRepository interface {
 	UpdateReview(ctx context.Context, command ReviewCommand, at time.Time) (Candidate, error)
 	UpdateImportState(ctx context.Context, command ImportStateCommand) (Candidate, error)
 	RecoverImports(ctx context.Context, at time.Time) (int64, error)
+}
+
+// TaskImportRepository is implemented by persistent repositories that support
+// task-isolated candidate imports. It is optional so historical project-level
+// discovery remains readable, but task imports must not silently fall back to
+// the legacy global import columns.
+type TaskImportRepository interface {
+	GetCandidateTaskImport(ctx context.Context, projectID, candidateID, researchTaskID string) (CandidateTaskImport, bool, error)
+	UpdateCandidateTaskImport(ctx context.Context, command ImportStateCommand) (CandidateTaskImport, error)
 }
 
 type DiscoveryProjectLoader interface {
@@ -153,10 +194,11 @@ const (
 )
 
 type MaterializedCandidate struct {
-	Path   string
-	Name   string
-	SHA256 string
-	Kind   ImportKind
+	Warning string
+	Path    string
+	Name    string
+	SHA256  string
+	Kind    ImportKind
 }
 
 type CandidateMaterializer interface {
@@ -168,29 +210,47 @@ type ResearchAttachmentImporter interface {
 	ImportResearchStaged(ctx context.Context, projectID, path, name string) (attachment.Attachment, error)
 }
 
+type ResearchTaskAttachmentImporter interface {
+	ImportResearchStagedForTask(ctx context.Context, projectID, path, name, researchTaskID string) (attachment.Attachment, error)
+}
+
 type ResearchKnowledgeImporter interface {
 	Enqueue(ctx context.Context, value attachment.Attachment) error
 }
 
 type ImportCandidateCommand struct {
-	ProjectID   string          `json:"projectId"`
-	CandidateID string          `json:"candidateId"`
-	Mode        MaterializeMode `json:"mode,omitempty"`
+	ProjectID      string          `json:"projectId"`
+	CandidateID    string          `json:"candidateId"`
+	Mode           MaterializeMode `json:"mode,omitempty"`
+	ResearchTaskID string          `json:"researchTaskId,omitempty"`
 }
 
 type ImportCandidateResult struct {
+	Warning    string                `json:"warning,omitempty"`
 	Candidate  Candidate             `json:"candidate"`
 	Attachment attachment.Attachment `json:"attachment"`
 }
 
 type DiscoveryService struct {
+	fullTexts    fullTextCache
 	research     *Service
 	repository   DiscoveryRepository
 	projects     DiscoveryProjectLoader
 	materializer CandidateMaterializer
 	attachments  ResearchAttachmentImporter
 	knowledge    ResearchKnowledgeImporter
+	tasks        researchtask.Validator
 	now          func() time.Time
+}
+
+func (s *DiscoveryService) SetTaskValidator(validator researchtask.Validator) {
+	if s != nil {
+		s.tasks = validator
+	}
+}
+
+func (s *DiscoveryService) validateTask(ctx context.Context, projectID, taskID string) error {
+	return researchtask.Validate(ctx, s.tasks, projectID, taskID)
 }
 
 func (s *DiscoveryService) SetImportPipeline(materializer CandidateMaterializer, attachments ResearchAttachmentImporter, knowledge ResearchKnowledgeImporter) error {
@@ -219,11 +279,17 @@ func (s *DiscoveryService) Search(ctx context.Context, command DiscoverySearchCo
 	if _, err := s.projects.Get(ctx, projectID); err != nil {
 		return DiscoverySearchResult{}, err
 	}
+	if taskID := strings.TrimSpace(command.ResearchTaskID); taskID != "" {
+		if err := s.validateTask(ctx, projectID, taskID); err != nil {
+			return DiscoverySearchResult{}, err
+		}
+		command.ResearchTaskID = taskID
+	}
 	limit := command.Limit
 	if limit == 0 {
 		limit = 20
 	}
-	result, err := s.research.Search(ctx, SearchCommand{Query: command.Query, SourceIDs: command.SourceIDs, Limit: limit})
+	result, err := s.research.Search(ctx, SearchCommand{Query: command.Query, ProviderQueries: command.ProviderQueries, SourceIDs: command.SourceIDs, Limit: limit, Offset: command.Offset, EnrichMetadata: command.EnrichMetadata, Years: command.Years})
 	if err != nil {
 		return DiscoverySearchResult{}, err
 	}
@@ -234,11 +300,30 @@ func (s *DiscoveryService) Search(ctx context.Context, command DiscoverySearchCo
 		}
 	}
 	key := SearchQueryKey(result.Query, effectiveSourceIDs, limit)
-	query, err := s.repository.SaveSearch(ctx, projectID, key, SearchCommand{Query: result.Query, SourceIDs: effectiveSourceIDs, Limit: limit}, result, s.now())
+	if len(command.ProviderQueries) > 0 {
+		projection, _ := json.Marshal(command.ProviderQueries)
+		key = hashText(key + ":providers:" + string(projection))
+	}
+	if command.Years.Active() {
+		key = hashText(fmt.Sprintf("%s:years:%d:%d", key, command.Years.From, command.Years.To))
+	}
+	if command.SnapshotKey == "" {
+		command.SnapshotKey, err = id.New()
+		if err != nil {
+			return DiscoverySearchResult{}, err
+		}
+	}
+	if command.SnapshotKey != "" {
+		key = hashText(key + ":" + command.SnapshotKey)
+	}
+	if command.Offset > 0 {
+		key = hashText(fmt.Sprintf("%s:offset:%d", key, command.Offset))
+	}
+	query, err := s.repository.SaveSearch(ctx, projectID, key, SearchCommand{Query: result.Query, SourceIDs: effectiveSourceIDs, Limit: limit, ResearchTaskID: command.ResearchTaskID}, result, s.now())
 	if err != nil {
 		return DiscoverySearchResult{}, err
 	}
-	page, err := s.ListCandidates(ctx, CandidateListCommand{ProjectID: projectID, QueryID: query.ID, Sort: "relevance", Limit: 20})
+	page, err := s.ListCandidates(ctx, CandidateListCommand{ProjectID: projectID, QueryID: query.ID, Sort: "relevance", Limit: 20, ResearchTaskID: command.ResearchTaskID})
 	if err != nil {
 		return DiscoverySearchResult{}, err
 	}
@@ -258,9 +343,41 @@ func (s *DiscoveryService) ListCandidates(ctx context.Context, command Candidate
 	if _, err := s.projects.Get(ctx, projectID); err != nil {
 		return CandidatePage{}, err
 	}
+	command.ProjectID = projectID
+	command.QueryID = strings.TrimSpace(command.QueryID)
+	command.ResearchTaskID = strings.TrimSpace(command.ResearchTaskID)
+	if command.Offset < 0 {
+		return CandidatePage{}, fmt.Errorf("candidate offset cannot be negative")
+	}
+	if command.Limit == 0 {
+		command.Limit = 20
+	}
+	if command.Limit < 1 || command.Limit > 100 {
+		return CandidatePage{}, fmt.Errorf("candidate page limit must be between 1 and 100")
+	}
+	if command.QueryID != "" {
+		if repository, ok := s.repository.(interface {
+			CandidatePage(context.Context, CandidateListCommand) (CandidatePage, error)
+		}); ok {
+			// The repository resolves the persisted query owner. Historical reads
+			// do not grant mutation rights to a deleted task.
+			return repository.CandidatePage(ctx, command)
+		}
+	}
+	if taskID := strings.TrimSpace(command.ResearchTaskID); taskID != "" {
+		if err := s.validateTask(ctx, projectID, taskID); err != nil {
+			return CandidatePage{}, err
+		}
+		command.ResearchTaskID = taskID
+	}
 	values, err := s.repository.ListCandidates(ctx, projectID, strings.TrimSpace(command.QueryID))
 	if err != nil {
 		return CandidatePage{}, err
+	}
+	if taskID := strings.TrimSpace(command.ResearchTaskID); taskID != "" {
+		if err := s.applyTaskImportState(ctx, projectID, taskID, values); err != nil {
+			return CandidatePage{}, err
+		}
 	}
 	search := normalizeTitle(command.Search)
 	filtered := make([]Candidate, 0, len(values))
@@ -296,6 +413,47 @@ func (s *DiscoveryService) ListCandidates(ctx context.Context, command Candidate
 	return page, nil
 }
 
+// applyTaskImportState replaces the legacy project-wide import columns with
+// the state owned by the requested research task. A candidate imported by a
+// different task must appear as not imported here, while a project-shared
+// materialization remains reusable and may retain its imported state.
+func (s *DiscoveryService) applyTaskImportState(ctx context.Context, projectID, taskID string, values []Candidate) error {
+	taskRepository, ok := s.repository.(TaskImportRepository)
+	if !ok {
+		return fmt.Errorf("task-isolated research imports are not supported by this repository")
+	}
+	attachmentGetter, _ := s.attachments.(interface {
+		Get(context.Context, string) (attachment.Attachment, error)
+	})
+	for index := range values {
+		state, found, err := taskRepository.GetCandidateTaskImport(ctx, projectID, values[index].ID, taskID)
+		if err != nil {
+			return err
+		}
+		if found {
+			values[index].ImportStatus = state.Status
+			values[index].ImportKind = state.Kind
+			values[index].AttachmentID = state.AttachmentID
+			values[index].ImportError = state.ErrorMessage
+			continue
+		}
+		// Only a project-shared attachment is visible across tasks. A task-owned
+		// attachment recorded on the candidate belongs to another task and must
+		// not leak its status into this task's view.
+		if attachmentGetter != nil && values[index].AttachmentID != "" {
+			value, getErr := attachmentGetter.Get(ctx, values[index].AttachmentID)
+			if getErr == nil && value.ProjectID == projectID && value.ScopeKind == attachment.ScopeProjectShared {
+				continue
+			}
+		}
+		values[index].ImportStatus = ImportNotImported
+		values[index].ImportKind = ""
+		values[index].AttachmentID = ""
+		values[index].ImportError = ""
+	}
+	return nil
+}
+
 func (s *DiscoveryService) GetCandidate(ctx context.Context, projectID, candidateID string) (Candidate, error) {
 	projectID, candidateID = strings.TrimSpace(projectID), strings.TrimSpace(candidateID)
 	if _, err := s.projects.Get(ctx, projectID); err != nil {
@@ -307,13 +465,47 @@ func (s *DiscoveryService) GetCandidate(ctx context.Context, projectID, candidat
 	return s.repository.GetCandidate(ctx, projectID, candidateID)
 }
 
+func (s *DiscoveryService) GetCandidateForTask(ctx context.Context, projectID, candidateID, researchTaskID string) (Candidate, error) {
+	value, err := s.GetCandidate(ctx, projectID, candidateID)
+	if err != nil {
+		return Candidate{}, err
+	}
+	taskID := strings.TrimSpace(researchTaskID)
+	if taskID == "" {
+		return value, nil
+	}
+	if err := s.validateTask(ctx, projectID, taskID); err != nil {
+		return Candidate{}, err
+	}
+	if scoped, ok := s.repository.(interface {
+		CandidateForTask(context.Context, string, string, string) (Candidate, error)
+	}); ok {
+		value, err = scoped.CandidateForTask(ctx, projectID, candidateID, taskID)
+		if err != nil {
+			return Candidate{}, err
+		}
+	}
+	values := []Candidate{value}
+	if err := s.applyTaskImportState(ctx, projectID, taskID, values); err != nil {
+		return Candidate{}, err
+	}
+	value = values[0]
+	return value, nil
+}
+
 func (s *DiscoveryService) UpdateReview(ctx context.Context, command ReviewCommand) (Candidate, error) {
+	command.ResearchTaskID = strings.TrimSpace(command.ResearchTaskID)
 	command.ProjectID = strings.TrimSpace(command.ProjectID)
 	command.CandidateID = strings.TrimSpace(command.CandidateID)
 	command.ExclusionReason = strings.TrimSpace(command.ExclusionReason)
 	command.Note = strings.TrimSpace(command.Note)
 	if _, err := s.projects.Get(ctx, command.ProjectID); err != nil {
 		return Candidate{}, err
+	}
+	if command.ResearchTaskID != "" {
+		if err := s.validateTask(ctx, command.ProjectID, command.ResearchTaskID); err != nil {
+			return Candidate{}, err
+		}
 	}
 	if command.Status != ReviewPending && command.Status != ReviewIncluded && command.Status != ReviewExcluded {
 		return Candidate{}, fmt.Errorf("candidate review status is invalid")
@@ -332,12 +524,18 @@ func (s *DiscoveryService) UpdateReview(ctx context.Context, command ReviewComma
 
 func (s *DiscoveryService) ImportCandidate(ctx context.Context, command ImportCandidateCommand) (result ImportCandidateResult, returnErr error) {
 	projectID, candidateID := strings.TrimSpace(command.ProjectID), strings.TrimSpace(command.CandidateID)
+	researchTaskID := strings.TrimSpace(command.ResearchTaskID)
 	selected, err := s.projects.Get(ctx, projectID)
 	if err != nil {
 		return result, err
 	}
 	if s.materializer == nil || s.attachments == nil || s.knowledge == nil {
 		return result, fmt.Errorf("research import pipeline is not configured")
+	}
+	if researchTaskID != "" {
+		if err := s.validateTask(ctx, projectID, researchTaskID); err != nil {
+			return result, err
+		}
 	}
 	mode := command.Mode
 	if mode == "" {
@@ -346,18 +544,49 @@ func (s *DiscoveryService) ImportCandidate(ctx context.Context, command ImportCa
 	if mode != MaterializeAuto && mode != MaterializeFullText && mode != MaterializeMetadata {
 		return result, fmt.Errorf("research import mode is invalid")
 	}
-	candidate, err := s.repository.GetCandidate(ctx, projectID, candidateID)
+	candidate, err := s.GetCandidateForTask(ctx, projectID, candidateID, researchTaskID)
 	if err != nil {
 		return result, err
 	}
 	if candidate.ReviewStatus != ReviewIncluded {
 		return result, fmt.Errorf("include the candidate before importing it into the knowledge base")
 	}
-	if candidate.ImportStatus == ImportImported && candidate.AttachmentID != "" {
-		return ImportCandidateResult{Candidate: candidate}, nil
+	var taskRepository TaskImportRepository
+	if researchTaskID != "" {
+		var supported bool
+		taskRepository, supported = s.repository.(TaskImportRepository)
+		if !supported {
+			return result, fmt.Errorf("task-isolated research imports are not supported by this repository")
+		}
+		if state, found, stateErr := taskRepository.GetCandidateTaskImport(ctx, projectID, candidateID, researchTaskID); stateErr != nil {
+			return result, stateErr
+		} else if found {
+			candidate.ImportStatus, candidate.ImportKind, candidate.AttachmentID, candidate.ImportError = state.Status, state.Kind, state.AttachmentID, state.ErrorMessage
+		}
+	}
+	// A project-level import can be replayed directly. Task-scoped imports
+	// must still pass through the scoped attachment importer: the candidate
+	// row stores only the latest attachment ID and must not silently point a
+	// different research task at another task's attachment.
+	if candidate.ImportStatus == ImportImported && candidate.AttachmentID != "" && researchTaskID == "" && (mode != MaterializeFullText || candidate.ImportKind == ImportFullText) {
+		return ImportCandidateResult{Candidate: candidate, Warning: candidate.ImportError}, nil
+	}
+	if candidate.ImportStatus == ImportImported && candidate.AttachmentID != "" && researchTaskID != "" && (mode != MaterializeFullText || candidate.ImportKind == ImportFullText) {
+		if scoped, ok := s.attachments.(interface {
+			Get(context.Context, string) (attachment.Attachment, error)
+		}); ok {
+			if existing, getErr := scoped.Get(ctx, candidate.AttachmentID); getErr == nil && existing.ProjectID == projectID && (existing.ScopeKind == attachment.ScopeProjectShared || existing.ScopeKind == attachment.ScopeTask && existing.ResearchTaskID == strings.TrimSpace(command.ResearchTaskID)) {
+				return ImportCandidateResult{Candidate: candidate, Attachment: existing, Warning: candidate.ImportError}, nil
+			}
+		}
 	}
 	now := s.now()
-	if _, err := s.repository.UpdateImportState(ctx, ImportStateCommand{ProjectID: projectID, CandidateID: candidateID, Status: ImportImporting, At: now}); err != nil {
+	stateCommand := ImportStateCommand{ProjectID: projectID, CandidateID: candidateID, ResearchTaskID: researchTaskID, Status: ImportImporting, At: now}
+	if taskRepository != nil {
+		if _, err := taskRepository.UpdateCandidateTaskImport(ctx, stateCommand); err != nil {
+			return result, err
+		}
+	} else if _, err := s.repository.UpdateImportState(ctx, stateCommand); err != nil {
 		return result, err
 	}
 	defer func() {
@@ -365,14 +594,27 @@ func (s *DiscoveryService) ImportCandidate(ctx context.Context, command ImportCa
 			return
 		}
 		message := boundedText(returnErr.Error(), 4000)
-		_, _ = s.repository.UpdateImportState(context.WithoutCancel(ctx), ImportStateCommand{ProjectID: projectID, CandidateID: candidateID, Status: ImportFailed, ErrorMessage: message, At: s.now()})
+		failed := ImportStateCommand{ProjectID: projectID, CandidateID: candidateID, ResearchTaskID: researchTaskID, Status: ImportFailed, ErrorMessage: message, At: s.now()}
+		if candidate.ImportStatus == ImportImported && candidate.AttachmentID != "" {
+			failed.Status, failed.Kind, failed.AttachmentID = candidate.ImportStatus, candidate.ImportKind, candidate.AttachmentID
+		}
+		if taskRepository != nil {
+			_, _ = taskRepository.UpdateCandidateTaskImport(context.WithoutCancel(ctx), failed)
+		} else {
+			_, _ = s.repository.UpdateImportState(context.WithoutCancel(ctx), failed)
+		}
 	}()
 	materialized, err := s.materializer.Materialize(ctx, selected, candidate, mode)
 	if err != nil {
 		return result, err
 	}
 	defer s.materializer.Cleanup(materialized)
-	imported, err := s.attachments.ImportResearchStaged(ctx, projectID, materialized.Path, materialized.Name)
+	var imported attachment.Attachment
+	if scoped, ok := s.attachments.(ResearchTaskAttachmentImporter); ok {
+		imported, err = scoped.ImportResearchStagedForTask(ctx, projectID, materialized.Path, materialized.Name, command.ResearchTaskID)
+	} else {
+		imported, err = s.attachments.ImportResearchStaged(ctx, projectID, materialized.Path, materialized.Name)
+	}
 	if err != nil {
 		return result, err
 	}
@@ -382,11 +624,21 @@ func (s *DiscoveryService) ImportCandidate(ctx context.Context, command ImportCa
 	if err := s.knowledge.Enqueue(ctx, imported); err != nil {
 		return result, err
 	}
-	candidate, err = s.repository.UpdateImportState(ctx, ImportStateCommand{ProjectID: projectID, CandidateID: candidateID, Status: ImportImported, Kind: materialized.Kind, AttachmentID: imported.ID, At: s.now()})
+	stateCommand = ImportStateCommand{ProjectID: projectID, CandidateID: candidateID, ResearchTaskID: researchTaskID, Status: ImportImported, Kind: materialized.Kind, AttachmentID: imported.ID, At: s.now()}
+	stateCommand.ErrorMessage = materialized.Warning
+	if taskRepository != nil {
+		var state CandidateTaskImport
+		state, err = taskRepository.UpdateCandidateTaskImport(ctx, stateCommand)
+		if err == nil {
+			candidate.ImportStatus, candidate.ImportKind, candidate.AttachmentID, candidate.ImportError = state.Status, state.Kind, state.AttachmentID, state.ErrorMessage
+		}
+	} else {
+		candidate, err = s.repository.UpdateImportState(ctx, stateCommand)
+	}
 	if err != nil {
 		return result, err
 	}
-	return ImportCandidateResult{Candidate: candidate, Attachment: imported}, nil
+	return ImportCandidateResult{Candidate: candidate, Attachment: imported, Warning: materialized.Warning}, nil
 }
 
 func SearchQueryKey(query string, sourceIDs []string, limit int) string {

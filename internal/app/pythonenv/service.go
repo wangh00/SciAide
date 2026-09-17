@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -307,6 +308,11 @@ func (s *Service) verifyRecordedEnvironment(ctx context.Context, value Environme
 	if created.BasePrefix == created.Prefix || !created.HasPip {
 		return value, fmt.Errorf("managed interpreter is not an isolated venv with pip")
 	}
+	if value.Kind != KindExternal {
+		if err := s.runtime.ValidateEnvironmentScripts(ctx, expectedPython); err != nil {
+			return value, fmt.Errorf("Python 环境启动脚本路径已失效，请在项目 Python 环境中重建；不会自动修改现有依赖 (rebuild required): %w", err)
+		}
+	}
 	lock, err := s.runtime.Freeze(ctx, expectedPython)
 	if err != nil {
 		return value, err
@@ -532,6 +538,13 @@ func (s *Service) Create(ctx context.Context, projectID, preferredPath string, r
 		return Environment{}, fmt.Errorf("publish Python environment: %w", err)
 	}
 	createdPath := environmentPython(target)
+	if err = s.runtime.FinalizeEnvironment(ctx, createdPath, staging); err != nil {
+		_ = s.removeEnvironmentWithin(projectRoot, target)
+		if hadPrevious {
+			_ = os.Rename(backup, target)
+		}
+		return Environment{}, fmt.Errorf("finalize published Python environment: %w", err)
+	}
 	fingerprint, freezeHash := environmentHashes(base, created, lock)
 	verified := s.now()
 	existing.State = StateReady
@@ -667,6 +680,9 @@ func (s *Service) Install(ctx context.Context, projectID string, packages []stri
 	if err != nil {
 		return Environment{}, fmt.Errorf("saved Python dependency lock is not reproducible: %w", err)
 	}
+	if packageRequirementsSatisfied(requested, locked) {
+		return previous, nil
+	}
 	operationID, err := id.New()
 	if err != nil {
 		return Environment{}, err
@@ -737,6 +753,11 @@ func (s *Service) Install(ctx context.Context, projectID string, packages []stri
 		_ = os.Rename(backup, target)
 		return Environment{}, fmt.Errorf("publish updated Python environment: %w", err)
 	}
+	if err = s.runtime.FinalizeEnvironment(ctx, environmentPython(target), staging); err != nil {
+		_ = s.removeEnvironmentWithin(projectRoot, target)
+		_ = os.Rename(backup, target)
+		return Environment{}, fmt.Errorf("finalize updated Python environment: %w", err)
+	}
 	verified := s.now()
 	updated := previous
 	updated.State, updated.EnvironmentPythonPath = StateReady, environmentPython(target)
@@ -790,6 +811,11 @@ func (s *Service) Verify(ctx context.Context, projectID string) (Environment, er
 	created, err := s.runtime.Probe(ctx, value.EnvironmentPythonPath)
 	if err != nil {
 		return fail(err)
+	}
+	if value.Kind != KindExternal {
+		if err := s.runtime.ValidateEnvironmentScripts(ctx, value.EnvironmentPythonPath); err != nil {
+			return fail(fmt.Errorf("Python 环境启动脚本路径已失效，请在项目 Python 环境中重建；不会自动修改现有依赖 (rebuild required): %w", err))
+		}
 	}
 	lock, err := s.runtime.Freeze(ctx, value.EnvironmentPythonPath)
 	if err != nil {
@@ -1043,6 +1069,136 @@ func normalizePackages(values []string, pattern *regexp.Regexp, kind string) ([]
 	}
 	sort.Slice(result, func(i, j int) bool { return strings.ToLower(result[i]) < strings.ToLower(result[j]) })
 	return result, nil
+}
+
+var requestedPackageParts = regexp.MustCompile(`^([A-Za-z0-9][A-Za-z0-9._-]*)(?:\[[A-Za-z0-9._,-]+\])?(?:(==|!=|~=|>=|<=|>|<)([A-Za-z0-9][A-Za-z0-9._+!-]*))?$`)
+
+func packageRequirementsSatisfied(requested, locked []string) bool {
+	installed := make(map[string]string, len(locked))
+	for _, value := range locked {
+		parts := strings.SplitN(value, "==", 2)
+		if len(parts) != 2 {
+			return false
+		}
+		installed[normalizePackageName(parts[0])] = parts[1]
+	}
+	for _, requirement := range requested {
+		parts := requestedPackageParts.FindStringSubmatch(requirement)
+		if len(parts) != 4 {
+			return false
+		}
+		version, ok := installed[normalizePackageName(parts[1])]
+		if !ok || !pythonVersionSatisfies(version, parts[2], parts[3]) {
+			return false
+		}
+	}
+	return true
+}
+
+func normalizePackageName(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	var result strings.Builder
+	separator := false
+	for _, character := range value {
+		if character == '-' || character == '_' || character == '.' {
+			if !separator {
+				result.WriteByte('-')
+				separator = true
+			}
+			continue
+		}
+		result.WriteRune(character)
+		separator = false
+	}
+	return result.String()
+}
+
+func pythonVersionSatisfies(installed, operator, requested string) bool {
+	if operator == "" {
+		return true
+	}
+	comparison, ok := compareStablePythonVersions(installed, requested)
+	if !ok {
+		return false
+	}
+	switch operator {
+	case "==":
+		return comparison == 0
+	case "!=":
+		return comparison != 0
+	case ">=":
+		return comparison >= 0
+	case "<=":
+		return comparison <= 0
+	case ">":
+		return comparison > 0
+	case "<":
+		return comparison < 0
+	case "~=":
+		if comparison < 0 {
+			return false
+		}
+		requestedParts, requestedOK := stableVersionParts(requested)
+		installedParts, installedOK := stableVersionParts(installed)
+		if !requestedOK || !installedOK {
+			return false
+		}
+		prefixLength := len(requestedParts) - 1
+		if prefixLength < 1 {
+			prefixLength = 1
+		}
+		for index := 0; index < prefixLength; index++ {
+			if versionPart(installedParts, index) != versionPart(requestedParts, index) {
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
+}
+
+func compareStablePythonVersions(left, right string) (int, bool) {
+	leftParts, leftOK := stableVersionParts(left)
+	rightParts, rightOK := stableVersionParts(right)
+	if !leftOK || !rightOK {
+		return 0, false
+	}
+	length := max(len(leftParts), len(rightParts))
+	for index := 0; index < length; index++ {
+		leftValue, rightValue := versionPart(leftParts, index), versionPart(rightParts, index)
+		if leftValue < rightValue {
+			return -1, true
+		}
+		if leftValue > rightValue {
+			return 1, true
+		}
+	}
+	return 0, true
+}
+
+func stableVersionParts(value string) ([]int, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" || strings.ContainsAny(value, "!+-_") {
+		return nil, false
+	}
+	raw := strings.Split(value, ".")
+	parts := make([]int, len(raw))
+	for index, part := range raw {
+		parsed, err := strconv.Atoi(part)
+		if err != nil || parsed < 0 {
+			return nil, false
+		}
+		parts[index] = parsed
+	}
+	return parts, true
+}
+
+func versionPart(parts []int, index int) int {
+	if index < 0 || index >= len(parts) {
+		return 0
+	}
+	return parts[index]
 }
 
 func environmentPython(root string) string {

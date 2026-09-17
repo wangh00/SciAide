@@ -110,6 +110,15 @@ type environmentRuntimeFixture struct {
 	createErr          error
 	installErr         error
 	createdDestination *string
+	finalizeErr        error
+	validateScriptsErr error
+}
+
+func (r environmentRuntimeFixture) FinalizeEnvironment(_ context.Context, _, _ string) error {
+	return r.finalizeErr
+}
+func (r environmentRuntimeFixture) ValidateEnvironmentScripts(_ context.Context, _ string) error {
+	return r.validateScriptsErr
 }
 
 type blockingEnvironmentRuntimeFixture struct {
@@ -298,6 +307,42 @@ func TestNormalizeRequestedPackagesRejectsPipInjection(t *testing.T) {
 		if _, err := normalizeRequestedPackages([]string{value}); err == nil {
 			t.Fatalf("package specification %q was accepted", value)
 		}
+	}
+}
+
+func TestPackageRequirementsSatisfiedUsesFrozenLock(t *testing.T) {
+	locked := []string{"numpy==2.5.2", "pip==24.0", "scipy==1.18.1", "scikit-learn==1.7.2"}
+	for _, requested := range [][]string{{"numpy>=1.24", "scipy>=1.11"}, {"NumPy", "scipy<2"}, {"scikit_learn~=1.7"}, {"numpy==2.5.2"}} {
+		if !packageRequirementsSatisfied(requested, locked) {
+			t.Fatalf("satisfied requirements were rejected: %v against %v", requested, locked)
+		}
+	}
+	for _, requested := range [][]string{{"numpy>=3"}, {"scipy<1"}, {"pandas>=2"}, {"scikit-learn~=1.6.0"}, {"numpy>=2.5rc1"}} {
+		if packageRequirementsSatisfied(requested, locked) {
+			t.Fatalf("unsatisfied requirements were accepted: %v against %v", requested, locked)
+		}
+	}
+}
+
+func TestInstallReusesEnvironmentWhenFrozenLockSatisfiesRequest(t *testing.T) {
+	workspace := t.TempDir()
+	projectID := "satisfied-environment"
+	if err := project.PrepareRestoredWorkspace(workspace, projectID); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	previous := Environment{
+		ID: "environment", ProjectID: projectID, State: StateReady, Kind: KindWorkspaceManaged,
+		EnvironmentFingerprint: strings.Repeat("a", 64), Lock: []string{"numpy==2.5.2", "pip==24.0", "scipy==1.18.1"}, CreatedAt: now, UpdatedAt: now,
+	}
+	repository := &environmentRepositoryFixture{values: map[string]Environment{projectID: previous}, operations: map[string]Operation{}}
+	service, err := NewService(repository, projectFixture{project.Project{ID: projectID, WorkspacePath: workspace}}, environmentRuntimeFixture{createErr: errors.New("environment must not be rebuilt")}, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.Install(context.Background(), projectID, []string{"numpy>=1.24", "scipy>=1.11"})
+	if err != nil || result.EnvironmentFingerprint != previous.EnvironmentFingerprint || len(repository.operations) != 0 {
+		t.Fatalf("satisfied environment was not reused: %#v, operations=%#v, err=%v", result, repository.operations, err)
 	}
 }
 

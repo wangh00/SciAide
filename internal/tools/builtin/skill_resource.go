@@ -26,6 +26,10 @@ type SkillResourceLoader interface {
 	ReadResource(ctx context.Context, runID, name, resourcePath string, offset, maxBytes int) (opensciskill.Resource, error)
 }
 
+type SkillSectionLoader interface {
+	LoadStructuredForRun(ctx context.Context, runID, projectID, toolCallID, name, section string, offset, limit int) (opensciskill.Info, opensciskill.Chunk, bool, error)
+}
+
 type SkillResourceLister interface {
 	ListResources(ctx context.Context, runID, name string) (opensciskill.ResourceList, error)
 }
@@ -34,7 +38,10 @@ type SkillResourceMaterializer interface {
 	MaterializeResource(ctx context.Context, runID, name, resourcePath string) (opensciskill.MaterializedResource, error)
 }
 
-type ReadSkillResource struct{ skills SkillResourceLoader }
+type ReadSkillResource struct {
+	skills   SkillResourceLoader
+	sections SkillSectionLoader
+}
 type ListSkillResources struct{ skills SkillResourceLister }
 type MaterializeSkillResource struct {
 	skills   SkillResourceMaterializer
@@ -42,7 +49,9 @@ type MaterializeSkillResource struct {
 }
 
 func NewReadSkillResource(skills SkillResourceLoader) *ReadSkillResource {
-	return &ReadSkillResource{skills: skills}
+	value := &ReadSkillResource{skills: skills}
+	value.sections, _ = skills.(SkillSectionLoader)
+	return value
 }
 
 func NewListSkillResources(skills SkillResourceLister) *ListSkillResources {
@@ -121,6 +130,25 @@ func (t *ReadSkillResource) Invoke(ctx context.Context, invocation tool.Invocati
 	if err := json.Unmarshal(invocation.Arguments, &args); err != nil {
 		return tool.Result{}, err
 	}
+	if section, ok := mistakenSkillSectionPath(args.Path); ok && t.sections != nil {
+		_, chunk, _, err := t.sections.LoadStructuredForRun(ctx, invocation.RunID, invocation.ProjectID, invocation.CallID, args.Name, section, args.Offset, sectionReadLimit(args.MaxBytes))
+		if err != nil {
+			return tool.Result{}, fmt.Errorf("load Skill section %s with builtin.skill.load: %w", section, err)
+		}
+		payload := struct {
+			Name         string `json:"name"`
+			Path         string `json:"path"`
+			BytesRead    int    `json:"bytesRead"`
+			OriginalSize int64  `json:"originalBytes"`
+			Truncated    bool   `json:"truncated"`
+		}{Name: args.Name, Path: section, BytesRead: len([]byte(chunk.Content)), OriginalSize: int64(len([]byte(chunk.Content))), Truncated: chunk.Truncated}
+		structured, marshalErr := json.Marshal(payload)
+		if marshalErr != nil {
+			return tool.Result{}, marshalErr
+		}
+		text := "The requested path is a logical SKILL.md section, not a package resource. It was loaded through the section reader. Continue logical sections with builtin.skill.load using name and section; use resource.list paths only with resource.read_text.\n\n" + chunk.Content
+		return tool.Result{Status: tool.ResultSuccess, Text: text, Structured: structured, Truncated: chunk.Truncated, Meta: tool.ResultMeta{OriginalBytes: int64(len([]byte(chunk.Content)))}}, nil
+	}
 	value, err := t.skills.ReadResource(ctx, invocation.RunID, args.Name, args.Path, args.Offset, args.MaxBytes)
 	if err != nil {
 		return tool.Result{}, err
@@ -137,6 +165,30 @@ func (t *ReadSkillResource) Invoke(ctx context.Context, invocation tool.Invocati
 		return tool.Result{}, err
 	}
 	return tool.Result{Status: tool.ResultSuccess, Text: value.Content, Structured: structured, Truncated: value.Truncated, Meta: tool.ResultMeta{OriginalBytes: value.OriginalBytes}}, nil
+}
+
+func mistakenSkillSectionPath(value string) (string, bool) {
+	value = strings.ToLower(strings.TrimSpace(filepath.ToSlash(value)))
+	if strings.Contains(value, "/") {
+		return "", false
+	}
+	value = strings.TrimSuffix(value, ".md")
+	if !strings.HasPrefix(value, "section-") || len(value) == len("section-") {
+		return "", false
+	}
+	for _, character := range value[len("section-"):] {
+		if character < '0' || character > '9' {
+			return "", false
+		}
+	}
+	return value, true
+}
+
+func sectionReadLimit(maxBytes int) int {
+	if maxBytes <= 0 || maxBytes > opensciskill.MaxReadRunes {
+		return opensciskill.MaxReadRunes
+	}
+	return maxBytes
 }
 
 func (*MaterializeSkillResource) Definition(context.Context) (tool.Definition, error) {

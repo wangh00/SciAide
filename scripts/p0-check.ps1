@@ -38,7 +38,7 @@ if ($generatedBindingImports) {
 
 Write-Host "== Go format =="
 $goFiles = Get-ChildItem -Path . -Recurse -Filter "*.go" -File |
-    Where-Object { $_.FullName -notmatch "[\\/](\.codex-tmp|artifacts|frontend[\\/]node_modules)[\\/]" }
+    Where-Object { $_.FullName -notmatch "[\\/](\.codex-tmp|\.tmp|artifacts|frontend[\\/]node_modules)[\\/]" }
 $unformatted = $goFiles | ForEach-Object {
     $output = & gofmt -l $_.FullName
     if ($LASTEXITCODE -ne 0) {

@@ -25,7 +25,7 @@ export type WorkflowAnalysisManifest = {
 
 export type WorkflowEvidenceNode = {
   id: string;
-  stage: "evidence" | "analysis" | "artifact" | "report" | "export";
+  stage: "source" | "evidence" | "analysis" | "artifact" | "report" | "export";
   label: string;
   detail: string;
   sha256: string;

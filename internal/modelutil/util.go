@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/wangh00/SciAide/internal/browserhttp"
+	"github.com/wangh00/SciAide/internal/httpua"
 	"io"
 	"net"
 	"net/http"
@@ -42,10 +44,32 @@ func NewStreamingHTTPClient(responseTimeout time.Duration) *http.Client {
 	transport.DialContext = (&net.Dialer{Timeout: responseTimeout, KeepAlive: 30 * time.Second}).DialContext
 	transport.TLSHandshakeTimeout = responseTimeout
 	transport.ResponseHeaderTimeout = responseTimeout
-	return &http.Client{Transport: transport}
+	return &http.Client{Transport: browserhttp.New(transport)}
 }
 
 func ProviderToolName(qualified string) string {
+	qualified = strings.TrimSpace(qualified)
+	if strings.HasPrefix(qualified, "builtin.") {
+		name := strings.ReplaceAll(strings.TrimPrefix(qualified, "builtin."), ".", "_")
+		if name != "" && len(name) <= MaxProviderName {
+			valid := true
+			for _, c := range name {
+				if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_') {
+					valid = false
+					break
+				}
+			}
+			if valid {
+				return name
+			}
+		}
+	}
+	return externalProviderToolName(qualified)
+}
+
+// External names keep their stable, collision-resistant form.
+// Adapters reject collisions in each request before any network IO.
+func externalProviderToolName(qualified string) string {
 	qualified = strings.TrimSpace(qualified)
 	safe := qualified != "" && len(qualified) <= MaxProviderName
 	for _, c := range qualified {
@@ -75,6 +99,47 @@ func ProviderToolName(qualified string) string {
 		value = value[:MaxProviderName-len(suffix)]
 	}
 	return value + suffix
+}
+
+// Exact names win; one extra trailing separator may refer to a declared name.
+func ResolveProviderToolName(providerName string, aliases map[string]string) string {
+	if qualified := aliases[providerName]; qualified != "" {
+		return qualified
+	}
+	if strings.HasSuffix(providerName, "_") && !strings.HasSuffix(providerName, "__") {
+		if qualified := aliases[strings.TrimSuffix(providerName, "_")]; qualified != "" {
+			return qualified
+		}
+	}
+	return providerName
+}
+
+// ProviderToolAliasForQualified returns the exact provider alias declared for
+// a qualified tool. It is used when persisting provider protocol state so a
+// repaired call can be replayed with the declared spelling on the next turn.
+func ProviderToolAliasForQualified(qualified string, aliases map[string]string) string {
+	for alias, value := range aliases {
+		if value == qualified {
+			return alias
+		}
+	}
+	return qualified
+}
+
+// BuildToolAliases validates definitions and builds both directions before IO.
+func BuildToolAliases(definitions []model.ToolDefinition) (map[string]string, map[string]string, error) {
+	forward, reverse := map[string]string{}, map[string]string{}
+	for _, def := range definitions {
+		if err := ValidateDefinition(def); err != nil {
+			return nil, nil, err
+		}
+		alias := ProviderToolName(def.Name)
+		if _, exists := reverse[alias]; exists {
+			return nil, nil, fmt.Errorf("duplicate or colliding model tool name: %q", alias)
+		}
+		forward[def.Name], reverse[alias] = alias, def.Name
+	}
+	return forward, reverse, nil
 }
 
 func ValidateDefinition(def model.ToolDefinition) error {
@@ -127,6 +192,7 @@ func ApplyBearerAndCustomHeaders(req *http.Request, secret []byte, headers map[s
 	for name, value := range headers {
 		req.Header.Set(name, value)
 	}
+	httpua.Apply(req)
 }
 
 func ClassifyNetwork(err error) error {
@@ -208,7 +274,13 @@ func RetryAfter(err error) time.Duration {
 }
 
 func StreamErrorRetryable(errorType, code string) bool {
-	value := strings.ToLower(strings.TrimSpace(errorType + " " + code))
+	errorType = strings.ToLower(strings.TrimSpace(errorType))
+	code = strings.ToLower(strings.TrimSpace(code))
+	// Match the explicit transport failure, not the generic upstream wrapper.
+	if code == "stream_read_error" || (code == "" && errorType == "stream_read_error") {
+		return true
+	}
+	value := errorType + " " + code
 	for _, marker := range []string{"overloaded", "rate_limit", "server_error", "internal_error", "service_unavailable", "temporarily_unavailable", "timeout_error"} {
 		if strings.Contains(value, marker) {
 			return true
@@ -414,29 +486,4 @@ func mentionsReasoningLevel(detail string) bool {
 		}
 	}
 	return false
-}
-
-func ReasoningControlRejected(status int, body []byte) bool {
-	return ClassifyReasoningRejection(status, body) != ReasoningRejectionNone
-}
-
-type SliceStream struct {
-	Events    []model.Event
-	Index     int
-	CloseFunc func() error
-}
-
-func (s *SliceStream) Recv() (model.Event, error) {
-	if s.Index >= len(s.Events) {
-		return model.Event{}, io.EOF
-	}
-	e := s.Events[s.Index]
-	s.Index++
-	return e, nil
-}
-func (s *SliceStream) Close() error {
-	if s.CloseFunc != nil {
-		return s.CloseFunc()
-	}
-	return nil
 }

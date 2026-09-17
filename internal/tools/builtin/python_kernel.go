@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/wangh00/SciAide/internal/app/project"
 	"github.com/wangh00/SciAide/internal/app/pythonenv"
 	"github.com/wangh00/SciAide/internal/app/tool"
 )
@@ -76,8 +78,39 @@ func (t *PythonKernelExecute) Invoke(ctx context.Context, invocation tool.Invoca
 			return tool.Result{}, fmt.Errorf("project Python environment fingerprint changed after Workflow validation")
 		}
 	}
+	workspaceRoot := invocation.WorkspaceRoot
+	if invocation.ResearchTaskID != "" {
+		selected, err := t.kernels.Project(ctx, invocation.ProjectID)
+		if err != nil {
+			return tool.Result{}, err
+		}
+		taskRoot, err := project.ResearchTaskWorkspacePath(selected, invocation.ResearchTaskID)
+		if err != nil {
+			return tool.Result{}, err
+		}
+		// Task-scoped execution must never honor a project-root fallback or a
+		// caller-supplied sibling path. Resolve the canonical task root here,
+		// immediately before starting the persistent Kernel.
+		workspaceRoot = taskRoot
+		if err := os.MkdirAll(workspaceRoot, 0o700); err != nil {
+			return tool.Result{}, err
+		}
+		for _, inputPath := range args.InputPaths {
+			absolute := filepath.Join(workspaceRoot, filepath.FromSlash(inputPath))
+			info, statErr := os.Stat(absolute)
+			if statErr != nil {
+				if os.IsNotExist(statErr) {
+					return tool.Result{}, tool.NewUserFacingError(fmt.Sprintf("当前任务输入文件不存在：%s。请重新选择该任务的冻结输入后再试。", filepath.ToSlash(inputPath)))
+				}
+				return tool.Result{}, fmt.Errorf("task workspace input %q is unavailable at %s: %w", inputPath, workspaceRoot, statErr)
+			}
+			if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+				return tool.Result{}, tool.NewUserFacingError(fmt.Sprintf("当前任务输入路径不是普通文件：%s。请重新选择该任务的冻结输入后再试。", filepath.ToSlash(inputPath)))
+			}
+		}
+	}
 	result, runErr := t.kernels.ExecuteTool(ctx, pythonenv.KernelExecuteRequest{
-		ProjectID: invocation.ProjectID, Code: args.Code, InputPaths: args.InputPaths, InputData: args.InputData, OutputPaths: args.OutputPaths,
+		ProjectID: invocation.ProjectID, WorkspacePath: workspaceRoot, ToolCallID: invocation.CallID, Code: args.Code, InputPaths: args.InputPaths, InputData: args.InputData, OutputPaths: args.OutputPaths,
 		Timeout: time.Duration(args.TimeoutSeconds) * time.Second,
 	}, invocation.CallID, invocation.RunID)
 	structured, err := json.Marshal(result)
@@ -93,17 +126,37 @@ func (t *PythonKernelExecute) Invoke(ctx context.Context, invocation tool.Invoca
 	for _, path := range paths {
 		artifacts = append(artifacts, tool.ArtifactRef{Name: filepath.Base(path), WorkspacePath: path, SHA256: result.OutputSHA256[path]})
 	}
-	status := tool.ResultSuccess
-	if result.Status == "error" {
-		status = tool.ResultError
+	status := tool.ResultError
+	if result.Status == "success" {
+		status = tool.ResultSuccess
 	}
 	if runErr != nil {
 		if ctx.Err() != nil {
 			return tool.Result{}, ctx.Err()
 		}
+		if message, safe := pythonKernelUserFacingError(runErr); safe {
+			return tool.Result{}, tool.NewUserFacingError(message)
+		}
 		return tool.Result{}, runErr
 	}
 	return tool.Result{Status: status, Text: renderKernelResult(result), Structured: structured, Artifacts: artifacts, Citations: []tool.CitationRef{}, Truncated: result.StdoutTruncated || result.StderrTruncated}, nil
+}
+
+func pythonKernelUserFacingError(err error) (string, bool) {
+	if err == nil {
+		return "", false
+	}
+	message := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(message, "openblas error: memory allocation"):
+		return "Python 数值库初始化超出 1 GiB 内存预算；SciAide 已停止本次分析。", true
+	case strings.Contains(message, "process-tree memory budget"):
+		return "Python 分析超出 1 GiB 内存预算；请降低数据规模或方法的内存占用后重试。", true
+	case strings.Contains(message, "output exceeded the 64 kib per-stream limit"):
+		return "Python 分析输出超过 64 KiB 限制；请减少逐行打印并把完整结果写入声明的产物文件。", true
+	default:
+		return "", false
+	}
 }
 
 func expandWorkflowPath(value string, invocation tool.Invocation) string {

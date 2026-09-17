@@ -75,6 +75,48 @@ func TestWorkflowRepositoryVersionsAreImmutableIdempotentAndProjectScoped(t *tes
 		t.Fatalf("created Workflow = %#v", created)
 	}
 
+	reused, err := service.Save(ctx, workflow.SaveCommand{ProjectID: firstProject.ID, Definition: definition})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reused.Created || reused.Workflow.ID != created.Workflow.ID || reused.Version.ID != created.Version.ID {
+		t.Fatalf("duplicate template save = %#v, want existing Workflow %s", reused, created.Workflow.ID)
+	}
+	var workflowCount, versionCount int
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM workflows WHERE project_id=?`, firstProject.ID).Scan(&workflowCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM workflow_versions WHERE workflow_id=?`, created.Workflow.ID).Scan(&versionCount); err != nil {
+		t.Fatal(err)
+	}
+	if workflowCount != 1 || versionCount != 1 {
+		t.Fatalf("duplicate template persisted rows: workflows=%d versions=%d", workflowCount, versionCount)
+	}
+
+	distinctDefinition := definition
+	distinctDefinition.Description = "A separately customized research plan"
+	distinct, err := service.Save(ctx, workflow.SaveCommand{ProjectID: firstProject.ID, Definition: distinctDefinition})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !distinct.Created || distinct.Workflow.ID == created.Workflow.ID || distinct.Version.DefinitionSHA256 == created.Version.DefinitionSHA256 {
+		t.Fatalf("edited template was incorrectly reused: %#v", distinct)
+	}
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM workflows WHERE project_id=?`, firstProject.ID).Scan(&workflowCount); err != nil {
+		t.Fatal(err)
+	}
+	if workflowCount != 2 {
+		t.Fatalf("edited template workflow count = %d, want 2", workflowCount)
+	}
+
+	otherProjectCopy, err := service.Save(ctx, workflow.SaveCommand{ProjectID: secondProject.ID, Definition: definition})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !otherProjectCopy.Created || otherProjectCopy.Workflow.ID == created.Workflow.ID {
+		t.Fatalf("cross-project template save was incorrectly reused: %#v", otherProjectCopy)
+	}
+
 	idempotent, err := service.Save(ctx, workflow.SaveCommand{
 		ProjectID: firstProject.ID, WorkflowID: created.Workflow.ID, ExpectedCurrentVersionID: created.Version.ID, Definition: definition,
 	})
@@ -119,6 +161,87 @@ func TestWorkflowRepositoryVersionsAreImmutableIdempotentAndProjectScoped(t *tes
 	var count int
 	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM workflows WHERE project_id=?`, firstProject.ID).Scan(&count); err != nil || count != 0 {
 		t.Fatalf("Workflow cascade count = %d, %v", count, err)
+	}
+}
+
+func TestWorkflowRepositoryDeletesLegacyEquivalentPlansAtomically(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "workflow-equivalent-delete.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	projects := project.NewService(NewProjectRepository(store.DB()), filepath.Join(t.TempDir(), "workspaces"), filepath.Join(t.TempDir(), "trash"))
+	selected, err := projects.Create(ctx, "Equivalent plans", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := tool.NewRegistry()
+	if err := registry.Register(ctx, workflowFixtureTool{version: "1"}); err != nil {
+		t.Fatal(err)
+	}
+	compiler := workflow.NewCompiler(registry)
+	service, err := workflow.NewService(NewWorkflowRepository(store.DB()), projects, compiler)
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition := workflow.Definition{SchemaVersion: 1, Name: "Legacy duplicate", Nodes: []workflow.Node{{ID: "search", Name: "Search", Kind: workflow.NodeTool, ToolName: "fixture.workflow", Arguments: json.RawMessage(`{"query":"fixed"}`)}}}
+	first, err := service.Save(ctx, workflow.SaveCommand{ProjectID: selected.ID, Definition: definition})
+	if err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := compiler.Compile(ctx, definition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := formatTime(time.Now().UTC())
+	secondWorkflowID, secondVersionID := "legacy-duplicate-workflow", "legacy-duplicate-version"
+	definitionJSON, _ := json.Marshal(definition)
+	compilationJSON, _ := json.Marshal(compiled)
+	tx, err := store.DB().BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO workflows(id,project_id,name,description,current_version_id,version,created_at,updated_at) VALUES (?,?,?,? ,NULL,1,?,?)`, secondWorkflowID, selected.ID, definition.Name, definition.Description, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO workflow_versions(id,workflow_id,version_number,definition_json,definition_sha256,compilation_json,compilation_sha256,created_at) VALUES (?,?,?,?,?,?,?,?)`, secondVersionID, secondWorkflowID, 1, string(definitionJSON), compiled.DefinitionSHA256, string(compilationJSON), compiled.CompilationSHA256, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE workflows SET current_version_id=? WHERE id=?`, secondVersionID, secondWorkflowID); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `INSERT INTO workflow_runs(id,project_id,workflow_id,workflow_version_id,status,permission_mode,inputs_json,inputs_sha256,compilation_json,compilation_sha256,outputs_json,created_at,updated_at) VALUES ('duplicate-active',?,?,?,?,?,'{}',?, ?,?,'{}',?,?)`, selected.ID, secondWorkflowID, secondVersionID, "paused", "plan", strings.Repeat("a", 64), string(compilationJSON), compiled.CompilationSHA256, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Delete(ctx, selected.ID, first.Workflow.ID); err == nil || !strings.Contains(err.Error(), "未结束") {
+		t.Fatalf("equivalent active Workflow deletion error = %v", err)
+	}
+	var workflowCount int
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM workflows WHERE project_id=?`, selected.ID).Scan(&workflowCount); err != nil {
+		t.Fatal(err)
+	}
+	if workflowCount != 2 {
+		t.Fatalf("atomic rejection left %d Workflows, want 2", workflowCount)
+	}
+	if _, err := store.DB().ExecContext(ctx, `UPDATE workflow_runs SET status='cancelled',completed_at=updated_at WHERE id='duplicate-active'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Delete(ctx, selected.ID, first.Workflow.ID); err != nil {
+		t.Fatal(err)
+	}
+	var versionCount int
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM workflows WHERE project_id=?`, selected.ID).Scan(&workflowCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM workflow_versions WHERE workflow_id IN (?,?)`, first.Workflow.ID, secondWorkflowID).Scan(&versionCount); err != nil {
+		t.Fatal(err)
+	}
+	if workflowCount != 0 || versionCount != 0 {
+		t.Fatalf("equivalent Workflow rows remain: workflows=%d versions=%d", workflowCount, versionCount)
 	}
 }
 

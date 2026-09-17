@@ -36,7 +36,11 @@ func (f *KnowledgeFacade) SaveEmbeddingConfig(projectID string, command embeddin
 }
 
 func (f *KnowledgeFacade) ListDocuments(projectID string) ([]knowledge.Document, error) {
-	return f.service.ListDocuments(f.lifecycle.Context(), projectID)
+	return f.service.ListDocumentsForProject(f.lifecycle.Context(), projectID)
+}
+
+func (f *KnowledgeFacade) ListTaskDocuments(projectID, taskID string) ([]knowledge.Document, error) {
+	return f.service.ListDocumentsForTask(f.lifecycle.Context(), projectID, taskID)
 }
 
 func (f *KnowledgeFacade) ChooseAndImportDocuments(projectID string) (attachment.ImportBatch, error) {
@@ -65,18 +69,53 @@ func (f *KnowledgeFacade) ChooseAndImportDocuments(projectID string) (attachment
 	return result, nil
 }
 
+func (f *KnowledgeFacade) ChooseAndImportTaskDocuments(projectID, taskID string) (attachment.ImportBatch, error) {
+	paths, err := runtime.OpenMultipleFilesDialog(f.lifecycle.Context(), runtime.OpenDialogOptions{Title: "导入当前科研任务资料", Filters: []runtime.FileFilter{{DisplayName: "科研文档 (*.pdf;*.docx;*.xlsx;*.txt;*.md;*.csv;*.tsv)", Pattern: "*.pdf;*.docx;*.xlsx;*.txt;*.md;*.markdown;*.csv;*.tsv"}}})
+	if err != nil || len(paths) == 0 {
+		return attachment.ImportBatch{Attachments: []attachment.Attachment{}, Errors: []attachment.ImportError{}}, err
+	}
+	result, err := f.attachments.ImportPathsForTask(f.lifecycle.Context(), projectID, paths, taskID)
+	if err != nil {
+		return result, err
+	}
+	for _, value := range result.Attachments {
+		if value.Status == attachment.StatusReady {
+			if enqueueErr := f.service.Enqueue(f.lifecycle.Context(), value); enqueueErr != nil {
+				result.Errors = append(result.Errors, attachment.ImportError{Path: value.OriginalName, Message: enqueueErr.Error()})
+			}
+		}
+	}
+	return result, nil
+}
+
 func (f *KnowledgeFacade) RemoveDocument(projectID, documentID string) (knowledge.Document, error) {
 	return f.service.RemoveDocument(f.lifecycle.Context(), projectID, documentID)
+}
+
+func (f *KnowledgeFacade) RemoveTaskDocument(projectID, taskID, documentID string) (knowledge.Document, error) {
+	return f.service.RemoveDocumentForTask(f.lifecycle.Context(), projectID, taskID, documentID)
 }
 
 func (f *KnowledgeFacade) CancelDocument(projectID, documentID string) (knowledge.ImportJob, error) {
 	return f.service.CancelDocument(f.lifecycle.Context(), projectID, documentID)
 }
 
+func (f *KnowledgeFacade) CancelTaskDocument(projectID, taskID, documentID string) (knowledge.ImportJob, error) {
+	return f.service.CancelDocumentForTask(f.lifecycle.Context(), projectID, taskID, documentID)
+}
+
 func (f *KnowledgeFacade) RetryDocument(projectID, documentID string) (knowledge.ImportJob, error) {
 	return f.service.RetryDocument(f.lifecycle.Context(), projectID, documentID)
 }
 
+func (f *KnowledgeFacade) RetryTaskDocument(projectID, taskID, documentID string) (knowledge.ImportJob, error) {
+	return f.service.RetryDocumentForTask(f.lifecycle.Context(), projectID, taskID, documentID)
+}
+
 func (f *KnowledgeFacade) RebuildDocument(projectID, documentID string) (knowledge.ImportJob, error) {
 	return f.service.RebuildDocument(f.lifecycle.Context(), projectID, documentID)
+}
+
+func (f *KnowledgeFacade) RebuildTaskDocument(projectID, taskID, documentID string) (knowledge.ImportJob, error) {
+	return f.service.RebuildDocumentForTask(f.lifecycle.Context(), projectID, taskID, documentID)
 }

@@ -9,8 +9,11 @@ import (
 	"time"
 
 	"github.com/wangh00/SciAide/internal/app/attachment"
+	"github.com/wangh00/SciAide/internal/app/citation"
 	"github.com/wangh00/SciAide/internal/app/embedding"
 	"github.com/wangh00/SciAide/internal/app/project"
+	"github.com/wangh00/SciAide/internal/app/research"
+	"github.com/wangh00/SciAide/internal/app/researchtask"
 	"github.com/wangh00/SciAide/internal/document"
 )
 
@@ -24,6 +27,7 @@ type Service struct {
 	repository  Repository
 	projects    ProjectLoader
 	attachments AttachmentLoader
+	tasks       researchtask.Validator
 	embeddings  EmbeddingProvider
 	now         func() time.Time
 	wake        chan struct{}
@@ -64,6 +68,16 @@ func NewService(repository Repository, projects ProjectLoader, attachments Attac
 		repository: repository, projects: projects, attachments: attachments,
 		now: func() time.Time { return time.Now().UTC() }, wake: make(chan struct{}, 1), running: map[string]*runningKnowledgeJob{},
 	}
+}
+
+func (s *Service) SetTaskValidator(validator researchtask.Validator) {
+	if s != nil {
+		s.tasks = validator
+	}
+}
+
+func (s *Service) validateTask(ctx context.Context, projectID, taskID string) error {
+	return researchtask.Validate(ctx, s.tasks, projectID, taskID)
 }
 
 func (s *Service) Start() (int64, error) {
@@ -132,6 +146,27 @@ func (s *Service) Enqueue(ctx context.Context, value attachment.Attachment) erro
 	if value.Status != attachment.StatusReady {
 		return fmt.Errorf("attachment is not ready for knowledge indexing")
 	}
+	if value.ScopeKind == attachment.ScopeLegacyProject || value.ScopeKind == attachment.ScopeConversation {
+		return fmt.Errorf("legacy or conversation-local attachments must be explicitly re-imported before knowledge indexing")
+	}
+	if value.ScopeKind == attachment.ScopeTask {
+		if err := s.validateTask(ctx, value.ProjectID, value.ResearchTaskID); err != nil {
+			return err
+		}
+	}
+	// Re-read ownership from the attachment repository before indexing. This
+	// prevents internal callers from fabricating a task-scoped Attachment value.
+	if resolver, ok := s.attachments.(interface {
+		Get(context.Context, string) (attachment.Attachment, error)
+	}); ok {
+		stored, getErr := resolver.Get(ctx, value.ID)
+		if getErr != nil {
+			return fmt.Errorf("verify knowledge attachment ownership: %w", getErr)
+		}
+		if stored.ProjectID != value.ProjectID || stored.ScopeKind != value.ScopeKind || stored.ResearchTaskID != value.ResearchTaskID {
+			return fmt.Errorf("knowledge attachment scope does not match persisted attachment")
+		}
+	}
 	selectedProject, version, err := s.ensureProjectVersion(ctx, value.ProjectID)
 	if err != nil {
 		return err
@@ -164,6 +199,30 @@ func (s *Service) Enqueue(ctx context.Context, value attachment.Attachment) erro
 }
 
 func (s *Service) ListDocuments(ctx context.Context, projectID string) ([]Document, error) {
+	return s.listDocumentsForScope(ctx, projectID, "")
+}
+
+// ListDocumentsForProject is the explicit project resource-manager view. It
+// includes project-shared, task-owned, and historical unowned documents while
+// still hiding conversation-local rows. Model-facing callers must use List or
+// ListDocumentsForTask instead.
+func (s *Service) ListDocumentsForProject(ctx context.Context, projectID string) ([]Document, error) {
+	return s.listDocumentsForScope(ctx, projectID, "*")
+}
+
+// listAllAttachments is an internal maintenance view. The public attachment
+// service deliberately exposes only project-shared files, while the project
+// index still has to maintain task-owned documents already admitted to it.
+func (s *Service) listAllAttachments(ctx context.Context, projectID string) ([]attachment.Attachment, error) {
+	if scoped, ok := s.attachments.(interface {
+		ListAll(context.Context, string) ([]attachment.Attachment, error)
+	}); ok {
+		return scoped.ListAll(ctx, projectID)
+	}
+	return s.attachments.List(ctx, projectID)
+}
+
+func (s *Service) listDocumentsForScope(ctx context.Context, projectID, taskID string) ([]Document, error) {
 	projectID = strings.TrimSpace(projectID)
 	if projectID == "" {
 		return nil, fmt.Errorf("project id is required")
@@ -175,11 +234,32 @@ func (s *Service) ListDocuments(ctx context.Context, projectID string) ([]Docume
 	if err != nil {
 		return nil, err
 	}
+	// Conversation rows remain local to their chat and never enter a normal
+	// project/task list. The project resource manager intentionally keeps legacy
+	// rows visible so users can identify and explicitly re-home old material.
+	visible := make([]Document, 0, len(documents))
+	for _, value := range documents {
+		if value.ScopeKind == attachment.ScopeConversation {
+			continue
+		}
+		if taskID == "*" {
+			// Project resource manager: show shared, task-owned, and legacy rows;
+			// the UI groups task rows by their persisted researchTaskId.
+		} else if taskID == "" {
+			if value.ScopeKind != attachment.ScopeProjectShared {
+				continue
+			}
+		} else if value.ScopeKind != attachment.ScopeProjectShared && (value.ScopeKind != attachment.ScopeTask || value.ResearchTaskID != taskID) {
+			continue
+		}
+		visible = append(visible, value)
+	}
+	documents = visible
 	jobs, err := s.repository.ListLatestJobs(ctx, projectID)
 	if err != nil {
 		return nil, err
 	}
-	attachments, err := s.attachments.List(ctx, projectID)
+	attachments, err := s.listAllAttachments(ctx, projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -204,6 +284,21 @@ func (s *Service) ListDocuments(ctx context.Context, projectID string) ([]Docume
 		}
 	}
 	return documents, nil
+}
+
+func (s *Service) ListDocumentsForTask(ctx context.Context, projectID, taskID string) ([]Document, error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return nil, fmt.Errorf("research task id is required")
+	}
+	if err := s.validateTask(ctx, projectID, taskID); err != nil {
+		return nil, err
+	}
+	return s.listDocumentsForScope(ctx, projectID, taskID)
+}
+
+func (s *Service) ListProjectSharedDocuments(ctx context.Context, projectID string) ([]Document, error) {
+	return s.ListDocuments(ctx, projectID)
 }
 
 func (s *Service) RefreshProject(ctx context.Context, projectID string) error {
@@ -244,6 +339,13 @@ func (s *Service) CancelDocument(ctx context.Context, projectID, documentID stri
 	return ImportJob{}, fmt.Errorf("knowledge task is no longer cancellable")
 }
 
+func (s *Service) CancelDocumentForTask(ctx context.Context, projectID, taskID, documentID string) (ImportJob, error) {
+	if _, err := s.ownedDocumentForTask(ctx, projectID, taskID, documentID); err != nil {
+		return ImportJob{}, err
+	}
+	return s.CancelDocument(ctx, projectID, documentID)
+}
+
 func (s *Service) RetryDocument(ctx context.Context, projectID, documentID string) (ImportJob, error) {
 	documents, err := s.ListDocuments(ctx, projectID)
 	if err != nil {
@@ -261,6 +363,17 @@ func (s *Service) RetryDocument(ctx context.Context, projectID, documentID strin
 	return ImportJob{}, fmt.Errorf("knowledge document was not found")
 }
 
+func (s *Service) RetryDocumentForTask(ctx context.Context, projectID, taskID, documentID string) (ImportJob, error) {
+	value, err := s.ownedDocumentForTask(ctx, projectID, taskID, documentID)
+	if err != nil {
+		return ImportJob{}, err
+	}
+	if value.Status != DocumentFailed && (value.Job == nil || (value.Job.Status != JobFailed && value.Job.Status != JobCancelled)) {
+		return ImportJob{}, fmt.Errorf("only a failed or cancelled knowledge task can be retried")
+	}
+	return s.enqueueDocument(ctx, value, true)
+}
+
 func (s *Service) RebuildDocument(ctx context.Context, projectID, documentID string) (ImportJob, error) {
 	value, found, err := s.repository.GetDocument(ctx, strings.TrimSpace(projectID), strings.TrimSpace(documentID))
 	if err != nil {
@@ -272,18 +385,28 @@ func (s *Service) RebuildDocument(ctx context.Context, projectID, documentID str
 	return s.enqueueDocument(ctx, value, true)
 }
 
+func (s *Service) RebuildDocumentForTask(ctx context.Context, projectID, taskID, documentID string) (ImportJob, error) {
+	if _, err := s.ownedDocumentForTask(ctx, projectID, taskID, documentID); err != nil {
+		return ImportJob{}, err
+	}
+	return s.RebuildDocument(ctx, projectID, documentID)
+}
+
 func (s *Service) enqueueDocument(ctx context.Context, value Document, force bool) (ImportJob, error) {
 	selectedProject, version, err := s.ensureProjectVersion(ctx, value.ProjectID)
 	if err != nil {
 		return ImportJob{}, err
 	}
-	attachments, err := s.attachments.List(ctx, value.ProjectID)
+	attachments, err := s.listAllAttachments(ctx, value.ProjectID)
 	if err != nil {
 		return ImportJob{}, err
 	}
 	for _, item := range attachments {
 		if item.ID != value.AttachmentID {
 			continue
+		}
+		if value.ScopeKind != item.ScopeKind || value.ResearchTaskID != item.ResearchTaskID {
+			return ImportJob{}, fmt.Errorf("knowledge document scope no longer matches its attachment")
 		}
 		if item.Status != attachment.StatusReady {
 			return ImportJob{}, fmt.Errorf("attachment %q is not ready: %s", item.OriginalName, item.ErrorMessage)
@@ -364,6 +487,50 @@ func (s *Service) RemoveDocument(ctx context.Context, projectID, documentID stri
 	return value, nil
 }
 
+func (s *Service) RemoveDocumentForTask(ctx context.Context, projectID, taskID, documentID string) (Document, error) {
+	if _, err := s.ownedDocumentForTask(ctx, projectID, taskID, documentID); err != nil {
+		return Document{}, err
+	}
+	return s.RemoveDocument(ctx, projectID, documentID)
+}
+
+func (s *Service) ownedDocumentForTask(ctx context.Context, projectID, taskID, documentID string) (Document, error) {
+	value, err := s.documentForTask(ctx, projectID, taskID, documentID)
+	if err != nil {
+		return Document{}, err
+	}
+	if value.ScopeKind != attachment.ScopeTask || value.ResearchTaskID != strings.TrimSpace(taskID) {
+		return Document{}, fmt.Errorf("project-shared knowledge is read-only inside a research task")
+	}
+	return value, nil
+}
+
+func (s *Service) documentForTask(ctx context.Context, projectID, taskID, documentID string) (Document, error) {
+	projectID, taskID, documentID = strings.TrimSpace(projectID), strings.TrimSpace(taskID), strings.TrimSpace(documentID)
+	if err := s.validateTask(ctx, projectID, taskID); err != nil {
+		return Document{}, err
+	}
+	value, found, err := s.repository.GetDocument(ctx, strings.TrimSpace(projectID), strings.TrimSpace(documentID))
+	if err != nil {
+		return Document{}, err
+	}
+	if !found || (value.ScopeKind != attachment.ScopeProjectShared && (value.ScopeKind != attachment.ScopeTask || value.ResearchTaskID != taskID)) {
+		return Document{}, fmt.Errorf("knowledge document does not belong to the current research task")
+	}
+	jobs, err := s.repository.ListLatestJobs(ctx, projectID)
+	if err != nil {
+		return Document{}, err
+	}
+	for _, job := range jobs {
+		if job.DocumentID == value.ID {
+			jobCopy := job
+			value.Job = &jobCopy
+			break
+		}
+	}
+	return value, nil
+}
+
 func (s *Service) Search(ctx context.Context, projectID, query string, limit int) (SearchResult, error) {
 	return s.SearchWithOptions(ctx, projectID, SearchOptions{Query: query, Limit: limit})
 }
@@ -373,6 +540,21 @@ func (s *Service) Search(ctx context.Context, projectID, query string, limit int
 // It is used by deterministic Workflows that cannot continue on a stale ready
 // snapshot after importing new research material.
 func (s *Service) SynchronizeAttachments(ctx context.Context, projectID string, attachmentIDs []string) ([]Document, error) {
+	return s.synchronizeAttachments(ctx, projectID, "", attachmentIDs)
+}
+
+func (s *Service) SynchronizeAttachmentsForTask(ctx context.Context, projectID, taskID string, attachmentIDs []string) ([]Document, error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return nil, fmt.Errorf("research task id is required")
+	}
+	if err := s.validateTask(ctx, projectID, taskID); err != nil {
+		return nil, err
+	}
+	return s.synchronizeAttachments(ctx, projectID, taskID, attachmentIDs)
+}
+
+func (s *Service) synchronizeAttachments(ctx context.Context, projectID, taskID string, attachmentIDs []string) ([]Document, error) {
 	projectID = strings.TrimSpace(projectID)
 	if projectID == "" || len(attachmentIDs) == 0 || len(attachmentIDs) > 20 {
 		return nil, fmt.Errorf("project and 1-20 knowledge attachments are required")
@@ -426,6 +608,12 @@ func (s *Service) SynchronizeAttachments(ctx context.Context, projectID string, 
 	}
 	byAttachment := make(map[string]Document, len(documents))
 	for _, value := range documents {
+		if taskID == "" && value.ScopeKind != attachment.ScopeProjectShared {
+			continue
+		}
+		if taskID != "" && !(value.ScopeKind == attachment.ScopeProjectShared || value.ScopeKind == attachment.ScopeTask && value.ResearchTaskID == taskID) {
+			continue
+		}
 		if _, selected := wanted[value.AttachmentID]; selected {
 			byAttachment[value.AttachmentID] = value
 		}
@@ -449,7 +637,12 @@ func (s *Service) SynchronizeAttachments(ctx context.Context, projectID string, 
 }
 
 func (s *Service) ReadEvidenceChunk(ctx context.Context, projectID, indexVersionID, documentID, attachmentID, chunkID string) (EvidenceChunk, error) {
+	return s.readEvidenceChunk(ctx, projectID, "", indexVersionID, documentID, attachmentID, chunkID)
+}
+
+func (s *Service) readEvidenceChunk(ctx context.Context, projectID, taskID, indexVersionID, documentID, attachmentID, chunkID string) (EvidenceChunk, error) {
 	projectID, indexVersionID = strings.TrimSpace(projectID), strings.TrimSpace(indexVersionID)
+	taskID = strings.TrimSpace(taskID)
 	selectedProject, err := s.projects.Get(ctx, projectID)
 	if err != nil {
 		return EvidenceChunk{}, err
@@ -465,7 +658,11 @@ func (s *Service) ReadEvidenceChunk(ctx context.Context, projectID, indexVersion
 	if err != nil {
 		return EvidenceChunk{}, err
 	}
-	if !found || documentValue.Status != DocumentReady || documentValue.IndexVersionID != version.ID || documentValue.AttachmentID != strings.TrimSpace(attachmentID) {
+	allowedScope := documentValue.ScopeKind == attachment.ScopeProjectShared
+	if taskID != "" && documentValue.ScopeKind == attachment.ScopeTask && documentValue.ResearchTaskID == taskID {
+		allowedScope = true
+	}
+	if !found || !allowedScope || documentValue.Status != DocumentReady || documentValue.IndexVersionID != version.ID || documentValue.AttachmentID != strings.TrimSpace(attachmentID) {
 		return EvidenceChunk{}, fmt.Errorf("knowledge evidence document is not ready in the selected index")
 	}
 	index, err := openProjectIndex(ctx, selectedProject, version)
@@ -483,13 +680,38 @@ func (s *Service) ReadEvidenceChunk(ctx context.Context, projectID, indexVersion
 	return value, nil
 }
 
+func (s *Service) ReadEvidenceChunkForTask(ctx context.Context, projectID, taskID, indexVersionID, documentID, attachmentID, chunkID string) (EvidenceChunk, error) {
+	if err := s.validateTask(ctx, projectID, taskID); err != nil {
+		return EvidenceChunk{}, err
+	}
+	documentValue, found, err := s.repository.GetDocument(ctx, strings.TrimSpace(projectID), strings.TrimSpace(documentID))
+	if err != nil {
+		return EvidenceChunk{}, err
+	}
+	if !found || (documentValue.ScopeKind != attachment.ScopeProjectShared && (documentValue.ScopeKind != attachment.ScopeTask || documentValue.ResearchTaskID != strings.TrimSpace(taskID))) {
+		return EvidenceChunk{}, fmt.Errorf("knowledge evidence does not belong to the current research task")
+	}
+	return s.readEvidenceChunk(ctx, projectID, taskID, indexVersionID, documentID, attachmentID, chunkID)
+}
+
+// EvidenceChunkForTask adapts the task-scoped knowledge reader to the
+// bibliography evidence contract.
+func (s *Service) EvidenceChunkForTask(ctx context.Context, projectID, taskID string, reference research.EvidenceReference) (research.EvidenceSnapshot, error) {
+	value, err := s.ReadEvidenceChunkForTask(ctx, projectID, taskID, reference.IndexVersionID, reference.DocumentID, reference.AttachmentID, reference.ChunkID)
+	if err != nil {
+		return research.EvidenceSnapshot{}, err
+	}
+	quote := strings.TrimSpace(value.Content)
+	return research.EvidenceSnapshot{IndexVersionID: value.IndexVersionID, DocumentID: value.DocumentID, AttachmentID: value.AttachmentID, ChunkID: value.ChunkID, SourceName: value.SourceName, Locator: value.Locator, Quote: quote, QuoteSHA256: citation.QuoteSHA256(quote), SourceStart: value.SourceStart, SourceEnd: value.SourceEnd}, nil
+}
+
 func (s *Service) SearchWithOptions(ctx context.Context, projectID string, options SearchOptions) (SearchResult, error) {
 	projectID, options.Query = strings.TrimSpace(projectID), strings.TrimSpace(options.Query)
 	query := options.Query
 	if projectID == "" || query == "" {
 		return SearchResult{}, fmt.Errorf("project and knowledge search query are required")
 	}
-	if len([]rune(query)) > 200 {
+	if len([]rune(query)) > MaxSearchQueryRunes {
 		return SearchResult{}, fmt.Errorf("knowledge search query is too long")
 	}
 	if options.Limit == 0 {
@@ -498,7 +720,7 @@ func (s *Service) SearchWithOptions(ctx context.Context, projectID string, optio
 	if options.Limit < 1 || options.Limit > maxSearchLimit {
 		return SearchResult{}, fmt.Errorf("knowledge search result limit is invalid")
 	}
-	if len(options.DocumentIDs) > 20 || len(options.Formats) > 6 {
+	if len(options.DocumentIDs) > 100 || len(options.Formats) > 6 {
 		return SearchResult{}, fmt.Errorf("knowledge search filter is too large")
 	}
 	for index, value := range options.DocumentIDs {
@@ -518,6 +740,65 @@ func (s *Service) SearchWithOptions(ctx context.Context, projectID string, optio
 	selectedProject, version, err := s.ensureProjectVersion(ctx, projectID)
 	if err != nil {
 		return SearchResult{}, err
+	}
+	if taskID := strings.TrimSpace(options.ResearchTaskID); taskID != "" {
+		documents, listErr := s.ListDocumentsForTask(ctx, projectID, taskID)
+		if listErr != nil {
+			return SearchResult{}, listErr
+		}
+		allowed := make([]string, 0, len(documents))
+		for _, value := range documents {
+			allowed = append(allowed, value.ID)
+		}
+		if len(options.DocumentIDs) == 0 {
+			options.DocumentIDs = allowed
+		} else {
+			allowedSet := make(map[string]struct{}, len(allowed))
+			for _, id := range allowed {
+				allowedSet[id] = struct{}{}
+			}
+			filtered := options.DocumentIDs[:0]
+			for _, id := range options.DocumentIDs {
+				if _, ok := allowedSet[id]; ok {
+					filtered = append(filtered, id)
+				}
+			}
+			options.DocumentIDs = filtered
+		}
+		if len(options.DocumentIDs) == 0 {
+			options.DocumentIDs = []string{"__no_task_document__"}
+		}
+	} else {
+		// Unscoped searches are project-shared searches. Legacy rows are kept
+		// for archival inspection but must not silently influence new work.
+		documents, listErr := s.ListDocuments(ctx, projectID)
+		if listErr != nil {
+			return SearchResult{}, listErr
+		}
+		allowed := make([]string, 0, len(documents))
+		for _, value := range documents {
+			if value.ScopeKind == attachment.ScopeProjectShared {
+				allowed = append(allowed, value.ID)
+			}
+		}
+		if len(options.DocumentIDs) == 0 {
+			options.DocumentIDs = allowed
+		} else {
+			allowedSet := make(map[string]struct{}, len(allowed))
+			for _, id := range allowed {
+				allowedSet[id] = struct{}{}
+			}
+			filtered := options.DocumentIDs[:0]
+			for _, id := range options.DocumentIDs {
+				if _, ok := allowedSet[id]; ok {
+					filtered = append(filtered, id)
+				}
+			}
+			options.DocumentIDs = filtered
+		}
+		if len(options.DocumentIDs) == 0 {
+			options.DocumentIDs = []string{"__no_project_shared_document__"}
+		}
 	}
 	if err := s.queueMissingProjectDocuments(ctx, selectedProject, version); err != nil {
 		return SearchResult{}, err
@@ -577,6 +858,9 @@ func (s *Service) SearchWithOptions(ctx context.Context, projectID string, optio
 		}
 	}
 	matches, total, searchErr := index.SearchWithOptions(ctx, options, queryVector)
+	if searchErr == nil && options.EvidenceMode {
+		matches, searchErr = index.completeResearchEvidence(ctx, matches, options)
+	}
 	closeErr := index.Close()
 	if searchErr != nil {
 		return SearchResult{}, searchErr
@@ -584,15 +868,86 @@ func (s *Service) SearchWithOptions(ctx context.Context, projectID string, optio
 	if closeErr != nil {
 		return SearchResult{}, closeErr
 	}
-	matches = fitSearchResultBudget(matches, maxSearchResultRunes)
+	if !options.EvidenceMode {
+		matches = fitSearchResultBudget(matches, maxSearchResultRunes)
+	}
 	for index := range matches {
 		matches[index].IndexVersionID = searchVersion.ID
 	}
-	status, err := s.repository.ProjectStatus(ctx, projectID)
+	status, err := s.visibleStatus(ctx, projectID, options.ResearchTaskID)
 	if err != nil {
 		return SearchResult{}, err
 	}
 	return SearchResult{Query: query, Matches: matches, TotalMatches: total, Status: status, RetrievalMode: mode, EmbeddingWarning: warning}, nil
+}
+
+// visibleStatus mirrors the same scope predicate used for search results. A
+// task search must not report project-wide counts, because those counts reveal
+// the existence and progress of unrelated task documents.
+func (s *Service) visibleStatus(ctx context.Context, projectID, taskID string) (ProjectStatus, error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		documents, err := s.ListDocuments(ctx, projectID)
+		if err != nil {
+			return ProjectStatus{}, err
+		}
+		return statusFromDocuments(documents), nil
+	}
+	documents, err := s.ListDocumentsForTask(ctx, projectID, taskID)
+	if err != nil {
+		return ProjectStatus{}, err
+	}
+	return statusFromDocuments(documents), nil
+}
+
+func statusFromDocuments(documents []Document) ProjectStatus {
+	status := ProjectStatus{}
+	for _, value := range documents {
+		status.Documents++
+		switch value.Status {
+		case DocumentReady:
+			status.Ready++
+		case DocumentPending:
+			status.Pending++
+		case DocumentIndexing:
+			status.Indexing++
+		case DocumentFailed:
+			status.Failed++
+		}
+		if value.Job != nil {
+			switch value.Job.Status {
+			case JobQueued:
+				status.QueuedJobs++
+			case JobRunning:
+				status.RunningJobs++
+			}
+		}
+	}
+	return status
+}
+
+func (s *Service) SearchWithTask(ctx context.Context, projectID, taskID string, options SearchOptions) (SearchResult, error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return SearchResult{}, fmt.Errorf("research task id is required")
+	}
+	if err := s.validateTask(ctx, projectID, taskID); err != nil {
+		return SearchResult{}, err
+	}
+	options.ResearchTaskID = taskID
+	return s.SearchWithOptions(ctx, projectID, options)
+}
+
+func (s *Service) SearchForTask(ctx context.Context, projectID, taskID, query string, documentIDs []string) ([]research.EvidenceSearchMatch, error) {
+	result, err := s.SearchWithTask(ctx, projectID, taskID, SearchOptions{Query: query, Limit: 12, DocumentIDs: documentIDs})
+	if err != nil {
+		return nil, err
+	}
+	values := make([]research.EvidenceSearchMatch, 0, len(result.Matches))
+	for _, value := range result.Matches {
+		values = append(values, research.EvidenceSearchMatch{Reference: research.EvidenceReference{IndexVersionID: value.IndexVersionID, DocumentID: value.DocumentID, AttachmentID: value.AttachmentID, ChunkID: value.ChunkID}, SourceName: value.Name, Locator: value.Locator, Title: value.Title, Snippet: value.Snippet, Rank: value.Rank})
+	}
+	return values, nil
 }
 
 func fitSearchResultBudget(values []Match, maximum int) []Match {
@@ -631,7 +986,7 @@ func (s *Service) queueMissingProjectDocuments(ctx context.Context, selectedProj
 	if err != nil {
 		return fmt.Errorf("list selected knowledge documents: %w", err)
 	}
-	attachments, err := s.attachments.List(ctx, selectedProject.ID)
+	attachments, err := s.listAllAttachments(ctx, selectedProject.ID)
 	if err != nil {
 		return fmt.Errorf("list project attachments for indexing: %w", err)
 	}
@@ -660,6 +1015,9 @@ func (s *Service) queueMissingProjectDocuments(ctx context.Context, selectedProj
 			return err
 		}
 		value, found := byID[documentValue.AttachmentID]
+		if documentValue.ScopeKind == attachment.ScopeLegacyProject || documentValue.ScopeKind == attachment.ScopeConversation || value.ScopeKind == attachment.ScopeLegacyProject || value.ScopeKind == attachment.ScopeConversation {
+			continue
+		}
 		if _, skip := blocked[documentValue.ID]; skip {
 			continue
 		}

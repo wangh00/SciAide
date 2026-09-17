@@ -1,264 +1,248 @@
 # SciAide 当前开发状态
 
-> 更新日期：2026-08-26
-> 代码基线：`v0.5.1` 发布源码，包含 P6、动态 Skill 与 P7.1～P7.6；修复 `v0.5.0` 在英文 Windows CI 下的科研产物复现编码、默认 Skill 来源清单换行和本地进程测试稳定性问题
-> 用途：供新会话和开发者快速恢复上下文；长期架构与阶段门禁仍以 [`start.md`](../start.md) 为准。
+> 更新：2026-09-16。供新会话接手使用，只记录当前实现、运行边界、最近验证与待办，不累积修复流水。
+> 文档不是运行证据。诊断时先核对实际运行程序、持久记录和当前代码；旧分支、注释及旧测试不能替代当前流程。
+> 当前处于科研闭环稳定性验证阶段，尚未完成正式发布加固。工作树有大量未提交改动，不得重置或覆盖他人改动。
 
-## 如何使用本文档
+## 1. 当前程序与版本
 
-新会话不需要先遍历整个仓库。建议按以下顺序接手：
+- 项目：`D:\MyGitProject\SciAide`。
+- 程序：`D:\MyGitProject\SciAide\build\bin\SciAide.exe`，Windows amd64。
+- 最近构建：2026-09-16 报告与产物引用展示修复版，60,002,304 字节，已覆盖原 EXE，未自动启动。
+- SHA256：`4564AE2031F24205AEE757E441C48813C18BDB29DA2C540C07BCC76846FB7588`；配套 `SciAide.exe.sha256` 已更新。正式前后端构建、Windows amd64 PE 校验通过，日志 `build/qa/report-citation-build.log`。
+- 版本标识尚未统一：前端 package version 为 `0.5.1`，`internal/bootstrap/application.go` 的 Version 仍为 `0.4.0`。不能仅凭启动日志版本判断是否运行最新 EXE。HTTP UA 已改为浏览器池，与应用版本分离。
+- 最新数据库迁移：`000088_research_discovery_task_cleanup.sql`。
+- 当前冻结协议：启动器 `research-starter-semantic-v6`；候选初筛 `dynamic-candidate-screening-v11`；入选证据综合 `selected-evidence-v5`；分析实现 `dynamic-implementation-v5`；报告 `dynamic-report-v5`；动态独立审查 `dynamic-independent-review-v4`（数据路线保留 `-implementation-v1` 后缀）。
+- 相关工具版本：workflow.search v7、workflow.import v4、workflow.sync v2、knowledge.search v6、research.full_text.read v3。全文权限新增 idp.nature.com，本轮验证使用新任务，不改写旧契约。
+- 新建任务采用当前协议；不强行改写旧任务的冻结 Schema、工具快照或历史引用。新保存的方案会同时比较定义和编译契约，契约变化生成不可变新版本。
 
-1. 阅读本文档，确认当前阶段、约束和未完成范围。
-2. 运行 `git status --short` 与 `git diff --stat`，确认本文档之后是否又有改动。
-3. 阅读 [`start.md`](../start.md) 中与当前任务相关的章节。
-4. 阅读 [`CHANGELOG.md`](../CHANGELOG.md) 的最新发布记录、`Unreleased` 和对应 [`docs/adr`](adr) 决策。
-5. 最后使用 `rg` 定向定位代码和测试，不要无目的遍历整个仓库。
+## 2. 科研主流程
 
-当文档与程序行为冲突时，可信度顺序为：当前运行行为、自动化测试、当前工作区代码、本文档、ADR、`start.md` 路线图。路线图描述目标，不代表功能已经实现。
+实际阶段由用户采纳的路线决定，不是所有任务都有相同数量的步骤，也不是每个课题都执行 Python。
 
-## 当前阶段
+1. 用户描述课题，宿主提供当前任务资料和可用 Skill 目录。
+2. AI 按需澄清研究方向、对象、目标和交付范围。信息充分直接设计路线；上传时机、文件绑定、依赖安装不作为方向问答反复询问。
+3. 用户采纳路线后冻结阶段、依赖、工具和 Skill 范围。需要数据但未提供时，在此处等待绑定文件，绑定后启动同一条路线，不重新选择路线。
+4. 文献路线执行检索、相关性初筛、材料确认、导入索引、可信证据综合；数据路线执行数据预检、方法综合/实现、环境准备和计算。
+5. 解释结果与局限、形成报告、独立审查，再经过确定性交付门禁。审查不是保证科学正确，也不因模型说“通过”而绕过宿主检查。
+6. 完成且未登记的交付可以自然语言咨询和协商返修。用户确认返修方案后重跑受影响阶段，重新审查；登记必须对应当前有效交付。
 
-- P0～P4.6 已完成：工程基线、聊天与 Agent Loop、权限和工具、MCP、多协议模型、Skill、项目附件与本地文档读取。
-- P5 已完成：项目知识库、FTS5/BM25、可选 Embedding 混合检索、可信引用、任务运维、解析诊断和固定语料评测。
-- P6.0 已完成：斜杠命令及运行时二级面板、手动压缩、聊天界面与流式渲染加固。
-- P6.1 已完成：可信 Artifact 核心、不可变版本、内容寻址对象、来源/引用快照和最小产物管理闭环。
-- P6.2 已完成：不可变派生 DOCX/PDF 导出、GB/T 7714-2015 与 APA 7 引用渲染，以及 Markdown/PDF/DOCX/XLSX/CSV 结构化预览。
-- P6.3 已完成：OpenAlex、Crossref、arXiv、PubMed、Europe PMC 和 Semantic Scholar 公共 Connector，固定 Catalog/Search/Fetch 工具面及统一网络治理。
-- P6.4 已完成：多源文献发现、保守去重、筛选记录、开放全文或披露型元数据附件，以及复用现有 Attachment/Knowledge 队列的本地知识化闭环。
-- P6.5 已完成：规范书目、字段级来源与修订历史、证据矩阵、审核状态和完整引用渲染。
-- P6.6 已完成：版本化无密钥项目归档与隔离恢复。原版本绑定式多 Skill 协调随后被 OpenScience 动态 Skill 路径取代，只保留旧 Run/归档兼容读取。
-- P6 已收尾：形成“公共数据库发现 → 筛选 → 本地知识化 → 可信引用 → Artifact → 正式导出 → 项目恢复”的完整科研闭环。
-- P7.1 已完成：受统一权限与审计管道约束的 PowerShell/CMD/Python 一次性本地执行、Windows 进程树清理和显式 Artifact 登记。
-- P7.2 已完成：新建虚拟环境位于 `<Workspace>/.sciaide/python/venv`，也可只绑定用户已有 venv；依赖锁和指纹、持久 Kernel、结构化结果、路径无关复现哈希、输出回滚、进程树内存治理，以及真实 CSV/TSV、XLSX 清洗/统计/绘图/脚本 Workflow 均已落地。旧版 `%USERPROFILE%/.sciaide/data/python-envs/<project-id>` 环境继续兼容读取，但新建不再写入全局目录。
-- P7.3 已完成：默认 Skill 派生转换、真实执行边界、资源物化和 311 项 v2 能力重审。
-- P7.4 已完成：版本化 Workflow Schema、静态编译、不可变 Tool 快照、模板和 Studio 编辑预览。
-- P7.5 已完成：可检查点恢复的 Workflow Run/Step 状态机、审批、人工决策、暂停/恢复/取消、重启恢复和副作用确认重试。
-- P7.6 已完成：参考科研 Workflow 已串联检索、筛选、知识、Citation、Python 分析、Artifact、Markdown 和 DOCX/PDF 导出；Run 详情同时展示冻结环境 Manifest 和产物图谱，全量门禁与正式 EXE 隔离验收已通过。
-- P8～P9 尚未开始。
+### 数据与计算
 
-## 已实现能力
+- 数据路线的报告与独立审查同时接收最初方法蓝图、实际方法实现（代码/参数/研究变更）、真实计算结果及产物快照，不再仅依赖解释阶段转述。对应 PromptVersion 追加 `-implementation-v1`；纯设计/文献路线不增加 Python 输入。
+- 报告与审查绑定输入时核对实际实现代码 SHA256 与成功 Python 执行记录；交付门禁执行前、登记交付时重新核对审查的全部直接依赖与当前上游快照（含研究约定、证据、方法、计算结果、预检、产物）。不一致时阻止使用旧审查交付并指出依赖字段；不是递归验证全部历史阶段，也不证明统计算法正确。
+- 本轮未增加人工问答、确认表单或并发 AI 调用；新增输入边仅对新创建的路线生效，不改写旧任务的冻结方案。
+- 支持最多 16 份 CSV/TSV/XLSX，不预设业务列名或强制用户套固定字段模板。
+- 预检检查文件及结构，不替代 AI 对文件角色、单位、关联键、缺失值、重复和未匹配记录的判断；XLSX 结构检查不代表所有工作表语义已验证。
+- 方法实现可声明最多 14 个额外产物，支持 csv/tsv/xlsx/json/md/png/svg/pdf；宿主分配输出位置，校验名称、格式、哈希与发布行为。
+- AI 自写 Python 的可修复错误最多连续自动修复 3 次，即初次执行后最多再执行 3 次。成功或用户显式重新启动修复链才重置计数，程序重启不重置。
+- 纯技术修复不固定要求人工确认；研究方法、参数、假设、局限或产物约定发生实质变化时须确认。代码语义等价不能仅靠元数据比较证明。
+- 环境权限、依赖安装、外部环境保护、独立审查与交付门禁仍有效。网络断流重试不计入 Python 修复次数。
 
-### 应用与数据
+## 3. 当前文献链路
 
-- Go + Wails + React + TypeScript 桌面架构，使用 Application / Port / Adapter 分层。
-- Project、Conversation、Message、Run、模型配置、MCP、Skill 和审计状态持久化到版本化 SQLite。
-- API Key 存入 Windows Credential Manager，前端和普通配置只保留掩码或引用。
-- 默认数据根为 `%USERPROFILE%\.sciaide`；用户可以让项目使用任意外部 Workspace。
-- 项目附件、解析缓存和知识索引跟随 Workspace，避免大体积科研数据固定占用系统盘。
-- Artifact 元数据保存在 SQLite；真实字节按 SHA256 存在 `<Workspace>/.sciaide/artifacts/objects`，版本一经创建不可更新。
+### 3.1 检索与来源适配
 
-### 模型对话与 Agent
+- Semantic Scholar 可读取启动进程环境变量 SEMANTIC_SCHOLAR_API_KEY，只向官方 HTTPS 主机发送 x-api-key，不落入查询 URL/来源快照。尚无来源密钥设置 UI；OpenAlex Key 和 arXiv 备用检索尚未接入。
+- OpenAlex 保存最多 12 个去重开放 PDF 位置，下载仍最多尝试 3 个且限现有可信域名，不放开任意存储库。新增位置只有新检索快照可获得。
 
-- 支持 OpenAI Chat Completions、OpenAI Responses 和 Anthropic Messages 三种协议。
-- 支持流式回答、停止、错误详情、安全网络重试、工具续轮、上下文预算和 checkpoint 压缩。
-- 支持模型级上下文窗口配置，普通模型元数据缺失时回退到 200K；达到阈值后保留可校验科研摘要和最近完整对话。
-- 思考强度采用 `low/medium/high/xhigh/max`，按协议和运行反馈做懒验证与逐档回退。
-- Responses 原生 reasoning、Anthropic thinking/signature/redacted thinking 和工具协议项按 Provider Turn 持久化并原样回放，避免工具续轮破坏协议顺序。
-- 聊天支持 JPEG、PNG 与 WebP 图片。当前模型首次收到原生图片内容块；HTTP 400/422 明确拒图，或 HTTP 200 正文返回 `[Unsupported Image]`/宿主不可用标记时，由宿主级“识图兜底”机制调用独立视觉渠道，仅将最小视觉事实回交原文本模型。内部渠道、像素传递和信任标签不会进入最终回答；图片内指令仍不能覆盖系统规则或用户请求。该机制不属于 Skill，也不会扫描普通 SciAide 对话模型。
-- 项目不携带内置视觉模型、端点或密钥，也不扫描普通 SciAide 对话模型。用户可在“模型与 API → 识图兜底”新增、测试、启停或删除自己的视觉渠道；渠道元数据进入 SQLite，自定义 API Key 仅进入 Windows Credential Manager。未配置渠道时，文本模型明确拒图后会提示用户添加多模态模型。
-- 只有 HTTP 400/422 且错误载荷明确表示仅支持文本/不支持图片时才触发回退；超时、鉴权、限流、坏图、格式和尺寸错误不会把模型误标为不支持图片。
-- Run 不设置固定模型轮数、累计工具数或总运行时长上限；仍保留用户停止、单次模型请求超时、单次工具超时和上下文保护。
-- 当前轮的思考、工具调用和执行步骤收敛为可展开的“已处理 + 耗时”；历史及已中断 Run 也可从对应助手消息按需加载处理记录，最终回答独立呈现。
-- 用户停止会将已有草稿、最近处理活动和工具结果保存为有界的终止上下文；下一条“继续”会在新 Run 中参考这些不可信历史数据，但不会恢复原模型流、未落库的隐藏推理状态或精确 Token 位置。
+- 默认 1 条、最多 2 条包含课题主要方向的完整检索式，不再拆成许多宽泛子问题分别搜。
+- 每个检索式从每个启用来源只取首页最多 20 条；不自动翻页、不在综合后循环补搜。来源数量不写死，原始结果上界随启用来源数变化。
+- 首轮合并去重后保留候选，由 AI 初筛；不能将单个来源的 20 条误解为全任务最多 20 条，也不能把首页已满当作必须翻页。
+- PubMed、Europe PMC 使用适配的布尔/字段查询；Crossref 使用书目文本与相关度排序；OpenAlex 使用适配的布尔/短语查询和相关度排序。实际 providerQuery、来源状态、原始数据及年份限制随查询保存。
+- 明确来源一致的越界年份可前置排除；缺年份或来源冲突保留核验，不以 arXiv 提交时间冒充正式发表年份。
+- Semantic Scholar 和 arXiv 有连接器，但此前真实接口测试受 429 限制，其质量与稳定性未验证完。不能把 429 断言为 IP 永久封禁，也不能把失败算成零相关结果。
+- 来源失败与学术证据不足分别记录。检索接口未实现跨请求来源级冷却；全文下载已有进程内冷却，均无稳定可用性保证。
+- 模型分析保持串行，没有为提速引入并发 AI 请求。10～20 分钟只是目标，没有严格时限保证。
+- 代码仍保留旧分页、补检索和分层处理相关结构；当前行为须沿 v11 的实际分支核对，不能只看旧常量或提示词判断新任务会自动补搜。
 
-### 缓存与用量
+### 3.2 相关性初筛与用户确认
 
-- 三协议使用稳定追加式前缀：Chat Completions 依赖供应商前缀缓存，Responses 使用会话级 `prompt_cache_key`，Anthropic 使用原生 `cache_control` 断点。
-- 每个逻辑模型请求写入一条最终请求记录；内部重试不会重复记账。
-- 同一 Agent 轮次中的图片能力探测、识图兜底请求和主模型回答使用不同请求 ID，分别展示真实模型、状态、耗时和 Token。
-- 成功请求记录供应商返回的输入、缓存读取/创建、输出、推理、首 Token 和耗时。
-- 失败、超时和用户取消记录状态码与有限错误详情，取消映射为 `499`；失败记录为零 Token，不参与 Token 与缓存命中率聚合。
-- 用量窗口支持今天、近 7/14/30 天、全部、自定义范围，以及当天分钟级时间筛选、状态筛选和请求详情。
+- AI 读取候选题名和来源摘要，提交相关性判定、简短理由及可定位原文依据，不要求初筛就填完整研究设计/人群/干预/对照/结局表。
+- 分开记录保留候选与建议导入：
+  - `direct`：直接相关，默认建议导入。
+  - `verify`：有直接匹配线索但需要核验，默认建议导入核验。
+  - `background`：背景保留，不默认导入。
+  - `exclude`：排除并记录原因。
+- 无结果研究方案、泛综述、更正、复合干预等按实际用途判断，不能因为可能将来有结果就作为直接效果证据。
+- 初筛完成后宿主汇总建议，用户确认选材；不再在确认前重复请求全局 coverage、详细证据提取或补检索模型循环。
+- 用户可调整建议。推荐及导入最多 100 篇，候选总数可以更多；不静默丢掉超过单批容量的候选。
+- 原文摘录必须能匹配对应来源；有限排版规范化不能改科学含义，原始模型输出与修正审计保留。
+- “建议导入”不等于证明有效、独立试验或已完成全文评估。
 
-### 工具、权限与 MCP
+### 3.3 摘要优先导入
 
-- 所有内置和 MCP Tool 都经过统一 Registry、JSON Schema 校验、PolicyEngine、ToolExecutor、持久化和取消链路。
-- `Plan` 模式读取当前 Workspace 及其子目录无需确认；越界读取、写入和其他工具调用按策略请求用户确认。`Full Access` 放行已注册且通过边界校验的工具。
-- MCP 支持 stdio 与 Streamable HTTP、常见 `mcpServers` JSON 导入、能力发现、后台隐藏子进程、批量连接和应用退出清理。
-- MCP 与 Codex 一样区分宿主外层超时：启动和首次能力发现固定为 30 秒，`tools/call` 按 Server 配置且默认 300 秒；工具参数中的页面加载超时由 MCP Server 自己处理。
-- `/mcp` 展示并控制实际 Server 连接状态；保存或测试配置不会形成长期连接，当前需在配置页或 `/mcp` 显式连接，连接后工具才注册，应用退出时统一关闭。
+- 单篇全文最多 3 个入口共用 45 秒获取预算（含下载排队），不再每入口重新计时；内部预算耗尽可在 auto 下留警告并回退，父请求取消/超时仍停止。全部入口不可用时保留各入口原因，不只保留最后一个。安全/本地保存错误不因此降级。
 
-### P7 本地执行、Python 与 Workflow
+- 返回 text/html 或 application/xhtml+xml 明确视为全文不可用，不解析为证据；可继续备用位置，auto 全部不可用时降级题录并留 warning，显式 full_text 仍失败。伪装 PDF 的坏内容、大小/安全校验和本地保存错误仍不降级。
 
-- 注册 `builtin.shell.execute` 与 `builtin.python.execute`。Shell 支持 PowerShell/CMD；Python 支持内联 `code` 或当前 Workspace 的 `scriptPath`，并固定使用 `-I -u -X utf8` 与参数数组。
-- 两个工具均为高风险、非幂等，声明 Workspace 读写与 `process.execute`；Plan 模式逐次审批且审批卡默认展示完整参数、运行时、工作目录和 1～300 秒时间限制，Full Access 仍不能跳过 Registry、Schema 和路径校验。
-- 工作目录、脚本和最多 32 个声明产物受 PathGuard 约束，拒绝绝对路径、`.sciaide` 及 symlink/junction/reparse point。只有成功退出且本轮内容新增或改变的显式声明常规文件自动登记 Artifact；失败、中断、旧内容和未声明文件不会登记。
-- 子进程只继承核心环境 allowlist，排除名称包含 `KEY`、`SECRET`、`TOKEN` 的变量；Shell 不加载用户 Profile。解释器由宿主 PATH 探测，模型不能传入任意解释器路径。
-- Windows 使用挂起启动、Job Object 纳管后恢复和 kill-on-close；超时、用户取消、应用退出以及根进程正常结束后都会清理整个子进程树。stdout/stderr 分别有界保留 64 KiB，达到上限后继续排空并保存总字节数及 SHA256，管道另有 2 秒 drain timeout。
-- `process_execution_audits` 保存 ToolCall/Run/Project、工具、解释器路径/版本/SHA256、脚本路径/SHA256、内联命令 SHA256、工作目录、timeout、环境变量名称、PID、退出码、终止原因及输出统计；启动恢复将遗留活动记录标为 `app_shutdown`，项目归档会重映射审计关系。
-- 该能力是经用户授权的本机进程执行器，不是强安全沙箱。获准代码仍具有当前账户权限，可能主动访问 Workspace 外绝对路径或网络；Workspace PathGuard 不等价于操作系统文件系统隔离。
-- 网络授权采用默认允许策略：联网 Tool、Shell、一次性 Python 和项目 Kernel 的工具调用一旦获准执行，即可直接发起网络请求，不再要求逐域名审批、白名单或单独网络配置。Plan 仍确认整个高风险工具调用，Full Access 自动执行；默认联网不会向子进程注入应用密钥，依赖安装仍因改变项目环境而单独确认。
-- 每个项目可从探测或用户选择的基础 Python 3 在 `<Workspace>/.sciaide/python/venv` 创建独立虚拟环境，也可绑定已有 venv；数据库保存环境归属、解释器身份、锁定包、`pip freeze` SHA256 和环境指纹。外部 venv 只验证和运行，托管环境的创建、重建、删除和中断恢复使用项目串行锁及暂存/原子替换。
-- `builtin.python.environment.install` 是改变环境的独立高风险 Tool，安装声明包后重建并冻结完整依赖；Skill 不能静默执行 `pip install`。未检测到 Python 时，管理页明确提示安装 Python 3 或选择现有 `python.exe`，SciAide 不自动下载解释器。
-- `builtin.python.kernel.execute` 使用项目环境和项目级串行 Kernel；变量与导入只在 Kernel 生命周期内持续，可停止、重启并在 15 分钟空闲后回收。结果包含 stdout/stderr、JSON 值、表格、异常和最多 16 张 Matplotlib PNG。
-- Kernel 输入必须是当前 Workspace 常规文件并在执行期间设为只读；声明输出只能新建在 `analysis-output/`。普通输出与 Matplotlib 图片先写入 `.sciaide/tmp/kernel-<UUID>/`，验证后作为单一批次无覆盖发布；外部同名文件抢占会令本批次失败，并且只回滚文件身份仍属于本次执行的输出。环境创建、重建、安装、删除与同项目 Kernel 共用串行锁，异常、取消、超时、越界或输入变化不会留下半产物，`MemoryError` 后淘汰 Kernel。
-- Kernel 默认使用 1 GiB Windows Job Object 进程树内存预算；代码、结构化输入、文件输入、环境和输出/异常快照形成稳定 `reproductionSha256`。总复现哈希按声明顺序使用内容摘要而不绑定易变文件名，完整路径到 SHA256 的映射仍独立保存在 provenance；该预算是进程资源治理，不是安全沙箱。
-- 内置“数据探索与可复现分析”接受一份 CSV/TSV，用户可直接选择文件、用自然语言填写研究目标，并选择数据概览、数据质量检查或数值分布概览；固定审计脚本生成清洗 CSV、字段统计 CSV、SVG 图、方法说明 Markdown 和可独立重放 `.py`。支持 UTF-8/BOM/GB18030 和标准 CSV 引号换行，限制 20 万行、256 列、200 万单元格及单元格 10000 字符，清洗 CSV 会转义公式型单元格。
-- 内置“XLSX 清洗与描述统计”接受一份 `.xlsx`，用项目 Kernel 和 Python 标准库读取首张 Sheet，生成清洗 CSV、数值描述统计 CSV、均值 SVG 和可独立重放 `.py`。XLSX 外层拒绝不安全 ZIP 路径、超大条目、超过 2000 个条目和超过 256 MiB 的解压规模，脚本内部使用与 CSV 同级的行列/单元格限制及公式转义；不需要默认安装 pandas/openpyxl。
-- 所有显式 `fileKind` Workflow 输入在 Run 创建前通过 PathGuard 打开并复制到 `research-inputs/<名称>-<完整SHA256>.<扩展名>`；Run 输入哈希记录冻结路径，工具执行前再次核对文件名摘要和实际字节。源文件不修改，外部 symlink/junction、`.sciaide`、目录、路径逃逸、格式伪装、二进制 NUL 和被篡改快照均失败关闭。旧内置分析方案通过精确定义哈希获得兼容输入向导；旧版本已创建但未冻结输入的 Run 不会悄悄读取可变源文件，需重新发起。
-- Workflow 是“科研模式”内部的可选确定性执行能力，普通聊天继续使用 Agent Loop。主工作区提供“自由对话 / 科研模式”显式切换；文献发现、知识库、Python 环境与科研产物是项目级公共能力，在两种模式的顶部均可进入。科研模式采用中性浅色实验工作区、石墨标题带和电蓝/青色状态强调，正文、阶段、按钮和运行证据使用可读字号；选择参考方案时保留稳定选中态并明确提示“预览不等于运行”。采用方案后自动进入连续任务配置：选择数据、填写目标/方法、检查 Python 状态、启动并处理授权、查看进度，完成后可直接打开科研产物。JSON、Tool、Schema 和原始快照只在高级设置或折叠技术记录中展示。底层仍支持不可变版本、运行历史、审批、候选/Citation 人工选择、暂停/恢复/取消和事件审计；任务详情从已提交 Step Output 推导冻结环境 Manifest 和 Citation/分析产物/报告/正式导出的产物图谱，不从当前电脑状态猜测历史证据。
-- Workflow Port 使用显式 `fileKind`、`control`、`minItems/maxItems` 描述输入能力，运行时和前端都不再按 `input_paths`/`analysis_request` 名称猜测通用自定义方案。保存、文件选择、启动、审批、人工决定和重试使用同步事务锁；方案列表、版本、Run、轮询和 Python 前检使用独立请求门禁，旧响应、旧错误和旧 `finally` 不会覆盖当前选择。
-- Workflow 创建前拒绝循环、类型不匹配、未知/变化 Tool、路径逃逸、嵌套密钥和超大图；每个执行节点仍进入现有 ToolRegistry、PolicyEngine、Approval、ToolExecutor 和 Artifact 管道。
-- Runtime 只自动恢复未提交的幂等步骤；已提交步骤不重放。非幂等步骤在崩溃后进入 `outcome_unknown`，必须由用户确认副作用后才能重试；人工决策和审批并发提交只有一个成功。
-- 成功 ToolResult 在落库前把声明产物冻结到 `.sciaide/artifacts/objects/<sha256>`，并校验工具声明的大小、MIME 与 SHA256；Artifact 登记或应用重启只能读取该不可变对象，不会重新采用 Workspace 路径中的新字节。
-- 参考模板实现“公共数据库检索 → 人工筛选 → 导入材料 → 知识索引 → 本地证据检索 → 人工 Citation → Python 分析 → CSV/SVG Artifact → Markdown 报告 → DOCX/PDF 导出”，沿用 P6 不可变来源链。
+- `auto` 有可用摘要时直接生成明确标注非全文的材料，不先逐篇下载 PDF；首选记录缺摘要时可采用聚合来源记录中的已有摘要。
+- 无摘要才尝试固定可信来源的开放全文。403/404/408/429/5xx 或网络超时可降级为题录，持久记录 warning 和实际 importKind。
+- 显式 `full_text` 模式不降级。取消、伪 PDF、越界来源、内容或大小校验失败不能当作成功。
+- 批量导入遇单篇材料获取失败继续其他候选，最后汇总成功/失败篇数及具体原因；有未完成项时阶段仍失败，不静默忽略。
+- 成功导入持久保存，重试复用可用材料。已导入摘要后可单独获取开放全文，获取失败保留原摘要附件与状态。
+- 索引同步必须确认本次材料全部就绪，不能仅下载成功就进入可信证据分析。
+- 降级只解决获取容错，不会把缺摘要题录变成可支持研究结论的证据。
 
-### Skill
+### 3.4 提取可信证据与综合
 
-- 当前生产路径是 OpenScience 风格动态 Skill，不再使用旧 `$skill-id`、关键词 trigger、项目版本绑定、优先级/回滚或依赖/冲突预协调。旧 P4 生产实现已收缩为历史 DTO、严格哈希解码/渲染、只读加载、项目归档恢复兼容和一次性退休包归档；不能再创建旧安装/选择状态。
-- OpenScience 默认目录包含 311 个 Skill、`LICENSE`/`NOTICE` 在内共 1,624 个文件和约 20.75 MB 内容，只读嵌入 EXE；逐文件 Manifest 固定 OpenScience `2.0.31` 的路径、大小和 SHA256。默认内容不写入 `%USERPROFILE%\.sciaide`，用户可在 Skills 管理页通过只读目录树查看当前生效包，无需从 EXE 解包。
-- 目录来源优先级固定为 `project > user > installed > default`。Project 扫描 `.openscience/`、`.synsc/` 及配置中的相对 `skills.paths`；User 与 Git Installed 使用独立目录；当前不扫描 `.claude/skills`。
-- 每个新 Run 根据当前用户消息对 `name/category/description/tags/routing-aliases` 评分，最多召回 20 个、向模型提供 16 个候选和必要的分类/科研路由提示；模型负责最终语义判断，Skill 正文不会预先占用上下文。
-- 模型调用 `builtin.skill.load` 后才渐进取得正文。第一次成功加载会将完整正文、来源、分类、内容 SHA256 和全包 SHA256 保存到 `run_dynamic_skills`；同一 Run 后续分页、工具续轮、审批恢复和压缩均复用该不可变快照。
-- `/skill` 只列 `entry=true` 的动态 Skill，选择后插入 `Use the <name> skill:`；显式选择会要求模型先无旁白调用 loader，再处理用户请求。
-- 短 Skill 正文一次完整加载；长 Markdown 先返回最多 256 个互不重叠的章节索引，再以稳定 `section-N` 加载所需章节；无标题长文使用有界分页兜底。两种方式都保存完整正文与 SHA256 的 Run 快照。
-- `builtin.skill.resource.list` 列出当前 Run 已加载 Skill 的附属资源路径、reference/asset/script 分类、大小、媒体类型和文本可读性；`builtin.skill.resource.read_text` 再读取规范相对路径 UTF-8 文本，并要求当前包仍与 Run 哈希一致。二进制 asset 可发现但不会伪装成文本，脚本只作为文本读取，Skill 机制没有脚本执行入口。
-- `allowed-tools` 在加载时与实时 Tool Registry 做能力诊断，明确显示已匹配、MCP 提供或缺失；它不改变工具自身的权限要求，也不会自动执行工具。
-- 新 Run 将请求与 Skill 元数据对称映射到同一中英文科研概念，执行常见英文词形归一化并排除明确否定的任务概念；未知领域可在 frontmatter 通过 `routing-aliases` 声明双语说法。当前消息、最近三条用户任务和同会话最近真实加载的 Skill 最多召回 20 项，再向主模型暴露 16 项重排；最近 Skill 只用于连续性召回，不自动加载。显式选择始终置顶并进入审计；首次生成的路由提示以 SHA256 绑定到 Run，工具续轮及审批恢复均复用同一不可变快照。
-- 每个首次路由同时结构化保存候选分数、当前/最近分量、否定、连续性来源、显式选择、短名单、输入 SHA256 和候选不可变哈希；读取时关联实际 `run_dynamic_skills`，项目级指标可统计实际加载率和短名单加载率，数据库篡改会失败关闭。
-- 320 条版本化路由评测覆盖中文、英文、中英混合、否定和无需 Skill；当前 Recall@16 为 `98.5%`、MRR 为 `0.834`，中文/英文/混合召回分别为 `99.1%`/`97.2%`/`100%`，无关请求误召回及否定误命中均为 `0%`。
-- 管理页支持搜索、分类/来源/能力筛选、允许加载开关、全开/全关、刷新、User Skill CRUD 和 Git 安装/卸载。P7.3 v2 能力矩阵为原生可用 4、需要本地依赖 200、需要外部服务 87、当前不可用 20、未审计 0；Git 安装固定 commit SHA，执行路径/体积/链接/危险模式审查，警告必须针对同一 SHA 二次确认。
-- 238 个执行型默认 Skill 明确要求“资源物化 → 用户/模型检查 → 正式 Python/Shell Tool → 正常审批”，并指向单独审批的项目依赖安装；同步转换会拒绝自动注入上游凭据、自动计费和不存在的托管 API，未知工具只披露为用户配置的 MCP/API 缺口。
-- Default、Installed、User 与 Project Skill 均可查看当前有效包的完整目录树并逐文件浏览；UTF-8 文本显示完整只读源码，二进制或超过 2 MiB 的文件只显示路径、MIME 与大小。UI 只接收规范包内相对路径，不暴露磁盘绝对路径；磁盘包哈希漂移会拒绝返回混合内容并要求刷新目录。
-- 旧 `internal/app/skill`、`internal/skillpkg` 与 `run_skill_contexts/run_skills` 仅用于历史 Run、旧项目归档和数据库兼容；新 Run 不再进入该选择路径，旧快照保持原字节。Artifact provenance 合并旧/新来源并用 `origin/dynamic` 区分。
+- 摘要筛选保留原始索引 Title，不再把 Abstract 展示标签写入证据快照。发布时仅对旧 knowledge.search v6、perDocument=true、明确文档范围内的 metadata Markdown、空索引标题/Abstract 快照标题这一已知投影作限定识别；仍核对成功工具快照、任务归属、编号、哈希、定位和原文，历史记录不改写。
+- evidence_screening 在引用选择之前也从本阶段已完成知识检索依赖中绑定引用；分批 coverage 的精简候选必须匹配源快照，不能凭任意编号签发。Chat 标记在提交预检、完成和确认时先还原 Workflow 标记，避免合法候选被判未签发。
+- 内部科研回答优先展示结构化结果的摘要，纠错前言及原始 JSON 放在默认折叠的“技术详情 · 原始阶段回复”；未绑定编号仅留原始详情，不显示伪可点击引用。已有绑定引用仍可打开证据，自由对话不变。旧消息不补写引用记录。
+- 完整报告和历史交付按该次 outputs 的已发布 version.citations（未发布时为 outputs.citations）展示编号；产物预览只绑定所选版本的 citations，防止切换版本时旧正文匹配新引用。详情显示冻结题名、原文、定位和已有 DOI/URL 入口；未知标记保留明确提示，不借用其他任务或新版快照。只改显示，不改原稿、哈希或导出文件，无需重跑已完成任务。
 
-### 附件与知识库
+- knowledge.search 的科研 perDocument 分支读取经过作用域和哈希验证的完整索引块，不使用界面约 900 字符的展示 snippet 冒充完整依据。
+- 元数据材料优先 Abstract 区段、过滤题录和来源列表；每文档最多 3 块，超过 85 份时最多 2 块，总量不超过 255，并明确有限读取。
+- 初始分析材料不超过 120 KiB 时一次整体分析；超过则按实际字节分组，保留输入哈希及已完成分组，再综合。全局仍有 220 KiB 安全边界，不无限增大上下文或丢弃原文来伪装成功。
+- 每文档保留简短发现、未使用原因或局限，不机械逐篇发一个模型请求，也不再为每条摘录重复填写完整评估。
+- 推荐引用的 supportingQuote 必须逐字来自对应已签发 quote；只有题名、作者、DOI 的题录不能支持效果结论。
+- 摘要、全文片段、仅题录分别标记；文件是 PDF 不等于通读全文，多篇报告不等于多个独立试验。
+- 证据充分且推荐 proceed 时自动采用已签发引用并留审计；有限证据或范围变化仍需确认，不自动宣称达到验收。
+- 报告、方法和独立审查保留实际检索日志、来源状态、候选书目信息，避免因上下文遗漏被误判为没检索。
 
-- 聊天附件默认只供当前对话读取，不会自动加入知识库；知识库窗口负责显式导入、移除、重试和重建。
-- 本地文档解析支持 PDF、DOCX、XLSX、TXT、Markdown、CSV 和 TSV；聊天图片支持 JPEG、PNG 和 WebP，并按经过校验的真实内容确定 MIME 类型，因此 WebP 即使使用 `.jpg` 文件名也能安全导入；图片不进入文档文本解析、`builtin.document.*` 或知识库索引，文档工具误调用不会改变图片就绪状态。
-- PDF 保留页码并清理碎片换行、断词和重复页眉页脚；DOCX 保留标题层级、章节路径、列表和表格行。
-- 知识库默认使用项目级 FTS5/BM25；配置 `/v1/embeddings` 后构建独立向量影子索引并使用 BM25 + 向量 + RRF 混合检索，Embedding 失败自动回退 BM25。
-- 查询向量缓存在当前项目的 `index-vN.db` 中，按索引版本隔离且不保存查询明文。
-- 引用绑定 Run、IndexVersion、Chunk 和原文件 SHA256；最终回答只展示经过证据快照校验的可点击引用。
+### 3.5 按需全文核验及现有限制
 
-### 文献发现、书目与证据
+- 成功全文解析结果可在同一进程、同一任务和候选来源快照内复用，保留 SHA256/定位信息；最多 16 篇、估算 8 MiB、单篇 2 MiB、30 分钟有效，读取仍先验证任务归属及入选状态。不是磁盘 PDF 缓存，也未实现新的按页读取工具。
 
-- 内置 OpenAlex、Crossref、arXiv、PubMed、Europe PMC 和 Semantic Scholar 六个公共 Connector；这些主要使用公开、免 Key 或可选 Key API，不代表与文献提供商存在商业合作。
-- 模型只看到固定的 `builtin.research.catalog/search/fetch` 工具。Connector 固定来源 Host，共享取消、30 秒超时、限速、有界重试、8 MiB 响应上限、缓存和来源错误分类；单一来源失败不会伪装成零结果。
-- “文献发现”支持项目级多源查询、部分失败、保守去重、来源快照、纳入/排除/待定、排除原因和用户笔记。只有显式纳入后才下载开放全文或生成明确披露为元数据/摘要的 Markdown。
-- 每个候选具有规范书目及作者顺序、年份、题名、载体、卷期页、出版社、DOI/PMID/PMCID/arXiv/OpenAlex ID、URL 等字段；每个观察值保留来源和 SHA256，冲突可选择来源，用户修改保留逐字段修订历史。
-- 证据矩阵支持研究问题、方法、样本/数据集、主要结论、局限和笔记。研究事实必须绑定当前书目的本地知识 Chunk；只有用户笔记可无证据，全文与元数据/摘要以不同证据等级展示。
-- 模型证据只能从 `pending` 开始，由用户核验、拒绝或重新置为待复核；审核只改变状态，正文、provenance、证据等级、Quote、SHA256、定位及历史来源快照受应用校验和 SQLite 触发器双重保护。
+- 新工具 `builtin.research.full_text.read` 仅供当前任务已纳入候选的定向核验；模型指定 candidateId 和具体问题关键词。
+- 临时下载、解析 PDF，最多返回 6 个相关解析单元、总计 10000 字符，标记 selectionLimited、parserTruncated 和 fullTextRead=false。
+- 导入结果提供 fullTextAvailability；无受支持入口的材料提示 AI 不要调用。已有 PMCID 可构造固定 Europe PMC 入口；Crossref/OpenAlex 的 HTTPS Nature/JAMA 链接受固定域名校验支持，不代表已验证在线可下载。
+- 全文下载串行，等待可取消；每篇最多 3 个去重入口，仅获取不可用类错误尝试备用入口。伪 PDF、安全校验失败不降级或换入口掩盖。
+- 429/5xx 触发宿主内存中的站点冷却，默认 5 分钟，尊重最长 24 小时的 Retry-After；403/404/408 等按 URL 缓存，超时缓存 1 分钟。缓存有界且重启失效，不是持久全文缓存。
+- 获取不可用返回 status=unavailable、具体 reason、fullTextRead=false；程序异常仍失败并保留原因。单篇一次仍是提示约束，不是全阶段硬性调用去重。新内容不自动签发引用。
+- 工具不覆盖原附件/索引、不签发新 [K-...] 引用。工具读到的新增内容可用于发现问题，但超出原签发依据的结论仍须标为待补证，不能自动升级成已支持结论。
+- 尚未实现从临时全文核验到重新索引、签发引用、刷新依赖的完整闭环，也未保证关键词选段找到所有相关表格或结果。
 
-### 本地命令与界面
+## 4. 工具、上下文与错误处理
 
-- 聊天框输入 `/` 可使用 `/mcp`、`/skill`、`/knowledge`、`/compact`、`/model`、`/reasoning`、`/permission`、`/status`、`/usage`、`/new` 和 `/help`。`/reasoning` 与 `/permission` 直接持久化当前会话设置；`/status` 只读汇总模型、上下文、checkpoint、MCP、Skill、知识库和识图兜底，不创建模型 Run。
-- 本地命令不创建聊天消息或模型 Run；未知命令仍可作为普通文本发送。
-- 命令面板支持多级键盘操作和点击外部关闭；`/compact` 显式显示执行中、成功、部分完成或失败。
-- 流式文本按浏览器动画帧合并，历史消息隔离重绘，降低 WebView2 长对话掉帧。
+- 原生 HTTP 传输统一接入 `internal/browserhttp` / req v3.54.0：Chrome120、Firefox120 TLS/H2 预设；Edge 使用库支持的 Edge85 TLS + Chromium H2 组合，不宣称与最新版 Edge 或 curl_cffi 完全等价。UA 已对应调整，主机稳定选择，Nature IDP 与正文同一配置；保留原客户端代理、超时、取消及流式语义，外部进程不受控。
+- Nature 下载使用单次隔离 CookieJar，允许指定 authorize/transit 路径且 redirect_uri 必须等于原 PDF；最终仍校验 MIME/PDF。curl 曾成功下载，但本轮真实 Go 指纹客户端返回 text/html，尚未证明线上成功，不能标记为全文获取已解决。无挑战页面自动执行能力。
 
-### 科研产物
+- 程序原生 HTTP 请求统一使用 `internal/httpua` 的 Windows Chrome/Firefox/Edge UA 池，按主机稳定选择；覆盖模型请求/列表、Embedding、视觉备用模型、文献检索/下载、MCP HTTP，最终覆盖自定义 UA，其他自定义头不变。不伪造完整浏览器环境，不改变限流重试；Python/pip/Git/外部 MCP 进程及 WebView 自身网络不受此策略控制。浏览器版本字符串需后续维护。
 
-- 完整助手回答可显式保存为 Markdown Artifact，并快照 Run、Message、模型配置名称、模型、协议、所用 Skill 和实际采用的可信引用。
-- Workspace 文件只在用户显式登记时进入产物库，可继续登记为现有 Artifact 的不可变新版本；不会自动扫描整个 Workspace。
-- 成功 ToolResult 只有显式声明 `workspacePath` 才自动登记产物；现有 `ArtifactRef.ID` 附件/知识来源语义保持不变，启动恢复使用 `tool_call_id + ordinal` 幂等键。
-- Tool 自动登记仍受原调用的 Workspace 权限资源范围约束；只有沿用 P5 Run/哈希/项目校验链的知识证据会显示为可信引用，外部 Tool 自报 Citation 不会自动取得可信状态。
-- 项目级产物窗口支持列表、文本/图片有界预览、版本历史、来源摘要、完整性检查、下载、重命名、回收站和恢复。
-- 删除 Conversation 会清除 Lineage 的活外键，但不会删除 Artifact；来源 ID、模型、协议、Skill 和引用内容的不可变快照继续保留。
-- 每个 ArtifactVersion 可派生 DOCX 或 PDF；导出记录独立、不可更新，不覆盖原始对象也不推进当前版本。相同版本、格式、引用样式和生成器版本幂等复用，并对生成字节不一致明确报错。
-- DOCX/PDF 从经过 SHA256 复核的临时快照生成，生成后重新打开校验，再写入内容寻址对象；下载目标已存在时拒绝覆盖。
-- Markdown 通过 Goldmark GFM AST 转换标题、段落、列表、引用、代码和表格；PDF、DOCX、XLSX 和 CSV 复用本地结构解析器。图片和不可提取二进制不会伪装成研究文档。
-- 无可读正文或超出正式解析/表格上限的源文件会在对象发布前拒绝导出。宽表按最多 8 列分段并在后续分段重复首列；DOCX 重复表头，PDF 对超高单元格分页切片且验证首尾文本没有丢失。
-- 当前表格布局生成器为 `p6.2-v2`；旧 `p6.2-v1` 派生文件保持不可变并可继续下载，同一生成器版本内仍执行确定性字节校验。
-- 正文只有与不可变 Citation snapshot 匹配的 `[K-...]` 标记才会按 GB/T 数字标号或 APA 形式渲染；伪造标记显示为未验证引用。新 Citation 同时快照当时的规范书目和证据等级，已知作者、年份、期刊和 DOI 会进入正式引文，缺失字段仍明确披露且不推断。
-- PDF 内嵌固定版本的 Droid Sans Fallback 字体及 ToUnicode 映射，不依赖系统字体、Word、LibreOffice、Chrome 或联网服务；DOCX/PDF 对相同输入产生稳定字节。
-- 科研产物窗口可为任一历史版本选择 DOCX/PDF 与 GB/T/APA，查看并下载该版本的历史导出；Markdown、PDF、DOCX、XLSX、CSV/TSV 以标题、段落、代码和有界表格块预览。
+- Wails + Go + React/TypeScript；支持 Chat Completions、Responses、Anthropic Messages、MCP、OpenScience Skill、本地 Python、知识库及报告导出。
+- Registry、Schema、权限审批、幂等与审计是执行边界；资料正文、Skill、MCP 输出和模型回复都是不可信输入。
+- 内置工具模型名称移除 builtin. 并将点号改为下划线，例如 knowledge_search、research_full_text_read，不附加哈希。定义、宿主说明和可投影历史共用映射，原生签名/加密内容不改写。
+- 名称精确匹配优先；当前保留“已声明名称多一个尾下划线”的有限修复，不支持近似拼写、双尾下划线、旧哈希缺损等宽泛猜测。未知名称拒绝执行。
+- 新动态阶段使用 resource_open/search 的宿主签发 actionId 读取任务资料和 Skill；执行复核 Run/任务/阶段/目录/契约绑定，不让模型自由猜路径或越权。
+- 当前 Run 的目录是快照；资源菜单有界分页，已读账本抑制重复读取，浏览 Skill 目录不代表实际加载。
+- 资源探索最多 12 轮（Skill discovery）或 40 轮（冻结执行），随后独立请求 submit_stage_result；总安全上限 48 轮。单纯进度文本不会无限续写。
+- 结构化提交只开放提交函数，按冻结 Schema、Skill 和业务规则校验；同一上下文最多纠正两次。兼容等价表示，不补造缺失语义；伪工具文本不会执行。
+- 证据综合阶段的动态 Schema 加工保持幂等，重复准备/完成/恢复不会重复添加 documentAnalyses 必填项。编译、调用模型前、提交及完成时检查宿主输出契约；重复 required、明确非对象根契约、封闭对象要求未声明属性等错误归类为 WORKFLOW_AI_SCHEMA_INVALID，不消耗模型内容纠正或整阶段自动重试。有效 Schema 下的模型内容错误仍保留原纠正机制。
+- 模型请求/断流错误按既有分类最多额外重试 5 次，取消可中断等待；明确 stream_read_error 可重连，认证/参数/上下文等永久错误不能无限重试。
+- 重连只重发当前请求，不重复已完成工具副作用。工具失败、供应商失败、结构提交失败和 Python 错误必须分别诊断。
+- 科研宿主输入上限 262144 字符，普通用户输入 100000；另有实际模型上下文预算，修改配置不代表当前请求已经换用新预算。
+- 上下文压缩保留审计与工具配对；特定绑定科研资源的完整历史超预算时可转成独立协作请求继续，但协议损坏或无法安全压缩时仍停止，不静默丢历史。
 
-### 项目归档与恢复
+### 缓存与页面性能
 
-- 左侧项目区可将项目导出为版本化 `.sciaide-project`，并从归档默认恢复为新 ID 的托管项目；原项目和归档文件不修改，同一归档可以多次独立恢复。
-- 归档包含一致性项目 SQLite 快照、附件、文档缓存、知识索引、Artifact 原件/正式导出、研究候选、规范书目、证据和不可变历史关系；成功 ToolResult 已冻结但尚未完成 ArtifactVersion 登记的内容对象也会纳入 Manifest，恢复后可按同一 SHA256 补登记。所有文件由 Manifest 固化路径、类型、大小和 SHA256。
-- 归档不包含 API Key、模型 Header、MCP Server/Secret、识图渠道、Embedding 凭据/查询向量、权限授权、待审批、Skill 包源码或可重建临时文件。历史模型仅恢复为禁用占位且 Conversation 回到 `Plan`；Skill 仅在本机存在完全匹配哈希时重新绑定。
-- 恢复在隔离暂存中校验 ZIP 路径、碰撞、设备名、符号链接、条目数、大小、压缩比、Manifest、SHA256、SQLite 表/迁移/外键和项目关系，再重映射项目作用域 ID。Workspace 与导出文件使用操作系统原子 no-replace 发布，不覆盖竞态出现的目标。
-- 数据库合并失败会回收已发布 Workspace；启动恢复会处理 marker、清除中断暂存并把未入库的孤立 Workspace 移入可恢复 trash，不暴露半恢复项目。
+- 固定规则与动态资源菜单、账本、进度分开；只对宿主标记的动态 ContextTail 调整投影，不把系统约束降级为用户消息换缓存。
+- Responses 动态状态放在原生调用/结果之后；Messages 使用固定 system 块缓存断点，但动态 system 仍在历史之前，不能承诺缓存完整历史；Chat Completions 保留消息顺序。
+- 网关拒绝缓存参数时按既有逻辑降级。缓存受模型、供应商、请求前缀和路由等影响，没有新版真实命中率保证。
+- 活动轻量投影、字段级条件补丁、有界前端基线缓存、后台暂停轮询、惰性技术详情及 Markdown 复用减少开销。
+- 普通工具卡片默认收起，pending/running/completed 状态变化不强制展开；新的授权请求自动展开一次，同一请求刷新不覆盖用户手动折叠。
+- 流式片段按 100ms 或 4096 字节合并，结束/失败发完尾部；完整原文及模型审计保留。
+- 局部基准和隔离 Chrome 检查不能证明真实 WebView2 长时间运行不再 OOM，历史驻留和整机 CPU 仍需实测。
 
-## 当前限制与未完成项
+## 5. 任务隔离、文献发现与时间线
 
-- 未内置 OCR；扫描型 PDF 只显示缺少文本层的诊断，需用户先用外部 OCR 处理。
-- MCP `ImageContent` 仍只保留产物元数据和文本占位，不会作为模型原生图片内容块回传；当前图片输入仅来自聊天附件。
-- 暂不支持旧版二进制 `.doc` 和 `.xls`；支持 `.docx` 与 `.xlsx`。
-- 引用仅使用生成当时的不可变规范书目快照；用户自定义参考文献模板、完整 CSL 引擎和图表原位嵌入不属于 P6 范围。
-- 扫描 PDF、图片和不可提取二进制不能直接转换为正式文档；需要先产生可验证文本或 OCR 结果。
-- 当前项目 Python 仅支持 CPython 3 虚拟环境，尚无 R/Julia、Conda、容器或 GPU 资源调度；1 GiB Kernel 内存预算不是完整 CPU、文件系统或网络沙箱。
-- 科研模式当前提供内置研究方案、阶段向导、数据分析任务表单和任务进度；尚未实现由对话自动生成研究方案、拖拽式节点画布，以及更多领域方案的结构化非编程参数表单。底层 Workflow 仍是显式可选能力，不会接管普通聊天或强制所有任务套用科研模板。
-- P8 安装升级、代码签名、SBOM、跨平台发布和系统化压力测试尚未完成。
+- 任务工作目录为项目 Workspace 下的 `.sciaide/tasks/<taskID>/`，绑定失败不能退回项目根目录。
+- 文献发现和任务产物不自动跨任务复用；知识库可使用本任务资料及明确项目共享资料，不按相似标签自动喂旧结论。
+- 文献发现按任务左栏组织、显示任务创建时间区分同名任务，支持历史分页、任务分组删除和批量候选移除。
+- 查询来源/原始结果快照和人工筛选/导入状态按任务绑定，不能把候选全局最新状态冒充旧任务快照。
+- 删除/归档科研任务同步清理关联文献发现查询和筛选记录（迁移 88）；这不等于物理清除知识库、已导入附件或已登记科研产物。
+- 规划、消息、工具、确认、交付和返修按持久序号构成完整任务时间线，不再用固定底部卡片容器追加历史内容。
+- 历史卡片只读、分页保持阅读锚点，迟到响应按任务隔离；用户消息右对齐。冗余“开始研究”“本次执行失败”“已安排重试”卡片隐藏，底层事件仍保留。
+- 工具内部技术名称放在展开详情内；成果来源链保留。报告登记前聊天框提示为“结论不对？向AI提出疑问并令其返修...”。
+- 模型配置可直接确认删除，底层保留历史审计所需的删除记录，不要求用户先停用；不把历史来源一并物理抹除。
 
-## 不可破坏的实现约束
+## 6. 独立审查、交付与自然语言返修
 
-- 前端只调用 `internal/transport/wails` Facade，不直接访问 SQLite、密钥或基础设施对象。
-- 外部模型、MCP、Skill 和文献内容均视为不可信数据，只有结构化 ToolCall 能进入执行管道。
-- 不得重新加入 Run 轮次、工具数量或总运行时长硬限制；复杂任务由用户停止、单次边界和上下文压缩控制。
-- 不得因重试重复执行已有副作用的工具；网络重试仅覆盖可安全重试的模型请求阶段。
-- 工具完整结果用于界面和审计，后续模型回放使用已持久化的有界不可变快照，不能动态改写旧缓存前缀。
-- 聊天附件与知识库导入保持两条独立路径。
-- 全局数据与项目大文件分离；删除项目派生缓存后应能由项目附件重建。
-- 用户工作区可能包含未提交修改，不得使用 `git reset --hard` 或覆盖不属于当前任务的改动。
+- 新动态路线启用跨轮问题跟踪：reviewFindings 的问题 ID 保留，下一轮逐项核对 open/resolved/withdrawn；重新打开关闭项须标记 reopened。新增、改判及关闭须说明理由，历史意见不作为科学事实。宿主继承最近完成审查的问题和已通过判断，核对输出哈希与审查输入绑定，不塞入所有旧报告。
+- 阻断意见须指向当前冻结输入的 JSON Pointer 和匹配原文；每项 open 问题唯一关联一项必改要求和返修计划。可选措辞建议放 suggestions，不阻断交付；这只保证可定位、结构一致，不证明推理正确或能自动识别所有换名重复问题。发现实质遗漏仍可提出新问题，不能因为上轮漏检而强制放行。
+- 逐项复核记录、已解决/撤回数量与可选建议默认折叠；此前问题仍未解决时在返修建议提示。维持用户明确确认返修，不增加自动全阶段重跑或自动通过。
+- 报告 v5 在提交校验时由宿主从真实检索记录附加方法附录：原定与实际检索式、providerQuery/有效式、年份限制、来源状态、返回数量、完成时间及首页范围。无检索记录不伪造附录；原始模型文本保留，派生报告及附录参与审查/恢复/登记。模型改写同名附录会请求纠正，不静默覆盖科学内容。
+- 对几种明确的旧界面/内部返修说明作窄范围提交前检查，不删合法引用或科学局限，不宣称是全面自然语言语义检查。审查依据含引用标记时，在实时提交、完成和确认校验前统一 Chat/Workflow 引用域，避免合法原文误拒。
 
-## 数据位置
+- 完成未登记时，底部聊天用于了解真实路线、进度、阶段输出及问题，不会因普通咨询直接重跑任务。
+- research_task_read 按当前任务读取持久记录，原始信息分页获取，不是每次自动塞入所有对话全文。
+- research_revision_propose 只生成方案，不启动。用户可以继续自然语言协商，新消息使旧方案失效，回复成功后的最新方案才可确认。
+- 宿主计算返修起点至末尾的实际重跑范围；确认时复核任务快照、消息、提案调用和回复状态、所属任务及未登记条件。
+- 确认后在原 Run 中新增尝试，保留前序结果、旧输出、文件及审计，商定修改要求进入受影响阶段与独立审查。
+- 已登记产物不支持通过此入口再次返修；也不支持在方案里任意换原始文件、重定义研究方向/Skill 范围或跳过依赖。
+- 独立审查可在返修后再次执行，但不是无限循环到模型给出通过；审查身份、问题覆盖和确定性交付门禁必须满足。
+- 研究实质变化或需要用户决策的返修不能被纯技术自动修复绕过。
+- 修订清单不显示重复的通用小标题，只保留编号与具体内容；已有明确操作含义的小标题及折叠的原始审查记录保留。
+- 报告、独立审查与返修共同遵守可信引用契约：宿主签发的合法 [K-...] 是原稿证据链接，不属于禁止的内部流程用语。引用感知界面及 DOCX/PDF 导出转换显示样式，存储 Markdown 保留标记；不能因外观要求删除或手工改号。旧审查/Skill 的相反建议不覆盖此规则，返修保留合法链接并修正其他实质缺陷。
+- 科研报告与内部返修记录分离：不要求在正文、摘要、结论摘要、方法摘要或报告局限中解释引用政策冲突，旧稿中的审查争议及界面/导出说明应删除，不能换成中性流程说明或挪到其他报告字段。科学局限、真实方法与复现信息仍须保留。既有审查、提示词和执行尝试留在宿主审计中；复审可指出实质问题，但不以补写内部过程说明作为通过条件。
+- 本轮问题跟踪与检索附录通过新动态路线协议启用，应新开任务测试；不改写历史审查、已冻结 Schema 或旧模型输出。旧任务不强行迁移。仅重新检查通过才能发布。发布服务验证来源、快照和标记存在性，不等于逐句验证主张与引用的语义对应。
 
-```text
-%USERPROFILE%/.sciaide/
-├── data/sciaide.db                 # 全局 SQLite 元数据
-├── data/workspaces/<project-id>/   # 默认托管 Workspace
-├── data/python-envs/<project-id>/  # 仅兼容旧版全局托管 Python 环境
-├── data/installed-skills/          # Git 安装的动态 Skill
-├── data/user-skills/               # 用户创建的动态 Skill
-├── data/skill-archives/            # 删除/卸载的可恢复归档
-├── mcp/                            # 全局 MCP 配置/运行元数据
-├── cache/project-archives/         # 归档导入/导出的中断暂存，启动时清理
-├── backups/trash/                  # 移除项目及失败恢复 Workspace 的可恢复副本
-└── logs/                           # 脱敏轮转日志
+## 7. 最近验证、未完成项与接手建议
 
-<Workspace>/.sciaide/
-├── attachments/objects/            # 原始附件对象
-├── cache/documents/                # 可重建的解析结果
-├── cache/knowledge/index-vN.db     # Chunk、FTS5、向量和查询向量缓存
-├── artifacts/objects/<prefix>/     # Artifact SHA256 内容寻址对象
-└── tmp/                            # 同卷随机暂存；启动时清理中断文件
-```
+- 2026-09-16 报告与产物引用展示：前端 159 项测试、类型检查，artifact/exporter/wails 全包测试通过。使用真实已完成报告的 20 条只读冻结引用在 Edge/Playwright 隔离渲染实际组件，验证当前报告、历史交付、产物段落/列表/表格引用、不同版本隔离、原文及 DOI/URL、关闭与焦点恢复，1100/390px 无溢出；原聊天引用交互专项也通过。脚本 build/qa/report-citation-ui.cjs，未发模型请求、未改写任务或产物，未重跑全仓测试；原生桌面进程未自动启动。
 
-密钥不在上述目录中，以引用方式关联 Windows Credential Manager。
+- 2026-09-16 引用展示与摘要发布修复：knowledge/researchworkflow/workflow/citation/workflowai/chat/builtin/wails/exporter 全包测试、相关 vet、前端 150 项测试和类型检查通过；Bootstrap 新增证据初筛前 Chat 引用绑定、摘要 perDocument 导入至发布/重启导出、研究设计返修、动态实证报告返修登记专项通过。Edge 实际 CitedAnswer 1000/390px 摘要、点击引用、技术详情折叠和无溢出检查通过（build/qa/citation-repair-ui.cjs）。真实任务仅只读核查，未自动重试/登记，未发起真实模型请求，未运行全仓测试。
 
-## 关键代码入口
+- 2026-09-16 跨轮审查跟踪：workflow/workflowai/researchworkflow/builtin/wails/exporter 全包测试、相关 vet、前端 146 项测试与类型检查通过；新回归包含新增问题、旧项遗漏、解决/撤回/重开、证据原文与数值定位、Chat 引用域、门禁投影、报告附录幂等及完成/恢复保留原文。Bootstrap 重启返修导出、动态实证报告返修登记和 Chat checkpoint 恢复专项通过（本地模型桩）。Edge 隔离渲染 1000/390px 展开与溢出检查通过，截图 build/qa/review-tracking-*.png。未发起真实模型科研任务，科学审查质量与新协议耗时仍需新任务验证。
+- 本轮全仓测试未全过：旧模型测试桩缺少新问题协议导致的两项闭环失败已修并专项复测通过；PowerShell 10 秒超时项单独复测通过；两项旧迁移测试仍报 no such column: deleted_at，未改动迁移或真实数据。不能据此宣称全仓质量门禁通过。
 
-- `main.go`：Wails 进程入口。
-- `internal/bootstrap/application.go`：Composition Root、依赖注入和生命周期。
-- `internal/transport/wails/`：前端可调用的 Facade 边界。
-- `internal/app/chat/`：发送、停止、恢复与聊天用例。
-- `internal/app/agent/`：Agent Loop、上下文、重试、推理摘要和压缩。
-- `internal/model/{openai,responses,anthropic}/`：三种模型协议 Adapter。
-- `internal/app/tool/` 与 `internal/tools/builtin/`：工具协议、权限执行和内置工具。
-- `internal/app/mcpserver/` 与 `internal/mcp/`：MCP 配置、生命周期和传输。
-- `internal/opensciskill/`：OpenScience 默认目录、来源发现、中英文两阶段语义路由、结构化正文/资源契约、Git/User 管理和动态 Run 快照；`internal/app/skill/` 与 `internal/skillpkg/` 是最小旧 Run/归档只读兼容层；`internal/app/multimodal/`：独立的宿主级识图兜底配置、路由与渠道管理。
-- `internal/app/{attachment,knowledge,citation,artifact,research,projectarchive}/`：附件、知识检索、可信引用、科研产物、文献发现/证据和无密钥项目归档。
-- `internal/research/{connectors,materializer,evidence}/`：公共数据源 Adapter、开放材料导入和本地证据校验。
-- `internal/exporter/`：确定性 DOCX/PDF 结构生成、引用样式和固定字体资产。
-- `internal/platform/filepublish/`：跨平台原子 no-replace 文件/目录发布。
-- `internal/platform/localexec/`：本地进程环境、输出、取消、进程树和应用关闭生命周期。
-- `internal/app/pythonenv/`、`internal/platform/{pythonruntime,pythonkernel}/`：项目环境、依赖锁、持久 Kernel、复现哈希和资源治理。
-- `internal/app/workflow/`、`internal/app/researchworkflow/`：Workflow 编译、不可变版本、可恢复 Runtime 和参考科研闭环。
-- `internal/storage/sqlite/`：Repository 与迁移；当前最新迁移为 `000062_p7_workflow_permissions.sql`。
-- `frontend/src/App.tsx` 与 `frontend/src/styles.css`：当前主要 UI 和交互实现。
+- 2026-09-16 内部返修说明边界修复：workflow/workflowai/researchworkflow/builtin/exporter 全包测试及 vet 通过，产物发布/导出、重启返修导出集成专项通过。回归覆盖第二轮旧审查要求“删除过程说明但补中性说明”的输入、旧冲突指令不再进入可信提示、原始返修审计及哈希不变、无过程说明的报告符合原 Schema。定向独立审查未发现阻断；正式前后端编译及校验通过，日志 build/qa/review-audit-boundary-build.log。属于指令一致性与程序路径验证，未进行真实模型返修；未重跑全仓或前端测试，本轮没有前端代码变化。未新增自然语言语义拦截器，不能以本轮测试证明模型一定遵循正文/审计边界。
 
-## 验证与构建基线
+- 2026-09-16 审查标题/引用规则修复：前端 145 项测试及类型检查通过；workflow/researchworkflow/exporter/workflowai/builtin 全包测试与 vet 通过，产物发布/导出与重启返修导出集成专项通过。覆盖普通清单无空标题、起草/动态与模板审查/历史审查返修/用户返修的引用规则、纯手工编号不能替代缺失标记、导出不改写原稿及证据映射。使用真实任务的七条历史意见在隔离 Edge/Playwright 1000/390px 渲染检查，未溢出，技术详情可展开；截图在 build/qa/review-feedback-*.png。定向审查未发现本轮阻断，未发起真实模型返修或改写真实任务，本轮未重跑全仓测试。
 
-- 统一检查：`.\scripts\p0-check.ps1`
-- Windows x64 发布构建：`.\scripts\build-release.ps1`
-- 不要直接依赖当前机器的全局 Go 目标；脚本会显式使用 `windows/amd64` 和 `CGO_ENABLED=0`。
-- 构建不依赖 `config.json`、临时 embed 文件或任何视觉渠道；没有配置识图模型的干净源码树也必须通过统一检查并产出可启动 EXE。
-- 自动化测试覆盖三协议图片映射、真实 PNG/WebP 导入、图片拒绝分类、自定义视觉渠道优先级切换、密钥隔离、旧 Skill 迁移和同轮多请求记账。OpenAI 兼容视觉渠道使用非流式请求以兼容部分网关，普通对话模型继续流式输出。
-- P6.2 自动化测试覆盖源/导出 SHA256、幂等复用、重命名稳定性、下载拒绝覆盖、无文本层 PDF 拒绝、64 列分段、DOCX 重复表头及 PDF 超长单元格跨页首尾完整性。
-- P6.3～P6.5 测试覆盖六个 Connector Fixture、网络治理、保守去重、候选导入幂等、书目字段冲突/修订、证据不可变审核、完整 GB/T/APA 渲染，以及“候选 → 附件 → 索引 → Citation → Artifact → PDF”的端到端链。
-- 动态 Skill 测试覆盖 311 个默认包解析/能力审计、1,624 文件 Manifest、四级来源覆盖、启停策略、320 条双语路由门禁、结构化 Run 路由审计/篡改检测/实际加载指标、多轮连续性、候选上限、显式选择、旧 Run 路由隔离、章节索引/分页/幂等正文快照、文本与二进制资源清单、管理页源码目录/文本/二进制/路径逃逸/哈希漂移边界、50 文件深层树/小屏布局、`allowed-tools` Registry 交集、Git 审查/固定 SHA、Artifact provenance 和项目归档 ID 重映射；P6.6 归档攻击面与失败原子性测试继续保留。
-- P7.1 真实 Windows 测试覆盖 PowerShell/CMD/Python、中文 Workspace 与 UTF-8 输出、密钥环境排除、1 MiB 输出持续排空、64 KiB 截断、非零退出与 stderr、超时/取消/应用关闭、后台子进程清理、路径逃逸、`.sciaide`、旧内容冒充产物、执行审计生命周期及归档 ID 重映射。
-- P7.2 测试覆盖 Workspace 内环境原子创建/重建/恢复、旧全局环境升级兼容、已有 venv 绑定与只解除绑定、取消解释器选择不改变状态、依赖锁、固定数据的路径无关复现哈希、Kernel 状态持续与重启、异常/缺包/超时/取消/内存超限后的输出回滚、普通输出与图片整批发布、外部目标抢占、同项目 Kernel/环境互斥、旧 staging 清理与近期 staging 保留，以及 Shell、一次性 Python 与 Kernel 默认联网。外部 venv 始终由用户管理，SciAide 不删除、不重建且不向其中安装依赖。真实 CSV/TSV Fixture 验证结构化目标、完整 SHA 输入快照、源文件只读、公式转义、五类 Artifact 和独立重放哈希；真实 XLSX Fixture 在两个干净项目中使用不同输入/Run 文件名，验证完整 SHA 快照、四类 Artifact 内容哈希一致、公式转义、SQLite Kernel 审计和生成脚本独立重放。恶意/超大 XLSX、快照篡改、4 KiB 后二进制 NUL、非法 Port 契约和旧内置方案兼容均有专项测试。
-- P7.3 同步门禁覆盖 311 个 Skill、1,624 个文件、238 个执行边界、v2 能力矩阵和禁止宿主承诺扫描；P7.4/P7.5 覆盖合法图、循环、类型、Tool 变化、路径/密钥/体积、并发决策、幂等恢复、未知结果与副作用确认。
-- P7.6 确定性端到端测试覆盖两次应用重启，以及候选筛选、Citation 冻结、项目环境、Kernel、CSV/SVG、Artifact、Markdown、DOCX/PDF 和来源链；ToolResult 字节冻结、声明 SHA 不匹配拒绝、待登记对象归档/还原/补登记也有专项测试。前端专项测试覆盖历史环境 Manifest、产物图谱、未完成 Run 不伪造证据、小屏布局，以及科研模式必须保持主工作区身份、四项项目级公共入口不被模式隔离和高级工程信息降级。
-- OpenScience 同步检查：`.\scripts\sync-openscience-skills.ps1 -Check`；只有审核上游差异后才使用 `-Update`，脚本会校验来源版本、311/1,624 数量、许可证、逐文件哈希和安全路径。
-- P7 正式 Windows x64 Release 已使用隔离 `SCIAIDE_HOME` 完成进程、数据库和可见窗口验收；本轮 Workspace Python 环境改动新增第 61 条迁移 `000061`，最新 Release 已复验 `integrity_check=ok`、`foreign_key_check` 0 行、主窗口可见且标准关闭退出码 0。
-- 上一版 Release 已用 `%USERPROFILE%/.sciaide` 的完整隔离副本覆盖真实历史升级；迁移 `000061` 会把旧 Python 环境记录标记为 `legacy_managed` 并保留原路径，新建记录默认使用 `workspace_managed`。未知迁移校验仍拒绝启动，并由 Windows 错误弹窗直接显示原因。
-- 当前本地 EXE：`build/bin/SciAide.exe`；构建时间 `2026-08-26 16:42:27`，大小 `50,508,288` 字节，PE Machine `0x8664`（Windows amd64），SHA256 `B49F6B7A4E6838DBC207F6CB8D96B2103B7B87A7093132CECFE4ED59B654DC6E`。
+### 已验证
 
-## 下一步建议
+- 2026-09-16 工具折叠/Schema 修复：前端 142 项测试、类型检查；tool/workflow/agent/workflowai/bootstrap/wails 相关包测试及 vet 通过。新增重复加工幂等、32 文档整体分析提交/完成/恢复、无效契约零模型请求、无效契约不重试、封闭对象必填矛盾及非对象根契约拒绝回归。限定独立审查未发现剩余阻断；未做真实模型与浏览器点击复测。
+- 此轮额外全仓测试未全过：两项历史迁移夹具仍报缺少 deleted_at；并行全仓执行时 TestApplicationRestartPreservesPendingWorkflowApproval 的 10 秒 PowerShell 命令超时，隔离重跑该测试及 Python 自动修复/重启返修导出闭环已通过。未删除失败测试或放宽产品契约。
 
-P7.1～P7.6 已通过专项测试、全量 Go 测试、vet、前端类型检查/测试/生产构建、P0 统一检查、默认 Skill 派生树校验、Windows x64 Release 和隔离数据根验收，P7 到此结束。下一阶段进入 P8 安装升级、代码签名、SBOM、跨平台发布和系统压力测试；所有能力继续复用 ToolExecutor、PolicyEngine、可信 Citation 和 Artifact，不允许 Workflow、脚本或 Skill 自行扩大权限。
+- 2026-09-16 交付一致性：workflow/bootstrap/transport-wails/workflowai 全包测试及 vet 通过；覆盖全部审查直接依赖过期/缺失/未完成、原始输入变化、引用标记投影一致性、代码哈希不匹配拒绝。隔离集成测试实际执行 Python，验证连续 3 次修复成功/耗尽，以及重启后方法返修、再次审查、DOCX/PDF 导出；模型为本地测试服务，不等于真实模型科学质量验证。前端 141 项测试与类型检查通过。
+
+- 单篇获取总预算、父请求取消不降级、备用入口原因保留回归通过；materializer/researchworkflow/research/connectors/builtin 及相关 vet 通过。此轮是定点稳定性修复，不代表全文索引引用闭环或真实任务稳定性已全面完成。
+
+- 2026-09-16 多全文位置/HTML降级/任务内缓存：research、connectors、materializer、researchworkflow、builtin 测试及相关 vet 通过；凭据目标限制、多位置去重、HTML备用及回退、缓存容量/过期/任务快照隔离测试通过，SQLite research 专项通过。未做真实模型端到端或公开站点成功率验证。
+
+- TLS 传输：三配置本地 HTTP/2 协商和不可信证书拒绝测试通过；模型全包、Embedding、MCP、检索、下载及相关 vet、注册/升级专项通过。Nature 真实 Go 下载测试失败（text/html），未改写真实任务。
+
+- 浏览器 UA 池：httpua、modelutil、model 全包、connectors、materializer、MCP、Embedding、multimodal 测试及相关 vet 通过，正式编译通过。未以 UA 切换证明公网 429 已解决。
+
+- 2026-09-15：全文入口/备用路径/429冷却/等待取消测试、research/materializer、app/research、researchworkflow、builtin、workflow 包及相关 vet 通过；最终权限变更后的注册/模板/升级/导入集成专项通过。较早 Bootstrap 全量通过，后一次重复全量主动停止，不计作通过。正式构建通过；未执行真实任务或公网全文成功率验证。
+
+- 上一轮摘要优先/导入容错相关后端包、bootstrap 全量、SQLite 任务导入/隔离专项、modelutil/tool 契约测试及相关 vet 通过。
+- 141 项前端测试、TypeScript 检查、正式前后端构建与 PE/SHA256 校验通过。
+- 覆盖摘要跳过下载、429/超时降级、显式全文失败、取消、伪 PDF 拒绝、批量继续/重试、全文候选作用域、有界选段及补全文失败保留原摘要。
+- 日志集中在 `D:\MyGitProject\SciAide\build\qa\abstract-first-*.log`。最初工具注册清单测试未更新导致失败，补齐后 bootstrap 全量重跑通过。
+- 上述不是全仓最新全量门禁，也没有进行本轮真实模型端到端与浏览器视觉复测。
+
+### 尚未完成
+
+1. 新任务真实模型全链路复测：检索耗时/召回和误纳比例、摘要优先后的结论质量、按需全文核验是否实际触发、审查与登记是否正确衔接。
+2. 全文核验新增证据的可信引用再签发闭环、持久失败缓存、官方全文入口进一步解析及真实网络验证。已有进程内下载冷却不等于这些功能已完成。
+3. Semantic Scholar/arXiv 的真实可用性与查询质量、按学科的文献类型过滤；不能靠扩大检索轮次掩盖来源故障。
+4. 优化后的供应商缓存统计、真实 WebView2 长时内存和 CPU、超长时间线历史驻留控制。
+5. 全仓质量门禁仍未通过。2026-09-16 全仓复验以下两项旧迁移夹具仍因旧 Schema 缺 deleted_at 失败，不应随意删测试或放宽运行契约：
+   - TestModelRequestUsageMigrationDeduplicatesSnapshotsAndPreservesDistinctRequests
+   - TestRequestOutcomeMigrationBackfillsProvenFailedTurn
+6. 版本号统一、安装升级、签名、SBOM、跨平台发布与系统性压力测试。无内置 OCR，不支持旧 .doc/.xls；本地 Python 不是强安全沙箱。
+7. 分析数值与图表的独立确定性验算、研究语义（配对/单位/重复测量等）的结构化确认仍未完成；当前代码和结果哈希一致不能证明方法有效。UniProt/PDB/ChEMBL/PubChem/GEO/Ensembl 科研数据对象连接器尚未加入。
+8. 审查记录的既有加固项：SQLite WorkflowAIContract 读取尚未比对保存的 output_schema_sha256 与 Schema 内容，需结合持久化 JSON 格式规则补存储损坏校验；与本次 required 重复无关。
+
+### 最近已定位案例
+
+- 任务 `d519967d-6253-48f4-8447-5edefabfa586`，失败 Run `1a310bb1-37b0-4d0b-aca2-029f0cc52cd4`。
+- 当时选中 48 篇，导入 43 篇后，第 44 篇 DOI `10.3390/nu14071509` 的 Europe PMC PDF 返回 HTTP 429，后 4 篇未尝试；旧错误被界面泛化为“工具执行失败”。
+- 这是上次只读诊断时的状态，不代表下次会话的实时任务状态；修复未自动重试或改写真实任务。
+- 当前 import v4 和 full_text.read v3 权限契约已变化；验证本轮应新建任务，不改写旧任务冻结工具或自动重试真实任务。
+
+## 8. 新会话接手入口
+
+- 先读本文件和 AGENTS.md，再看 git status --short；只做当前请求范围内修改，不回滚已有工作。
+- 默认真实数据库：`C:\Users\AA\.sciaide\data\sciaide.db`。诊断优先只读，并核对当前运行 EXE 与任务/Run/工具调用身份，勿沿用历史任务“当前”状态。
+- 测试使用临时目录或 SCIAIDE_HOME 隔离，未经用户要求不修改、重跑、删除、登记真实任务。
+- 流程入口：`internal/app/workflow/dynamic_route.go`、`literature.go`、`literature_hierarchy.go`、`selected_evidence.go`、`runtime.go`。
+- 文献与工具：`internal/research/connectors`、`internal/research/materializer`、`internal/app/research`、`internal/app/researchworkflow`、`internal/tools/builtin`。
+- 上下文/协议：`internal/app/agent`、`internal/app/workflowai`、`internal/app/resource`、`internal/model`、`internal/modelutil`。
+- 存储/界面/集成：`internal/storage/sqlite`、`internal/transport/wails`、`frontend/src`、`internal/bootstrap`。
+- 构建严格按 AGENTS.md：核对完整路径后关闭本项目 EXE，运行 scripts/build-release.ps1，只覆盖 build/bin/SciAide.exe 并更新 sha256，不生成版本名/备份名 EXE，不结束其他路径同名程序。
+- 常规验证：当前 PowerShell 设置 GOARCH=amd64、CGO_ENABLED=0；按影响范围运行 Go 测试/vet，前端运行 npm test 与 npm run typecheck。不要让清理 Vite 产物的正式构建与嵌入同一资源的 Go 测试并发。
+- 开发操作见 docs/development.md；历史设计见 start.md、CHANGELOG.md、docs/adr，可能落后于本文件和实际代码。
+- 后续维护本文件时替换失效内容，只保留一份当前构建和运行规则；修复日志不要继续堆在“当前状态”里。

@@ -18,7 +18,9 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/wangh00/SciAide/internal/app/conversation"
 	"github.com/wangh00/SciAide/internal/app/project"
+	"github.com/wangh00/SciAide/internal/app/researchtask"
 	"github.com/wangh00/SciAide/internal/document"
 	"github.com/wangh00/SciAide/internal/id"
 	"github.com/wangh00/SciAide/internal/model"
@@ -37,18 +39,89 @@ type ProjectLoader interface {
 	Get(ctx context.Context, projectID string) (project.Project, error)
 }
 
+// ConversationValidator resolves the durable conversation record used as an
+// attachment owner. A caller-provided conversation ID is never trusted by
+// itself because conversation IDs are unique across projects.
+type ConversationValidator interface {
+	GetConversation(ctx context.Context, conversationID string) (conversation.Conversation, error)
+}
+
 type Service struct {
-	repository Repository
-	projects   ProjectLoader
-	now        func() time.Time
-	mu         sync.Mutex
+	repository    Repository
+	projects      ProjectLoader
+	tasks         researchtask.Validator
+	conversations ConversationValidator
+	now           func() time.Time
+	mu            sync.Mutex
 }
 
 func NewService(repository Repository, projects ProjectLoader) *Service {
 	return &Service{repository: repository, projects: projects, now: func() time.Time { return time.Now().UTC() }}
 }
 
+func (s *Service) SetTaskValidator(validator researchtask.Validator) {
+	if s != nil {
+		s.tasks = validator
+	}
+}
+
+func (s *Service) SetConversationValidator(validator ConversationValidator) {
+	if s != nil {
+		s.conversations = validator
+	}
+}
+
+func (s *Service) validateTask(ctx context.Context, projectID, taskID string) error {
+	return researchtask.Validate(ctx, s.tasks, projectID, taskID)
+}
+
+func (s *Service) validateConversation(ctx context.Context, projectID, conversationID string) error {
+	projectID, conversationID = strings.TrimSpace(projectID), strings.TrimSpace(conversationID)
+	if projectID == "" || conversationID == "" {
+		return fmt.Errorf("project and conversation id are required")
+	}
+	if s.conversations == nil {
+		return fmt.Errorf("conversation ownership validator is not configured")
+	}
+	value, err := s.conversations.GetConversation(ctx, conversationID)
+	if err != nil {
+		return fmt.Errorf("validate conversation ownership: %w", err)
+	}
+	if value.ProjectID != projectID {
+		return fmt.Errorf("conversation does not belong to the current project")
+	}
+	return nil
+}
+
 func (s *Service) ImportPaths(ctx context.Context, projectID string, paths []string) (ImportBatch, error) {
+	return s.importPathsWithScope(ctx, projectID, paths, "")
+}
+
+// ImportPathsForTask creates task-owned attachment rows. The content object
+// may be deduplicated by bytes, but the ownership record remains isolated.
+func (s *Service) ImportPathsForTask(ctx context.Context, projectID string, paths []string, researchTaskID string) (ImportBatch, error) {
+	researchTaskID = strings.TrimSpace(researchTaskID)
+	if researchTaskID == "" {
+		return ImportBatch{}, fmt.Errorf("research task id is required")
+	}
+	if err := s.validateTask(ctx, projectID, researchTaskID); err != nil {
+		return ImportBatch{}, err
+	}
+	return s.importPathsWithScope(ctx, projectID, paths, researchTaskID)
+}
+
+// ImportPathsForConversation keeps ordinary chat uploads out of the project
+// and research-task scopes. The conversation ID is stored as ownership
+// metadata, not as a user-visible filesystem path.
+func (s *Service) ImportPathsForConversation(ctx context.Context, projectID string, paths []string, conversationID string) (ImportBatch, error) {
+	conversationID = strings.TrimSpace(conversationID)
+	if err := s.validateConversation(ctx, projectID, conversationID); err != nil {
+		return ImportBatch{}, err
+	}
+	return s.importPathsWithScope(ctx, projectID, paths, "conversation:"+conversationID)
+}
+
+func (s *Service) importPathsWithScope(ctx context.Context, projectID string, paths []string, researchTaskID string) (ImportBatch, error) {
 	projectID = strings.TrimSpace(projectID)
 	if projectID == "" {
 		return ImportBatch{}, fmt.Errorf("project id is required")
@@ -77,7 +150,7 @@ func (s *Service) ImportPaths(ctx context.Context, projectID string, paths []str
 			result.Errors = append(result.Errors, ImportError{Path: sourcePath, Message: "selected documents exceed the 1 GiB batch limit"})
 			continue
 		}
-		value, importErr := s.importOne(ctx, selectedProject, sourcePath, "", false)
+		value, importErr := s.importOneWithScope(ctx, selectedProject, sourcePath, "", false, researchTaskID)
 		if value.ID != "" {
 			result.Attachments = append(result.Attachments, value)
 		}
@@ -88,10 +161,98 @@ func (s *Service) ImportPaths(ctx context.Context, projectID string, paths []str
 	return result, nil
 }
 
+// ListForTask excludes legacy and unrelated task material. Project-shared
+// attachments remain visible because they are explicitly reusable resources.
+func (s *Service) ListForTask(ctx context.Context, projectID, taskID string) ([]Attachment, error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return nil, fmt.Errorf("research task id is required")
+	}
+	if err := s.validateTask(ctx, projectID, taskID); err != nil {
+		return nil, err
+	}
+	all, err := s.ListAll(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	filtered := make([]Attachment, 0, len(all))
+	for _, value := range all {
+		if value.ScopeKind == ScopeProjectShared || value.ScopeKind == ScopeTask && value.ResearchTaskID == taskID {
+			filtered = append(filtered, value)
+		}
+	}
+	return filtered, nil
+}
+
+func (s *Service) ListForConversation(ctx context.Context, projectID, conversationID string) ([]Attachment, error) {
+	conversationID = strings.TrimSpace(conversationID)
+	if err := s.validateConversation(ctx, projectID, conversationID); err != nil {
+		return nil, err
+	}
+	owner := "conversation:" + conversationID
+	all, err := s.ListAll(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	filtered := make([]Attachment, 0, len(all))
+	for _, value := range all {
+		if value.ScopeKind == ScopeProjectShared || value.ScopeKind == ScopeConversation && value.ResearchTaskID == owner {
+			filtered = append(filtered, value)
+		}
+	}
+	return filtered, nil
+}
+
+func (s *Service) ResolveForConversation(ctx context.Context, projectID, conversationID string, ids []string) ([]MessageReference, error) {
+	projectID, conversationID = strings.TrimSpace(projectID), strings.TrimSpace(conversationID)
+	if conversationID == "" {
+		return nil, fmt.Errorf("conversation id is required")
+	}
+	allowed, err := s.ListForConversation(ctx, projectID, conversationID)
+	if err != nil {
+		return nil, err
+	}
+	byID := make(map[string]Attachment, len(allowed))
+	for _, value := range allowed {
+		byID[value.ID] = value
+	}
+	if len(ids) > maxImportFiles {
+		return nil, fmt.Errorf("too many message attachments")
+	}
+	result := make([]MessageReference, 0, len(ids))
+	seen := map[string]struct{}{}
+	for _, rawID := range ids {
+		attachmentID := strings.TrimSpace(rawID)
+		if attachmentID == "" {
+			return nil, fmt.Errorf("attachment id is required")
+		}
+		if _, ok := seen[attachmentID]; ok {
+			continue
+		}
+		seen[attachmentID] = struct{}{}
+		value, ok := byID[attachmentID]
+		if !ok || value.Status != StatusReady {
+			return nil, fmt.Errorf("attachment does not belong to the current conversation")
+		}
+		result = append(result, MessageReference{AttachmentID: value.ID, OriginalName: value.OriginalName, MIMEType: value.MIMEType, Format: value.Format, SizeBytes: value.SizeBytes, UnitCount: value.UnitCount, Truncated: value.Truncated})
+	}
+	return result, nil
+}
+
 // ImportResearchStaged imports a file produced by the research downloader. It
 // accepts only the dedicated project-private staging prefix; ordinary callers
 // must continue to use ImportPaths and cannot import SciAide's private data.
 func (s *Service) ImportResearchStaged(ctx context.Context, projectID, sourcePath, originalName string) (Attachment, error) {
+	return s.ImportResearchStagedForTask(ctx, projectID, sourcePath, originalName, "")
+}
+
+func (s *Service) ImportResearchStagedForTask(ctx context.Context, projectID, sourcePath, originalName, researchTaskID string) (Attachment, error) {
+	researchTaskID = strings.TrimSpace(researchTaskID)
+	if researchTaskID != "" {
+		if err := s.validateTask(ctx, projectID, researchTaskID); err != nil {
+			return Attachment{}, err
+		}
+	}
 	selectedProject, err := s.projects.Get(ctx, strings.TrimSpace(projectID))
 	if err != nil {
 		return Attachment{}, err
@@ -115,10 +276,14 @@ func (s *Service) ImportResearchStaged(ctx context.Context, projectID, sourcePat
 	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 		return Attachment{}, fmt.Errorf("research attachment staging file is unavailable")
 	}
-	return s.importOne(ctx, selectedProject, absSource, originalName, true)
+	return s.importOneWithScope(ctx, selectedProject, absSource, originalName, true, researchTaskID)
 }
 
 func (s *Service) importOne(ctx context.Context, selectedProject project.Project, sourcePath, originalName string, allowPrivate bool) (Attachment, error) {
+	return s.importOneWithScope(ctx, selectedProject, sourcePath, originalName, allowPrivate, "")
+}
+
+func (s *Service) importOneWithScope(ctx context.Context, selectedProject project.Project, sourcePath, originalName string, allowPrivate bool, researchTaskID string) (Attachment, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	sourcePath = strings.TrimSpace(sourcePath)
@@ -194,7 +359,29 @@ func (s *Service) importOne(ctx context.Context, selectedProject project.Project
 		mimeType = detectedMIMEType
 		parseMetadata = map[string]string{"width": fmt.Sprint(width), "height": fmt.Sprint(height)}
 	}
-	if existing, found, findErr := s.repository.FindByHash(ctx, selectedProject.ID, digest); findErr != nil {
+	scopeKind := ScopeProjectShared
+	scopeOwnerID := ""
+	sourceKind := SourceUserImport
+	if strings.HasPrefix(strings.TrimSpace(researchTaskID), "conversation:") {
+		scopeKind = ScopeConversation
+		scopeOwnerID = strings.TrimSpace(researchTaskID)
+		sourceKind = SourceConversation
+	} else if strings.TrimSpace(researchTaskID) != "" {
+		scopeKind = ScopeTask
+		scopeOwnerID = strings.TrimSpace(researchTaskID)
+	}
+	if allowPrivate {
+		sourceKind = SourceResearchImport
+	}
+	var existing Attachment
+	var found bool
+	var findErr error
+	if scoped, ok := s.repository.(ScopedHashRepository); ok {
+		existing, found, findErr = scoped.FindByHashInScope(ctx, selectedProject.ID, digest, scopeKind, scopeOwnerID)
+	} else if scopeKind == ScopeProjectShared {
+		existing, found, findErr = s.repository.FindByHash(ctx, selectedProject.ID, digest)
+	}
+	if findErr != nil {
 		_ = root.Remove(tempRelative)
 		return Attachment{}, findErr
 	} else if found {
@@ -263,11 +450,14 @@ func (s *Service) importOne(ctx context.Context, selectedProject project.Project
 	now := s.now()
 	value := Attachment{
 		ID: attachmentID, ProjectID: selectedProject.ID, OriginalName: name,
-		MIMEType: mimeType, Format: format, SizeBytes: written, SHA256: digest,
+		SourceKind: sourceKind,
+		MIMEType:   mimeType, Format: format, SizeBytes: written, SHA256: digest,
 		StorageRelativePath: filepath.ToSlash(storageRelative),
 		CacheRelativePath:   filepath.ToSlash(filepath.Join("cache", "documents", attachmentID+".json")),
 		Status:              StatusParsing, ParseMetadata: parseMetadata, CreatedAt: now, UpdatedAt: now,
 	}
+	value.ScopeKind = scopeKind
+	value.ResearchTaskID = scopeOwnerID
 	if err := s.repository.Create(ctx, value); err != nil {
 		if objectCreated {
 			_ = root.Remove(storageRelative)
@@ -303,7 +493,52 @@ func (s *Service) importOne(ctx context.Context, selectedProject project.Project
 }
 
 func (s *Service) List(ctx context.Context, projectID string) ([]Attachment, error) {
+	values, err := s.ListAll(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	filtered := make([]Attachment, 0, len(values))
+	for _, value := range values {
+		if value.ScopeKind == ScopeProjectShared {
+			filtered = append(filtered, value)
+		}
+	}
+	return filtered, nil
+}
+
+// ListForProject is the resource-manager view. It includes shared material,
+// task-owned material, and historical rows so users can explicitly identify
+// and re-home them, while conversation-local uploads remain private to chat.
+func (s *Service) ListForProject(ctx context.Context, projectID string) ([]Attachment, error) {
+	values, err := s.ListAll(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	filtered := make([]Attachment, 0, len(values))
+	for _, value := range values {
+		if value.ScopeKind != ScopeConversation {
+			filtered = append(filtered, value)
+		}
+	}
+	return filtered, nil
+}
+
+// ListAll is reserved for internal maintenance such as rebuilding the
+// project index. User-facing and model-facing callers must use List,
+// ListForTask, or ListForConversation so unrelated task data is not exposed.
+func (s *Service) ListAll(ctx context.Context, projectID string) ([]Attachment, error) {
 	return s.repository.ListByProject(ctx, strings.TrimSpace(projectID))
+}
+
+// Get exposes the immutable ownership metadata needed by higher-level import
+// flows to decide whether an existing content record is reusable in the
+// requested resource scope.
+func (s *Service) Get(ctx context.Context, attachmentID string) (Attachment, error) {
+	attachmentID = strings.TrimSpace(attachmentID)
+	if attachmentID == "" {
+		return Attachment{}, fmt.Errorf("attachment id is required")
+	}
+	return s.repository.Get(ctx, attachmentID)
 }
 
 func (s *Service) Resolve(ctx context.Context, projectID string, ids []string) ([]MessageReference, error) {
@@ -382,6 +617,17 @@ func (s *Service) ResolveImage(ctx context.Context, projectID, attachmentID stri
 	}, nil
 }
 
+func (s *Service) ResolveImageForConversation(ctx context.Context, projectID, conversationID, attachmentID string) (model.ContentPart, error) {
+	allowed, err := s.ResolveForConversation(ctx, projectID, conversationID, []string{attachmentID})
+	if err != nil || len(allowed) != 1 {
+		if err != nil {
+			return model.ContentPart{}, err
+		}
+		return model.ContentPart{}, fmt.Errorf("image attachment does not belong to the current conversation")
+	}
+	return s.ResolveImage(ctx, projectID, attachmentID)
+}
+
 func (s *Service) Parsed(ctx context.Context, projectID, attachmentID string) (Attachment, document.Parsed, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -421,6 +667,23 @@ func (s *Service) Parsed(ctx context.Context, projectID, attachmentID string) (A
 		return value, document.Parsed{}, err
 	}
 	return value, parsed, nil
+}
+
+func (s *Service) ParsedForTask(ctx context.Context, projectID, taskID, attachmentID string) (Attachment, document.Parsed, error) {
+	if strings.TrimSpace(taskID) == "" {
+		return Attachment{}, document.Parsed{}, fmt.Errorf("research task id is required")
+	}
+	if err := s.validateTask(ctx, projectID, taskID); err != nil {
+		return Attachment{}, document.Parsed{}, err
+	}
+	value, err := s.Get(ctx, attachmentID)
+	if err != nil {
+		return Attachment{}, document.Parsed{}, err
+	}
+	if value.ProjectID != strings.TrimSpace(projectID) || value.ScopeKind != ScopeProjectShared && (value.ScopeKind != ScopeTask || value.ResearchTaskID != strings.TrimSpace(taskID)) {
+		return Attachment{}, document.Parsed{}, fmt.Errorf("attachment does not belong to the current research task")
+	}
+	return s.Parsed(ctx, projectID, attachmentID)
 }
 
 func (s *Service) ensureParsedLocked(ctx context.Context, selectedProject project.Project, value Attachment) (document.Parsed, error) {

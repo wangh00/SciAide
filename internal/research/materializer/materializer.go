@@ -5,16 +5,23 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"github.com/wangh00/SciAide/internal/browserhttp"
+	"github.com/wangh00/SciAide/internal/httpua"
+	"golang.org/x/net/publicsuffix"
 	"io"
 	"mime"
 	"net"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -42,13 +49,18 @@ var fixedFullTextHosts = map[string]map[string]struct{}{
 	"semantic-scholar": {
 		"www.semanticscholar.org": {}, "semanticscholar.org": {},
 	},
+	"crossref": {"www.nature.com": {}, "jamanetwork.com": {}},
+	"openalex": {"www.nature.com": {}, "jamanetwork.com": {}},
 }
 
 type Service struct {
-	client       *http.Client
-	allowHTTP    bool
-	maxPDFBytes  int64
-	allowedHosts map[string]map[string]struct{}
+	fullTextTimeout time.Duration
+	downloadMu      sync.Mutex
+	failures        map[string]cachedFailure
+	client          *http.Client
+	allowHTTP       bool
+	maxPDFBytes     int64
+	allowedHosts    map[string]map[string]struct{}
 }
 
 func New() *Service {
@@ -60,15 +72,14 @@ func New() *Service {
 	}
 	transport.DialContext = safeDialContext(dialer)
 	service := &Service{maxPDFBytes: defaultMaxPDFBytes, allowedHosts: cloneAllowedHosts(fixedFullTextHosts)}
-	service.client = &http.Client{Timeout: defaultTimeout, Transport: transport, CheckRedirect: fixedHostRedirect}
+	service.client = &http.Client{Timeout: defaultTimeout, Transport: browserhttp.New(transport), CheckRedirect: fixedHostRedirect}
 	return service
 }
 
-func newTestService(client *http.Client, sourceID, host string) *Service {
-	return &Service{client: client, allowHTTP: true, maxPDFBytes: defaultMaxPDFBytes, allowedHosts: map[string]map[string]struct{}{sourceID: {strings.ToLower(host): {}}}}
-}
-
 func (s *Service) Materialize(ctx context.Context, selected project.Project, candidate appresearch.Candidate, mode appresearch.MaterializeMode) (appresearch.MaterializedCandidate, error) {
+	if err := ctx.Err(); err != nil {
+		return appresearch.MaterializedCandidate{}, err
+	}
 	if s == nil || s.client == nil {
 		return appresearch.MaterializedCandidate{}, fmt.Errorf("research materializer is not configured")
 	}
@@ -81,15 +92,120 @@ func (s *Service) Materialize(ctx context.Context, selected project.Project, can
 	if err := ctx.Err(); err != nil {
 		return appresearch.MaterializedCandidate{}, err
 	}
+	if mode == appresearch.MaterializeAuto {
+		if strings.TrimSpace(candidate.Preferred.Abstract) == "" {
+			for _, record := range candidate.Records {
+				if strings.TrimSpace(record.Work.Abstract) != "" {
+					candidate.Preferred.Abstract = record.Work.Abstract
+					break
+				}
+			}
+		}
+		if strings.TrimSpace(candidate.Preferred.Abstract) != "" {
+			return s.writeMetadata(selected, candidate)
+		}
+	}
 	if mode != appresearch.MaterializeMetadata {
-		if record, target, found := s.fullTextTarget(candidate); found {
-			return s.downloadPDF(ctx, selected, candidate, record, target)
+		if targets := s.fullTextTargets(candidate); len(targets) > 0 {
+			budget := s.fullTextTimeout
+			if budget <= 0 {
+				budget = defaultTimeout
+			}
+			fetchCtx, cancel := context.WithTimeout(ctx, budget)
+			defer cancel()
+			var value appresearch.MaterializedCandidate
+			var err error
+			reasons := []string{}
+			for _, target := range targets {
+				value, err = s.downloadPDF(fetchCtx, selected, candidate, target.record, target.url)
+				if ctx.Err() != nil {
+					return value, ctx.Err()
+				}
+				if errors.Is(fetchCtx.Err(), context.DeadlineExceeded) && err != nil {
+					err = &FullTextUnavailableError{Message: "full text acquisition timed out within the per-paper budget"}
+				}
+				var unavailable *FullTextUnavailableError
+				if err == nil || !errors.As(err, &unavailable) {
+					break
+				}
+				u, _ := url.Parse(target.url)
+				reasons = append(reasons, u.Hostname()+": "+unavailable.Message)
+				if fetchCtx.Err() != nil {
+					break
+				}
+			}
+			var unavailable *FullTextUnavailableError
+			if errors.As(err, &unavailable) && len(reasons) > 0 {
+				err = &FullTextUnavailableError{Message: strings.Join(reasons, "; ")}
+			}
+			if err != nil && mode == appresearch.MaterializeAuto && ctx.Err() == nil && errors.As(err, &unavailable) {
+				value, writeErr := s.writeMetadata(selected, candidate)
+				if writeErr != nil {
+					return value, writeErr
+				}
+				value.Warning = unavailable.Error() + "; imported metadata/abstract only, full text was not read"
+				return value, nil
+			}
+			return value, err
 		}
 		if mode == appresearch.MaterializeFullText {
-			return appresearch.MaterializedCandidate{}, fmt.Errorf("candidate has no open full text on a fixed trusted research source")
+			return appresearch.MaterializedCandidate{}, &FullTextUnavailableError{Message: "candidate has no open full text on a fixed trusted research source"}
 		}
 	}
 	return s.writeMetadata(selected, candidate)
+}
+
+type FullTextUnavailableError struct{ Message string }
+
+func (e *FullTextUnavailableError) Error() string { return e.Message }
+
+func (e *FullTextUnavailableError) FullTextUnavailable() bool { return true }
+
+type cachedFailure struct {
+	until   time.Time
+	message string
+}
+
+type fullTextTarget struct {
+	record appresearch.SourceRecord
+	url    string
+}
+
+func (s *Service) FullTextAvailability(candidate appresearch.Candidate) string {
+	if len(s.fullTextTargets(candidate)) == 0 {
+		return "unavailable"
+	}
+	return "requestable_not_verified"
+}
+
+// Only derive a fixed Europe PMC endpoint from a strictly validated PMCID.
+func (s *Service) fullTextTargets(candidate appresearch.Candidate) []fullTextTarget {
+	result := []fullTextTarget{}
+	seen := map[string]bool{}
+	add := func(record appresearch.SourceRecord, target string) {
+		if len(result) < 3 && !seen[target] && s.allowedTarget(record.Work.SourceID, target) {
+			seen[target] = true
+			result = append(result, fullTextTarget{record, target})
+		}
+	}
+	if record, target, ok := s.fullTextTarget(candidate); ok {
+		add(record, target)
+	}
+	for _, record := range candidate.Records {
+		if record.Work.OpenAccess {
+			add(record, record.Work.PDFURL)
+			for _, target := range record.Work.PDFURLs {
+				add(record, target)
+			}
+		}
+		pmcid := strings.ToUpper(strings.TrimSpace(record.Work.Identifiers.PMCID))
+		if len(pmcid) <= 3 || len(pmcid) > 20 || !strings.HasPrefix(pmcid, "PMC") || strings.Trim(pmcid[3:], "0123456789") != "" {
+			continue
+		}
+		record.Work.SourceID = "europepmc"
+		add(record, "https://europepmc.org/articles/"+pmcid+"?pdf=render")
+	}
+	return result
 }
 
 func (s *Service) Cleanup(value appresearch.MaterializedCandidate) {
@@ -138,25 +254,77 @@ func (s *Service) allowedTarget(sourceID, target string) bool {
 	}
 	hosts := s.allowedHosts[strings.ToLower(strings.TrimSpace(sourceID))]
 	_, allowed := hosts[strings.ToLower(parsed.Hostname())]
+	if sourceID == "openalex" {
+		for _, hosts := range s.allowedHosts {
+			if _, ok := hosts[strings.ToLower(parsed.Hostname())]; ok {
+				allowed = true
+			}
+		}
+	}
 	return allowed
 }
 
 func (s *Service) downloadPDF(ctx context.Context, selected project.Project, candidate appresearch.Candidate, record appresearch.SourceRecord, target string) (appresearch.MaterializedCandidate, error) {
+	// Serialize downloads even when a model emits several tool calls together.
+	for !s.downloadMu.TryLock() {
+		select {
+		case <-ctx.Done():
+			return appresearch.MaterializedCandidate{}, ctx.Err()
+		case <-time.After(25 * time.Millisecond):
+		}
+	}
+	defer s.downloadMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return appresearch.MaterializedCandidate{}, err
+	}
+	parsed, _ := url.Parse(target)
+	hostKey := "host:" + parsed.Hostname()
+	for _, key := range []string{target, hostKey} {
+		if failure, ok := s.failures[key]; ok && time.Now().Before(failure.until) {
+			return appresearch.MaterializedCandidate{}, &FullTextUnavailableError{Message: failure.message + "; request skipped during cooldown"}
+		}
+	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
 		return appresearch.MaterializedCandidate{}, err
 	}
 	request.Header.Set("Accept", "application/pdf")
-	request.Header.Set("User-Agent", "SciAide/0.4")
-	response, err := s.client.Do(request)
+	httpua.Apply(request)
+	client := *s.client
+	client.Jar, _ = cookiejar.New(&cookiejar.Options{PublicSuffixList: publicsuffix.List})
+	response, err := client.Do(request)
 	if err != nil {
 		if ctx.Err() != nil {
 			return appresearch.MaterializedCandidate{}, ctx.Err()
+		}
+		var networkError net.Error
+		if errors.As(err, &networkError) && networkError.Timeout() {
+			s.cacheFailure(target, "open full text request timed out", time.Minute)
+			return appresearch.MaterializedCandidate{}, &FullTextUnavailableError{Message: "open full text request timed out"}
 		}
 		return appresearch.MaterializedCandidate{}, fmt.Errorf("download open full text from %s: %w", record.Work.SourceID, err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
+		if response.StatusCode == 429 || response.StatusCode == 408 || response.StatusCode == 403 || response.StatusCode == 404 || response.StatusCode >= 500 {
+			message := fmt.Sprintf("open full text source %s returned HTTP %d", parsed.Hostname(), response.StatusCode)
+			s.cacheFailure(target, message, 5*time.Minute)
+			if response.StatusCode == 429 || response.StatusCode >= 500 {
+				delay := 5 * time.Minute
+				if seconds, parseErr := strconv.Atoi(response.Header.Get("Retry-After")); parseErr == nil && seconds > 0 && seconds <= 86400 {
+					if suggested := time.Duration(seconds) * time.Second; suggested > delay {
+						delay = suggested
+					}
+				} else if until, parseErr := http.ParseTime(response.Header.Get("Retry-After")); parseErr == nil && time.Until(until) > delay {
+					delay = time.Until(until)
+					if delay > 24*time.Hour {
+						delay = 24 * time.Hour
+					}
+				}
+				s.cacheFailure(hostKey, message, delay)
+			}
+			return appresearch.MaterializedCandidate{}, &FullTextUnavailableError{Message: message}
+		}
 		return appresearch.MaterializedCandidate{}, fmt.Errorf("open full text source returned HTTP %d", response.StatusCode)
 	}
 	if !s.allowedTarget(record.Work.SourceID, response.Request.URL.String()) {
@@ -166,10 +334,30 @@ func (s *Service) downloadPDF(ctx context.Context, selected project.Project, can
 		return appresearch.MaterializedCandidate{}, fmt.Errorf("open full text exceeds the configured size limit")
 	}
 	mediaType, _, _ := mime.ParseMediaType(response.Header.Get("Content-Type"))
+	if mediaType == "text/html" || mediaType == "application/xhtml+xml" {
+		message := "open full text returned unexpected MIME type HTML, not a PDF; verification unavailable"
+		s.cacheFailure(target, message, 5*time.Minute)
+		return appresearch.MaterializedCandidate{}, &FullTextUnavailableError{Message: message}
+	}
 	if mediaType != "" && mediaType != "application/pdf" && mediaType != "application/octet-stream" {
 		return appresearch.MaterializedCandidate{}, fmt.Errorf("open full text returned unexpected MIME type %q", mediaType)
 	}
 	return s.writePDF(selected, candidate, response.Body)
+}
+
+func (s *Service) cacheFailure(key, message string, duration time.Duration) {
+	if s.failures == nil {
+		s.failures = map[string]cachedFailure{}
+	}
+	for k, value := range s.failures {
+		if time.Now().After(value.until) {
+			delete(s.failures, k)
+		}
+	}
+	if len(s.failures) >= 256 {
+		return
+	}
+	s.failures[key] = cachedFailure{until: time.Now().Add(duration), message: message}
 }
 
 func (s *Service) writePDF(selected project.Project, candidate appresearch.Candidate, reader io.Reader) (appresearch.MaterializedCandidate, error) {
@@ -186,6 +374,10 @@ func (s *Service) writePDF(selected project.Project, candidate appresearch.Candi
 	}()
 	hash := sha256.New()
 	written, copyErr := io.Copy(io.MultiWriter(file, hash), io.LimitReader(reader, s.maxPDFBytes+1))
+	var networkError net.Error
+	if copyErr != nil && errors.As(copyErr, &networkError) && networkError.Timeout() {
+		return appresearch.MaterializedCandidate{}, &FullTextUnavailableError{Message: "open full text download timed out"}
+	}
 	if copyErr != nil || written < 5 || written > s.maxPDFBytes {
 		return appresearch.MaterializedCandidate{}, fmt.Errorf("read open full text within size limit: %w", copyErr)
 	}
@@ -344,6 +536,24 @@ func fixedHostRedirect(request *http.Request, via []*http.Request) error {
 		return nil
 	}
 	first := via[0].URL
+	if first.Scheme == "https" && first.Host == "www.nature.com" && strings.HasPrefix(first.Path, "/articles/") && strings.HasSuffix(first.Path, ".pdf") {
+		u := request.URL
+		if u.User != nil || u.Scheme != "https" || u.Fragment != "" {
+			return fmt.Errorf("invalid Nature redirect")
+		}
+		if u.String() == first.String() {
+			return nil
+		}
+		if u.Host == "idp.nature.com" && (u.Path == "/authorize" || u.Path == "/transit") {
+			q, err := url.ParseQuery(u.RawQuery)
+			if err == nil && len(q["redirect_uri"]) == 1 && q.Get("redirect_uri") == first.String() {
+				if u.Path == "/transit" || (q.Get("client_id") == "grover" && q.Get("response_type") == "cookie") {
+					return nil
+				}
+			}
+		}
+		return fmt.Errorf("research full text redirected outside the approved Nature session flow")
+	}
 	if request.URL.Scheme != first.Scheme || !strings.EqualFold(request.URL.Hostname(), first.Hostname()) || request.URL.Port() != first.Port() {
 		return fmt.Errorf("research full text redirected outside its fixed host")
 	}

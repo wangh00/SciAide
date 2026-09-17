@@ -70,7 +70,11 @@ func (c *crossrefConnector) Source() appresearch.Source {
 }
 
 func (c *crossrefConnector) Search(ctx context.Context, options appresearch.SearchOptions) ([]appresearch.Work, error) {
-	query := url.Values{"query.bibliographic": {options.Query}, "rows": {fmt.Sprint(options.Limit)}}
+	query := url.Values{"query.bibliographic": {options.Query}, "rows": {fmt.Sprint(options.Limit)}, "sort": {"relevance"}}
+	applyPublicationYears("crossref", query, options.Years)
+	if options.Offset > 0 {
+		query.Set("offset", fmt.Sprint(options.Offset))
+	}
 	var response crossrefResponse
 	if err := c.client.getJSON(ctx, c.base+"?"+query.Encode(), requestOptions{SourceID: "crossref", Host: c.host, Cache: true}, &response); err != nil {
 		return nil, err
@@ -116,6 +120,12 @@ func crossrefWorks(records []crossrefWork) []appresearch.Work {
 			}
 		}
 		published, year := crossrefPublished(record)
+		years := []int{}
+		for _, date := range []crossrefDate{record.PublishedPrint, record.PublishedOnline, record.Issued} {
+			if len(date.DateParts) > 0 && len(date.DateParts[0]) > 0 {
+				years = append(years, date.DateParts[0][0])
+			}
+		}
 		pdf := ""
 		for _, link := range record.Links {
 			if strings.Contains(strings.ToLower(link.ContentType), "pdf") {
@@ -129,7 +139,7 @@ func crossrefWorks(records []crossrefWork) []appresearch.Work {
 		}
 		result = append(result, appresearch.Work{
 			SourceRecordID: doi, Title: title, Abstract: plainText(record.Abstract), Authors: authors,
-			Year: year, Published: published, Venue: firstString(record.ContainerTitle), Volume: record.Volume,
+			Year: year, Published: published, PublicationYears: years, Venue: firstString(record.ContainerTitle), Volume: record.Volume,
 			Issue: record.Issue, Pages: record.Page, Publisher: record.Publisher, WorkType: record.Type,
 			Language: record.Language, Identifiers: appresearch.Identifiers{DOI: doi}, LandingURL: landing,
 			PDFURL: pdf, OpenAccess: pdf != "", CitedByCount: record.ReferencedByCount, Score: record.Score,

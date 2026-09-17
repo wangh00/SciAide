@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -31,6 +32,16 @@ func (r *ArtifactRepository) CreateVersion(ctx context.Context, record artifact.
 		return artifact.SaveResult{}, fmt.Errorf("begin Artifact version: %w", err)
 	}
 	defer tx.Rollback()
+	if outputName := record.Version.Provenance.Extra["workflowDeliverable"]; outputName != "" {
+		var status, outputs string
+		if err := tx.QueryRowContext(ctx, `SELECT status,outputs_json FROM workflow_runs WHERE id=? AND project_id=?`, record.Version.Provenance.WorkflowRunID, record.ProjectID).Scan(&status, &outputs); err != nil {
+			return artifact.SaveResult{}, err
+		}
+		var frozen map[string]json.RawMessage
+		if json.Unmarshal([]byte(outputs), &frozen) != nil || status != "completed" || len(frozen[outputName]) == 0 || fmt.Sprintf("%x", sha256.Sum256(frozen[outputName])) != record.Version.Provenance.Extra["outputSHA256"] {
+			return artifact.SaveResult{}, fmt.Errorf("任务已进入返修或交付内容已变化，请刷新并等待新版本审查完成")
+		}
+	}
 
 	if key := strings.TrimSpace(record.Version.SourceKey); key != "" {
 		var versionID string
@@ -60,8 +71,13 @@ func (r *ArtifactRepository) CreateVersion(ctx context.Context, record artifact.
 	err = tx.QueryRowContext(ctx, `SELECT project_id,kind,status FROM artifacts WHERE id=?`, record.ArtifactID).Scan(&projectID, &kind, &status)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
-		_, err = tx.ExecContext(ctx, `INSERT INTO artifacts(id,project_id,name,kind,status,current_version_id,created_at,updated_at,trashed_at) VALUES (?,?,?,?,'active',NULL,?,?,NULL)`,
-			record.ArtifactID, record.ProjectID, record.Name, record.Kind, formatTime(record.Version.CreatedAt), formatTime(record.Version.CreatedAt))
+		scopeKind := record.Version.Provenance.Extra["scopeKind"]
+		if scopeKind == "" {
+			scopeKind = string(artifact.ScopeLegacyProject)
+		}
+		taskID := record.Version.Provenance.Extra["researchTaskId"]
+		_, err = tx.ExecContext(ctx, `INSERT INTO artifacts(id,project_id,scope_kind,research_task_id,name,kind,status,current_version_id,created_at,updated_at,trashed_at) VALUES (?,?,?,?,?,?,'active',NULL,?,?,NULL)`,
+			record.ArtifactID, record.ProjectID, scopeKind, taskID, record.Name, record.Kind, formatTime(record.Version.CreatedAt), formatTime(record.Version.CreatedAt))
 		if err != nil {
 			return artifact.SaveResult{}, fmt.Errorf("insert Artifact: %w", err)
 		}
@@ -321,6 +337,15 @@ func (r *ArtifactRepository) AssistantSource(ctx context.Context, projectID, mes
 		return value, fmt.Errorf("load assistant Artifact source: %w", err)
 	}
 	value.APIProtocol = protocol
+	// Workflow AI chat runs are bound to a research task through their parent
+	// Workflow Run. Preserve that ownership when the answer is saved as an
+	// Artifact; ordinary chat answers remain project-shared.
+	var taskID string
+	if err := r.db.QueryRowContext(ctx, `SELECT COALESCE(wr.research_task_id,'')
+		FROM workflow_ai_chat_runs binding JOIN workflow_ai_executions execution ON execution.id=binding.execution_id
+		JOIN workflow_runs wr ON wr.id=execution.workflow_run_id WHERE binding.chat_run_id=?`, value.RunID).Scan(&taskID); err == nil {
+		value.ResearchTaskID = strings.TrimSpace(taskID)
+	}
 	rows, err := r.db.QueryContext(ctx, `SELECT text_content FROM message_parts WHERE message_id=? AND part_type='text' ORDER BY ordinal`, messageID)
 	if err != nil {
 		return value, err
@@ -377,6 +402,12 @@ func (r *ArtifactRepository) ToolSource(ctx context.Context, callID string) (art
 	}
 	if err := json.Unmarshal([]byte(citationsJSON), &value.Citations); err != nil {
 		return value, fmt.Errorf("decode tool citations: %w", err)
+	}
+	if tool.NormalizeSubjectKind(value.SubjectKind) == tool.SubjectWorkflowRun {
+		var taskID string
+		if err := r.db.QueryRowContext(ctx, `SELECT COALESCE(research_task_id,'') FROM workflow_runs WHERE id=?`, value.RunID).Scan(&taskID); err == nil {
+			value.ResearchTaskID = strings.TrimSpace(taskID)
+		}
 	}
 	if tool.NormalizeSubjectKind(value.SubjectKind) == tool.SubjectChatRun {
 		value.Skills, err = loadSkillSnapshots(ctx, r.db, value.RunID)
@@ -616,7 +647,7 @@ func scanArtifactCurrent(row artifactRowScanner) (artifact.Artifact, error) {
 	var versionNumber int
 	var sizeBytes int64
 	var trashedAt, versionCreatedAt sql.NullString
-	err := row.Scan(&value.ID, &value.ProjectID, &value.Name, &value.Kind, &value.Status, &currentVersionID, &createdAt, &updatedAt, &trashedAt,
+	err := row.Scan(&value.ID, &value.ProjectID, &value.ScopeKind, &value.ResearchTaskID, &value.Name, &value.Kind, &value.Status, &currentVersionID, &createdAt, &updatedAt, &trashedAt,
 		&versionID, &blobID, &versionNumber, &fileName, &mimeType, &sizeBytes, &sha256, &sourceKind, &provenance, &versionCreatedAt)
 	if err != nil {
 		return value, err
@@ -759,7 +790,7 @@ func loadVersionRelationsFrom(ctx context.Context, queryer artifactTxQueryer, ve
 	return err
 }
 
-const artifactCurrentSelect = `SELECT a.id,a.project_id,a.name,a.kind,a.status,COALESCE(a.current_version_id,''),a.created_at,a.updated_at,a.trashed_at,
+const artifactCurrentSelect = `SELECT a.id,a.project_id,a.scope_kind,a.research_task_id,a.name,a.kind,a.status,COALESCE(a.current_version_id,''),a.created_at,a.updated_at,a.trashed_at,
 	COALESCE(v.id,''),COALESCE(v.blob_id,''),COALESCE(v.version_number,0),COALESCE(v.file_name,''),COALESCE(v.mime_type,''),COALESCE(v.size_bytes,0),COALESCE(v.sha256,''),COALESCE(v.source_kind,''),COALESCE(v.provenance_json,'{}'),v.created_at
 	FROM artifacts a LEFT JOIN artifact_versions v ON v.id=a.current_version_id`
 

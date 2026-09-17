@@ -238,7 +238,10 @@ func secureExecutablePath(path string) (string, error) {
 	if !info.Mode().IsRegular() {
 		return "", fmt.Errorf("Python executable is not a regular file")
 	}
-	return filepath.Clean(resolved), nil
+	// Validate the resolved file, but execute through the selected venv path.
+	// On POSIX, venv/bin/python commonly points at the base interpreter; using
+	// the resolved path would silently discard the virtual environment.
+	return filepath.Clean(path), nil
 }
 
 func hashFile(path string) (string, error) {

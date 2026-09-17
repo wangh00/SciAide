@@ -11,8 +11,9 @@ type HistoricalRunContextLoader interface {
 	GetRunContext(ctx context.Context, runID string) (RunContext, error)
 }
 
-// HistoricalRunContexts replays immutable snapshots created by the retired
-// package selector. It never selects a Skill or creates state for a new Run.
+// HistoricalRunContexts replays immutable snapshots stored by the retired
+// package selector. It is a read-only archive path and never selects a Skill
+// or creates state for a new Run.
 type HistoricalRunContexts struct {
 	loader HistoricalRunContextLoader
 }
@@ -31,10 +32,10 @@ func (h *HistoricalRunContexts) PrepareRunContext(ctx context.Context, runID, pr
 		return RunContext{}, nil
 	}
 	if err != nil {
-		return RunContext{}, fmt.Errorf("load historical Run Skill context: %w", err)
+		return RunContext{}, fmt.Errorf("load archived Run Skill context: %w", err)
 	}
 	if value.ProjectID != projectID {
-		return RunContext{}, fmt.Errorf("historical Run Skill context belongs to another project")
+		return RunContext{}, fmt.Errorf("archived Run Skill context belongs to another project")
 	}
 	return value, nil
 }

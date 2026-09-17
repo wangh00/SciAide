@@ -7,6 +7,7 @@ import (
 
 	"github.com/wangh00/SciAide/internal/app/pythonenv"
 	"github.com/wangh00/SciAide/internal/app/tool"
+	"github.com/wangh00/SciAide/internal/platform/localexec"
 )
 
 const PythonEnvironmentInstallName = "builtin.python.environment.install"
@@ -42,7 +43,7 @@ func (t *PythonEnvironmentInstall) Invoke(ctx context.Context, invocation tool.I
 	if err := json.Unmarshal(invocation.Arguments, &args); err != nil {
 		return tool.Result{}, err
 	}
-	value, err := t.environments.Install(ctx, invocation.ProjectID, args.Packages)
+	value, err := t.environments.Install(localexec.WithCallID(ctx, invocation.CallID), invocation.ProjectID, args.Packages)
 	if err != nil {
 		return tool.Result{}, err
 	}

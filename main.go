@@ -19,6 +19,16 @@ import (
 var assets embed.FS
 
 func main() {
+	releaseInstance, primaryInstance, err := acquireApplicationInstance()
+	if err != nil {
+		reportStartupError(fmt.Errorf("acquire SciAide application instance: %w", err))
+		os.Exit(1)
+	}
+	defer releaseInstance()
+	if !primaryInstance {
+		return
+	}
+
 	application, err := bootstrap.New(bootstrap.Options{})
 	if err != nil {
 		reportStartupError(fmt.Errorf("bootstrap SciAide: %w", err))
@@ -37,6 +47,7 @@ func main() {
 		Windows: &windows.Options{
 			Theme:                             windows.Light,
 			DisableFramelessWindowDecorations: false,
+			WindowClassName:                   singleInstanceWindowClass,
 		},
 		AssetServer: &assetserver.Options{
 			Assets: assets,
@@ -74,10 +85,12 @@ func main() {
 }
 
 const (
-	minimumWindowWidth  = 960
-	minimumWindowHeight = 640
-	maximumWindowWidth  = 1920
-	maximumWindowHeight = 1200
+	singleInstanceMutexName   = `Local\SciAide.Desktop.SingleInstance.v1`
+	singleInstanceWindowClass = "SciAideMainWindowV1"
+	minimumWindowWidth        = 960
+	minimumWindowHeight       = 640
+	maximumWindowWidth        = 1920
+	maximumWindowHeight       = 1200
 )
 
 func applyInitialWindowSize(ctx context.Context) {

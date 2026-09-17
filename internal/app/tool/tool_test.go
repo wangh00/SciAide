@@ -53,6 +53,31 @@ func TestDefinitionRejectsDuplicateAndMismatchedSyntheticPermissions(t *testing.
 	}
 }
 
+func TestDefinitionFingerprintIgnoresDescriptionButCoversExecutionContract(t *testing.T) {
+	base := Definition{QualifiedName: "builtin.test", Description: "first", InputSchema: json.RawMessage(`{"type":"object"}`), OutputSchema: json.RawMessage(`{"type":"object"}`), Risk: RiskLow, Version: "1", Idempotent: true}
+	changedDescription := base
+	changedDescription.Description = "display text changed"
+	if DefinitionFingerprint(base) != DefinitionFingerprint(changedDescription) {
+		t.Fatal("description-only change altered execution contract")
+	}
+	changedSchema := base
+	changedSchema.InputSchema = json.RawMessage(`{"type":"object","required":["path"]}`)
+	if DefinitionFingerprint(base) == DefinitionFingerprint(changedSchema) {
+		t.Fatal("schema change did not alter execution contract")
+	}
+	formatted := base
+	formatted.InputSchema = json.RawMessage(`{ "type": "object" }`)
+	if DefinitionFingerprint(base) != DefinitionFingerprint(formatted) {
+		t.Fatal("equivalent JSON formatting altered execution contract")
+	}
+	reordered := base
+	reordered.Permissions = []PermissionRequirement{{Kind: PermissionWorkspaceWrite, Resource: "out"}, {Kind: PermissionWorkspaceRead, Resource: "."}}
+	base.Permissions = []PermissionRequirement{{Kind: PermissionWorkspaceRead, Resource: "."}, {Kind: PermissionWorkspaceWrite, Resource: "out"}}
+	if DefinitionFingerprint(base) != DefinitionFingerprint(reordered) {
+		t.Fatal("permission ordering altered execution contract")
+	}
+}
+
 func TestDefinitionRejectsUnboundedSecurityMetadata(t *testing.T) {
 	base := Definition{QualifiedName: "builtin.test", Description: "test", InputSchema: json.RawMessage(`{}`), Risk: RiskLow, Version: "1"}
 	oversized := base
@@ -91,6 +116,28 @@ func TestJSONSchemaValidatorRejectsUnknownAndInvalidArguments(t *testing.T) {
 	}
 	if err := validator.Validate([]byte(`{"type":"object"}`), []byte(`{} {}`)); err == nil {
 		t.Fatal("trailing instance JSON was accepted")
+	}
+}
+
+func TestNormalizeModelArgumentsCanonicalizesOnlySchemaDeclaredIntegers(t *testing.T) {
+	schema := json.RawMessage(`{"type":"object","additionalProperties":false,"properties":{"limit":{"type":"integer","minimum":1,"maximum":7500},"label":{"type":"string"},"values":{"type":"array","items":{"type":"integer"}},"nested":{"type":"object","properties":{"offset":{"type":"integer"}}}}}`)
+	input := json.RawMessage(`{"limit":"200","label":"300","values":["4",5],"nested":{"offset":"6"}}`)
+	normalized, changed, err := NormalizeModelArguments(schema, input)
+	if err != nil || !changed {
+		t.Fatalf("NormalizeModelArguments() = %s, %v, %v", normalized, changed, err)
+	}
+	if string(normalized) != `{"label":"300","limit":200,"nested":{"offset":6},"values":[4,5]}` {
+		t.Fatalf("normalized = %s", normalized)
+	}
+	if err := (JSONSchemaValidator{}).Validate(schema, normalized); err != nil {
+		t.Fatalf("normalized arguments failed schema validation: %v", err)
+	}
+
+	for _, value := range []string{`{"limit":"01"}`, `{"limit":"1.0"}`, `{"limit":"+1"}`, `{"limit":" 1"}`, `{"limit":"9223372036854775808"}`} {
+		normalized, changed, err := NormalizeModelArguments(schema, json.RawMessage(value))
+		if err != nil || changed || string(normalized) != value {
+			t.Fatalf("non-canonical integer %s changed to %s (%v, %v)", value, normalized, changed, err)
+		}
 	}
 }
 
@@ -232,5 +279,47 @@ func TestServiceValidatesBeforePersistingAndCompletes(t *testing.T) {
 	}
 	if len(repository.events) != 3 || repository.events[0].Type != "tool.proposed" || repository.events[2].Type != "tool.completed" {
 		t.Fatalf("events = %#v", repository.events)
+	}
+}
+
+func TestResourceModelProjectionKeepsResolvedAuditSeparate(t *testing.T) {
+	result := Result{Status: ResultSuccess, Text: "full private adapter index", Structured: json.RawMessage(`{"sourceArguments":{"path":"real/data.csv"}}`), ModelProjection: &ModelResultProjection{Text: "selected resource content", Structured: json.RawMessage(`{"actionId":"res_abc","actions":[]}`)}}
+	if err := ValidateResult(result); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := BuildModelContextSnapshot("call", "", result)
+	if strings.Contains(snapshot, "sourceArguments") || strings.Contains(snapshot, "real/data.csv") || !strings.Contains(snapshot, "selected resource content") {
+		t.Fatalf("wrong model view: %s", snapshot)
+	}
+	if result.Text != "full private adapter index" || !strings.Contains(string(result.Structured), "real/data.csv") {
+		t.Fatal("projection destroyed audit")
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "selected resource content") {
+		t.Fatal("internal projection leaked into UI JSON")
+	}
+	result.ModelProjection.Structured = json.RawMessage(`{`)
+	if ValidateResult(result) == nil {
+		t.Fatal("invalid projection accepted")
+	}
+}
+
+func TestModelProjectionUsesExecutorLimits(t *testing.T) {
+	e := &Executor{maxText: 12, maxJSON: 32}
+	r := Result{Status: ResultSuccess, Text: "audit", Structured: json.RawMessage(`{}`), ModelProjection: &ModelResultProjection{Text: strings.Repeat("幼", 10), Structured: json.RawMessage(`{}`)}}
+	limited, code, _ := e.limitResult(r)
+	if code != "" || len(limited.ModelProjection.Text) > 12 || !limited.Truncated {
+		t.Fatalf("projection bypassed limit: %+v %s", limited, code)
+	}
+	if len(r.ModelProjection.Text) != 30 {
+		t.Fatal("limiting mutated caller projection")
+	}
+	r.ModelProjection.Structured = json.RawMessage(`{"large":"` + strings.Repeat("x", 50) + `"}`)
+	limited, code, _ = e.limitResult(r)
+	if code != ErrorCodeResultTooLarge || limited.ModelProjection != nil {
+		t.Fatal("oversize projection accepted")
 	}
 }
