@@ -260,7 +260,7 @@ func TestModelRequestUsageMigrationDeduplicatesSnapshotsAndPreservesDistinctRequ
 	}
 	now := time.Date(2026, 8, 20, 12, 42, 20, 0, time.UTC)
 	profile := modelprofile.Profile{ID: "usage-profile", Name: "fixture", ProviderType: modelprofile.ProviderOpenAICompatible, BaseURL: "https://example.test/v1", ModelID: "fixture", Models: []modelprofile.ProfileModel{{ID: "fixture", Enabled: true, IsDefault: true}}, SecretRef: "secret", TimeoutSeconds: 60, CustomHeaders: map[string]string{}, Enabled: true, IsDefault: true, CreatedAt: now, UpdatedAt: now}
-	if err := NewModelProfileRepository(db).Save(ctx, profile); err != nil {
+	if _, err := db.ExecContext(ctx, `INSERT INTO model_profiles(id,name,provider_type,base_url,model_id,secret_ref,timeout_seconds,custom_headers_json,enabled,is_default,created_at,updated_at) VALUES (?,?,?,?,?,?,60,'{}',1,1,?,?)`, profile.ID, profile.Name, profile.ProviderType, profile.BaseURL, profile.ModelID, profile.SecretRef, formatTime(now), formatTime(now)); err != nil {
 		t.Fatal(err)
 	}
 	createdConversation, err := conversation.NewService(NewConversationRepository(db)).Create(ctx, createdProject.ID, "usage")
@@ -270,7 +270,7 @@ func TestModelRequestUsageMigrationDeduplicatesSnapshotsAndPreservesDistinctRequ
 	run := chat.Run{ID: "usage-run", ConversationID: createdConversation.ID, UserMessageID: "usage-user", AssistantMessageID: "usage-assistant", ModelProfileID: profile.ID, ModelID: profile.ModelID, Status: chat.RunRunning, InputTokens: 26400, FreshInputTokens: 13600, OutputTokens: 244, CachedInputTokens: 12800, CacheReportedTurns: 2, CacheReportedFreshInputTokens: 13600, CacheHitTurns: 1, ModelTurns: 1, CreatedAt: now, StartedAt: &now, UpdatedAt: now}
 	user := conversation.Message{ID: run.UserMessageID, ConversationID: run.ConversationID, RunID: run.ID, Role: conversation.RoleUser, Status: conversation.MessageComplete, CreatedAt: now, UpdatedAt: now, Parts: []conversation.MessagePart{{ID: "usage-user-part", MessageID: run.UserMessageID, Type: "text", CreatedAt: now}}}
 	assistant := conversation.Message{ID: run.AssistantMessageID, ConversationID: run.ConversationID, RunID: run.ID, Role: conversation.RoleAssistant, Status: conversation.MessageStreaming, CreatedAt: now, UpdatedAt: now, Parts: []conversation.MessagePart{{ID: "usage-assistant-part", MessageID: run.AssistantMessageID, Type: "text", CreatedAt: now}}}
-	if err := NewRunRepository(db).CreateWithMessages(ctx, run, user, assistant); err != nil {
+	if err := seedLegacyUsageRun(ctx, db, run, user, assistant); err != nil {
 		t.Fatal(err)
 	}
 	for index, fixture := range []struct {
@@ -365,7 +365,7 @@ func TestRequestOutcomeMigrationBackfillsProvenFailedTurn(t *testing.T) {
 	}
 	now := time.Date(2026, 8, 21, 11, 55, 29, 0, time.UTC)
 	profile := modelprofile.Profile{ID: "outcome-profile", Name: "fixture", ProviderType: modelprofile.ProviderOpenAICompatible, BaseURL: "https://example.test/v1", ModelID: "fixture", Models: []modelprofile.ProfileModel{{ID: "fixture", Enabled: true, IsDefault: true}}, SecretRef: "secret", TimeoutSeconds: 60, CustomHeaders: map[string]string{}, Enabled: true, IsDefault: true, CreatedAt: now, UpdatedAt: now}
-	if err := NewModelProfileRepository(db).Save(ctx, profile); err != nil {
+	if _, err := db.ExecContext(ctx, `INSERT INTO model_profiles(id,name,provider_type,base_url,model_id,secret_ref,timeout_seconds,custom_headers_json,enabled,is_default,created_at,updated_at) VALUES (?,?,?,?,?,?,60,'{}',1,1,?,?)`, profile.ID, profile.Name, profile.ProviderType, profile.BaseURL, profile.ModelID, profile.SecretRef, formatTime(now), formatTime(now)); err != nil {
 		t.Fatal(err)
 	}
 	createdConversation, err := conversation.NewService(NewConversationRepository(db)).Create(ctx, createdProject.ID, "outcome")
@@ -375,7 +375,7 @@ func TestRequestOutcomeMigrationBackfillsProvenFailedTurn(t *testing.T) {
 	run := chat.Run{ID: "outcome-run", ConversationID: createdConversation.ID, UserMessageID: "outcome-user", AssistantMessageID: "outcome-assistant", ModelProfileID: profile.ID, ModelID: profile.ModelID, Status: chat.RunRunning, ModelTurns: 1, CreatedAt: now, StartedAt: &now, UpdatedAt: now}
 	user := conversation.Message{ID: run.UserMessageID, ConversationID: run.ConversationID, RunID: run.ID, Role: conversation.RoleUser, Status: conversation.MessageComplete, CreatedAt: now, UpdatedAt: now, Parts: []conversation.MessagePart{{ID: "outcome-user-part", MessageID: run.UserMessageID, Type: "text", CreatedAt: now}}}
 	assistant := conversation.Message{ID: run.AssistantMessageID, ConversationID: run.ConversationID, RunID: run.ID, Role: conversation.RoleAssistant, Status: conversation.MessageStreaming, CreatedAt: now, UpdatedAt: now, Parts: []conversation.MessagePart{{ID: "outcome-assistant-part", MessageID: run.AssistantMessageID, Type: "text", CreatedAt: now}}}
-	if err := NewRunRepository(db).CreateWithMessages(ctx, run, user, assistant); err != nil {
+	if err := seedLegacyUsageRun(ctx, db, run, user, assistant); err != nil {
 		t.Fatal(err)
 	}
 	completed := now.Add(66 * time.Second)
@@ -400,6 +400,17 @@ func TestRequestOutcomeMigrationBackfillsProvenFailedTurn(t *testing.T) {
 	if status != 502 || code != "MODEL_RESPONSE_INCOMPLETE" || !strings.Contains(message, "missing terminal event") {
 		t.Fatalf("backfilled outcome = status:%d code:%q message:%q", status, code, message)
 	}
+}
+
+// Migration fixtures must use the historical schema, not current workflow guards.
+func seedLegacyUsageRun(ctx context.Context, db *sql.DB, run chat.Run, messages ...conversation.Message) error {
+	for _, message := range messages {
+		if _, err := db.ExecContext(ctx, `INSERT INTO messages(id,conversation_id,run_id,role,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?)`, message.ID, message.ConversationID, message.RunID, message.Role, message.Status, formatTime(message.CreatedAt), formatTime(message.UpdatedAt)); err != nil {
+			return err
+		}
+	}
+	_, err := db.ExecContext(ctx, `INSERT INTO runs(id,conversation_id,user_message_id,assistant_message_id,model_profile_id,model_id,status,input_tokens,fresh_input_tokens,output_tokens,cached_input_tokens,cache_reported_turns,cache_reported_fresh_input_tokens,cache_hit_turns,model_turns,created_at,started_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, run.ID, run.ConversationID, run.UserMessageID, run.AssistantMessageID, run.ModelProfileID, run.ModelID, run.Status, run.InputTokens, run.FreshInputTokens, run.OutputTokens, run.CachedInputTokens, run.CacheReportedTurns, run.CacheReportedFreshInputTokens, run.CacheHitTurns, run.ModelTurns, formatTime(run.CreatedAt), nullableTime(run.StartedAt), formatTime(run.UpdatedAt))
+	return err
 }
 
 func TestLegacyBaselineChecksumIsNarrowlyAccepted(t *testing.T) {

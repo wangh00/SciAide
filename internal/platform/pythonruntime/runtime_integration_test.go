@@ -113,8 +113,16 @@ func TestAdapterCreatesAndFreezesRealVirtualEnvironment(t *testing.T) {
 	} else {
 		activate = exec.Command("sh", "-c", `. "$1"; python -c 'import sys; print(sys.prefix)'`, "sh", filepath.Join(published, "bin", "activate"))
 	}
-	if out, err := activate.CombinedOutput(); err != nil || !strings.Contains(string(out), published) {
+	out, err := activate.CombinedOutput()
+	if err != nil {
 		t.Fatalf("activation: %v: %s", err, out)
+	}
+	// Windows can canonicalize path casing; compare directory identity, not spelling.
+	actual := strings.TrimSpace(string(out))
+	actualInfo, actualErr := os.Stat(actual)
+	expectedInfo, expectedErr := os.Stat(published)
+	if actualErr != nil || expectedErr != nil || !os.SameFile(actualInfo, expectedInfo) {
+		t.Fatalf("activation prefix: actual=%q expected=%q; stat errors: %v, %v", actual, published, actualErr, expectedErr)
 	}
 	// Reject path traversal metadata before invoking distlib or writing scripts.
 	newDist := filepath.Join(published, strings.TrimPrefix(dist, destination+string(filepath.Separator)))
