@@ -2,6 +2,9 @@
   "$schema": "https://wails.io/schemas/config.v2.json",
   "name": "SciAide",
   "outputfilename": "SciAide",
+  "info": {
+    "productVersion": "1.0.1"
+  },
   "frontend:install": "npm ci --include=dev",
   "frontend:build": "npm run build",
   "frontend:dev:watcher": "npm run dev",

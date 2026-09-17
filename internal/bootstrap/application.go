@@ -50,7 +50,7 @@ import (
 	wailstransport "github.com/wangh00/SciAide/internal/transport/wails"
 )
 
-const Version = "0.4.0"
+const Version = "1.0.1"
 
 type Options struct {
 	RootDir            string

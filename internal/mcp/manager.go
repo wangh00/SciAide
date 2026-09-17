@@ -151,7 +151,7 @@ func (m *Manager) Connect(ctx context.Context, server mcpserver.Server) (mcpserv
 	if m.observer != nil {
 		m.observer.Starting(server.ID)
 	}
-	client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "sciaide", Title: "SciAide", Version: "0.4.0"}, &mcpsdk.ClientOptions{
+	client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "sciaide", Title: "SciAide", Version: "1.0.1"}, &mcpsdk.ClientOptions{
 		Capabilities: &mcpsdk.ClientCapabilities{},
 		KeepAlive:    30 * time.Second,
 		ToolListChangedHandler: func(context.Context, *mcpsdk.ToolListChangedRequest) {

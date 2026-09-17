@@ -1,16 +1,17 @@
 # SciAide 当前开发状态
 
-> 更新：2026-09-16。供新会话接手使用，只记录当前实现、运行边界、最近验证与待办，不累积修复流水。
+> 更新：2026-09-17。供新会话接手使用，只记录当前实现、运行边界、最近验证与待办，不累积修复流水。
 > 文档不是运行证据。诊断时先核对实际运行程序、持久记录和当前代码；旧分支、注释及旧测试不能替代当前流程。
-> 当前处于科研闭环稳定性验证阶段，尚未完成正式发布加固。工作树有大量未提交改动，不得重置或覆盖他人改动。
+> v1.0.1 为当前发布版本，科研闭环稳定性验证及发布加固仍在推进。修改前检查工作树，不得重置或覆盖他人改动。
 
 ## 1. 当前程序与版本
 
 - 项目：`D:\MyGitProject\SciAide`。
 - 程序：`D:\MyGitProject\SciAide\build\bin\SciAide.exe`，Windows amd64。
-- 最近构建：2026-09-16 报告与产物引用展示修复版，60,002,304 字节，已覆盖原 EXE，未自动启动。
-- SHA256：`4564AE2031F24205AEE757E441C48813C18BDB29DA2C540C07BCC76846FB7588`；配套 `SciAide.exe.sha256` 已更新。正式前后端构建、Windows amd64 PE 校验通过，日志 `build/qa/report-citation-build.log`。
-- 版本标识尚未统一：前端 package version 为 `0.5.1`，`internal/bootstrap/application.go` 的 Version 仍为 `0.4.0`。不能仅凭启动日志版本判断是否运行最新 EXE。HTTP UA 已改为浏览器池，与应用版本分离。
+- 最近构建：2026-09-17 v1.0.1，60,002,304 字节，已覆盖原 EXE，未自动启动。
+- SHA256：`63A1BAD7C7DB79C9E21BAD9D40422EF1DAD0125C9081C66140D1FA30D63718A8`；配套 `SciAide.exe.sha256` 已更新。正式前后端构建、Windows amd64 PE 及文件/产品版本 1.0.1 校验通过，日志 `build/qa/release-v1.0.1-build.log`。
+- 应用、MCP 客户端、前端及 Windows 产品版本统一为 `1.0.1`。HTTP UA 为浏览器池，与应用版本分离。发布说明见 `docs/releases/v1.0.1.md`。
+- 本次发布验证：前端 159 项测试、构建中的 TypeScript 检查、MCP 与 bootstrap 全包测试通过；未重新执行全仓测试或真实模型科研任务，已有全仓门禁缺口保留在下文。
 - 最新数据库迁移：`000088_research_discovery_task_cleanup.sql`。
 - 当前冻结协议：启动器 `research-starter-semantic-v6`；候选初筛 `dynamic-candidate-screening-v11`；入选证据综合 `selected-evidence-v5`；分析实现 `dynamic-implementation-v5`；报告 `dynamic-report-v5`；动态独立审查 `dynamic-independent-review-v4`（数据路线保留 `-implementation-v1` 后缀）。
 - 相关工具版本：workflow.search v7、workflow.import v4、workflow.sync v2、knowledge.search v6、research.full_text.read v3。全文权限新增 idp.nature.com，本轮验证使用新任务，不改写旧契约。
@@ -222,7 +223,7 @@
 5. 全仓质量门禁仍未通过。2026-09-16 全仓复验以下两项旧迁移夹具仍因旧 Schema 缺 deleted_at 失败，不应随意删测试或放宽运行契约：
    - TestModelRequestUsageMigrationDeduplicatesSnapshotsAndPreservesDistinctRequests
    - TestRequestOutcomeMigrationBackfillsProvenFailedTurn
-6. 版本号统一、安装升级、签名、SBOM、跨平台发布与系统性压力测试。无内置 OCR，不支持旧 .doc/.xls；本地 Python 不是强安全沙箱。
+6. 安装升级、签名、SBOM、跨平台发布与系统性压力测试。版本号已在 v1.0.1 统一。无内置 OCR，不支持旧 .doc/.xls；本地 Python 不是强安全沙箱。
 7. 分析数值与图表的独立确定性验算、研究语义（配对/单位/重复测量等）的结构化确认仍未完成；当前代码和结果哈希一致不能证明方法有效。UniProt/PDB/ChEMBL/PubChem/GEO/Ensembl 科研数据对象连接器尚未加入。
 8. 审查记录的既有加固项：SQLite WorkflowAIContract 读取尚未比对保存的 output_schema_sha256 与 Schema 内容，需结合持久化 JSON 格式规则补存储损坏校验；与本次 required 重复无关。
 
