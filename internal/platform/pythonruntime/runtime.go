@@ -211,7 +211,7 @@ func (a *Adapter) InstallPackages(ctx context.Context, environmentPythonPath str
 	}
 	args := []string{"-I", "-u", "-X", "utf8", "-m", "pip", "install", "--disable-pip-version-check", "--no-input"}
 	args = append(args, packages...)
-	environment, _ := localexec.CoreEnvironment(map[string]string{"PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1", "PIP_DISABLE_PIP_VERSION_CHECK": "1", "PIP_NO_INPUT": "1", "NO_COLOR": "1"})
+	environment, _ := localexec.CoreEnvironment(map[string]string{"PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1", "PIP_DISABLE_PIP_VERSION_CHECK": "1", "PIP_NO_INPUT": "1", "NO_COLOR": "1", "PIP_CONFIG_FILE": os.DevNull, "PIP_CACHE_DIR": filepath.Join(filepath.Dir(filepath.Dir(executablePath)), ".pip-cache")})
 	result, runErr := a.runner.Execute(ctx, localexec.Request{Program: executablePath, Args: args, Dir: filepath.Dir(executablePath), Env: environment, Timeout: 10 * time.Minute})
 	if runErr != nil || result.ExitCode != 0 {
 		return executionError("install Python packages", result, runErr)

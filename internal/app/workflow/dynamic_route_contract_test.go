@@ -1,10 +1,13 @@
 package workflow
 
 import (
+	stdcontext "context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/wangh00/SciAide/internal/app/attachment"
 	"github.com/wangh00/SciAide/internal/app/knowledge"
 )
 
@@ -72,5 +75,69 @@ func TestDataDeliveryReceivesActualImplementationAndResults(t *testing.T) {
 				t.Errorf("missing %s -> %s.%s", source.node, target, source.input)
 			}
 		}
+	}
+}
+
+func TestDynamicRouteWithOnlySelectedMaterialsSkipsDiscoveryButKeepsEvidenceChain(t *testing.T) {
+	route := ResearchRoute{
+		RouteID: "local-materials", Title: "本地资料综合", AvailableNow: true,
+		StageIDs:          []string{"question_refinement", "method_selection", "report_drafting", "independent_review", "delivery_gate"},
+		ReviewCheckpoints: []string{"独立二次审查"},
+		Layers: []ResearchRouteLayer{
+			{LayerID: "question", Title: "问题", Objective: "明确研究问题", Stages: []ResearchRouteStage{{StageID: "question_refinement", Objective: "明确边界", Outputs: []string{"研究问题"}}}},
+			{LayerID: "method", Title: "方法", Objective: "综合本地资料", Stages: []ResearchRouteStage{{StageID: "method_selection", Objective: "选择方法", Outputs: []string{"方法蓝图"}}, {StageID: "report_drafting", Objective: "形成资料综合", Outputs: []string{"交付稿"}}}},
+			{LayerID: "delivery", Title: "交付", Objective: "独立核验", Stages: []ResearchRouteStage{{StageID: "independent_review", Objective: "独立审查", Outputs: []string{"审查结论"}}, {StageID: "delivery_gate", Objective: "核验交付", Outputs: []string{"交付许可"}}}},
+		},
+	}
+	starterContext := ResearchStarterContext{
+		ResearchIdea:      "基于已有资料形成研究综述",
+		PlannerVersion:    dynamicResearchPlannerVersion,
+		StageCatalog:      dynamicResearchStageCatalog(),
+		SelectedMaterials: []attachment.MessageReference{{AttachmentID: "local-reference", OriginalName: "reference.pdf"}},
+	}
+	template, _, _, err := dynamicResearchRouteTemplate(route, starterContext, true)
+	if err != nil {
+		t.Fatalf("local-material route template: %v", err)
+	}
+	nodes := make([]string, 0, len(template.Definition.Nodes))
+	for _, node := range template.Definition.Nodes {
+		nodes = append(nodes, node.ID)
+	}
+	for _, absent := range []string{"literature_query_expansion", "literature_discovery", "candidate_screening"} {
+		if slices.Contains(nodes, absent) {
+			t.Fatalf("local-material route unexpectedly searches public literature: %v", nodes)
+		}
+	}
+	for _, required := range []string{"candidate_review", "evidence_import", "evidence_sync", "evidence_search", "evidence_screening", "evidence_extraction"} {
+		if !slices.Contains(nodes, required) {
+			t.Fatalf("local-material route lost %s: %v", required, nodes)
+		}
+	}
+	var candidate Node
+	for _, node := range template.Definition.Nodes {
+		if node.ID == "candidate_review" {
+			candidate = node
+			break
+		}
+	}
+	var arguments struct {
+		References []attachment.MessageReference `json:"referenceMaterials"`
+		Candidates []any                         `json:"candidates"`
+	}
+	if err := json.Unmarshal(candidate.Arguments, &arguments); err != nil || len(arguments.References) != 1 || arguments.References[0].AttachmentID != "local-reference" || arguments.Candidates == nil || len(arguments.Candidates) != 0 {
+		t.Fatalf("candidate selection does not preserve explicit local references: %s %v", candidate.Arguments, err)
+	}
+	for _, edge := range []Edge{
+		{FromNode: "candidate_review", FromPort: "selectedAttachmentIds", ToNode: "evidence_import", ToPort: "selectedAttachmentIds"},
+		{FromNode: "evidence_import", FromPort: "structured.attachmentIds", ToNode: "evidence_sync", ToPort: "attachmentIds"},
+		{FromNode: "evidence_sync", FromPort: "structured.documentIds", ToNode: "evidence_search", ToPort: "documentIds"},
+		{FromNode: "evidence_search", FromPort: "citations", ToNode: "evidence_extraction", ToPort: "candidates"},
+	} {
+		if !slices.Contains(template.Definition.Edges, edge) {
+			t.Fatalf("local-material route lost evidence edge %#v", edge)
+		}
+	}
+	if _, err := NewCompiler(referenceTemplateRegistry(t)).Compile(stdcontext.Background(), template.Definition); err != nil {
+		t.Fatalf("local-material route does not compile: %v", err)
 	}
 }

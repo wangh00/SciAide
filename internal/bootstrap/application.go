@@ -3,6 +3,7 @@ package bootstrap
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"github.com/wangh00/SciAide/internal/app/agent"
 	"github.com/wangh00/SciAide/internal/app/artifact"
 	"github.com/wangh00/SciAide/internal/app/attachment"
+	"github.com/wangh00/SciAide/internal/app/browserenv"
 	"github.com/wangh00/SciAide/internal/app/chat"
 	"github.com/wangh00/SciAide/internal/app/contextmemory"
 	"github.com/wangh00/SciAide/internal/app/conversation"
@@ -30,10 +32,12 @@ import (
 	"github.com/wangh00/SciAide/internal/app/researchworkflow"
 	"github.com/wangh00/SciAide/internal/app/skill"
 	"github.com/wangh00/SciAide/internal/app/tool"
+	"github.com/wangh00/SciAide/internal/app/websearch"
 	"github.com/wangh00/SciAide/internal/app/workflow"
 	"github.com/wangh00/SciAide/internal/app/workflowai"
 	mcpadapter "github.com/wangh00/SciAide/internal/mcp"
 	"github.com/wangh00/SciAide/internal/model/gateway"
+	"github.com/wangh00/SciAide/internal/network"
 	"github.com/wangh00/SciAide/internal/observability"
 	"github.com/wangh00/SciAide/internal/opensciskill"
 	"github.com/wangh00/SciAide/internal/platform/appdirs"
@@ -175,6 +179,13 @@ func New(options Options) (*Application, error) {
 	contextCheckpointService := contextmemory.NewService(sqlite.NewContextCheckpointRepository(store.DB()))
 	profileRepository := sqlite.NewModelProfileRepository(store.DB())
 	secrets := secretstore.NewNative("SciAide")
+	networkService, err := network.New(context.Background(), secrets)
+	if err != nil {
+		_ = store.Close()
+		return fail(err)
+	}
+	network.Activate(networkService)
+	webSearchService := websearch.New(secrets)
 	embeddingService := embedding.NewService(sqlite.NewEmbeddingRepository(store.DB()), secrets, embedding.NewHTTPClient())
 	if err := knowledgeService.SetEmbeddingProvider(embeddingService); err != nil {
 		_ = store.Close()
@@ -202,7 +213,8 @@ func New(options Options) (*Application, error) {
 		_ = store.Close()
 		return fail(fmt.Errorf("configure research discovery: %w", err))
 	}
-	if err := researchDiscovery.SetImportPipeline(materializer.New(), attachmentService, knowledgeService); err != nil {
+	researchMaterializer := materializer.New()
+	if err := researchDiscovery.SetImportPipeline(researchMaterializer, attachmentService, knowledgeService); err != nil {
 		_ = store.Close()
 		return fail(fmt.Errorf("configure research import pipeline: %w", err))
 	}
@@ -235,6 +247,8 @@ func New(options Options) (*Application, error) {
 		_ = store.Close()
 		return fail(fmt.Errorf("configure project Python Kernel: %w", err))
 	}
+	browserService := browserenv.New(projectService, pythonEnvironmentService, pythonProcessRunner)
+	researchMaterializer.SetBrowser(browserService)
 	pythonKernelService.SetAuditRepository(sqlite.NewPythonKernelRepository(store.DB()))
 	pythonEnvironmentService.SetKernelStopper(pythonKernelService.Stop)
 	if recovered, err := pythonKernelService.Recover(context.Background()); err != nil {
@@ -265,6 +279,7 @@ func New(options Options) (*Application, error) {
 		return fail(fmt.Errorf("configure research Workflow coordination: %w", err))
 	}
 	for _, builtinTool := range []tool.Tool{
+		builtin.NewWebSearch(webSearchService), builtin.NewWebOpen(webSearchService), builtin.NewBrowserOpen(browserService),
 		builtin.NewListWorkspace(projectService), builtin.NewReadText(projectService),
 		builtin.NewShellExecute(projectService, localProcessRunner), builtin.NewPythonExecute(projectService, localProcessRunner),
 		builtin.NewPythonKernelExecute(pythonKernelService), builtin.NewPythonKernelManage(pythonKernelService),
@@ -342,6 +357,7 @@ func New(options Options) (*Application, error) {
 	researchDiscovery.SetTaskValidator(researchTaskService)
 	researchBibliography.SetTaskValidator(researchTaskService)
 	researchWorkflowService.SetTaskValidator(researchTaskService)
+	researchWorkflowService.SetMaterialLoader(attachmentService)
 	toolExecutor := tool.NewExecutor(toolRegistry, toolService, tool.CompositeProjectResolver{Runs: runRepository, Workflows: workflowRuntimeRepository}, tool.ExecutorOptions{
 		OnInvocationError: func(call tool.Call, err error) {
 			logger.Error("tool invocation failed", "toolCallId", call.ID, "tool", call.ToolName, "error", err)
@@ -360,6 +376,7 @@ func New(options Options) (*Application, error) {
 		return fail(fmt.Errorf("configure Workflow Runtime: %w", err))
 	}
 	workflowRuntime.SetTaskValidator(researchTaskService)
+	workflowRuntime.SetMaterialLoader(attachmentService)
 	for _, value := range builtin.NewResearchDiscussionTools(workflowRuntime) {
 		if err := toolRegistry.Register(context.Background(), value); err != nil {
 			_ = store.Close()
@@ -406,9 +423,58 @@ func New(options Options) (*Application, error) {
 		return fail(fmt.Errorf("configure chat run steps: %w", err))
 	}
 	modelResolver := gateway.NewResolver(profileService)
+	discoveryScope := func(ctx context.Context, runID string) (map[string]bool, error) {
+		run, err := runRepository.Get(ctx, runID)
+		if err != nil {
+			return nil, err
+		}
+		contract, frozen, err := runRepository.WorkflowAIContract(ctx, runID)
+		if err != nil {
+			return nil, err
+		}
+		workflowAI, err := runRepository.IsWorkflowAIRun(ctx, runID)
+		if err != nil {
+			return nil, err
+		}
+		if workflowAI && !frozen {
+			return nil, fmt.Errorf("MCP discovery requires the frozen workflow tool scope")
+		}
+		guidance, bound, err := workflowRuntime.GuidanceForConversation(ctx, run.ConversationID)
+		if err != nil {
+			return nil, err
+		}
+		var allowed map[string]bool
+		if frozen {
+			var names []string
+			if err := json.Unmarshal(contract.AllowedTools, &names); err != nil {
+				return nil, err
+			}
+			allowed = map[string]bool{}
+			for _, name := range names {
+				allowed[name] = true
+			}
+		}
+		if bound {
+			next := map[string]bool{}
+			for _, name := range guidance.AllowedToolNames {
+				if allowed == nil || allowed[name] {
+					next[name] = true
+				}
+			}
+			allowed = next
+		}
+		return allowed, nil
+	}
+	for _, discoveryTool := range []tool.Tool{builtin.NewMCPList(toolRegistry, mcpService, discoveryScope), builtin.NewToolsSearch(toolRegistry, mcpService, discoveryScope)} {
+		if err := toolRegistry.Register(context.Background(), discoveryTool); err != nil {
+			_ = store.Close()
+			return fail(fmt.Errorf("register MCP discovery: %w", err))
+		}
+	}
 	multimodalService := multimodal.NewService(sqlite.NewVisionFallbackRepository(store.DB()), secrets, multimodal.NewProtocolResolver())
 	historicalSkills := skill.NewHistoricalRunContexts(sqlite.NewSkillRepository(store.DB()))
 	agentLoop := agent.NewLoop(runRepository, conversationRepository, toolService, toolRegistry, approvalCoordinator, toolExecutor, modelResolver, agent.NewEventObserver(chatService), agent.Options{Terminator: terminator, Checkpoints: contextCheckpointService, SkillContexts: historicalSkills, SkillRouter: dynamicSkills, Images: attachmentService, Multimodal: multimodalService, Research: workflowRuntime, Resources: resourceActions})
+	agentLoop.SetBrowserAvailability(browserService.Available)
 	if err := chatService.SetRunner(agent.NewRunner(agentLoop)); err != nil {
 		_ = store.Close()
 		return fail(fmt.Errorf("configure agent loop: %w", err))
@@ -508,6 +574,8 @@ func New(options Options) (*Application, error) {
 		transientRoot:        transientRoot,
 	}
 	application.WorkflowFacade.SetResearchTaskService(researchTaskService)
+	application.ModelFacade.SetWebSearch(webSearchService)
+	application.PythonFacade.SetBrowser(browserService)
 	return application, nil
 }
 

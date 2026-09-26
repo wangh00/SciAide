@@ -263,7 +263,7 @@ func TestModelRequestUsageMigrationDeduplicatesSnapshotsAndPreservesDistinctRequ
 	if _, err := db.ExecContext(ctx, `INSERT INTO model_profiles(id,name,provider_type,base_url,model_id,secret_ref,timeout_seconds,custom_headers_json,enabled,is_default,created_at,updated_at) VALUES (?,?,?,?,?,?,60,'{}',1,1,?,?)`, profile.ID, profile.Name, profile.ProviderType, profile.BaseURL, profile.ModelID, profile.SecretRef, formatTime(now), formatTime(now)); err != nil {
 		t.Fatal(err)
 	}
-	createdConversation, err := conversation.NewService(NewConversationRepository(db)).Create(ctx, createdProject.ID, "usage")
+	createdConversation, err := seedLegacyConversation(ctx, db, createdProject.ID, "usage", now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -368,7 +368,7 @@ func TestRequestOutcomeMigrationBackfillsProvenFailedTurn(t *testing.T) {
 	if _, err := db.ExecContext(ctx, `INSERT INTO model_profiles(id,name,provider_type,base_url,model_id,secret_ref,timeout_seconds,custom_headers_json,enabled,is_default,created_at,updated_at) VALUES (?,?,?,?,?,?,60,'{}',1,1,?,?)`, profile.ID, profile.Name, profile.ProviderType, profile.BaseURL, profile.ModelID, profile.SecretRef, formatTime(now), formatTime(now)); err != nil {
 		t.Fatal(err)
 	}
-	createdConversation, err := conversation.NewService(NewConversationRepository(db)).Create(ctx, createdProject.ID, "outcome")
+	createdConversation, err := seedLegacyConversation(ctx, db, createdProject.ID, "outcome", now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -403,6 +403,12 @@ func TestRequestOutcomeMigrationBackfillsProvenFailedTurn(t *testing.T) {
 }
 
 // Migration fixtures must use the historical schema, not current workflow guards.
+func seedLegacyConversation(ctx context.Context, db *sql.DB, projectID, title string, at time.Time) (conversation.Conversation, error) {
+	value := conversation.Conversation{ID: "legacy-" + title, ProjectID: projectID, Title: title, CreatedAt: at, UpdatedAt: at}
+	_, err := db.ExecContext(ctx, `INSERT INTO conversations(id,project_id,title,created_at,updated_at) VALUES (?,?,?,?,?)`, value.ID, value.ProjectID, value.Title, formatTime(at), formatTime(at))
+	return value, err
+}
+
 func seedLegacyUsageRun(ctx context.Context, db *sql.DB, run chat.Run, messages ...conversation.Message) error {
 	for _, message := range messages {
 		if _, err := db.ExecContext(ctx, `INSERT INTO messages(id,conversation_id,run_id,role,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?)`, message.ID, message.ConversationID, message.RunID, message.Role, message.Status, formatTime(message.CreatedAt), formatTime(message.UpdatedAt)); err != nil {

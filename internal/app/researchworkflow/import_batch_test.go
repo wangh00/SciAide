@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/wangh00/SciAide/internal/app/attachment"
+	"github.com/wangh00/SciAide/internal/app/knowledge"
 	"github.com/wangh00/SciAide/internal/app/research"
 )
 
@@ -58,5 +60,56 @@ func TestImportBatchStopsOnCancellation(t *testing.T) {
 	_, err := s.ImportSelected(ctx, "project", []string{"a", "b", "c"}, research.MaterializeAuto)
 	if !errors.Is(err, context.Canceled) || len(f.calls) != 1 {
 		t.Fatalf("calls=%v err=%v", f.calls, err)
+	}
+}
+
+type userMaterialLoader struct {
+	got    []string
+	values []attachment.Attachment
+	err    error
+}
+
+func (f *userMaterialLoader) ReferenceMaterials(_ context.Context, projectID, taskID string, ids []string) ([]attachment.Attachment, error) {
+	if projectID != "project" || taskID != "task" {
+		return nil, fmt.Errorf("unexpected scope %s/%s", projectID, taskID)
+	}
+	f.got = append([]string(nil), ids...)
+	return append([]attachment.Attachment(nil), f.values...), f.err
+}
+
+type userMaterialKnowledge struct{ enqueued []string }
+
+func (f *userMaterialKnowledge) SynchronizeAttachments(context.Context, string, []string) ([]knowledge.Document, error) {
+	return nil, nil
+}
+func (f *userMaterialKnowledge) ReadEvidenceChunk(context.Context, string, string, string, string, string) (knowledge.EvidenceChunk, error) {
+	return knowledge.EvidenceChunk{}, nil
+}
+func (f *userMaterialKnowledge) Enqueue(_ context.Context, value attachment.Attachment) error {
+	f.enqueued = append(f.enqueued, value.ID)
+	return nil
+}
+
+func TestImportUserMaterialsKeepsExplicitUserOriginAndIndexesAll(t *testing.T) {
+	loader := &userMaterialLoader{values: []attachment.Attachment{{ID: "shared", OriginalName: "shared.pdf"}, {ID: "task", OriginalName: "task.docx"}}}
+	index := &userMaterialKnowledge{}
+	service := &Service{knowledge: index}
+	service.SetMaterialLoader(loader)
+	values, err := service.ImportUserMaterials(context.Background(), "project", "task", []string{"shared", "task"})
+	if err != nil || strings.Join(loader.got, ",") != "shared,task" || strings.Join(index.enqueued, ",") != "shared,task" || len(values) != 2 {
+		t.Fatalf("values=%#v loader=%v indexed=%v err=%v", values, loader.got, index.enqueued, err)
+	}
+	for _, value := range values {
+		if value.MaterialOrigin != "user_selected" || value.CandidateID != "" || value.Warning == "" {
+			t.Fatalf("user material was silently promoted: %#v", value)
+		}
+	}
+	if _, err := service.ImportUserMaterials(context.Background(), "project", "", []string{"shared"}); err == nil {
+		t.Fatal("unscoped user material import was accepted")
+	}
+	loader.values = nil
+	values, err = service.ImportUserMaterials(context.Background(), "project", "task", []string{})
+	if err != nil || values == nil || len(values) != 0 {
+		t.Fatalf("empty material set must stay an explicit empty array: %#v %v", values, err)
 	}
 }

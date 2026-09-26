@@ -1,0 +1,10 @@
+.modal-discard-dialog { border:1px solid #e3e6ee;border-radius:20px;padding:24px;width:min(400px,calc(100vw - 48px));color:#24324a;box-shadow:0 24px 80px #15213b33; }
+.modal-discard-dialog::backdrop {background:#17203355;}
+.modal-discard-dialog h3 {margin:0 0 12px;font-size:18px;}
+.modal-discard-dialog p {color:#66748a;font-size:14px;line-height:1.7;}
+.modal-discard-dialog footer {display:flex;justify-content:flex-end;gap:10px;margin-top:22px;}
+.modal-discard-dialog button {border:1px solid #e3e6ee;border-radius:10px;padding:9px 16px;background:#f6f8fc;color:#344564;cursor:pointer;}
+.modal-discard-dialog button:last-child {background:#344ed8;color:white;border-color:transparent;}
+.modal-busy-notice {position:fixed;bottom:28px;left:50%;transform:translateX(-50%);padding:12px 20px;border:1px solid #e3e6ee;border-radius:12px;background:#fff;color:#46536a;box-shadow:0 8px 30px #15213b22;z-index:10000;font-size:14px;}
+dialog.app-dialog-backdrop {margin:0;border:0;max-width:none;max-height:none;width:100vw;height:100vh;box-sizing:border-box;}
+dialog.app-dialog-backdrop::backdrop {background:transparent;}

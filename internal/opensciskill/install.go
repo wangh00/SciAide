@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/wangh00/SciAide/internal/network"
 	"io"
 	"io/fs"
 	"net"
@@ -537,7 +538,9 @@ func runGit(ctx context.Context, directory string, arguments ...string) error {
 func runGitOutput(ctx context.Context, directory string, stdout io.Writer, arguments ...string) error {
 	command := exec.CommandContext(ctx, "git", arguments...)
 	command.Dir = directory
-	command.Env = gitEnvironment()
+	command.Env = network.Environment(gitEnvironment(), "skills")
+	proxy, _ := network.Resolve("skills")
+	command.Env = append(command.Env, "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=http.proxy", "GIT_CONFIG_VALUE_0="+proxy.URL)
 	command.Stdout = stdout
 	stderr := &boundedBuffer{remaining: 64 * 1024}
 	command.Stderr = stderr

@@ -27,10 +27,10 @@ func (f *ProjectArchiveFacade) ExportProject(projectID string) (projectarchive.E
 	}
 	fileName := archiveFileName(selected.Name)
 	destination, err := runtime.SaveFileDialog(f.lifecycle.Context(), runtime.SaveDialogOptions{
-		Title:           "导出无密钥项目归档",
+		Title:           "导出项目备份",
 		DefaultFilename: fileName,
 		Filters: []runtime.FileFilter{
-			{DisplayName: "SciAide 项目归档 (*.sciaide-project)", Pattern: "*.sciaide-project"},
+			{DisplayName: "SciAide 项目备份 (*.sciaide-project)", Pattern: "*.sciaide-project"},
 		},
 	})
 	if err != nil || strings.TrimSpace(destination) == "" {
@@ -41,9 +41,9 @@ func (f *ProjectArchiveFacade) ExportProject(projectID string) (projectarchive.E
 
 func (f *ProjectArchiveFacade) RestoreProject() (projectarchive.RestoreReport, error) {
 	source, err := runtime.OpenFileDialog(f.lifecycle.Context(), runtime.OpenDialogOptions{
-		Title: "恢复 SciAide 项目归档",
+		Title: "从备份导入项目",
 		Filters: []runtime.FileFilter{
-			{DisplayName: "SciAide 项目归档 (*.sciaide-project)", Pattern: "*.sciaide-project"},
+			{DisplayName: "SciAide 项目备份 (*.sciaide-project)", Pattern: "*.sciaide-project"},
 		},
 	})
 	if err != nil || strings.TrimSpace(source) == "" {

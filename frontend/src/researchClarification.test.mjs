@@ -10,7 +10,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 const source = await readFile(new URL("./ResearchClarificationDialog.tsx", import.meta.url), "utf8");
 const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022 } }).outputText;
 const exports = {};
-vm.runInNewContext(compiled, { exports, require: createRequire(import.meta.url) });
+const actualRequire=createRequire(import.meta.url);
+vm.runInNewContext(compiled, { exports, require: name => name === "./Modal" ? {ModalBackdrop: ({children}) => React.createElement("div",null,children)} : name === "react" ? {...actualRequire(name),useRef:value=>({current:value})} : actualRequire(name) });
 const question = { id: "metrics", text: "想分析哪些指标？", required: true, selectionMode: "multiple", options: [{ id: "height", label: "株高" }, { id: "mass", label: "干重" }] };
 function elements(node, type) {
   if (!node || typeof node !== "object") return [];
@@ -60,7 +61,7 @@ test("cancel, close and backdrop dismiss without changing saved answers", () => 
     const h = harness(question, ["height"]);
     elements(h.render(), "input")[1].props.onChange();
     const tree = h.render();
-    if (action === "backdrop") { const target = {}; tree.props.onMouseDown({ target, currentTarget: target }); }
+    if (action === "backdrop") { tree.props.close(); }
     else elements(tree, "button").find((button) => action === "close" ? button.props.className === "close" : button.props.children === action).props.onClick();
     assert.deepEqual(h.values().saved, ["height"]);
     assert.equal(h.values().closed, true);
@@ -77,7 +78,7 @@ test("multiple toggles and required empty confirmation, optional clearing", () =
 test("parent resets on question content changes and gates invalid plans and replan cost", async () => {
   const app = await readFile(new URL("./App.tsx", import.meta.url), "utf8");
   assert.match(app, /JSON.stringify\(clarification \?\? null\)/);
-  assert.match(app, /event.key === "Escape"\) setClarificationQuestion\(null\)/);
+  assert.match(source, /<ModalBackdrop/);
   assert.match(app, /starterPlanChecking \|\| Boolean\(starterPlanError\) \|\| !clarificationComplete/);
   assert.match(app, /disabled=\{!confirmReplan \|\| Boolean\(busy\) \|\| starterPlanChecking\}/);
   assert.match(app, /"WorkflowFacade", "ReplanResearchStarter"/);

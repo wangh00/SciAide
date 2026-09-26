@@ -22,10 +22,10 @@ func NewConversationRepository(db *sql.DB) *ConversationRepository {
 
 func (r *ConversationRepository) CreateConversation(ctx context.Context, value conversation.Conversation) error {
 	if !value.ReasoningLevel.Valid() {
-		value.ReasoningLevel = modelcap.ReasoningMedium
+		value.ReasoningLevel = modelcap.DefaultReasoningLevel
 	}
-	_, err := r.db.ExecContext(ctx, `INSERT INTO conversations(id, project_id, title, model_profile_id, model_id, permission_mode, reasoning_level, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		value.ID, value.ProjectID, value.Title, value.ModelProfileID, value.ModelID, value.PermissionMode, value.ReasoningLevel, formatTime(value.CreatedAt), formatTime(value.UpdatedAt))
+	_, err := r.db.ExecContext(ctx, `INSERT INTO conversations(id, project_id, title, model_profile_id, model_id, permission_mode, reasoning_level, created_at, updated_at, auto_title_pending) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		value.ID, value.ProjectID, value.Title, value.ModelProfileID, value.ModelID, value.PermissionMode, value.ReasoningLevel, formatTime(value.CreatedAt), formatTime(value.UpdatedAt), value.AutoTitlePending)
 	if err != nil {
 		return fmt.Errorf("insert conversation: %w", err)
 	}
@@ -33,7 +33,7 @@ func (r *ConversationRepository) CreateConversation(ctx context.Context, value c
 }
 
 func (r *ConversationRepository) GetConversation(ctx context.Context, id string) (conversation.Conversation, error) {
-	return scanConversation(r.db.QueryRowContext(ctx, `SELECT id, project_id, title, model_profile_id, model_id, permission_mode, reasoning_level, created_at, updated_at FROM conversations WHERE id = ?`, id))
+	return scanConversation(r.db.QueryRowContext(ctx, `SELECT id, project_id, title, model_profile_id, model_id, permission_mode, reasoning_level, created_at, updated_at, auto_title_pending FROM conversations WHERE id = ?`, id))
 }
 
 func (r *ConversationRepository) ListConversations(ctx context.Context, projectID string) ([]conversation.Conversation, error) {
@@ -41,7 +41,7 @@ func (r *ConversationRepository) ListConversations(ctx context.Context, projectI
 		SELECT conversation.id, conversation.project_id, conversation.title,
 			conversation.model_profile_id, conversation.model_id,
 			conversation.permission_mode, conversation.reasoning_level,
-			conversation.created_at, conversation.updated_at
+			conversation.created_at, conversation.updated_at, conversation.auto_title_pending
 		FROM conversations conversation
 		WHERE conversation.project_id = ?
 		AND NOT EXISTS (
@@ -481,7 +481,7 @@ func bibliographySnapshotForAttachment(ctx context.Context, tx *sql.Tx, projectI
 func scanConversation(row rowScanner) (conversation.Conversation, error) {
 	var value conversation.Conversation
 	var createdAt, updatedAt string
-	if err := row.Scan(&value.ID, &value.ProjectID, &value.Title, &value.ModelProfileID, &value.ModelID, &value.PermissionMode, &value.ReasoningLevel, &createdAt, &updatedAt); err != nil {
+	if err := row.Scan(&value.ID, &value.ProjectID, &value.Title, &value.ModelProfileID, &value.ModelID, &value.PermissionMode, &value.ReasoningLevel, &createdAt, &updatedAt, &value.AutoTitlePending); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return conversation.Conversation{}, fmt.Errorf("conversation not found")
 		}

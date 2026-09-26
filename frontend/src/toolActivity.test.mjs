@@ -41,7 +41,8 @@ test("tool cards stay collapsed during execution and only a new approval opens t
   const approval = { id: "approval-1" };
   const button = render({ status: "awaiting_approval", approval });
   assert.equal(button.props["aria-expanded"], true);
-  button.props.onClick();
+  assert.equal(render({ status: "running" }).props["aria-expanded"], false);
+  render({ status: "awaiting_approval", approval }).props.onClick();
   assert.equal(render({ status: "awaiting_approval", approval: { ...approval } }).props["aria-expanded"], false);
   assert.equal(render({ status: "running" }).props["aria-expanded"], false);
   assert.equal(render({ status: "awaiting_approval", approval: { id: "approval-2" } }).props["aria-expanded"], true);
@@ -51,6 +52,7 @@ test("internal tool name is the first expanded row, not a collapsed subtitle", a
   const source = await readFile(new URL("./App.tsx", import.meta.url), "utf8");
   const card = source.slice(source.indexOf("function UnifiedToolActivityCard("), source.indexOf("function ToolActivityCard("));
   const header = card.slice(card.indexOf("return <article"), card.indexOf('{open && <div className="tool-card-body">'));
+  assert.doesNotMatch(header, /className=\{"risk |中风险|高风险/);
   assert.doesNotMatch(header, /normalizeDisplayText\(activity.toolName\)/);
   assert.match(card, /\{open && <div className="tool-card-body">\s*<code className="tool-card-name">\{normalizeDisplayText\(activity.toolName\)\}<\/code>/);
 });
@@ -128,4 +130,17 @@ test("resource actions display resolved objects rather than opaque handles", () 
   assert.equal(file.title, "读取资料 · seedlings.csv");
   assert.equal(file.kind, "工具");
   assert.equal(toolPresentation({ toolName: "builtin.resource.open" }).title, "操作任务资源");
+});
+
+test("workspace list limit is entries, not characters", () => {
+ const view=toolPresentation({toolName:"builtin.workspace.list",arguments:{path:".sciaide",limit:500}});
+ assert.equal(view.summary,".sciaide · 最多 500 项");
+});
+
+
+test("MCP discovery cards distinguish server status from tool search", () => {
+  assert.equal(toolPresentation({toolName: "builtin.mcp.list", arguments: {limit: 20}}).title, "查看 MCP 状态");
+  const search = toolPresentation({toolName: "builtin.tools.search", arguments: {query: "browser", limit: 8}});
+  assert.equal(search.title, "查找 MCP 工具");
+  assert.equal(search.summary, "browser");
 });

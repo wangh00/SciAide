@@ -49,6 +49,25 @@ func TestChatSchemaPersistsAndRecoversActiveRun(t *testing.T) {
 	if err := repository.CreateWithMessages(ctx, run, user, assistant); err != nil {
 		t.Fatal(err)
 	}
+	for _, status := range []chat.RunStatus{chat.RunQueued, chat.RunRunning, chat.RunWaitingApproval, chat.RunCompleted, chat.RunFailed, chat.RunCancelled, chat.RunInterrupted} {
+		if _, err := store.DB().ExecContext(ctx, `UPDATE runs SET status=? WHERE id=?`, status, run.ID); err != nil {
+			t.Fatal(err)
+		}
+		items, err := repository.ListConversationActivity(ctx, createdProject.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		active := status == chat.RunQueued || status == chat.RunRunning || status == chat.RunWaitingApproval
+		if active && (len(items) != 1 || items[0].ConversationID != createdConversation.ID || items[0].Status != status) || !active && len(items) != 0 {
+			t.Fatalf("activity for %s: %+v", status, items)
+		}
+	}
+	if _, err := store.DB().ExecContext(ctx, `UPDATE runs SET status='queued' WHERE id=?`, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	if items, err := repository.ListConversationActivity(ctx, "other-project"); err != nil || len(items) != 0 {
+		t.Fatalf("project scope: %+v %v", items, err)
+	}
 	if err := repository.BeginModelTurn(ctx, run.ID, 1, now); err != nil {
 		t.Fatal(err)
 	}

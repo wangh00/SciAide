@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/wangh00/SciAide/internal/network"
 	"hash"
 	"io"
 	"os"
@@ -92,11 +93,12 @@ type AuditRecorder interface {
 }
 
 type Request struct {
-	Program string
-	Args    []string
-	Dir     string
-	Env     []string
-	Timeout time.Duration
+	NetworkPinned bool
+	Program       string
+	Args          []string
+	Dir           string
+	Env           []string
+	Timeout       time.Duration
 	// MemoryLimitBytes is a best-effort platform containment limit. The
 	// supported Windows target enforces it for the complete Job Object.
 	MemoryLimitBytes int64
@@ -345,6 +347,9 @@ func (r *Runner) Execute(ctx context.Context, request Request) (Result, error) {
 	cmd := exec.Command(request.Program, request.Args...)
 	cmd.Dir = request.Dir
 	cmd.Env = append([]string(nil), request.Env...)
+	if !request.NetworkPinned {
+		cmd.Env = network.Environment(cmd.Env, "dependencies")
+	}
 	controller.prepare(cmd)
 	stdoutPipe, stdoutWriter, err := os.Pipe()
 	if err != nil {

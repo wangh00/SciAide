@@ -16,6 +16,9 @@ const (
 )
 
 var researchReadTools = []string{
+	"builtin.mcp.list", "builtin.tools.search",
+	"builtin.web.search",
+	"builtin.web.open", "builtin.browser.open",
 	"builtin.resource.open",
 	"builtin.resource.search",
 	"builtin.workspace.list",

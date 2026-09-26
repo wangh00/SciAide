@@ -275,26 +275,50 @@ func (t *ResearchWorkflowSearch) Invoke(ctx context.Context, invocation tool.Inv
 }
 
 func (*ResearchWorkflowImport) Definition(context.Context) (tool.Definition, error) {
-	return tool.Definition{QualifiedName: ResearchWorkflowImportName, Version: "4", Risk: tool.RiskHigh, Idempotent: true,
+	return tool.Definition{QualifiedName: ResearchWorkflowImportName, Version: "5", Risk: tool.RiskHigh, Idempotent: true,
 		Description:  "Mark the exact human-selected research candidates as included, materialize open full text or disclosed metadata/abstract files, and import them as project attachments. Completed candidates are reused on retry.",
 		Permissions:  append(append([]tool.PermissionRequirement{}, researchFullTextNetworkPermissions...), tool.PermissionRequirement{Kind: tool.PermissionWorkspaceWrite, Resource: "."}),
-		InputSchema:  json.RawMessage(`{"type":"object","additionalProperties":false,"required":["selectedCandidateIds"],"properties":{"selectedCandidateIds":{"type":"array","minItems":1,"maxItems":100,"uniqueItems":true,"items":{"type":"string","minLength":1,"maxLength":128}},"mode":{"type":"string","enum":["auto","full_text","metadata_abstract"]}}}`),
+		InputSchema:  json.RawMessage(`{"type":"object","additionalProperties":false,"required":["selectedCandidateIds"],"properties":{"selectedCandidateIds":{"type":"array","maxItems":100,"uniqueItems":true,"items":{"type":"string","minLength":1,"maxLength":128}},"selectedAttachmentIds":{"type":"array","maxItems":16,"uniqueItems":true,"items":{"type":"string","minLength":1,"maxLength":128}},"mode":{"type":"string","enum":["auto","full_text","metadata_abstract"]}}}`),
 		OutputSchema: json.RawMessage(`{"type":"object","additionalProperties":false,"required":["materials","attachmentIds"],"properties":{"materials":{"type":"array","items":{"type":"object"}},"attachmentIds":{"type":"array","items":{"type":"string"}}}}`),
 	}, nil
 }
 
 func (t *ResearchWorkflowImport) Invoke(ctx context.Context, invocation tool.Invocation) (tool.Result, error) {
 	var args struct {
-		IDs  []string                 `json:"selectedCandidateIds"`
-		Mode research.MaterializeMode `json:"mode"`
+		IDs         []string                 `json:"selectedCandidateIds"`
+		Attachments []string                 `json:"selectedAttachmentIds"`
+		Mode        research.MaterializeMode `json:"mode"`
 	}
 	if err := json.Unmarshal(invocation.Arguments, &args); err != nil {
 		return tool.Result{}, err
 	}
-	values, err := t.service.ImportSelectedForTask(ctx, invocation.ProjectID, args.IDs, args.Mode, invocation.ResearchTaskID)
-	if err != nil {
-		return tool.Result{}, err
+	if len(args.IDs)+len(args.Attachments) == 0 || len(args.IDs)+len(args.Attachments) > 100 {
+		return tool.Result{}, fmt.Errorf("select 1-100 materials")
 	}
+	values := []researchworkflow.ImportedMaterial{}
+	if len(args.Attachments) > 0 {
+		imported, err := t.service.ImportUserMaterials(ctx, invocation.ProjectID, invocation.ResearchTaskID, args.Attachments)
+		if err != nil {
+			return tool.Result{}, err
+		}
+		values = append(values, imported...)
+	}
+	if len(args.IDs) > 0 {
+		imported, err := t.service.ImportSelectedForTask(ctx, invocation.ProjectID, args.IDs, args.Mode, invocation.ResearchTaskID)
+		if err != nil {
+			return tool.Result{}, err
+		}
+		values = append(values, imported...)
+	}
+	unique := values[:0]
+	seen := map[string]bool{}
+	for _, v := range values {
+		if !seen[v.AttachmentID] {
+			seen[v.AttachmentID] = true
+			unique = append(unique, v)
+		}
+	}
+	values = unique
 	ids := make([]string, 0, len(values))
 	warnings := 0
 	for _, value := range values {
@@ -304,7 +328,7 @@ func (t *ResearchWorkflowImport) Invoke(ctx context.Context, invocation tool.Inv
 		}
 	}
 	structured, _ := json.Marshal(map[string]any{"materials": values, "attachmentIds": ids})
-	return tool.Result{Status: tool.ResultSuccess, Text: fmt.Sprintf("已导入%d篇研究材料，其中%d篇全文获取受阻，已明确降级为题录/摘要；详见各材料 warning 和 importKind。", len(values), warnings), Structured: structured, Artifacts: []tool.ArtifactRef{}, Citations: []tool.CitationRef{}}, nil
+	return tool.Result{Status: tool.ResultSuccess, Text: fmt.Sprintf("已导入 %d 份研究材料，%d 份包含来源或证据限制说明；详见各材料 warning 和 importKind。", len(values), warnings), Structured: structured, Artifacts: []tool.ArtifactRef{}, Citations: []tool.CitationRef{}}, nil
 }
 
 func (*ResearchWorkflowSync) Definition(context.Context) (tool.Definition, error) {

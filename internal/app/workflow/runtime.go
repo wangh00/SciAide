@@ -17,6 +17,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/wangh00/SciAide/internal/app/attachment"
 	"github.com/wangh00/SciAide/internal/app/citation"
 	"github.com/wangh00/SciAide/internal/app/conversation"
 	"github.com/wangh00/SciAide/internal/app/permission"
@@ -420,6 +421,9 @@ type RuntimeService struct {
 	workflows      Repository
 	projects       ProjectLoader
 	literature     LiteratureCandidateReader
+	materialLoader interface {
+		ReferenceMaterials(context.Context, string, string, []string) ([]attachment.Attachment, error)
+	}
 	tasks          researchtask.Validator
 	registry       tool.Registry
 	tools          *tool.Service
@@ -443,6 +447,11 @@ func (s *RuntimeService) SetTaskValidator(validator researchtask.Validator) {
 	if s != nil {
 		s.tasks = validator
 	}
+}
+func (s *RuntimeService) SetMaterialLoader(loader interface {
+	ReferenceMaterials(context.Context, string, string, []string) ([]attachment.Attachment, error)
+}) {
+	s.materialLoader = loader
 }
 
 // resolveResearchTaskForRun is the one host-side translation from a planner
@@ -576,7 +585,7 @@ func (s *RuntimeService) Start(ctx context.Context, command StartCommand) (RunDe
 		}
 	}
 	if !command.ReasoningLevel.Valid() {
-		command.ReasoningLevel = modelcap.ReasoningMedium
+		command.ReasoningLevel = modelcap.DefaultReasoningLevel
 	}
 	detail, err := s.workflows.Get(ctx, command.ProjectID, command.WorkflowID)
 	if err != nil {
@@ -1119,10 +1128,41 @@ func (s *RuntimeService) Decide(ctx context.Context, command HumanDecisionComman
 			return s.rejectHumanDecision(ctx, detail, *step, command, contextJSON, "CANDIDATE_SELECTION_REJECTED", "用户取消了候选筛选")
 		}
 		var selection struct {
-			SelectedCandidateIDs []string `json:"selectedCandidateIds"`
+			SelectedCandidateIDs  []string `json:"selectedCandidateIds"`
+			SelectedAttachmentIDs []string `json:"selectedAttachmentIds"`
 		}
-		if json.Unmarshal(contextJSON, &selection) != nil || len(selection.SelectedCandidateIDs) == 0 || len(selection.SelectedCandidateIDs) > 100 {
+		selectedMaterials := []attachment.Attachment{}
+		if json.Unmarshal(contextJSON, &selection) != nil || len(selection.SelectedCandidateIDs)+len(selection.SelectedAttachmentIDs) == 0 || len(selection.SelectedCandidateIDs)+len(selection.SelectedAttachmentIDs) > 100 {
 			return RunDetail{}, fmt.Errorf("candidate selection must contain 1-100 selected candidate ids")
+		}
+		if len(selection.SelectedAttachmentIDs) > 0 {
+			connected := false
+			for _, edge := range detail.Run.Compilation.Edges {
+				if edge.FromNode == node.ID && edge.FromPort == "selectedAttachmentIds" {
+					connected = true
+				}
+			}
+			if !connected || s.materialLoader == nil {
+				return RunDetail{}, fmt.Errorf("此旧方案不支持补充资料，请新建研究任务")
+			}
+			var err error
+			if selector, ok := s.materialLoader.(interface {
+				SelectReferenceMaterials(context.Context, string, string, []string) ([]attachment.Attachment, error)
+			}); ok {
+				if _, err = selector.SelectReferenceMaterials(ctx, command.ProjectID, detail.Run.ResearchTaskID, selection.SelectedAttachmentIDs); err != nil {
+					return RunDetail{}, err
+				}
+			}
+			selectedMaterials, err = s.materialLoader.ReferenceMaterials(ctx, command.ProjectID, detail.Run.ResearchTaskID, selection.SelectedAttachmentIDs)
+			if err != nil {
+				return RunDetail{}, err
+			}
+		}
+		if selection.SelectedCandidateIDs == nil {
+			selection.SelectedCandidateIDs = []string{}
+		}
+		if selection.SelectedAttachmentIDs == nil {
+			selection.SelectedAttachmentIDs = []string{}
 		}
 		var screeningEnvelope struct {
 			Screening struct {
@@ -1160,9 +1200,13 @@ func (s *RuntimeService) Decide(ctx context.Context, command HumanDecisionComman
 			seen[value] = struct{}{}
 			selection.SelectedCandidateIDs[index] = value
 		}
+		selectionAudit := candidateSelectionAudit(step.Input, selection.SelectedCandidateIDs)
+		selectionAudit.SelectedAttachmentCount = len(selectedMaterials)
 		output, _ = json.Marshal(map[string]any{
-			"selectedCandidateIds": selection.SelectedCandidateIDs,
-			"selectionAudit":       candidateSelectionAudit(step.Input, selection.SelectedCandidateIDs),
+			"selectedCandidateIds":  selection.SelectedCandidateIDs,
+			"selectedAttachmentIds": selection.SelectedAttachmentIDs,
+			"selectionAudit":        selectionAudit,
+			"selectedMaterials":     selectedMaterials,
 		})
 	} else if node.Kind == NodeCitationSelection {
 		if !command.Approved {
@@ -1278,6 +1322,7 @@ func compilationCanContinueWithoutCitations(compilation Compilation) bool {
 }
 
 type candidateSelectionAuditSnapshot struct {
+	SelectedAttachmentCount     int      `json:"selectedAttachmentCount,omitempty"`
 	SelectedCandidateCount      int      `json:"selectedCandidateCount"`
 	IndependentStudyCount       int      `json:"independentStudyCount"`
 	RecommendedCandidateCount   int      `json:"recommendedCandidateCount"`
@@ -5085,7 +5130,11 @@ func canonicalCitationSubmission(value json.RawMessage, detail RunDetail, step S
 	if !usesTrackedReview(node) && node.ID != "evidence_screening" {
 		return value
 	}
-	return restoreWorkflowCitationMarkers(value, workflowCitationSeedsFromSteps(detail.Run.Compilation, detail.Steps, step), chatRunID)
+	value = restoreWorkflowCitationMarkers(value, workflowCitationSeedsFromSteps(detail.Run.Compilation, detail.Steps, step), chatRunID)
+	if node.ID == "evidence_screening" {
+		value = canonicalSupportingQuotes(value, step.Input)
+	}
+	return value
 }
 
 func workflowAIOutputChatRunID(output json.RawMessage, fallback string) string {

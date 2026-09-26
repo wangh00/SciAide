@@ -66,7 +66,7 @@ test("composer revision hint respects conversation scope and execution precedenc
     assert.equal(hint(overrides), "向 SciAide 描述研究问题，或输入 / 使用命令…");
   }
   assert.match(hint({ researchConversationLocked: true }), /科研流程正在自主推进/);
-  assert.match(hint({ busy: true }), /输入新指令可中断/);
+  assert.match(hint({ busy: true }), /正在回答，可先编辑下一条消息/);
   assert.match(hint({ busy: true, activeRunIsWorkflowAI: true }), /当前科研阶段由 AI 自主执行/);
   assert.match(source, /return \(\) => publishRevisionConversationId\(""\)/);
 });

@@ -3,6 +3,7 @@ package localexec
 import (
 	"errors"
 	"fmt"
+	"github.com/wangh00/SciAide/internal/network"
 	"io"
 	"os/exec"
 	"strings"
@@ -11,6 +12,7 @@ import (
 )
 
 type SessionRequest struct {
+	NetworkPinned    bool
 	CallID           string
 	Program          string
 	Args             []string
@@ -74,6 +76,9 @@ func (r *Runner) StartSession(request SessionRequest) (*Session, error) {
 	cmd := exec.Command(request.Program, request.Args...)
 	cmd.Dir = request.Dir
 	cmd.Env = append([]string(nil), request.Env...)
+	if !request.NetworkPinned {
+		cmd.Env = network.Environment(cmd.Env, "dependencies")
+	}
 	controller.prepare(cmd)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {

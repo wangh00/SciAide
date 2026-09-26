@@ -172,6 +172,10 @@ func writeTestArchive(t *testing.T, path string, files map[string]string) {
 }
 
 func writeMinimalPDF(t *testing.T, path, text string) {
+	writePDFStream(t, path, fmt.Sprintf("BT /F1 12 Tf 72 720 Td (%s) Tj ET", strings.ReplaceAll(text, ")", `\)`)))
+}
+
+func writePDFStream(t *testing.T, path, stream string) {
 	t.Helper()
 	objects := []string{
 		`<< /Type /Catalog /Pages 2 0 R >>`,
@@ -179,7 +183,6 @@ func writeMinimalPDF(t *testing.T, path, text string) {
 		`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>`,
 		`<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>`,
 	}
-	stream := fmt.Sprintf("BT /F1 12 Tf 72 720 Td (%s) Tj ET", strings.ReplaceAll(text, ")", `\)`))
 	objects = append(objects, fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(stream), stream))
 	var output bytes.Buffer
 	output.WriteString("%PDF-1.4\n")

@@ -1,3 +1,5 @@
+import {useRef} from "react";
+import {ModalBackdrop} from "./Modal";
 export type ResearchClarificationQuestion = {
   kind?: "research_direction";
   id: string; text: string; required: boolean; impact?: string;
@@ -24,11 +26,12 @@ export function ResearchClarificationDialog({ question, draft, setDraft, close, 
   question: ResearchClarificationQuestion; draft: string[];
   setDraft: (draft: string[]) => void; close: () => void; confirm: (draft: string[]) => void;
 }) {
-  return <div className="modal-backdrop research-clarification-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) close(); }}>
+  const initial=useRef(JSON.stringify(draft));
+  return <ModalBackdrop className="modal-backdrop research-clarification-backdrop" close={close} dirty={JSON.stringify(draft)!==initial.current}>
     <section className="model-modal research-clarification-dialog" role="dialog" aria-modal="true" aria-labelledby="research-clarification-title">
-      <header><h2 id="research-clarification-title">研究边界选择 · {clarificationModeLabel(question)}</h2><button type="button" className="close" onClick={close} aria-label="关闭选择窗口">×</button></header>
+      <header><h2 id="research-clarification-title">研究边界选择 · {clarificationModeLabel(question)}</h2><button type="button" className="close" data-dialog-dismiss onClick={close} aria-label="关闭选择窗口">×</button></header>
       <div className="research-clarification-dialog-body"><h3 id="research-clarification-question" className="research-clarification-question">{question.text}</h3>{question.impact && <p className="research-clarification-impact">{question.impact}</p>}<div className="research-clarification-dialog-options" role="group" aria-labelledby="research-clarification-question">{question.options.map((option) => <label key={option.id}><input type={question.selectionMode === "multiple" ? "checkbox" : "radio"} name={`clarification-dialog-${question.id}`} checked={draft.includes(option.id)} onChange={() => setDraft(clarificationSelection(question, draft, option.id))}/><span>{option.label}</span></label>)}</div></div>
-      <footer className="research-clarification-dialog-actions"><button type="button" onClick={close}>取消</button><button type="button" className="primary" disabled={question.required && draft.length === 0} onClick={() => confirm([...draft])}>确认选择</button></footer>
+      <footer className="research-clarification-dialog-actions"><button type="button" data-dialog-dismiss onClick={close}>取消</button><button type="button" className="primary" disabled={question.required && draft.length === 0} onClick={() => confirm([...draft])}>确认选择</button></footer>
     </section>
-  </div>;
+  </ModalBackdrop>;
 }

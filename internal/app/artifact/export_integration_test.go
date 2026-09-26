@@ -97,6 +97,66 @@ func TestPublishWorkflowReportFreezesSourcesExportsAndReplaysIdempotently(t *tes
 	}
 }
 
+func TestPublishWorkflowReportPersistsUserMaterialCitationWithoutBibliographyID(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	store, err := sqlite.Open(ctx, filepath.Join(root, "user-material-report.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	projects := project.NewService(sqlite.NewProjectRepository(store.DB()), filepath.Join(root, "workspaces"), filepath.Join(root, "trash"))
+	selected, err := projects.Create(ctx, "User material report", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	definition := `{"schemaVersion":1,"name":"Fixture","description":"","inputs":[],"nodes":[{"id":"publish","name":"Publish","kind":"tool","toolName":"builtin.research.workflow.report","arguments":{}}],"edges":[],"outputs":[]}`
+	compilation := `{"schemaVersion":1,"compilerVersion":"fixture","definitionSha256":"` + strings.Repeat("a", 64) + `","compilationSha256":"` + strings.Repeat("b", 64) + `","order":["publish"],"nodes":[],"edges":[],"inputs":[],"outputs":[],"diagnostics":[]}`
+	for _, statement := range []struct {
+		query string
+		args  []any
+	}{
+		{`INSERT INTO workflows(id,project_id,name,description,current_version_id,version,created_at,updated_at) VALUES ('workflow',?,'Fixture','',NULL,1,?,?)`, []any{selected.ID, now, now}},
+		{`INSERT INTO workflow_versions(id,workflow_id,version_number,definition_json,definition_sha256,compilation_json,compilation_sha256,created_at) VALUES ('workflow-version','workflow',1,?,?,?,?,?)`, []any{definition, strings.Repeat("a", 64), compilation, strings.Repeat("b", 64), now}},
+		{`UPDATE workflows SET current_version_id='workflow-version' WHERE id='workflow'`, nil},
+		{`INSERT INTO workflow_runs(id,project_id,workflow_id,workflow_version_id,status,inputs_json,inputs_sha256,compilation_json,compilation_sha256,outputs_json,current_step_ordinal,error_code,error_message,cancel_requested,resume_status,created_at,started_at,completed_at,updated_at) VALUES ('workflow-run',?,'workflow','workflow-version','completed','{}',? ,?,?,'{}',1,'','',0,'',?,?,?,?)`, []any{selected.ID, strings.Repeat("c", 64), compilation, strings.Repeat("b", 64), now, now, now, now}},
+	} {
+		if _, err := store.DB().ExecContext(ctx, statement.query, statement.args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, callID := range []string{"upstream-call", "report-call"} {
+		if _, err := store.DB().ExecContext(ctx, `INSERT INTO tool_calls(id,run_id,workflow_run_id,provider_call_id,tool_name,tool_version,arguments_json,status,risk,permissions_json,idempotent,idempotency_key,error_code,error_message,created_at,started_at,completed_at,updated_at) VALUES (?,NULL,'workflow-run',?,'builtin.fixture','1','{}','completed','low','[]',1,?,'','',?,?,?,?)`, callID, callID, callID, now, now, now, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	quote := "The supplied local notes have limited evidence."
+	bibliography := json.RawMessage(`{"schemaVersion":1,"materialOrigin":"user_selected","attachmentId":"attachment","attachmentSha256":"` + strings.Repeat("d", 64) + `","data":{"title":"local-notes.pdf","workType":"user_material"}}`)
+	citation := artifact.Citation{
+		Reference: "[K-0123456789AB]", SourceRunIDSnapshot: "workflow-run", SourceToolCallIDSnapshot: "upstream-call",
+		IndexVersionID: "index", DocumentID: "document", AttachmentID: "attachment", ChunkID: "chunk", SourceName: "local-notes.pdf", MIMEType: "application/pdf", Locator: "page:1", Title: "",
+		Quote: quote, QuoteSHA256: artifactQuoteSHA256(quote), SourceStart: 0, SourceEnd: len(quote),
+		BibliographySnapshot: bibliography,
+	}
+	service := artifact.NewService(sqlite.NewArtifactRepository(store.DB()), projects)
+	result, err := service.PublishWorkflowReport(ctx, artifact.WorkflowReportCommand{
+		ProjectID: selected.ID, WorkflowRunID: "workflow-run", ToolCallID: "report-call", ToolName: "builtin.research.workflow.report", ToolVersion: "1", Name: "本地资料报告",
+		Markdown: "# 结论\n\n" + quote + " [K-0123456789AB]", Citations: []artifact.Citation{citation}, SourceToolCallIDs: []string{"upstream-call"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Version.Citations) != 1 || result.Version.Citations[0].BibliographyIDSnapshot != "" || result.Version.Citations[0].EvidenceLevel != "" || string(result.Version.Citations[0].BibliographySnapshot) != string(bibliography) {
+		t.Fatalf("user material citation was not persistently frozen: %#v", result.Version.Citations)
+	}
+	for _, value := range []artifact.Export{result.DOCX, result.PDF} {
+		if err := service.DownloadExport(ctx, selected.ID, value.ID, filepath.Join(root, value.FileName)); err != nil {
+			t.Fatalf("export with user material citation %s: %v", value.Format, err)
+		}
+	}
+}
+
 func artifactQuoteSHA256(value string) string {
 	digest := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(digest[:])

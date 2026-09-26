@@ -12,15 +12,16 @@ import (
 )
 
 type Conversation struct {
-	ID             string                  `json:"id"`
-	ProjectID      string                  `json:"projectId"`
-	Title          string                  `json:"title"`
-	ModelProfileID string                  `json:"modelProfileId"`
-	ModelID        string                  `json:"modelId"`
-	PermissionMode PermissionMode          `json:"permissionMode"`
-	ReasoningLevel modelcap.ReasoningLevel `json:"reasoningLevel"`
-	CreatedAt      time.Time               `json:"createdAt"`
-	UpdatedAt      time.Time               `json:"updatedAt"`
+	ID               string                  `json:"id"`
+	ProjectID        string                  `json:"projectId"`
+	Title            string                  `json:"title"`
+	AutoTitlePending bool                    `json:"autoTitlePending,omitempty"`
+	ModelProfileID   string                  `json:"modelProfileId"`
+	ModelID          string                  `json:"modelId"`
+	PermissionMode   PermissionMode          `json:"permissionMode"`
+	ReasoningLevel   modelcap.ReasoningLevel `json:"reasoningLevel"`
+	CreatedAt        time.Time               `json:"createdAt"`
+	UpdatedAt        time.Time               `json:"updatedAt"`
 }
 
 // PermissionMode is a conversation-level user choice. Plan permits only
@@ -160,15 +161,20 @@ func NewService(repository Repository) *Service {
 func (s *Service) Create(ctx context.Context, projectID, title string) (Conversation, error) {
 	projectID = strings.TrimSpace(projectID)
 	title = strings.TrimSpace(title)
-	if projectID == "" || title == "" {
-		return Conversation{}, fmt.Errorf("project id and conversation title are required")
+	if projectID == "" {
+		return Conversation{}, fmt.Errorf("project id is required")
+	}
+	autoTitlePending := title == ""
+	if autoTitlePending {
+		title = "新会话"
 	}
 	conversationID, err := id.New()
 	if err != nil {
 		return Conversation{}, err
 	}
 	now := s.now()
-	value := Conversation{ID: conversationID, ProjectID: projectID, Title: title, PermissionMode: PermissionPlan, ReasoningLevel: modelcap.ReasoningMedium, CreatedAt: now, UpdatedAt: now}
+	value := Conversation{ID: conversationID, ProjectID: projectID, Title: title, PermissionMode: PermissionPlan, ReasoningLevel: modelcap.DefaultReasoningLevel, CreatedAt: now, UpdatedAt: now}
+	value.AutoTitlePending = autoTitlePending
 	if err := s.repository.CreateConversation(ctx, value); err != nil {
 		return Conversation{}, fmt.Errorf("create conversation: %w", err)
 	}

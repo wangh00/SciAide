@@ -175,6 +175,7 @@ func selectedEvidencePhaseNode(node CompiledNode, input json.RawMessage) Compile
 		delete(p, "documentAnalyses")
 	}
 	node.Prompt = selectedEvidenceOverviewInstruction
+	node.Prompt += "\nmaterialOrigin=user_selected 表示用户指定的资料，不代表相关、可信或已获得全文。按原文判断采用、背景或排除，并在documentAnalyses中说明。没有candidateId的资料不能调用builtin.research.full_text.read；仅使用当前索引签发的引用，不能凭文件名编造题录。"
 	node.Prompt += "\n初始材料以已有摘要为主。仅关键结论、冲突或缺失方法/结果需要时调用builtin.research.full_text.read，candidateId从importedMaterials逐字取，query指定要核验的具体结果词。fullTextAvailability=unavailable的材料不要调用；requestable_not_verified仅表示存在可尝试入口，不表示已获得全文。单篇一次，返回status=unavailable时核验未完成，保留原证据限制并继续其他材料，不重复请求。来源失败后继续其他材料并披露限制，不循环下载。工具是核验信息，不产生新[K]引用，也不更改已冻结材料；超出原签发证据的结论仍须标为待补证，不能静默提升为已支持。"
 	node.Prompt += "\n每条推荐引用的supportingQuote必须逐字摘录当前candidate.quote中直接支持reason的连续原句，不能用同文档其他块替代。仅题名作者DOI等题录不得推荐为效果依据。缺关键统计先核查已提供的完整块，不把界面短片段的截断当来源缺失。sourceLevel按当前片段实际内容判断，不按PDF扩展名。独立研究数需要跨文档试验身份核对；文档数不是独立试验数。"
 	node.Prompt += "\n最终citationAssessments只评估实际推荐的引用及需要指出问题的引用，不逐条重写全部检索摘录。推荐标记必须有对应非exclude判定。无引用的文档记录明确说明未用于结论的原因。"
@@ -250,7 +251,7 @@ func validateSelectedEvidence(output, input json.RawMessage) error {
 				q := strings.TrimSpace(a.SupportingQuote)
 				c := byRef[a.Reference]
 				if q == "" || !strings.Contains(c.Quote, q) {
-					return fmt.Errorf("citation %s supportingQuote must occur in this exact source excerpt", a.Reference)
+					return fmt.Errorf("citation %s supportingQuote must occur in this exact source excerpt；请从该引用对应的 candidate.quote 复制连续原文，不要改写数字、合并其他片段或使用同文献的另一引用。词内连字符与空白排版差异已自动处理，仍不匹配时请重新选择原句或排除该引用", a.Reference)
 				}
 				if strings.Contains(c.Quote, "## Bibliographic metadata") && !strings.Contains(c.Quote, "## Abstract") {
 					return fmt.Errorf("citation %s contains bibliographic metadata, not result evidence", a.Reference)

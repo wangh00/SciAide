@@ -74,10 +74,11 @@ type ResourceSnapshot struct {
 }
 
 type ResearchStarterContext struct {
-	ResearchIdea     string           `json:"researchIdea"`
-	ResourceSnapshot ResourceSnapshot `json:"resourceSnapshot"`
-	StageCatalog     []ResearchStage  `json:"stageCatalog"`
-	PlannerVersion   string           `json:"plannerVersion"`
+	SelectedMaterials []attachment.MessageReference `json:"selectedMaterials,omitempty"`
+	ResearchIdea      string                        `json:"researchIdea"`
+	ResourceSnapshot  ResourceSnapshot              `json:"resourceSnapshot"`
+	StageCatalog      []ResearchStage               `json:"stageCatalog"`
+	PlannerVersion    string                        `json:"plannerVersion"`
 	// ClarificationAnswers is populated only on a replanning attempt. Keeping
 	// the option IDs in the frozen input makes the hand-off auditable without
 	// relying on the rendered labels or reparsing the planner prompt.
@@ -201,11 +202,12 @@ type StarterSkillLoader interface {
 }
 
 type StartResearchCommand struct {
-	ProjectID      string                  `json:"projectId"`
-	ResearchIdea   string                  `json:"researchIdea"`
-	ModelProfileID string                  `json:"modelProfileId"`
-	ModelID        string                  `json:"modelId"`
-	ReasoningLevel modelcap.ReasoningLevel `json:"reasoningLevel,omitempty"`
+	ReferenceAttachmentIDs []string                `json:"referenceAttachmentIds,omitempty"`
+	ProjectID              string                  `json:"projectId"`
+	ResearchIdea           string                  `json:"researchIdea"`
+	ModelProfileID         string                  `json:"modelProfileId"`
+	ModelID                string                  `json:"modelId"`
+	ReasoningLevel         modelcap.ReasoningLevel `json:"reasoningLevel,omitempty"`
 }
 
 type AnswerResearchClarificationCommand struct {
@@ -283,6 +285,22 @@ func (s *StarterService) Start(ctx context.Context, command StartResearchCommand
 	if err != nil {
 		return RunDetail{}, err
 	}
+	references := []attachment.MessageReference{}
+	if len(command.ReferenceAttachmentIDs) > 0 {
+		loader, ok := s.attachments.(interface {
+			SelectReferenceMaterials(context.Context, string, string, []string) ([]attachment.Attachment, error)
+		})
+		if !ok {
+			return RunDetail{}, fmt.Errorf("参考资料服务未配置")
+		}
+		values, e := loader.SelectReferenceMaterials(ctx, command.ProjectID, "", command.ReferenceAttachmentIDs)
+		if e != nil {
+			return RunDetail{}, e
+		}
+		for _, v := range values {
+			references = append(references, attachment.MessageReference{AttachmentID: v.ID, OriginalName: v.OriginalName, Format: v.Format, MIMEType: v.MIMEType, SizeBytes: v.SizeBytes, UnitCount: v.UnitCount, Truncated: v.Truncated})
+		}
+	}
 	starter := ResearchStarterTemplate()
 	saved, err := s.workflows.save(ctx, SaveCommand{ProjectID: command.ProjectID, Definition: starter.Definition}, PurposeResearchStarter)
 	if err != nil {
@@ -290,7 +308,8 @@ func (s *StarterService) Start(ctx context.Context, command StartResearchCommand
 	}
 	inputs, err := json.Marshal(map[string]any{"starter_context": ResearchStarterContext{
 		ResearchIdea: command.ResearchIdea, ResourceSnapshot: snapshot,
-		StageCatalog: dynamicResearchStageCatalog(), PlannerVersion: dynamicResearchPlannerVersion,
+		SelectedMaterials: references,
+		StageCatalog:      dynamicResearchStageCatalog(), PlannerVersion: dynamicResearchPlannerVersion,
 	}})
 	if err != nil {
 		return RunDetail{}, err

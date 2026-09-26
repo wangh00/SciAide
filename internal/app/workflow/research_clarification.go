@@ -96,8 +96,15 @@ func (s *StarterService) startReplannedResearch(ctx context.Context, prior RunDe
 	if code, err := s.runtime.validateRunSnapshots(ctx, prior); err != nil {
 		return RunDetail{}, fmt.Errorf("%s: %w", code, err)
 	}
+	var priorInput struct {
+		Starter ResearchStarterContext `json:"starter_context"`
+	}
+	if err := json.Unmarshal(prior.Run.Inputs, &priorInput); err != nil {
+		return RunDetail{}, err
+	}
 	inputs, err := json.Marshal(map[string]any{"starter_context": ResearchStarterContext{
-		ResearchIdea: idea, ResourceSnapshot: snapshot, StageCatalog: dynamicResearchStageCatalog(), PlannerVersion: dynamicResearchPlannerVersion,
+		SelectedMaterials: priorInput.Starter.SelectedMaterials,
+		ResearchIdea:      idea, ResourceSnapshot: snapshot, StageCatalog: dynamicResearchStageCatalog(), PlannerVersion: dynamicResearchPlannerVersion,
 		ClarificationAnswers: answers, PriorStarterRunID: prior.Run.ID,
 	}})
 	if err != nil {

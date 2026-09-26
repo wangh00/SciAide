@@ -268,7 +268,7 @@ func (*HTTPClient) Embed(ctx context.Context, config Config, secret []byte, inpu
 	if timeout <= 0 {
 		timeout = defaultTimeout * time.Second
 	}
-	client := &http.Client{Transport: browserhttp.New(http.DefaultTransport.(*http.Transport).Clone()), Timeout: timeout, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
+	client := &http.Client{Transport: browserhttp.NewScoped(http.DefaultTransport.(*http.Transport).Clone(), "model"), Timeout: timeout, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
 	response, err := client.Do(request)
 	if err != nil {
 		return nil, fmt.Errorf("连接 Embedding 服务: %w", err)

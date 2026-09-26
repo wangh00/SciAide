@@ -370,3 +370,20 @@ func TestRequestApprovalRejectsForgedEvaluation(t *testing.T) {
 		t.Fatal("forged policy evaluation was accepted")
 	}
 }
+
+func TestPlanDiscoveryIsReadOnlyNotMCPExecutionApproval(t *testing.T) {
+	engine := NewEngine(newMemoryRepository())
+	for _, name := range []string{"builtin.mcp.list", "builtin.tools.search", "mcp.browser.tabs"} {
+		call := testCall(tool.RiskLow)
+		call.ToolName = name
+		call.Idempotent = true
+		result, err := engine.EvaluateCall(context.Background(), EvaluationRequest{ProjectID: "project-1", RunID: "run-1", Call: call}, conversation.PermissionPlan)
+		expected := DecisionAllow
+		if name == "mcp.browser.tabs" {
+			expected = DecisionAsk
+		}
+		if err != nil || result.Decision != expected {
+			t.Fatalf("%s: %+v %v", name, result, err)
+		}
+	}
+}

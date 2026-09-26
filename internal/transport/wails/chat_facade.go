@@ -38,6 +38,10 @@ func (f *ChatFacade) SteerChat(activeRunID string, request chat.StartCommand) (c
 func (f *ChatFacade) CancelRun(runID string) error {
 	return f.service.Cancel(f.lifecycle.Context(), runID)
 }
+
+func (f *ChatFacade) ListConversationActivity(projectID string) ([]chat.ConversationActivity, error) {
+	return f.service.ListConversationActivity(f.lifecycle.Context(), projectID)
+}
 func (f *ChatFacade) GetRunSnapshot(runID string) (RunSnapshot, error) {
 	base, err := f.service.Snapshot(f.lifecycle.Context(), runID)
 	if err != nil {

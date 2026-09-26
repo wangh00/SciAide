@@ -102,7 +102,7 @@ func TestReadTextMissingPathExplainsHowToRecover(t *testing.T) {
 	}
 }
 
-func TestWorkspaceToolsHideAndRejectPrivateProjectData(t *testing.T) {
+func TestWorkspaceToolsExposeOverviewButProtectManagedData(t *testing.T) {
 	workspace := t.TempDir()
 	private := filepath.Join(workspace, project.PrivateDirectoryName)
 	if err := os.MkdirAll(private, 0o700); err != nil {
@@ -116,8 +116,8 @@ func TestWorkspaceToolsHideAndRejectPrivateProjectData(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(listed.Structured), project.PrivateDirectoryName) {
-		t.Fatalf("private project data leaked in listing: %s", listed.Structured)
+	if !strings.Contains(string(listed.Structured), project.PrivateDirectoryName) {
+		t.Fatalf("private overview missing in listing: %s", listed.Structured)
 	}
 	if _, err := NewReadText(fixture).Invoke(context.Background(), tool.Invocation{ProjectID: "project", Arguments: json.RawMessage(`{"path":".sciaide/secret.txt"}`)}); err == nil {
 		t.Fatal("private project data path was readable through workspace tool")
@@ -143,5 +143,55 @@ func TestReadTextRejectsEscapingSymlink(t *testing.T) {
 	value := NewReadText(projectFixture{value: project.Project{ID: "project", WorkspacePath: workspace}})
 	if result, err := value.Invoke(context.Background(), tool.Invocation{ProjectID: "project", Arguments: json.RawMessage(`{"path":"link.txt"}`)}); err == nil || strings.Contains(result.Text, "secret") {
 		t.Fatalf("escaping symlink result = %#v, %v", result, err)
+	}
+}
+
+func TestWorkspacePrivateOverviewAndTaskScopedReads(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"attachments", "cache", "browser", "tasks/t1"} {
+		if err := os.MkdirAll(filepath.Join(root, ".sciaide", name), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, value := range map[string]string{".sciaide/project.json": "internal", ".sciaide/secret.txt": "secret", ".sciaide/tasks/t1/analysis.py": "print(42)"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(value), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f := projectFixture{value: project.Project{ID: "project", WorkspacePath: root}}
+	invoke := func(path string, listing bool, task string) (tool.Result, error) {
+		args, _ := json.Marshal(map[string]any{"path": path})
+		inv := tool.Invocation{ProjectID: "project", ResearchTaskID: task, Arguments: args}
+		if listing {
+			return NewListWorkspace(f).Invoke(context.Background(), inv)
+		}
+		return NewReadText(f).Invoke(context.Background(), inv)
+	}
+	for _, path := range []string{".sciaide", "./.sciaide/"} {
+		result, err := invoke(path, true, "")
+		if err != nil || !strings.Contains(string(result.Structured), "attachments") || strings.Contains(string(result.Structured), "secret") || strings.Contains(string(result.Structured), "project.json") || !strings.Contains(result.Text, "概览") {
+			t.Fatalf("overview = %+v %v", result, err)
+		}
+	}
+	for _, path := range []string{".sciaide/cache", ".sciaide/browser", ".sciaide/tasks/t1", ".sciaide/attachments", ".SCIAIDE/secret.txt", ".sciaide./secret.txt", ".sciaide /secret.txt", "nested/.sciaide/secret.txt", ".sciaide/project.json", "../outside", ".sciaide/tasks/../cache"} {
+		for _, listing := range []bool{true, false} {
+			_, err := invoke(path, listing, "")
+			safe, ok := err.(interface{ UserFacingMessage() string })
+			if !ok || safe.UserFacingMessage() == "" {
+				t.Fatalf("expected actionable rejection for %s: %v", path, err)
+			}
+		}
+	}
+	result, err := invoke("analysis.py", false, "t1")
+	if err != nil || result.Text != "print(42)" {
+		t.Fatalf("task file read: %+v %v", result, err)
+	}
+	_, err = invoke("../t2/analysis.py", false, "t1")
+	if err == nil {
+		t.Fatal("cross-task read allowed")
+	}
+	contents, _ := os.ReadFile(filepath.Join(root, ".sciaide/project.json"))
+	if string(contents) != "internal" {
+		t.Fatal("read-only operation changed configuration")
 	}
 }

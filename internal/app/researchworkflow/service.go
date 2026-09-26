@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/wangh00/SciAide/internal/app/artifact"
+	"github.com/wangh00/SciAide/internal/app/attachment"
 	"github.com/wangh00/SciAide/internal/app/citation"
 	"github.com/wangh00/SciAide/internal/app/knowledge"
 	"github.com/wangh00/SciAide/internal/app/pythonenv"
@@ -74,6 +75,42 @@ type Service struct {
 	toolCalls    ToolCalls
 	artifacts    Artifacts
 	tasks        researchtask.Validator
+	materials    interface {
+		ReferenceMaterials(context.Context, string, string, []string) ([]attachment.Attachment, error)
+	}
+}
+
+func (s *Service) SetMaterialLoader(loader interface {
+	ReferenceMaterials(context.Context, string, string, []string) ([]attachment.Attachment, error)
+}) {
+	s.materials = loader
+}
+
+func (s *Service) ImportUserMaterials(ctx context.Context, projectID, taskID string, ids []string) ([]ImportedMaterial, error) {
+	if strings.TrimSpace(taskID) == "" {
+		return nil, fmt.Errorf("参考资料导入需要当前科研任务")
+	}
+	if s.materials == nil {
+		return nil, fmt.Errorf("参考资料服务未配置")
+	}
+	values, err := s.materials.ReferenceMaterials(ctx, projectID, taskID, ids)
+	if err != nil {
+		return nil, err
+	}
+	indexer, ok := s.knowledge.(interface {
+		Enqueue(context.Context, attachment.Attachment) error
+	})
+	if !ok {
+		return nil, fmt.Errorf("资料索引服务未配置")
+	}
+	out := []ImportedMaterial{}
+	for _, v := range values {
+		if err := indexer.Enqueue(ctx, v); err != nil {
+			return nil, err
+		}
+		out = append(out, ImportedMaterial{AttachmentID: v.ID, AttachmentSHA256: v.SHA256, Title: v.OriginalName, MaterialOrigin: "user_selected", Warning: "用户提供资料，尚未验证研究相关性、书目信息及全文完整性。必须在证据综合中判断采用、背景或排除，不能自动升级证据等级。"})
+	}
+	return out, nil
 }
 
 func (s *Service) SetTaskValidator(validator researchtask.Validator) {
@@ -147,6 +184,8 @@ func (s *Service) LiteratureCandidates(ctx context.Context, projectID string, qu
 }
 
 type ImportedMaterial struct {
+	AttachmentSHA256     string              `json:"attachmentSha256,omitempty"`
+	MaterialOrigin       string              `json:"materialOrigin,omitempty"`
 	FullTextAvailability string              `json:"fullTextAvailability,omitempty"`
 	Warning              string              `json:"warning,omitempty"`
 	CandidateID          string              `json:"candidateId"`
@@ -391,11 +430,32 @@ func (s *Service) PublishReport(ctx context.Context, request ReportRequest) (art
 	searchCalls := map[string]tool.Call{}
 	availableArtifacts := map[string]struct{}{}
 	verifiedReviewGates := map[string]string{}
+	userMaterials := map[string]ImportedMaterial{}
 	for _, call := range calls {
 		if call.ID == request.ToolCallID || call.RunID != request.WorkflowRunID || tool.NormalizeSubjectKind(call.SubjectKind) != tool.SubjectWorkflowRun || call.Status != tool.CallCompleted || call.Result == nil || call.Result.Status != tool.ResultSuccess {
 			continue
 		}
 		completed = append(completed, call)
+		if call.ToolName == "builtin.research.workflow.import" {
+			var arguments struct {
+				SelectedAttachmentIDs []string `json:"selectedAttachmentIds"`
+			}
+			_ = json.Unmarshal(call.Arguments, &arguments)
+			selectedAttachments := map[string]bool{}
+			for _, id := range arguments.SelectedAttachmentIDs {
+				selectedAttachments[id] = true
+			}
+			var imported struct {
+				Materials []ImportedMaterial `json:"materials"`
+			}
+			if json.Unmarshal(call.Result.Structured, &imported) == nil {
+				for _, v := range imported.Materials {
+					if v.MaterialOrigin == "user_selected" && selectedAttachments[v.AttachmentID] && v.AttachmentSHA256 != "" {
+						userMaterials[v.AttachmentID] = v
+					}
+				}
+			}
+		}
 		if call.ToolName == citation.KnowledgeToolName {
 			searchCalls[call.ID] = call
 			for _, value := range call.Result.Citations {
@@ -470,7 +530,7 @@ func (s *Service) PublishReport(ctx context.Context, request ReportRequest) (art
 		if err != nil || len(offered[key]) == 0 {
 			return artifact.WorkflowReportResult{}, fmt.Errorf("report citation was not returned by a completed knowledge search in this Workflow Run")
 		}
-		value, err := s.verifyCitation(ctx, request.ProjectID, request.WorkflowRunID, request.ResearchTaskID, searchCalls[offered[key][0]], selected)
+		value, err := s.verifyCitation(ctx, request.ProjectID, request.WorkflowRunID, request.ResearchTaskID, searchCalls[offered[key][0]], selected, userMaterials)
 		if err != nil {
 			return artifact.WorkflowReportResult{}, err
 		}
@@ -523,7 +583,7 @@ func (s *Service) PublishReport(ctx context.Context, request ReportRequest) (art
 	})
 }
 
-func (s *Service) verifyCitation(ctx context.Context, projectID, runID, researchTaskID string, sourceCall tool.Call, selected tool.CitationRef) (artifact.Citation, error) {
+func (s *Service) verifyCitation(ctx context.Context, projectID, runID, researchTaskID string, sourceCall tool.Call, selected tool.CitationRef, imported ...map[string]ImportedMaterial) (artifact.Citation, error) {
 	if selected.Kind != citation.KindKnowledgeChunk || selected.ProjectID != projectID || selected.IndexVersionID == "" || selected.DocumentID == "" || selected.AttachmentID == "" || selected.ChunkID == "" {
 		return artifact.Citation{}, fmt.Errorf("report citation identity is invalid")
 	}
@@ -547,7 +607,24 @@ func (s *Service) verifyCitation(ctx context.Context, projectID, runID, research
 		return artifact.Citation{}, fmt.Errorf("report citation no longer matches the active verified knowledge chunk")
 	}
 	var bibliography research.CitationSnapshot
-	if scoped, ok := s.bibliography.(interface {
+	userMaterial := ImportedMaterial{}
+	if len(imported) > 0 {
+		userMaterial = imported[0][selected.AttachmentID]
+	}
+	if userMaterial.MaterialOrigin == "user_selected" {
+		if s.materials == nil || researchTaskID == "" {
+			return artifact.Citation{}, fmt.Errorf("user material verification is not configured")
+		}
+		values, loadErr := s.materials.ReferenceMaterials(ctx, projectID, researchTaskID, []string{selected.AttachmentID})
+		if loadErr != nil {
+			return artifact.Citation{}, loadErr
+		}
+		if len(values) != 1 || values[0].SHA256 != userMaterial.AttachmentSHA256 {
+			return artifact.Citation{}, fmt.Errorf("user material source hash changed after import")
+		}
+		// A local source snapshot is not a claim of a published paper or complete full text.
+		bibliography.Bibliography, err = json.Marshal(map[string]any{"schemaVersion": 1, "materialOrigin": "user_selected", "attachmentId": selected.AttachmentID, "attachmentSha256": userMaterial.AttachmentSHA256, "data": research.BibliographyData{Title: userMaterial.Title, WorkType: "user_material"}})
+	} else if scoped, ok := s.bibliography.(interface {
 		CitationSnapshotForAttachmentForTask(context.Context, string, string, string) (research.CitationSnapshot, error)
 	}); ok && researchTaskID != "" {
 		bibliography, err = scoped.CitationSnapshotForAttachmentForTask(ctx, projectID, researchTaskID, selected.AttachmentID)
@@ -557,7 +634,7 @@ func (s *Service) verifyCitation(ctx context.Context, projectID, runID, research
 	if err != nil {
 		return artifact.Citation{}, err
 	}
-	if bibliography.EvidenceLevel != research.EvidenceFullText && bibliography.EvidenceLevel != research.EvidenceMetadataAbstract {
+	if userMaterial.MaterialOrigin != "user_selected" && bibliography.EvidenceLevel != research.EvidenceFullText && bibliography.EvidenceLevel != research.EvidenceMetadataAbstract {
 		return artifact.Citation{}, fmt.Errorf("report citation has no declared evidence level")
 	}
 	return artifact.Citation{

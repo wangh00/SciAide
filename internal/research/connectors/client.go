@@ -71,7 +71,7 @@ func NewClient() *Client {
 		cache: map[string]cacheEntry{}, nextStart: map[string]time.Time{},
 	}
 	client.http = &http.Client{
-		Transport: browserhttp.New(&http.Transport{
+		Transport: browserhttp.NewScoped(&http.Transport{
 			Proxy:                 http.ProxyFromEnvironment,
 			DialContext:           (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
 			ForceAttemptHTTP2:     true,
@@ -80,7 +80,7 @@ func NewClient() *Client {
 			IdleConnTimeout:       90 * time.Second,
 			MaxIdleConns:          32,
 			MaxIdleConnsPerHost:   4,
-		}),
+		}, "research"),
 		CheckRedirect: func(request *http.Request, via []*http.Request) error {
 			if len(via) >= 4 {
 				return fmt.Errorf("research source redirected too many times")

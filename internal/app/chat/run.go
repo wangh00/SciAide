@@ -24,6 +24,7 @@ const (
 )
 
 type Run struct {
+	WebSearchDisabled             bool                        `json:"webSearchDisabled"`
 	ID                            string                      `json:"id"`
 	ConversationID                string                      `json:"conversationId"`
 	UserMessageID                 string                      `json:"userMessageId"`

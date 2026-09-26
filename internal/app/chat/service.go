@@ -24,14 +24,31 @@ type RunExecutor interface {
 	ResumeExecute(ctx context.Context, runID string)
 }
 
+// ConversationActivity is a lightweight sidebar projection, without messages or tool output.
+type ConversationActivity struct {
+	ConversationID string    `json:"conversationId"`
+	Status         RunStatus `json:"status"`
+}
+
+func (s *Service) ListConversationActivity(ctx context.Context, projectID string) ([]ConversationActivity, error) {
+	reader, ok := s.runs.(interface {
+		ListConversationActivity(context.Context, string) ([]ConversationActivity, error)
+	})
+	if !ok {
+		return nil, fmt.Errorf("conversation activity reader unavailable")
+	}
+	return reader.ListConversationActivity(ctx, projectID)
+}
+
 type StartCommand struct {
-	ConversationID  string                  `json:"conversationId"`
-	ModelProfileID  string                  `json:"modelProfileId"`
-	ModelID         string                  `json:"modelId"`
-	ReasoningLevel  modelcap.ReasoningLevel `json:"reasoningLevel"`
-	Text            string                  `json:"text"`
-	AttachmentIDs   []string                `json:"attachmentIds,omitempty"`
-	ClientMessageID string                  `json:"clientMessageId,omitempty"`
+	WebSearchEnabled bool                    `json:"webSearchEnabled"`
+	ConversationID   string                  `json:"conversationId"`
+	ModelProfileID   string                  `json:"modelProfileId"`
+	ModelID          string                  `json:"modelId"`
+	ReasoningLevel   modelcap.ReasoningLevel `json:"reasoningLevel"`
+	Text             string                  `json:"text"`
+	AttachmentIDs    []string                `json:"attachmentIds,omitempty"`
+	ClientMessageID  string                  `json:"clientMessageId,omitempty"`
 }
 
 var clientMessageIDPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
@@ -270,7 +287,7 @@ func (s *Service) start(ctx context.Context, cmd StartCommand, replacedRunID str
 		cmd.ReasoningLevel = selectedConversation.ReasoningLevel
 	}
 	if !cmd.ReasoningLevel.Valid() {
-		cmd.ReasoningLevel = modelcap.ReasoningMedium
+		cmd.ReasoningLevel = modelcap.DefaultReasoningLevel
 	}
 	if selectedConversation.ReasoningLevel != cmd.ReasoningLevel {
 		if err := s.conversations.UpdateReasoningLevel(ctx, selectedConversation.ID, cmd.ReasoningLevel, s.now()); err != nil {
@@ -357,6 +374,9 @@ func (s *Service) start(ctx context.Context, cmd StartCommand, replacedRunID str
 		Parts: []conversation.MessagePart{{ID: assistantPartID, MessageID: assistantID, Ordinal: 0, Type: "text", CreatedAt: now.Add(time.Nanosecond)}}}
 	defaultContextBudget := modelcap.ResolveContextBudget(defaultContextWindowTokens, 0, modelcap.ContextWindowSourceFallback)
 	run := Run{ID: runID, ConversationID: cmd.ConversationID, UserMessageID: userID, AssistantMessageID: assistantID, ModelProfileID: cmd.ModelProfileID, ModelID: cmd.ModelID, RequestedReasoningLevel: cmd.ReasoningLevel, ContextWindowTokens: defaultContextBudget.WindowTokens, ContextBudgetTokens: defaultContextBudget.EffectiveTokens, AutoCompactTokenLimit: defaultContextBudget.AutoCompactTokens, ContextWindowSource: defaultContextBudget.Source, PermissionMode: selectedConversation.PermissionMode, Status: RunQueued, CreatedAt: now, UpdatedAt: now}
+	// Freeze ordinary conversation opt-in per Run, including approval resumes.
+	// Automatic research stages retain their independently frozen tool contract.
+	run.WebSearchDisabled = workflowAI == nil && !cmd.WebSearchEnabled
 	if workflowAI != nil {
 		workflowAI.CreatedAt = now
 		if err := s.runs.(WorkflowAIRunCreator).CreateWorkflowAIWithMessages(ctx, run, user, assistant, *workflowAI); err != nil {

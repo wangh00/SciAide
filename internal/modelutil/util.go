@@ -44,7 +44,7 @@ func NewStreamingHTTPClient(responseTimeout time.Duration) *http.Client {
 	transport.DialContext = (&net.Dialer{Timeout: responseTimeout, KeepAlive: 30 * time.Second}).DialContext
 	transport.TLSHandshakeTimeout = responseTimeout
 	transport.ResponseHeaderTimeout = responseTimeout
-	return &http.Client{Transport: browserhttp.New(transport)}
+	return &http.Client{Transport: browserhttp.NewScoped(transport, "model")}
 }
 
 func ProviderToolName(qualified string) string {

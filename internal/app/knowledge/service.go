@@ -748,6 +748,19 @@ func (s *Service) SearchWithOptions(ctx context.Context, projectID string, optio
 		}
 		allowed := make([]string, 0, len(documents))
 		for _, value := range documents {
+			if len(options.DocumentIDs) == 0 {
+				if reader, ok := s.attachments.(interface {
+					MaterialHiddenFromDefault(context.Context, string) (bool, error)
+				}); ok {
+					hidden, e := reader.MaterialHiddenFromDefault(ctx, value.AttachmentID)
+					if e != nil {
+						return SearchResult{}, e
+					}
+					if hidden {
+						continue
+					}
+				}
+			}
 			allowed = append(allowed, value.ID)
 		}
 		if len(options.DocumentIDs) == 0 {
@@ -778,6 +791,19 @@ func (s *Service) SearchWithOptions(ctx context.Context, projectID string, optio
 		allowed := make([]string, 0, len(documents))
 		for _, value := range documents {
 			if value.ScopeKind == attachment.ScopeProjectShared {
+				if len(options.DocumentIDs) == 0 {
+					if reader, ok := s.attachments.(interface {
+						MaterialHiddenFromDefault(context.Context, string) (bool, error)
+					}); ok {
+						hidden, e := reader.MaterialHiddenFromDefault(ctx, value.AttachmentID)
+						if e != nil {
+							return SearchResult{}, e
+						}
+						if hidden {
+							continue
+						}
+					}
+				}
 				allowed = append(allowed, value.ID)
 			}
 		}

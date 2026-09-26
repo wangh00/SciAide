@@ -94,6 +94,22 @@ func looksLikeHeading(value string) bool {
 	if len(runes) == 0 || len(runes) > 120 || endsSentence(value) {
 		return false
 	}
+	// A decimal or a row of table values is not a section heading.
+	if !strings.ContainsFunc(value, unicode.IsLetter) {
+		return false
+	}
+	letters, digits := 0, 0
+	for _, r := range runes {
+		if unicode.IsLetter(r) {
+			letters++
+		}
+		if unicode.IsDigit(r) {
+			digits++
+		}
+	}
+	if digits > letters && digits > 4 {
+		return false
+	}
 	return headingPrefixPattern.MatchString(value)
 }
 

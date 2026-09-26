@@ -7,8 +7,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/wangh00/SciAide/internal/app/browserenv"
 	"github.com/wangh00/SciAide/internal/browserhttp"
 	"github.com/wangh00/SciAide/internal/httpua"
+	"github.com/wangh00/SciAide/internal/network"
 	"golang.org/x/net/publicsuffix"
 	"io"
 	"mime"
@@ -54,6 +56,7 @@ var fixedFullTextHosts = map[string]map[string]struct{}{
 }
 
 type Service struct {
+	browser         *browserenv.Service
 	fullTextTimeout time.Duration
 	downloadMu      sync.Mutex
 	failures        map[string]cachedFailure
@@ -63,6 +66,7 @@ type Service struct {
 	allowedHosts    map[string]map[string]struct{}
 }
 
+func (s *Service) SetBrowser(b *browserenv.Service) { s.browser = b }
 func New() *Service {
 	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
 	transport := &http.Transport{
@@ -72,7 +76,7 @@ func New() *Service {
 	}
 	transport.DialContext = safeDialContext(dialer)
 	service := &Service{maxPDFBytes: defaultMaxPDFBytes, allowedHosts: cloneAllowedHosts(fixedFullTextHosts)}
-	service.client = &http.Client{Timeout: defaultTimeout, Transport: browserhttp.New(transport), CheckRedirect: fixedHostRedirect}
+	service.client = &http.Client{Timeout: defaultTimeout, Transport: browserhttp.NewScoped(transport, "research"), CheckRedirect: fixedHostRedirect}
 	return service
 }
 
@@ -110,6 +114,9 @@ func (s *Service) Materialize(ctx context.Context, selected project.Project, can
 			budget := s.fullTextTimeout
 			if budget <= 0 {
 				budget = defaultTimeout
+				if s.browser != nil && s.browser.Available(ctx, selected.ID) {
+					budget = 3 * time.Minute
+				}
 			}
 			fetchCtx, cancel := context.WithTimeout(ctx, budget)
 			defer cancel()
@@ -278,8 +285,11 @@ func (s *Service) downloadPDF(ctx context.Context, selected project.Project, can
 		return appresearch.MaterializedCandidate{}, err
 	}
 	parsed, _ := url.Parse(target)
-	hostKey := "host:" + parsed.Hostname()
-	for _, key := range []string{target, hostKey} {
+	proxy, revision := network.Resolve("research")
+	binding := browserenv.Fingerprint(proxy, revision)
+	failureKey := binding + target
+	hostKey := binding + "host:" + parsed.Hostname()
+	for _, key := range []string{failureKey, hostKey} {
 		if failure, ok := s.failures[key]; ok && time.Now().Before(failure.until) {
 			return appresearch.MaterializedCandidate{}, &FullTextUnavailableError{Message: failure.message + "; request skipped during cooldown"}
 		}
@@ -291,6 +301,19 @@ func (s *Service) downloadPDF(ctx context.Context, selected project.Project, can
 	request.Header.Set("Accept", "application/pdf")
 	httpua.Apply(request)
 	client := *s.client
+	if _, ok := client.Transport.(*browserhttp.Transport); ok {
+		base := http.DefaultTransport.(*http.Transport).Clone()
+		base.Proxy = nil
+		if proxy.Mode == "custom" {
+			u, _ := url.Parse(proxy.URL)
+			base.Proxy = http.ProxyURL(u)
+		} else {
+			base.DialContext = safeDialContext(&net.Dialer{Timeout: 10 * time.Second})
+		}
+		tr := browserhttp.NewFixed(base)
+		defer tr.CloseIdleConnections()
+		client.Transport = tr
+	}
 	client.Jar, _ = cookiejar.New(&cookiejar.Options{PublicSuffixList: publicsuffix.List})
 	response, err := client.Do(request)
 	if err != nil {
@@ -299,16 +322,49 @@ func (s *Service) downloadPDF(ctx context.Context, selected project.Project, can
 		}
 		var networkError net.Error
 		if errors.As(err, &networkError) && networkError.Timeout() {
-			s.cacheFailure(target, "open full text request timed out", time.Minute)
+			s.cacheFailure(failureKey, "open full text request timed out", time.Minute)
 			return appresearch.MaterializedCandidate{}, &FullTextUnavailableError{Message: "open full text request timed out"}
 		}
 		return appresearch.MaterializedCandidate{}, fmt.Errorf("download open full text from %s: %w", record.Work.SourceID, err)
+	}
+	// Browser is a single opt-in fallback, only for a positively identified CF challenge.
+	if response.StatusCode == 403 && strings.EqualFold(response.Header.Get("Cf-Mitigated"), "challenge") && s.browser != nil {
+		response.Body.Close()
+		verifyURL := target
+		if landing, e := url.Parse(record.Work.LandingURL); e == nil && landing.Scheme == "https" && strings.EqualFold(landing.Hostname(), parsed.Hostname()) {
+			verifyURL = landing.String()
+		}
+		clearance, solveErr := s.browser.Solve(ctx, selected.ID, verifyURL, proxy, revision)
+		if solveErr != nil {
+			if ctx.Err() != nil {
+				return appresearch.MaterializedCandidate{}, ctx.Err()
+			}
+			message := "Cloudflare 验证未完成：" + solveErr.Error()
+			s.cacheFailure(failureKey, message, 5*time.Minute)
+			return appresearch.MaterializedCandidate{}, &FullTextUnavailableError{Message: message}
+		}
+		current, currentRevision := network.Resolve("research")
+		if browserenv.Fingerprint(current, currentRevision) != binding {
+			return appresearch.MaterializedCandidate{}, &FullTextUnavailableError{Message: "网络配置已变化，丢弃浏览器 Cookie，请重新请求"}
+		}
+		verified, closeTransport, solveErr := clearance.Client(ctx)
+		if solveErr != nil {
+			s.cacheFailure(failureKey, solveErr.Error(), 5*time.Minute)
+			return appresearch.MaterializedCandidate{}, &FullTextUnavailableError{Message: solveErr.Error()}
+		}
+		defer closeTransport()
+		verified.CheckRedirect = fixedHostRedirect
+		response, err = verified.Do(request)
+		if err != nil {
+			s.cacheFailure(failureKey, "浏览器验证后下载仍失败", time.Minute)
+			return appresearch.MaterializedCandidate{}, &FullTextUnavailableError{Message: "浏览器验证后下载仍失败"}
+		}
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		if response.StatusCode == 429 || response.StatusCode == 408 || response.StatusCode == 403 || response.StatusCode == 404 || response.StatusCode >= 500 {
 			message := fmt.Sprintf("open full text source %s returned HTTP %d", parsed.Hostname(), response.StatusCode)
-			s.cacheFailure(target, message, 5*time.Minute)
+			s.cacheFailure(failureKey, message, 5*time.Minute)
 			if response.StatusCode == 429 || response.StatusCode >= 500 {
 				delay := 5 * time.Minute
 				if seconds, parseErr := strconv.Atoi(response.Header.Get("Retry-After")); parseErr == nil && seconds > 0 && seconds <= 86400 {
@@ -336,7 +392,7 @@ func (s *Service) downloadPDF(ctx context.Context, selected project.Project, can
 	mediaType, _, _ := mime.ParseMediaType(response.Header.Get("Content-Type"))
 	if mediaType == "text/html" || mediaType == "application/xhtml+xml" {
 		message := "open full text returned unexpected MIME type HTML, not a PDF; verification unavailable"
-		s.cacheFailure(target, message, 5*time.Minute)
+		s.cacheFailure(failureKey, message, 5*time.Minute)
 		return appresearch.MaterializedCandidate{}, &FullTextUnavailableError{Message: message}
 	}
 	if mediaType != "" && mediaType != "application/pdf" && mediaType != "application/octet-stream" {

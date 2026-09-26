@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -42,7 +43,7 @@ func NewReadText(projects ProjectLoader) *ReadText { return &ReadText{projects: 
 func (*ListWorkspace) Definition(context.Context) (tool.Definition, error) {
 	return tool.Definition{
 		QualifiedName: ListWorkspaceName,
-		Description:   "列出当前科研项目 Workspace 中指定目录的一层内容，不递归。",
+		Description:   "列出当前 Workspace 目录的一层内容，不递归；limit 是条目数。允许查看 .sciaide 顶层受控目录概览，不允许深入内部存储。科研任务相对路径基于当前任务工作区。托管材料请用 attachment.list / document.inspect / document.read；MCP 配置请在设置 → MCP 查看，不要扫描内部目录或改用 Shell 绕过拒绝。",
 		InputSchema:   json.RawMessage(`{"type":"object","additionalProperties":false,"properties":{"path":{"type":"string","maxLength":4096},"limit":{"type":"integer","minimum":1,"maximum":500}}}`),
 		OutputSchema:  json.RawMessage(`{"type":"object","additionalProperties":false,"required":["path","entries","truncated"],"properties":{"path":{"type":"string"},"entries":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["name","path","kind","size"],"properties":{"name":{"type":"string"},"path":{"type":"string"},"kind":{"type":"string","enum":["file","directory","symlink","other"]},"size":{"type":"integer","minimum":0}}}},"truncated":{"type":"boolean"}}}`),
 		Risk:          tool.RiskLow,
@@ -74,7 +75,7 @@ func (t *ListWorkspace) Invoke(ctx context.Context, invocation tool.Invocation) 
 		return tool.Result{}, err
 	}
 	defer guard.Close()
-	if err := rejectPrivateProjectPath(guard, args.Path); err != nil {
+	if err := checkWorkspaceReadPath(guard, args.Path, workspaceList); err != nil {
 		return tool.Result{}, err
 	}
 	directory, clean, err := guard.OpenFile(args.Path)
@@ -82,25 +83,32 @@ func (t *ListWorkspace) Invoke(ctx context.Context, invocation tool.Invocation) 
 		if errors.Is(err, os.ErrNotExist) {
 			return tool.Result{}, tool.NewUserFacingError(fmt.Sprintf("Workspace 目录不存在：%s。请先调用 builtin.workspace.list，或使用当前任务提供的精确路径。", filepath.ToSlash(filepath.Clean(args.Path))))
 		}
-		return tool.Result{}, err
+		return tool.Result{}, workspaceOpenError(err)
 	}
 	defer directory.Close()
 	info, err := directory.Stat()
 	if err != nil || !info.IsDir() {
-		return tool.Result{}, fmt.Errorf("workspace path is not a directory")
+		return tool.Result{}, tool.NewUserFacingError("指定路径不是可列出的目录；文本文件请使用 builtin.workspace.read_text，文献请使用 builtin.document.read。")
 	}
-	entries, err := directory.ReadDir(args.Limit + 2)
-	if err != nil && !errors.Is(err, io.EOF) {
-		return tool.Result{}, err
-	}
-	if clean == "." {
-		visible := entries[:0]
-		for _, entry := range entries {
-			if !strings.EqualFold(entry.Name(), project.PrivateDirectoryName) {
-				visible = append(visible, entry)
+	var entries []os.DirEntry
+	if strings.EqualFold(clean, project.PrivateDirectoryName) {
+		// Enumerate only known children, not arbitrary private file names.
+		for _, name := range workspacePrivateOverview {
+			file, _, openErr := guard.OpenFile(filepath.Join(clean, name))
+			if openErr != nil {
+				continue
+			}
+			info, statErr := file.Stat()
+			file.Close()
+			if statErr == nil && info.IsDir() {
+				entries = append(entries, fs.FileInfoToDirEntry(info))
 			}
 		}
-		entries = visible
+	} else {
+		entries, err = directory.ReadDir(args.Limit + 1)
+		if err != nil && !errors.Is(err, io.EOF) {
+			return tool.Result{}, workspaceOpenError(err)
+		}
 	}
 	truncated := len(entries) > args.Limit
 	if truncated {
@@ -157,13 +165,17 @@ func (t *ListWorkspace) Invoke(ctx context.Context, invocation tool.Invocation) 
 	if err != nil {
 		return tool.Result{}, err
 	}
-	return tool.Result{Status: tool.ResultSuccess, Text: fmt.Sprintf("列出了 %d 个 Workspace 条目。", len(values)), Structured: structured, Truncated: truncated}, nil
+	summary := fmt.Sprintf("列出了 %d 个 Workspace 条目。", len(values))
+	if strings.EqualFold(clean, project.PrivateDirectoryName) {
+		summary += "这是内部目录概览（隐藏未知文件及配置），不是所有文件清单。attachments/artifacts 是托管材料与产物；tasks 是隔离的任务工作区；cache/python/browser/tmp 是缓存、运行环境和临时数据。请使用对应专用工具或设置入口，不要通过 Shell/Python 绕过内部存储限制；禁止直接修改内部索引、配置与任务状态。"
+	}
+	return tool.Result{Status: tool.ResultSuccess, Text: summary, Structured: structured, Truncated: truncated}, nil
 }
 
 func (*ReadText) Definition(context.Context) (tool.Definition, error) {
 	return tool.Definition{
 		QualifiedName: ReadTextName,
-		Description:   "读取当前科研项目 Workspace 中一个 UTF-8 文本文件的有界内容。",
+		Description:   "只读当前 Workspace 的 UTF-8 文件，支持有界分页；科研任务中相对路径基于当前任务工作区，可读取自己的输入、脚本和结果。不能读取 .sciaide 内部数据库、配置、Cookie 或跨任务存储；托管文献请使用 attachment.list / document.read 保留归属和原文定位。此工具不修改文件。",
 		InputSchema:   json.RawMessage(`{"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"type":"string","minLength":1,"maxLength":4096},"offset":{"type":"integer","minimum":0,"maximum":67108864},"maxBytes":{"type":"integer","minimum":1,"maximum":262144}}}`),
 		OutputSchema:  json.RawMessage(`{"type":"object","additionalProperties":false,"required":["path","content","bytesRead","originalBytes","truncated"],"properties":{"path":{"type":"string"},"content":{"type":"string"},"bytesRead":{"type":"integer","minimum":0},"originalBytes":{"type":"integer","minimum":0},"truncated":{"type":"boolean"}}}`),
 		Risk:          tool.RiskLow,
@@ -199,7 +211,7 @@ func (t *ReadText) Invoke(ctx context.Context, invocation tool.Invocation) (tool
 		return tool.Result{}, err
 	}
 	defer guard.Close()
-	if err := rejectPrivateProjectPath(guard, args.Path); err != nil {
+	if err := checkWorkspaceReadPath(guard, args.Path, workspaceRead); err != nil {
 		return tool.Result{}, err
 	}
 	file, clean, err := guard.OpenFile(args.Path)
@@ -207,7 +219,7 @@ func (t *ReadText) Invoke(ctx context.Context, invocation tool.Invocation) (tool
 		if errors.Is(err, os.ErrNotExist) {
 			return tool.Result{}, tool.NewUserFacingError(fmt.Sprintf("Workspace 文件不存在：%s。请先调用 builtin.workspace.list，或使用 workflow_state.inputs.input_paths 中的精确路径。", filepath.ToSlash(filepath.Clean(args.Path))))
 		}
-		return tool.Result{}, err
+		return tool.Result{}, workspaceOpenError(err)
 	}
 	defer file.Close()
 	info, err := file.Stat()
@@ -215,7 +227,7 @@ func (t *ReadText) Invoke(ctx context.Context, invocation tool.Invocation) (tool
 		return tool.Result{}, err
 	}
 	if !info.Mode().IsRegular() {
-		return tool.Result{}, fmt.Errorf("workspace path is not a regular file")
+		return tool.Result{}, tool.NewUserFacingError("指定路径不是普通文件；目录请使用 builtin.workspace.list。")
 	}
 	if args.Offset > info.Size() {
 		return tool.Result{}, tool.NewUserFacingError(fmt.Sprintf("Workspace 文件偏移超出范围：%s 的大小为 %d 字节，offset 不能超过该值。", filepath.ToSlash(clean), info.Size()))
@@ -239,7 +251,7 @@ func (t *ReadText) Invoke(ctx context.Context, invocation tool.Invocation) (tool
 	}
 	contents = trimUTF8Window(contents, args.Offset > 0)
 	if !utf8.Valid(contents) || containsBinary(contents) {
-		return tool.Result{}, fmt.Errorf("workspace file is not supported UTF-8 text")
+		return tool.Result{}, tool.NewUserFacingError("文件不是可读取的 UTF-8 文本；PDF、Word 等研究材料请先通过资料入口添加，再用 builtin.document.inspect / builtin.document.read 读取。")
 	}
 	payload := struct {
 		Path          string `json:"path"`
@@ -321,17 +333,54 @@ func utf8RuneWidth(value byte) int {
 	}
 }
 
+type workspaceReadOperation int
+
+const (
+	workspaceList workspaceReadOperation = iota
+	workspaceRead
+)
+
+var workspacePrivateOverview = []string{"attachments", "artifacts", "tasks", "cache", "python", "browser", "tmp"}
+
+// Materialization and local-execution working/output paths remain stricter
+// than directory inspection. This does not sandbox arbitrary script contents.
 func rejectPrivateProjectPath(guard *pathguard.Guard, value string) error {
+	return checkWorkspaceReadPath(guard, value, workspaceRead)
+}
+
+func workspaceOpenError(err error) error {
+	if errors.Is(err, os.ErrPermission) {
+		return tool.NewUserFacingError("操作系统拒绝读取此路径，请检查文件访问权限；不会自动提权或改用其他工具绕过。")
+	}
+	return tool.NewUserFacingError("无法安全打开 Workspace 路径：可能为符号链接/重解析点、路径无效或文件不可访问。请使用当前工作区内的真实相对路径；文献使用 builtin.document.read，内部配置通过设置页面查看。")
+}
+
+func checkWorkspaceReadPath(guard *pathguard.Guard, value string, operation workspaceReadOperation) error {
 	clean, err := guard.Relative(value)
 	if err != nil {
-		return err
+		return tool.NewUserFacingError("Workspace 路径必须是当前工作区内的相对路径，不能使用绝对路径或越过根目录；请先用 builtin.workspace.list 查看可用路径。科研任务以当前任务目录为根。")
 	}
-	first := clean
-	if separator := strings.IndexRune(clean, os.PathSeparator); separator >= 0 {
-		first = clean[:separator]
-	}
-	if strings.EqualFold(first, project.PrivateDirectoryName) {
-		return fmt.Errorf("SciAide project data is available only through project-scoped tools")
+	parts := strings.FieldsFunc(clean, func(r rune) bool { return r == '/' || r == '\\' })
+	for i, part := range parts {
+		// Windows normalizes trailing dots/spaces in path components.
+		if !strings.EqualFold(strings.TrimRight(part, ". "), project.PrivateDirectoryName) {
+			continue
+		}
+		if operation == workspaceList && i == 0 && len(parts) == 1 && strings.EqualFold(part, project.PrivateDirectoryName) {
+			return nil
+		}
+		hint := "内部配置、数据库、缓存和浏览器 Cookie 不通过通用文件工具开放；项目/网络/Python/MCP 配置请在设置或对应环境面板查看。"
+		if i+1 < len(parts) {
+			switch strings.ToLower(parts[i+1]) {
+			case "attachments":
+				hint = "托管研究材料请用 builtin.attachment.list 获取 ID，再用 builtin.document.inspect / builtin.document.read 读取，以保留材料归属和定位。"
+			case "artifacts":
+				hint = "已登记产物请在科研产物面板查看；本次分析尚未登记的结果请按当前任务提供的工作区相对路径读取。"
+			case "tasks":
+				hint = "任务存储不能从项目根目录跨任务遍历；请进入对应科研任务，使用任务工作区相对路径读取其输入、脚本和结果。"
+			}
+		}
+		return tool.NewUserFacingError("此路径属于 SciAide 内部受管数据，仅允许查看 .sciaide 顶层目录概览。" + hint + " 不要改用 Shell/Python 绕过拒绝，也不要直接修改内部状态；需要修改请通过对应管理入口。")
 	}
 	return nil
 }

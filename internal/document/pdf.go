@@ -42,7 +42,7 @@ func parsePDF(ctx context.Context, path string) (Parsed, error) {
 		if err := ctx.Err(); err != nil {
 			return Parsed{}, err
 		}
-		text, err := reader.Page(pageNumber).GetPlainText(nil)
+		text, err := positionedPDFText(ctx, reader.Page(pageNumber))
 		if err != nil {
 			return Parsed{}, fmt.Errorf("extract PDF page %d: %w", pageNumber, err)
 		}
@@ -92,7 +92,7 @@ func parsePDF(ctx context.Context, path string) (Parsed, error) {
 		"emptyPages":       strconv.Itoa(emptyPages),
 		"sections":         strconv.Itoa(sectionCount),
 		"removedEdgeLines": strconv.Itoa(removedEdges),
-		"structureParser":  "pdf-v2",
+		"structureParser":  "pdf-v3",
 	}
 	return Parsed{Units: collect.units, Metadata: metadata, Truncated: collect.truncated || analysisTruncated, ExtractedRunes: collect.runes}, nil
 }

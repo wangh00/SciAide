@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"github.com/wangh00/SciAide/internal/browserhttp"
 	"github.com/wangh00/SciAide/internal/httpua"
+	"github.com/wangh00/SciAide/internal/network"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -434,7 +435,7 @@ func buildTransportWithLogger(server mcpserver.Server, secretEnv map[string]stri
 		command := exec.Command(server.Command, server.Args...)
 		configureBackgroundCommand(command)
 		command.Dir = server.WorkingDir
-		command.Env = minimalEnvironment(server.Env, secretEnv)
+		command.Env = network.Environment(minimalEnvironment(server.Env, secretEnv), "mcp")
 		if logger != nil {
 			command.Stderr = newMCPStderrWriter(logger, server.ID, secretEnv)
 		}
@@ -444,7 +445,7 @@ func buildTransportWithLogger(server mcpserver.Server, secretEnv map[string]stri
 		baseTransport.Proxy = http.ProxyFromEnvironment
 		client := &http.Client{
 			Timeout:   time.Duration(server.TimeoutSeconds) * time.Second,
-			Transport: &headerTransport{base: browserhttp.New(baseTransport), headers: cloneMap(server.Headers)},
+			Transport: &headerTransport{base: browserhttp.NewScoped(baseTransport, "mcp"), headers: cloneMap(server.Headers)},
 			CheckRedirect: func(request *http.Request, via []*http.Request) error {
 				if len(via) >= 5 {
 					return fmt.Errorf("too many MCP HTTP redirects")

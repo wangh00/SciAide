@@ -6,7 +6,7 @@ export type DisplayCitation = {
   quote: string;
   quoteSha256: string;
   evidenceLevel?: string;
-  bibliography?: { data?: { title?: string; doi?: string; url?: string; year?: number; containerTitle?: string } };
+  bibliography?: { data?: { title?: string; doi?: string; url?: string; year?: number; containerTitle?: string; workType?: string } };
 };
 export type CitationDisplayMap = Map<string, { value: DisplayCitation; number: number }>;
 export function reportCitationSnapshot(outputs: unknown): unknown[];

@@ -8,6 +8,7 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import {markdownRemarkPlugins, markdownRehypePlugins} from "./markdownPlugins.js";
 import { citationReferenceFromURL, remarkSciAideCitations, safeMarkdownURL } from "./markdownRender.js";
 import { citationDisplayMap, citationSourceURL, citationTextSegments, reportCitationSnapshot } from "./citationPresentation.js";
 
@@ -73,7 +74,7 @@ const compiled = ts.transpileModule('import React, { Fragment, useState, useEffe
 }).outputText;
 const exports = {};
 vm.runInNewContext(compiled, {
-  exports, require: createRequire(import.meta.url), ReactMarkdown, remarkGfm, citationDisplayMap, citationTextSegments,
+  exports, require: createRequire(import.meta.url), MarkdownCodeBlock: ({children}) => React.createElement("pre",null,children), copyToClipboard: async()=>{}, ReactMarkdown, markdownRemarkPlugins, markdownRehypePlugins, remarkGfm, citationDisplayMap, citationTextSegments,
   reportCitationSnapshot, citationSourceURL, citationReferenceFromURL, remarkSciAideCitations, safeMarkdownURL,
   Icon: () => null, ResearchAcceptanceDetails: () => null,
 });

@@ -1,0 +1,32 @@
+const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');
+const {createRequire}=require('node:module');
+const {build}=createRequire(path.resolve('frontend/package.json'))('esbuild');
+const {chromium}=require(process.env.SCIAIDE_PLAYWRIGHT_PATH||'playwright');
+(async()=>{
+ const source=fs.readFileSync('frontend/src/App.tsx','utf8')+`
+ import {createRoot} from 'react-dom/client';
+ const material={id:'a',projectId:'p',scopeKind:'task',researchTaskId:'t',sourceKind:'research_import',originalName:'research-metadata.md',format:'markdown',sizeBytes:100,sha256:'hash',status:'ready',createdAt:'2026-09-22T00:00:00Z',title:'Trial reference',notes:'',archived:false,contentKind:'metadata_abstract',reusable:false,indexChunks:7,extractedRunes:1234};
+ const candidate={id:'c',preferred:{title:'Trial reference',abstract:'Original abstract',authors:[],identifiers:{},year:2026},records:[],reviewStatus:'excluded',importStatus:'imported',importKind:'metadata_abstract',attachmentId:'a'};
+ let collected=false;window.calls=[];
+ const service=async(f,m,...args)=>{window.calls.push([f,m,...args]);
+ if(m==='Catalog')return [{id:'crossref',name:'Crossref'}];if(m==='QueryOrigins')return [{id:'t',title:'Research task',count:1}];if(m==='QueryHistory')return [{id:'q',researchTaskId:'t',text:'Research query',sources:[]}];if(m==='ListCandidates')return {items:[candidate],total:1,offset:0,limit:20};
+ if(m==='ListMaterials')return [material];if(m==='ListLibraryMaterials')return collected?[{...material,id:'shared',scopeKind:'project_shared',researchTaskId:'',reusable:true}]:[];
+ if(m==='ListReferenceMaterials')return collected?[{...material,id:'shared',scopeKind:'project_shared',researchTaskId:'',reusable:true,originalName:material.title}]:[];
+ if(m==='ListResearchTasks')return [{id:'t',title:'Research task'}];if(m==='ReadMaterial')return {text:'Original abstract',totalRunes:17,nextOffset:-1};if(m==='CollectCandidate'){collected=true;return {...material,id:'shared',reusable:true};}if(m==='GetEmbeddingConfig')return {enabled:false,baseUrl:'https://example.test/v1',modelId:'embedding-test',secretConfigured:true};if(m==='SaveEmbeddingConfig')return {...args[1],secretConfigured:true};return []};
+ window.go={wails:Object.fromEntries(['ResearchFacade','KnowledgeFacade','WorkflowFacade'].map(f=>[f,new Proxy({},{get:(_,m)=>(...args)=>service(f,m,...args)})]))};
+ function Harness(){const[view,setView]=useState('library');return <><button onClick={()=>setView('discovery')}>打开文献发现</button>{view==='library'?<ResearchMaterialsLibrary project={{id:'p',name:'Test'}} service={backend} close={()=>setView('discovery')}/>:<ResearchDiscovery project={{id:'p',name:'Test'}} taskId='t' close={()=>{}} openKnowledge={()=>setView('library')}/>}</>}
+ createRoot(document.getElementById('root')).render(<Harness/>);`;
+ const bundle=await build({stdin:{contents:source,loader:'tsx',resolveDir:path.resolve('frontend/src')},bundle:true,write:false,format:'iife',jsx:'automatic',loader:{'.css':'text'},logLevel:'silent'});
+ const browser=await chromium.launch({channel:'msedge',headless:true});
+ try{const page=await browser.newPage({viewport:{width:1280,height:900}});const errors=[];page.on('pageerror',e=>errors.push(e.message));await page.setContent('<div id="root"></div>');for(const f of ['styles.css','researchMaterialsLibrary.css','referenceMaterials.css'])await page.addStyleTag({content:fs.readFileSync('frontend/src/'+f,'utf8')});await page.addScriptTag({content:bundle.outputFiles[0].text});
+ await page.getByText('这里还没有资料',{exact:true}).waitFor();assert.equal(await page.locator('.research-materials-task-group').count(),0);
+ const settings=page.getByRole('button',{name:'高级检索设置',exact:true});const bounds=await settings.boundingBox();const addBounds=await page.locator('.research-materials-header-actions').getByRole('button',{name:'添加资料',exact:true}).boundingBox();assert.ok(bounds.x<addBounds.x);assert.equal(await page.locator('.research-materials-scopes').getByText('高级检索设置',{exact:true}).count(),0);
+ await settings.click();const dialog=page.getByRole('dialog',{name:'高级检索设置',exact:true});await dialog.waitFor();await dialog.getByRole('checkbox').check();await dialog.getByRole('textbox',{name:'Embedding 模型',exact:true}).fill('embedding-updated');await page.screenshot({path:'build/qa/material-search-settings.png'});await dialog.getByRole('button',{name:'保存设置',exact:true}).click();await dialog.waitFor({state:'detached'});const save=await page.evaluate(()=>window.calls.find(c=>c[1]==='SaveEmbeddingConfig'));assert.equal(save[2],'p');assert.equal(save[3].modelId,'embedding-updated');assert.equal(save[3].apiKey,'');await settings.click();await dialog.waitFor();await page.keyboard.press('Escape');await dialog.waitFor({state:'detached'});
+ await page.getByRole('button',{name:'关闭研究资料库',exact:true}).click();await page.getByRole('button',{name:'加入资料库',exact:true}).waitFor();await page.getByRole('button',{name:'纳入本任务',exact:true}).waitFor();await page.getByText('已保存材料',{exact:true}).waitFor();
+ await page.getByRole('button',{name:'预览已保存材料',exact:true}).click();await page.getByText('已分割为 7 个索引片段',{exact:true}).waitFor();await page.getByRole('button',{name:'关闭资料详情',exact:true}).click();await page.getByRole('button',{name:'关闭研究资料库',exact:true}).click();
+ await page.getByRole('button',{name:'加入资料库',exact:true}).click();await page.getByText(/已将“Trial reference”加入资料库/).waitFor();
+ const calls=await page.evaluate(()=>window.calls);assert.equal(calls.filter(c=>c[1]==='CollectCandidate').length,1);assert.equal(calls.filter(c=>['UpdateReview','ImportCandidate'].includes(c[1])).length,0);assert.deepEqual(calls.find(c=>c[1]==='CollectCandidate').slice(2),['p','c','t']);
+ for(const width of [1280,960]){await page.setViewportSize({width,height:900});assert.ok(await page.locator('.research-layout').evaluate(e=>e.clientHeight>250));assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);await page.screenshot({path:'build/qa/discovery-collection-'+width+'.png'});}
+ await page.getByRole('button',{name:'打开资料库',exact:true}).click();await page.getByRole('button',{name:'预览 Trial reference',exact:true}).waitFor();assert.equal(await page.locator('.research-materials-row').count(),1);assert.deepEqual(errors,[]);console.log('PASS: empty user library, discovery preview, excluded candidate collection without workflow mutation, library refresh, 1280/960 layout');
+ }finally{await browser.close();}
+})().catch(e=>{console.error(e);process.exit(1)});

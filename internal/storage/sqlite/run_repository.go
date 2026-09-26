@@ -24,6 +24,26 @@ type RunRepository struct{ db *sql.DB }
 
 func NewRunRepository(db *sql.DB) *RunRepository { return &RunRepository{db: db} }
 
+func (r *RunRepository) ListConversationActivity(ctx context.Context, projectID string) ([]chat.ConversationActivity, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT r.conversation_id,r.status FROM runs r
+		JOIN conversations c ON c.id=r.conversation_id
+		WHERE c.project_id=? AND r.status IN ('queued','running','waiting_approval')
+		AND NOT EXISTS (SELECT 1 FROM workflow_conversations w WHERE w.conversation_id=c.id)`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	values := []chat.ConversationActivity{}
+	for rows.Next() {
+		var value chat.ConversationActivity
+		if err := rows.Scan(&value.ConversationID, &value.Status); err != nil {
+			return nil, err
+		}
+		values = append(values, value)
+	}
+	return values, rows.Err()
+}
+
 const (
 	maxProviderItemsPerTurn   = 128
 	maxProviderItemBytes      = 8 * 1024 * 1024
@@ -347,7 +367,7 @@ func (r *RunRepository) createWithMessages(ctx context.Context, value chat.Run, 
 		value.PermissionMode = conversation.PermissionPlan
 	}
 	if !value.RequestedReasoningLevel.Valid() {
-		value.RequestedReasoningLevel = "medium"
+		value.RequestedReasoningLevel = modelcap.DefaultReasoningLevel
 	}
 	contextBudget := modelcap.ResolveContextBudget(value.ContextWindowTokens, value.AutoCompactTokenLimit, value.ContextWindowSource)
 	value.ContextWindowTokens = contextBudget.WindowTokens
@@ -384,8 +404,22 @@ func (r *RunRepository) createWithMessages(ctx context.Context, value chat.Run, 
 	if err != nil {
 		return fmt.Errorf("insert run: %w", err)
 	}
+	if _, err := tx.ExecContext(ctx, `UPDATE runs SET web_search_disabled=? WHERE id=?`, value.WebSearchDisabled, value.ID); err != nil {
+		return fmt.Errorf("save web search policy: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx, `UPDATE conversations SET updated_at=? WHERE id=?`, formatTime(value.UpdatedAt), value.ConversationID); err != nil {
 		return err
+	}
+	// Persist naming in the same transaction as the first accepted message/Run.
+	// Workflow prompts and task follow-ups must never rename research conversations.
+	if workflowAI == nil {
+		if title := conversation.TitleFromMessage(userMessage); title != "" {
+			if _, err := tx.ExecContext(ctx, `UPDATE conversations SET title=?,auto_title_pending=0
+				WHERE id=? AND auto_title_pending=1
+				AND NOT EXISTS (SELECT 1 FROM workflow_conversations WHERE conversation_id=?)`, title, value.ConversationID, value.ConversationID); err != nil {
+				return fmt.Errorf("save conversation title: %w", err)
+			}
+		}
 	}
 	if workflowAI != nil {
 		if len(workflowAI.PromptText) == 0 || len(workflowAI.PromptText) > 262144 || len(workflowAI.PromptSHA256) != 64 || len(workflowAI.InputSHA256) != 64 || len(workflowAI.OutputSchemaSHA256) != 64 || !json.Valid(workflowAI.AllowedTools) || !json.Valid(workflowAI.OutputSchema) {
@@ -1356,7 +1390,7 @@ func scanRun(row rowScanner) (chat.Run, error) {
 	var createdAt, updatedAt string
 	var startedAt, completedAt sql.NullString
 	if err := row.Scan(&value.ID, &value.ConversationID, &value.UserMessageID, &value.AssistantMessageID, &value.ModelProfileID, &value.ModelID, &value.APIProtocol, &value.RequestedReasoningLevel, &value.ResolvedReasoningLevel, &value.ContextWindowTokens, &value.ContextBudgetTokens, &value.AutoCompactTokenLimit, &value.ContextWindowSource, &value.ContextCompacted, &value.PermissionMode, &value.Status,
-		&value.ErrorCode, &value.ErrorMessage, &value.ErrorDetails, &value.InputTokens, &value.FreshInputTokens, &value.OutputTokens, &value.ReasoningTokens, &value.ReasoningObserved, &value.ReasoningSignatureObserved, &value.ReasoningSummary, &value.CachedInputTokens, &value.CacheWriteTokens, &value.CacheReportedTurns, &value.CacheReportedFreshInputTokens, &value.CacheHitTurns, &value.ModelTurns, &value.FinishReason, &createdAt, &startedAt, &completedAt, &updatedAt); err != nil {
+		&value.ErrorCode, &value.ErrorMessage, &value.ErrorDetails, &value.InputTokens, &value.FreshInputTokens, &value.OutputTokens, &value.ReasoningTokens, &value.ReasoningObserved, &value.ReasoningSignatureObserved, &value.ReasoningSummary, &value.CachedInputTokens, &value.CacheWriteTokens, &value.CacheReportedTurns, &value.CacheReportedFreshInputTokens, &value.CacheHitTurns, &value.ModelTurns, &value.FinishReason, &createdAt, &startedAt, &completedAt, &updatedAt, &value.WebSearchDisabled); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return chat.Run{}, fmt.Errorf("run not found: %w", sql.ErrNoRows)
 		}
@@ -1388,7 +1422,7 @@ func scanRun(row rowScanner) (chat.Run, error) {
 	return value, nil
 }
 
-const runSelect = `SELECT id, conversation_id, user_message_id, COALESCE(assistant_message_id, ''), model_profile_id, model_id, api_protocol, requested_reasoning_level, resolved_reasoning_level, context_window_tokens, context_budget_tokens, auto_compact_token_limit, context_window_source, context_compacted, permission_mode, status, error_code, error_message, error_details, input_tokens, fresh_input_tokens, output_tokens, reasoning_tokens, reasoning_observed, reasoning_signature_observed, reasoning_summary, cached_input_tokens, cache_write_tokens, cache_reported_turns, cache_reported_fresh_input_tokens, cache_hit_turns, model_turns, finish_reason, created_at, started_at, completed_at, updated_at FROM runs`
+const runSelect = `SELECT id, conversation_id, user_message_id, COALESCE(assistant_message_id, ''), model_profile_id, model_id, api_protocol, requested_reasoning_level, resolved_reasoning_level, context_window_tokens, context_budget_tokens, auto_compact_token_limit, context_window_source, context_compacted, permission_mode, status, error_code, error_message, error_details, input_tokens, fresh_input_tokens, output_tokens, reasoning_tokens, reasoning_observed, reasoning_signature_observed, reasoning_summary, cached_input_tokens, cache_write_tokens, cache_reported_turns, cache_reported_fresh_input_tokens, cache_hit_turns, model_turns, finish_reason, created_at, started_at, completed_at, updated_at, web_search_disabled FROM runs`
 
 func nullableString(value string) any {
 	if value == "" {

@@ -208,6 +208,10 @@ func (e *Engine) evaluate(ctx context.Context, request EvaluationRequest, fullAc
 		return Evaluation{Decision: DecisionAllow, Reason: "用户已为该任务启用 Full Access。", Missing: []tool.PermissionRequirement{}, GrantIDs: []string{}}, nil
 	}
 	if approveWholeCall {
+		// Host-owned, credential-free metadata reads do not execute MCP tools.
+		if (request.Call.ToolName == "builtin.mcp.list" || request.Call.ToolName == "builtin.tools.search") && request.Call.Risk == tool.RiskLow && request.Call.Idempotent && len(request.Call.Permissions) == 0 {
+			return Evaluation{Decision: DecisionAllow, Reason: "只读查询 MCP 状态或发现工具，不执行 MCP 操作。", Missing: []tool.PermissionRequirement{}, GrantIDs: []string{}}, nil
+		}
 		// Plan mode allows low-risk, idempotent reads that are already confined
 		// to the current project's Workspace by the tool executor/pathguard.
 		// External paths, writes and all other tool invocations still ask.

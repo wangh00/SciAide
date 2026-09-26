@@ -5,6 +5,7 @@ import (
 
 	"github.com/wangh00/SciAide/internal/app/modelprofile"
 	"github.com/wangh00/SciAide/internal/app/multimodal"
+	"github.com/wangh00/SciAide/internal/app/websearch"
 	"github.com/wangh00/SciAide/internal/apperr"
 )
 
@@ -12,6 +13,7 @@ type ModelFacade struct {
 	lifecycle *LifecycleContext
 	service   *modelprofile.Service
 	vision    *multimodal.Service
+	web       *websearch.Service
 }
 
 func NewModelFacade(lifecycle *LifecycleContext, service *modelprofile.Service, vision ...*multimodal.Service) *ModelFacade {

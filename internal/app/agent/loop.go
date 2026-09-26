@@ -112,6 +112,7 @@ type Conversations interface {
 }
 
 type ToolCalls interface {
+	Propose(ctx context.Context, definition tool.Definition, cmd tool.CreateCommand) (tool.Call, error)
 	ProposeRegistered(ctx context.Context, registry tool.Registry, toolName string, cmd tool.CreateCommand) (tool.Call, error)
 	RejectProviderCall(ctx context.Context, registry tool.Registry, toolName string, cmd tool.CreateCommand, message string) (tool.Call, error)
 	Finish(ctx context.Context, callID string, result tool.Result, errorCode, errorMessage string) (tool.Call, error)
@@ -194,6 +195,7 @@ const (
 )
 
 type Loop struct {
+	browserReady  func(context.Context, string) bool
 	runs          Runs
 	conversations Conversations
 	tools         ToolCalls
@@ -389,6 +391,16 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 	if err != nil {
 		return OutcomeFailed, err
 	}
+	if l.browserReady != nil && !l.browserReady(ctx, projectID) {
+		filtered := make([]tool.Definition, 0, len(baseDefinitions))
+		for _, d := range baseDefinitions {
+			if d.QualifiedName != "builtin.browser.open" {
+				filtered = append(filtered, d)
+			}
+		}
+		baseDefinitions = filtered
+	}
+	baseDefinitions = filterWebTools(baseDefinitions, run.WebSearchDisabled)
 	definitions := baseDefinitions
 	var researchGuidance workflow.ResearchGuidance
 	var researchAllowed map[string]struct{}
@@ -606,6 +618,38 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 		}
 		run.ModelTurns, run.UpdatedAt = checkpoint.ModelTurns, checkpoint.UpdatedAt
 		modelDefinitions, systemContext := withoutResourceInterfaceTools(definitions), researchGuidance.SystemContext
+		// Refresh MCP registrations without widening frozen stage tool scopes.
+		if !researchBound && !workflowContractFound {
+			live, liveErr := l.registry.Definitions(ctx)
+			if liveErr != nil {
+				return OutcomeFailed, liveErr
+			}
+			modelDefinitions = append([]tool.Definition(nil), modelDefinitions...)
+			kept := modelDefinitions[:0]
+			for _, d := range modelDefinitions {
+				if !strings.HasPrefix(d.QualifiedName, "mcp.") {
+					kept = append(kept, d)
+				}
+			}
+			modelDefinitions = kept
+			for _, d := range live {
+				if strings.HasPrefix(d.QualifiedName, "mcp.") {
+					modelDefinitions = append(modelDefinitions, d)
+				}
+			}
+		}
+		modelDefinitions, discoveryEnabled := deferredMCPDefinitions(modelDefinitions, calls)
+		if !workflowAIRun {
+			for _, d := range modelDefinitions {
+				if d.QualifiedName == "builtin.web.search" {
+					systemContext += "\n" + optionalWebGuidance
+					break
+				}
+			}
+			if run.WebSearchDisabled {
+				systemContext += "\nThe user disabled general web browsing for this message. Do not work around this choice with Shell, Python, MCP, or resource tools to search or fetch webpages. This is not a request to change the research workflow or its literature-search contract."
+			}
+		}
 		dynamicState := ""
 		if workflowAIRun && researchGuidance.ExecutionSystemContext != "" {
 			systemContext = researchGuidance.ExecutionSystemContext
@@ -614,6 +658,7 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 		submissionPhase := false
 		if resourceMode {
 			modelDefinitions = resourceView.Definitions
+			modelDefinitions, discoveryEnabled = deferredMCPDefinitions(modelDefinitions, calls)
 			dynamicState += "\n" + resourceView.Context
 			progress, final := resourceStageProgress(run.ModelTurns-1, researchGuidance.SkillDiscovery, calls)
 			dynamicState += progress
@@ -621,6 +666,9 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 			if structuredCorrectionAttempts > 0 {
 				dynamicState += "\nHost phase override: SUBMIT because the terminal response omitted the required stage result."
 			}
+		}
+		if discoveryEnabled {
+			systemContext += "\n" + mcpDiscoveryGuidance
 		}
 		contextTurns := providerTurns
 		if submissionPhase {
@@ -986,6 +1034,22 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 				continue
 			}
 			command := tool.CreateCommand{RunID: run.ID, ProviderCallID: providerCall.ID, Arguments: providerCall.Arguments, IdempotencyKey: idempotencyKey}
+			if discoveryEnabled && strings.HasPrefix(providerCall.Name, "mcp.") && !definitionVisible(modelDefinitions, providerCall.Name) {
+				call, rejectErr := l.tools.RejectProviderCall(ctx, tool.NewRegistry(), providerCall.Name, command, "此 MCP 工具尚未加载或已不可用。请先调用 builtin.tools.search，并在下一轮收到工具定义后再调用；搜索不授予执行权限。")
+				if rejectErr != nil {
+					return OutcomeFailed, rejectErr
+				}
+				proposed = append(proposed, call)
+				continue
+			}
+			if run.WebSearchDisabled && isWebBrowsingTool(providerCall.Name) {
+				call, rejectErr := l.tools.RejectProviderCall(ctx, l.registry, providerCall.Name, command, "Web browsing is disabled for this message. Answer without browsing and state any uncertainty.")
+				if rejectErr != nil {
+					return OutcomeFailed, rejectErr
+				}
+				proposed = append(proposed, call)
+				continue
+			}
 			if (resourceMode && resource.WrappedTool(providerCall.Name)) || (resourceInterfaceTool(providerCall.Name) && (!resourceMode || !resourceView.Allows(providerCall.Name, providerCall.Arguments))) {
 				call, rejectErr := l.tools.RejectProviderCall(ctx, l.registry, providerCall.Name, command, "当前阶段只接受本轮资源菜单签发的操作；请通过 builtin.resource.open/search 选择 actionId，不填写路径、Skill 名称或附件 ID。")
 				if rejectErr != nil {
@@ -998,6 +1062,33 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 				call, rejectErr := l.tools.RejectProviderCall(ctx, l.registry, providerCall.Name, command, "当前科研阶段未开放此工具；请使用阶段中可见的工具，或先与用户确认并推进研究流程。")
 				if rejectErr != nil {
 					return OutcomeFailed, &apperr.Error{Code: "RESEARCH_TOOL_REJECTED", UserMessage: "模型请求了当前科研阶段未开放的工具。", Cause: rejectErr}
+				}
+				proposed = append(proposed, call)
+				continue
+			}
+			if discoveryEnabled && strings.HasPrefix(providerCall.Name, "mcp.") {
+				live, liveErr := l.registry.Definition(ctx, providerCall.Name)
+				matching := false
+				for _, d := range modelDefinitions {
+					if d.QualifiedName == providerCall.Name && liveErr == nil && tool.DefinitionFingerprint(d) == tool.DefinitionFingerprint(live) {
+						matching = true
+					}
+				}
+				if !matching {
+					call, rejectErr := l.tools.RejectProviderCall(ctx, l.registry, providerCall.Name, command, "MCP 连接或工具定义已变化，请重新使用 builtin.tools.search 获取当前定义。")
+					if rejectErr != nil {
+						return OutcomeFailed, rejectErr
+					}
+					proposed = append(proposed, call)
+					continue
+				}
+				// Freeze the exact model-visible definition; executor detects any later refresh.
+				call, proposeErr := l.tools.Propose(ctx, live, command)
+				if proposeErr != nil {
+					call, proposeErr = l.tools.RejectProviderCall(ctx, l.registry, providerCall.Name, command, toolProposalFailureMessage(providerCall.Name, proposeErr))
+					if proposeErr != nil {
+						return OutcomeFailed, proposeErr
+					}
 				}
 				proposed = append(proposed, call)
 				continue
@@ -1277,6 +1368,11 @@ func toolProposalFailureMessage(toolName string, proposalErr error) string {
 }
 
 func (l *Loop) processCalls(ctx context.Context, run *chat.Run, projectID string, calls []tool.Call) (bool, error) {
+	for _, call := range calls {
+		if run.WebSearchDisabled && isWebBrowsingTool(call.ToolName) && !call.Status.Terminal() {
+			return false, &apperr.Error{Code: "WEB_SEARCH_DISABLED", UserMessage: "本次对话未开启联网搜索，已阻止联网工具执行。"}
+		}
+	}
 	ready := make([]tool.Call, 0, len(calls))
 	for _, call := range calls {
 		if call.Status == tool.CallDenied || call.Status.Terminal() {
@@ -1983,4 +2079,8 @@ func ValidateProviderToolCalls(calls []model.ToolCall) error {
 		}
 	}
 	return nil
+}
+
+func (l *Loop) SetBrowserAvailability(check func(context.Context, string) bool) {
+	l.browserReady = check
 }

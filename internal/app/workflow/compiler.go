@@ -116,7 +116,9 @@ func (c *Compiler) Compile(ctx context.Context, definition Definition) (Compilat
 			draft.inputs["candidates"] = TypeArray
 			draft.required["candidates"] = true
 			draft.inputs["screening"] = TypeObject
+			draft.inputs["referenceMaterials"] = TypeArray
 			draft.outputs["selectedCandidateIds"] = TypeArray
+			draft.outputs["selectedAttachmentIds"] = TypeArray
 			draft.outputs["selectionAudit"] = TypeObject
 			diagnostics = validateArguments(node.Arguments, draft.inputs, path+".arguments", diagnostics)
 			if strings.TrimSpace(node.Prompt) == "" || len([]rune(node.Prompt)) > 2_000 {

@@ -16,6 +16,10 @@ coverage.*
 /frontend/package.json.md5
 *.tsbuildinfo
 
+# Python bytecode (browser bridge and local tests)
+__pycache__/
+*.py[cod]
+
 # Runtime data
 /.sciaide-dev/
 /.sciaide-build/

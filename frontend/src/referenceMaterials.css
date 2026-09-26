@@ -1,0 +1,33 @@
+.reference-materials { margin: 0; min-width: 0; }
+.workflow-plan-idea > .reference-materials { display: block; }
+.reference-material-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; padding: 2px 0; }
+.reference-material-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
+.reference-materials button { cursor: pointer; border: 1px solid #d9dfe3; border-radius: 8px; background: #f8fafb; color: #354449; padding: 7px 12px; font: inherit; font-size: 13px; transition: background .16s, color .16s, box-shadow .16s; }
+.reference-material-actions > button { display: inline-flex; align-items: center; gap: 7px; flex: 0 0 auto; min-height: 34px; padding: 6px 10px; border-color: transparent; background: transparent; color: #566b65; font-size: 12px; font-weight: 500; white-space: nowrap; }
+.reference-material-actions > button svg { color: #7b9189; }
+.reference-materials button:hover:not(:disabled) { background: #edf4f1; color: #296c57; }
+.reference-materials button:focus-visible { outline: 2px solid #7ba594; outline-offset: 2px; }
+.reference-materials button:disabled { opacity: .5; cursor: default; }
+.reference-material-count { margin-left: auto; color: #718c81; font-size: 11px; font-variant-numeric: tabular-nums; }
+.reference-materials ul { display: flex; flex-wrap: wrap; gap: 7px; margin: 9px 0 0; padding: 0; list-style: none; }
+.reference-materials li { display: flex; max-width: min(360px,100%); box-sizing: border-box; align-items: center; gap: 7px; padding: 5px 7px 5px 10px; border: 1px solid #e0e8e4; border-radius: 8px; background: #f6f9f7; color: #5c746a; font-size: 12px; animation: reference-chip-in .16s ease-out; }
+.reference-materials li > svg { flex: 0 0 auto; }
+.reference-materials li span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.reference-materials li button { display: grid; place-items: center; flex: 0 0 22px; width: 22px; height: 22px; padding: 0; border: 0; background: transparent; color: #81928a; font-size: 16px; }
+.reference-materials p[role=alert] { color: #9a3d38; font-size: 13px; overflow-wrap: anywhere; }
+.workflow-plan-idea .reference-material-dialog footer button { min-width: 72px; }
+@keyframes reference-chip-in { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: translateY(0); } }
+@media (prefers-reduced-motion: reduce) { .reference-materials li { animation: none; }.reference-materials button { transition: none; } }
+@media (max-width: 540px) { .reference-material-toolbar { gap: 5px 10px; } .reference-material-actions > button { padding-inline: 6px; }.reference-material-count { margin-left: 0; } }
+.reference-material-dialog { width: min(540px, calc(100vw - 40px)); max-height: 80vh; padding: 20px; box-sizing: border-box; border: 1px solid #d9e1df; border-radius: 8px; box-shadow: 0 18px 60px #132c352b; color: #273b3e; }
+.reference-material-dialog::backdrop { background: #14232966; }
+.reference-material-dialog header, .reference-material-dialog footer { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.reference-material-dialog h3 { margin: 0; font-size: 17px; }
+.reference-material-dialog > input { box-sizing: border-box; width: 100%; margin: 16px 0; padding: 9px; border: 1px solid #d9dfe3; border-radius: 5px; }
+.reference-material-list { overflow: auto; max-height: 45vh; }
+.reference-material-list label { display: flex; gap: 12px; padding: 12px 0; border-bottom: 1px solid #edf0f2; align-items: center; }
+.reference-material-list input[type="checkbox"] { box-sizing: border-box; width: 16px; min-width: 16px; height: 16px; min-height: 16px; margin: 0; padding: 0; accent-color: #397d72; appearance: auto; box-shadow: none; }
+.reference-material-list span { min-width: 0; overflow-wrap: anywhere; }
+.reference-material-list b { display: block; font-size: 14px; font-weight: 500; }
+.reference-material-list small { display: block; margin-top: 5px; color: #6b777c; }
+.reference-material-dialog footer { margin-top: 16px; font-size: 13px; }

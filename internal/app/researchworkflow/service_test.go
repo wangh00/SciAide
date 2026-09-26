@@ -3,11 +3,13 @@ package researchworkflow
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/wangh00/SciAide/internal/app/artifact"
+	"github.com/wangh00/SciAide/internal/app/attachment"
 	"github.com/wangh00/SciAide/internal/app/citation"
 	"github.com/wangh00/SciAide/internal/app/knowledge"
 	"github.com/wangh00/SciAide/internal/app/pythonenv"
@@ -31,6 +33,33 @@ type workflowBibliographyFixture struct{ snapshot research.CitationSnapshot }
 
 func (f workflowBibliographyFixture) CitationSnapshotForAttachment(context.Context, string, string) (research.CitationSnapshot, error) {
 	return f.snapshot, nil
+}
+
+type taskScopedKnowledgeFixture struct{ chunk knowledge.EvidenceChunk }
+
+func (f taskScopedKnowledgeFixture) SynchronizeAttachments(context.Context, string, []string) ([]knowledge.Document, error) {
+	return nil, nil
+}
+func (f taskScopedKnowledgeFixture) ReadEvidenceChunk(context.Context, string, string, string, string, string) (knowledge.EvidenceChunk, error) {
+	return f.chunk, nil
+}
+func (f taskScopedKnowledgeFixture) ReadEvidenceChunkForTask(_ context.Context, projectID, taskID, indexID, documentID, attachmentID, chunkID string) (knowledge.EvidenceChunk, error) {
+	if projectID != "project" || taskID != "task-a" || indexID != f.chunk.IndexVersionID || documentID != f.chunk.DocumentID || attachmentID != f.chunk.AttachmentID || chunkID != f.chunk.ChunkID {
+		return knowledge.EvidenceChunk{}, fmt.Errorf("reference is outside task scope")
+	}
+	return f.chunk, nil
+}
+
+type reportUserMaterialLoader struct {
+	value       attachment.Attachment
+	allowedTask string
+}
+
+func (f reportUserMaterialLoader) ReferenceMaterials(_ context.Context, projectID, taskID string, ids []string) ([]attachment.Attachment, error) {
+	if projectID != "project" || taskID != f.allowedTask || len(ids) != 1 || ids[0] != f.value.ID {
+		return nil, fmt.Errorf("reference material is outside task scope")
+	}
+	return []attachment.Attachment{f.value}, nil
 }
 
 type workflowCallsFixture struct{ calls []tool.Call }
@@ -216,5 +245,77 @@ func TestAbstractCitationTitleRecoveryRetainsEvidenceChecks(t *testing.T) {
 	ref.Title = chunk.Title
 	if _, err := s.verifyCitation(context.Background(), "project", "workflow", "", call, ref); err != nil {
 		t.Fatal("canonical new citation rejected", err)
+	}
+}
+
+func TestUserMaterialCitationRequiresImportedHashAndCurrentTaskScope(t *testing.T) {
+	chunk := knowledge.EvidenceChunk{IndexVersionID: "index", DocumentID: "document", AttachmentID: "user-attachment", ChunkID: "chunk", SourceName: "notes.pdf", MIMEType: "application/pdf", Locator: "page:1", Title: "", Content: "The locally supplied result is limited.", SourceStart: 0, SourceEnd: 37}
+	ref := tool.CitationRef{Kind: citation.KindKnowledgeChunk, ProjectID: "project", IndexVersionID: chunk.IndexVersionID, DocumentID: chunk.DocumentID, AttachmentID: chunk.AttachmentID, ChunkID: chunk.ChunkID, SourceName: chunk.SourceName, MIMEType: chunk.MIMEType, Locator: chunk.Locator, Quote: chunk.Content, QuoteSHA256: citation.QuoteSHA256(chunk.Content), SourceStart: chunk.SourceStart, SourceEnd: chunk.SourceEnd}
+	ref.Reference = citation.KnowledgeReference("workflow", ref.IndexVersionID, ref.ChunkID, ref.QuoteSHA256)
+	material := ImportedMaterial{AttachmentID: ref.AttachmentID, AttachmentSHA256: "expected-sha", Title: "notes.pdf", MaterialOrigin: "user_selected"}
+	service := &Service{
+		knowledge: taskScopedKnowledgeFixture{chunk: chunk},
+		materials: reportUserMaterialLoader{value: attachment.Attachment{ID: ref.AttachmentID, SHA256: "expected-sha"}, allowedTask: "task-a"},
+	}
+	result, err := service.verifyCitation(context.Background(), "project", "workflow", "task-a", tool.Call{}, ref, map[string]ImportedMaterial{ref.AttachmentID: material})
+	if err != nil || result.EvidenceLevel != "" || !strings.Contains(string(result.BibliographySnapshot), `"materialOrigin":"user_selected"`) || !strings.Contains(string(result.BibliographySnapshot), `"workType":"user_material"`) {
+		t.Fatalf("user material citation=%#v err=%v", result, err)
+	}
+	for _, mutate := range []func(*ImportedMaterial, *Service, *tool.CitationRef, *string){
+		func(v *ImportedMaterial, _ *Service, _ *tool.CitationRef, _ *string) { v.AttachmentSHA256 = "forged" },
+		func(_ *ImportedMaterial, _ *Service, _ *tool.CitationRef, task *string) { *task = "task-b" },
+		func(_ *ImportedMaterial, _ *Service, ref *tool.CitationRef, _ *string) {
+			ref.AttachmentID = "another-attachment"
+		},
+	} {
+		candidate, citationRef, task := material, ref, "task-a"
+		mutate(&candidate, service, &citationRef, &task)
+		if _, err := service.verifyCitation(context.Background(), "project", "workflow", task, tool.Call{}, citationRef, map[string]ImportedMaterial{citationRef.AttachmentID: candidate}); err == nil {
+			t.Fatal("forged hash or task scope bypass was accepted")
+		}
+	}
+}
+
+func TestPublishReportAcceptsOnlySameRunImportedUserMaterial(t *testing.T) {
+	chunk := knowledge.EvidenceChunk{IndexVersionID: "index", DocumentID: "document", AttachmentID: "user-attachment", ChunkID: "chunk", SourceName: "notes.pdf", MIMEType: "application/pdf", Locator: "page:1", Content: "The locally supplied result is limited.", SourceStart: 0, SourceEnd: 37}
+	ref := tool.CitationRef{Kind: citation.KindKnowledgeChunk, ProjectID: "project", IndexVersionID: chunk.IndexVersionID, DocumentID: chunk.DocumentID, AttachmentID: chunk.AttachmentID, ChunkID: chunk.ChunkID, SourceName: chunk.SourceName, MIMEType: chunk.MIMEType, Locator: chunk.Locator, Quote: chunk.Content, QuoteSHA256: citation.QuoteSHA256(chunk.Content), SourceStart: chunk.SourceStart, SourceEnd: chunk.SourceEnd}
+	ref.Reference = citation.KnowledgeReference("workflow", ref.IndexVersionID, ref.ChunkID, ref.QuoteSHA256)
+	analysis := json.RawMessage(`{"summary":"limited local evidence"}`)
+	gate := json.RawMessage(`{"approved":true}`)
+	imported, _ := json.Marshal(map[string]any{"materials": []ImportedMaterial{{AttachmentID: ref.AttachmentID, AttachmentSHA256: "expected-sha", Title: "notes.pdf", MaterialOrigin: "user_selected"}}})
+	calls := []tool.Call{
+		{ID: "import", RunID: "workflow", SubjectKind: tool.SubjectWorkflowRun, ToolName: "builtin.research.workflow.import", Status: tool.CallCompleted, Arguments: json.RawMessage(`{"selectedAttachmentIds":["user-attachment"]}`), Result: &tool.Result{Status: tool.ResultSuccess, Structured: imported}},
+		{ID: "search", RunID: "workflow", SubjectKind: tool.SubjectWorkflowRun, ToolName: citation.KnowledgeToolName, Status: tool.CallCompleted, Result: &tool.Result{Status: tool.ResultSuccess, Citations: []tool.CitationRef{ref}}},
+		{ID: "gate", RunID: "workflow", SubjectKind: tool.SubjectWorkflowRun, ToolName: ReviewGateToolName, Status: tool.CallCompleted, Arguments: json.RawMessage(`{"subject":{"summary":"limited local evidence"}}`), Result: &tool.Result{Status: tool.ResultSuccess, Structured: gate}},
+	}
+	artifacts := &workflowArtifactsFixture{}
+	service := &Service{
+		knowledge:    taskScopedKnowledgeFixture{chunk: chunk},
+		bibliography: workflowBibliographyFixture{}, // Must not be used for a user-selected material.
+		materials:    reportUserMaterialLoader{value: attachment.Attachment{ID: ref.AttachmentID, SHA256: "expected-sha"}, allowedTask: "task-a"},
+		toolCalls:    workflowCallsFixture{calls},
+		artifacts:    artifacts,
+	}
+	request := ReportRequest{ProjectID: "project", WorkflowRunID: "workflow", ResearchTaskID: "task-a", ToolCallID: "publish", Name: "local material report", Markdown: "Finding " + ref.Reference, Citations: []tool.CitationRef{ref}, Analysis: analysis, ReviewGate: gate}
+	if _, err := service.PublishReport(context.Background(), request); err != nil {
+		t.Fatal("same-run imported user material was rejected", err)
+	}
+	if len(artifacts.command.Citations) != 1 || artifacts.command.Citations[0].EvidenceLevel != "" || !strings.Contains(string(artifacts.command.Citations[0].BibliographySnapshot), `"attachmentSha256":"expected-sha"`) {
+		t.Fatalf("user material snapshot was not frozen: %#v", artifacts.command.Citations)
+	}
+	// The same knowledge citation cannot be promoted merely by a material record
+	// from a different Workflow Run.
+	calls[0].RunID = "other-run"
+	service.toolCalls = workflowCallsFixture{calls}
+	if _, err := service.PublishReport(context.Background(), request); err == nil {
+		t.Fatal("different-run import authorized a user material citation")
+	}
+	// A forged tool result cannot authorize an attachment that was not an
+	// explicit import input, even when it was returned by this same run.
+	calls[0].RunID = "workflow"
+	calls[0].Arguments = json.RawMessage(`{"selectedAttachmentIds":[]}`)
+	service.toolCalls = workflowCallsFixture{calls}
+	if _, err := service.PublishReport(context.Background(), request); err == nil {
+		t.Fatal("unselected attachment in import result authorized a user material citation")
 	}
 }

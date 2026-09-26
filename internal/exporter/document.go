@@ -371,6 +371,17 @@ func inTextCitation(value Citation, number int, style CitationStyle) string {
 }
 
 func formatReference(value Citation, number int, style CitationStyle) string {
+	if value.Bibliography.WorkType == "user_material" {
+		source := strings.TrimSpace(value.Bibliography.Title)
+		if source == "" {
+			source = value.SourceName
+		}
+		prefix := ""
+		if style != CitationAPA7 {
+			prefix = "[" + strconv.Itoa(number) + "] "
+		}
+		return prefix + source + ". " + value.Locator + " [用户提供资料；书目信息与全文完整性未核验]"
+	}
 	if hasBibliography(value.Bibliography) {
 		if style == CitationAPA7 {
 			return formatAPAReference(value.Bibliography) + evidenceDisclosure(value.EvidenceLevel)

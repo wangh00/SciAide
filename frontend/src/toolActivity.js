@@ -10,6 +10,9 @@ const labelByBuiltinName = {
   "builtin.knowledge.search": "本地知识库检索",
   "builtin.research.catalog": "查看文献来源",
   "builtin.research.search": "在线学术检索",
+  "builtin.web.search": "搜索互联网",
+  "builtin.web.open": "读取网页",
+  "builtin.browser.open": "浏览器访问网页",
   "builtin.research.fetch": "获取文献记录",
   "builtin.workspace.list": "浏览 Workspace",
   "builtin.workspace.read_text": "读取 Workspace 文件",
@@ -142,6 +145,14 @@ export function activityDurationLabel(name, durationMillis) {
 export function toolPresentation(call) {
   const name = String(call?.toolName ?? "");
   const args = record(call?.arguments);
+  if (name === "builtin.mcp.list" || name === "builtin.tools.search") {
+    return { kind: "MCP", icon: "server", title: name === "builtin.mcp.list" ? "查看 MCP 状态" : "查找 MCP 工具", summary: compactText(args.query || args.server || "", 100) };
+  }
+  if (name === "builtin.workspace.list") {
+    const path = compactText(args.path || ".", 90);
+    const limit = Number(args.limit);
+    return { kind: "工具", icon: "tool", title: labelByBuiltinName[name], summary: path + (Number.isFinite(limit) && limit > 0 ? ` · 最多 ${limit.toLocaleString()} 项` : "") };
+  }
   if (name === "builtin.resource.open" || name === "builtin.resource.search") {
     const resolved = record(call?.result?.structured);
     const skill = String(resolved.sourceTool ?? "").startsWith("builtin.skill.");

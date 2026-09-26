@@ -19,7 +19,7 @@ test("reasoning strength is selectable before a conversation and carried into ne
   assert.match(source, /workspaceReasoningLevel/);
   assert.match(source, /reasoningLevel: workspaceReasoningLevel/);
   assert.match(source, /reasoningLevel: selectedConversation\?\.reasoningLevel \?\? workspaceReasoningLevel/);
-  assert.match(source, /value=\{effectiveReasoningLevel\} disabled=\{!selectableModels\.length \|\| busy\}/);
+  assert.match(source, /value=\{effectiveReasoningLevel\} disabled=\{!selectableModels\.length \|\| busy \|\| researchConversationLocked\}/);
   assert.doesNotMatch(source, /value=\{selectedConversation\?\.reasoningLevel \?\? "medium"\} disabled=\{!selectedConversation \|\| busy\}/);
 });
 
@@ -29,7 +29,7 @@ test("project resources stay in the shared topbar while engineering controls rem
   assert.match(topbar, /className="research-open"[\s\S]*?<span>文献发现<\/span>/);
   assert.match(topbar, /className="python-open"[\s\S]*?<span>Python 环境<\/span>/);
   assert.match(topbar, /className="artifact-open"[\s\S]*?<span>科研产物<\/span>/);
-  assert.match(topbar, /className="knowledge-open"[\s\S]*?<span>知识库<\/span>/);
+  assert.match(topbar, /className="knowledge-open"[\s\S]*?<span>研究资料库<\/span>/);
   assert.doesNotMatch(source, /research-resource-tools/);
   assert.doesNotMatch(source, /function WorkflowStudio\(\{ project, open/);
   assert.match(source, /\{detail \? "创建任务" : "方案预览"\}<\/button>/);
@@ -59,11 +59,11 @@ test("desktop prompts use the animated in-app dialog system", async () => {
   assert.doesNotMatch(source, /window\.(?:alert|confirm|prompt)\s*\(/);
   assert.match(source, /const appDialogQueue: AppDialogRequest\[\] = \[\]/);
   assert.match(source, /function AppDialogHost\(\)/);
-  assert.match(source, /return createPortal\(<div className=\{`app-dialog-backdrop/);
-  assert.match(source, /<\/div>, document\.body\);/);
+  assert.match(source, /return createPortal\(<ModalDialog key=\{request.id\} className=\{`app-dialog-backdrop/);
+  assert.match(source, /<\/ModalDialog>, document\.body\);/);
   assert.match(source, /role="dialog" aria-modal="true"/);
   assert.match(source, /className=\{`app-dialog \$\{request\.tone === "danger"/);
-  assert.match(source, /querySelectorAll<HTMLElement>\('button:not\(:disabled\),input:not\(:disabled\)'\)/);
+  assert.match(await readFile(new URL('./Modal.tsx', import.meta.url), 'utf8'), /querySelectorAll<HTMLElement>/);
   assert.match(css, /\.app-dialog\s*\{[^}]*width:\s*min\(440px/s);
   assert.match(css, /\.app-dialog\s*\{[^}]*max-height:\s*calc\(100vh - 40px\)/s);
   assert.match(css, /\.app-dialog p\s*\{[^}]*overflow-y:\s*auto/s);
@@ -234,7 +234,7 @@ test("research runs bind the existing chat loop and restore the selected task", 
   assert.doesNotMatch(source, /className=\{`conversation-row[^\n]*research-bound/);
   assert.match(source, /科研流程正在自主推进，任务结束后可继续提问/);
   assert.match(source, /流程与 AI 正在完成闭环；可在左侧暂停或取消任务/);
-  assert.match(source, /busy && !activeRunIsWorkflowAI && !researchConversationLocked && <button type="button" className="stop"/);
+  assert.match(source, /busy && !activeRunIsWorkflowAI && !researchConversationLocked \? <button type="button" className="send is-stop"/);
   assert.match(css, /\.workspace:has\(\.research-route-panel\)\s*\{[^}]*grid-template-areas:\s*[^}]*"route chat evidence"[^}]*"route compose evidence"/s);
   assert.match(css, /\.workspace:has\(\.research-route-panel\) > \.workspace-content\s*\{[^}]*display:\s*contents/s);
   assert.match(css, /\.workspace:has\(\.research-route-panel\) > \.composer-wrap\s*\{[^}]*grid-area:\s*compose[^}]*background:\s*#fff/s);
@@ -267,7 +267,7 @@ test("research run workspace separates route, decisions, and verifiable results"
   assert.match(source, /className="workflow-artifact-lineage"/);
   assert.doesNotMatch(source, /密钥由系统凭据库保护|className="local-note"/);
   assert.doesNotMatch(source, /className="research-mode-indicator"/);
-  assert.match(source, /aria-label="打开项目知识库"/);
+  assert.match(source, /aria-label="打开项目研究资料库"/);
   assert.match(source, /aria-label="打开科研产物"/);
   assert.match(source, /复现快照/);
   assert.doesNotMatch(source, /技术审计/);
@@ -297,11 +297,11 @@ test("Workflow AI messages keep their own expandable activity history", async ()
   assert.match(source, /workflowMessageActivities\(detailSnapshot/);
 });
 
-test("ordinary chat keeps the legacy expandable run card", async () => {
+test("ordinary chat keeps inspectable run history before its answer", async () => {
   const source = await readFile(new URL("./App.tsx", import.meta.url), "utf8");
-  assert.match(source, /message\.role === "assistant" && run && !runActive && !workflowActivity && <RunProcess/);
+  assert.match(source, /message\.role === "assistant" && run && !workflowActivity && <RunProcess/);
   assert.match(source, /message\.role === "assistant" && !run && message\.runId && !workflowActivity && <HistoricalRunProcess/);
-  assert.match(source, /message\.role === "assistant" && run && runActive && !workflowActivity && <RunProcess/);
+  assert.match(source, /message\.role === "assistant" && run && !workflowActivity && <RunProcess/);
 });
 
 test("Workflow message activity includes AI, Workflow tools, approvals, and durable history", async () => {
@@ -617,7 +617,7 @@ test("frameless titlebar supports double-click maximize without handling control
   assert.match(source, /toggleMaximiseWindow\(\)/);
 });
 
-test("artifact and knowledge libraries share task-scoped full-width trees and focused detail dialogs", async () => {
+test("artifact and research materials preserve task scopes with focused detail dialogs", async () => {
   const source = await readFile(new URL("./App.tsx", import.meta.url), "utf8");
   const css = await readFile(new URL("./styles.css", import.meta.url), "utf8");
   assert.match(source, /function buildResourceScopes/);
@@ -629,29 +629,32 @@ test("artifact and knowledge libraries share task-scoped full-width trees and fo
   assert.match(source, /title: "分析与过程"/);
   assert.match(source, /title: "研究成果"/);
   assert.match(source, /title: "正式导出"/);
-  assert.match(source, /title: "附件来源"/);
-  assert.match(source, /title: "解析与索引"/);
-  assert.match(source, /title: "知识片段"/);
+  assert.match(source, /<ResearchMaterialsLibrary/);
+  assert.doesNotMatch(source, /function KnowledgeLibrary\(/);
   assert.match(css, /\.resource-browser-layout\s*\{/);
   assert.match(css, /\.resource-tree-flow\.columns-4\s*\{[^}]*grid-template-columns:\s*repeat\(4,minmax\(0,1fr\)\)/s);
   assert.match(css, /\.resource-tree-flow\.columns-3\s*\{[^}]*grid-template-columns:\s*repeat\(3,minmax\(0,1fr\)\)/s);
   assert.match(css, /\.knowledge-modal\s*\{[^}]*width:\s*min\(1480px,calc\(100vw - 48px\)\)/s);
   assert.match(css, /\.resource-tree-flow\s*\{[^}]*height:\s*100%[^}]*overflow:\s*hidden/s);
   assert.match(css, /\.resource-tree-column\s*\{[^}]*height:\s*100%[^}]*overflow:\s*hidden/s);
-  assert.match(source, /const selectable = scopeWritable && !knowledgeJobActive\(item\)/);
   assert.match(source, /className="artifact-detail-dialog resource-detail-dialog"/);
-  assert.match(source, /className="knowledge-detail-dialog resource-detail-dialog"/);
   assert.match(css, /\.resource-detail-backdrop\s*\{/);
-  assert.match(source, /按资源性质并列浏览，栏目不代表先后关系/);
   assert.match(source, /全选当前归属/);
   assert.match(source, /批量移入回收站/);
-  assert.match(source, /全选可移除文件/);
-  assert.match(source, /批量移出知识库/);
   assert.match(source, /taskId\.trim\(\) \? "TrashTaskArtifact" : "TrashArtifact"/);
-  assert.match(source, /taskId\.trim\(\) \? "RemoveTaskDocument" : "RemoveDocument"/);
   assert.match(source, /const scopeWritable = !taskId\.trim\(\) \|\| selectedScopeKey === `task:\$\{taskId\.trim\(\)\}`/);
-  assert.match(css, /\.resource-tree-actions\s*\{/);
-  assert.match(css, /\.resource-tree-selectable\s*\{/);
+  assert.match(css, /\.research-material-list\s*\{/);
+  assert.match(css, /\.research-material-card\s*\{/);
+  assert.match(css, /\.knowledge-technical-details\s*\{/);
   assert.doesNotMatch(source, /String\(index \+ 1\)\.padStart/);
   assert.doesNotMatch(css, /\.resource-tree-column:not\(:last-child\)::(?:before|after)/);
+});
+
+test("new chat and research use high without inheriting an existing conversation override", async () => {
+  const source = await readFile(new URL("./App.tsx", import.meta.url), "utf8");
+  assert.match(source, /const defaultReasoningLevel: ReasoningLevel = "high"/);
+  assert.match(source, /useState<ReasoningLevel>\(defaultReasoningLevel\)/);
+  const change = source.split("async function changeReasoningLevel")[1].split("async function removeConversation")[0];
+  assert.equal((change.match(/setWorkspaceReasoningLevel\(level\)/g) ?? []).length, 1);
+  assert.match(change, /if \(!settingsConversation\) \{\s*setWorkspaceReasoningLevel\(level\)/);
 });

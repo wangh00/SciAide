@@ -1,6 +1,9 @@
 package wails
 
-import appresearch "github.com/wangh00/SciAide/internal/app/research"
+import (
+	"github.com/wangh00/SciAide/internal/app/attachment"
+	appresearch "github.com/wangh00/SciAide/internal/app/research"
+)
 
 type ResearchFacade struct {
 	lifecycle    *LifecycleContext
@@ -98,4 +101,8 @@ func (f *ResearchFacade) UpdateReview(command appresearch.ReviewCommand) (appres
 
 func (f *ResearchFacade) ImportCandidate(command appresearch.ImportCandidateCommand) (appresearch.ImportCandidateResult, error) {
 	return f.service.ImportCandidate(f.lifecycle.Context(), command)
+}
+
+func (f *ResearchFacade) CollectCandidate(projectID, candidateID, taskID string) (attachment.Material, error) {
+	return f.service.CollectCandidate(f.lifecycle.Context(), projectID, candidateID, taskID)
 }

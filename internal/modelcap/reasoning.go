@@ -11,11 +11,12 @@ import (
 type ReasoningLevel string
 
 const (
-	ReasoningLow    ReasoningLevel = "low"
-	ReasoningMedium ReasoningLevel = "medium"
-	ReasoningHigh   ReasoningLevel = "high"
-	ReasoningXHigh  ReasoningLevel = "xhigh"
-	ReasoningMax    ReasoningLevel = "max"
+	ReasoningLow          ReasoningLevel = "low"
+	ReasoningMedium       ReasoningLevel = "medium"
+	ReasoningHigh         ReasoningLevel = "high"
+	ReasoningXHigh        ReasoningLevel = "xhigh"
+	ReasoningMax          ReasoningLevel = "max"
+	DefaultReasoningLevel                = ReasoningHigh
 )
 
 var orderedReasoningLevels = []ReasoningLevel{
@@ -60,7 +61,7 @@ func ResolveReasoningLevel(requested ReasoningLevel, supported []ReasoningLevel)
 		return ""
 	}
 	if !requested.Valid() {
-		requested = ReasoningMedium
+		requested = DefaultReasoningLevel
 	}
 	requestedRank := reasoningRank(requested)
 	for index := len(levels) - 1; index >= 0; index-- {

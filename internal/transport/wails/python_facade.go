@@ -2,10 +2,12 @@ package wails
 
 import (
 	"github.com/wailsapp/wails/v2/pkg/runtime"
+	"github.com/wangh00/SciAide/internal/app/browserenv"
 	"github.com/wangh00/SciAide/internal/app/pythonenv"
 )
 
 type PythonFacade struct {
+	browser   *browserenv.Service
 	lifecycle *LifecycleContext
 	service   *pythonenv.Service
 	kernels   *pythonenv.KernelService
@@ -71,3 +73,12 @@ func (f *PythonFacade) StopProjectKernel(projectID string) error {
 	}
 	return f.kernels.Stop(projectID)
 }
+
+func (f *PythonFacade) SetBrowser(s *browserenv.Service) { f.browser = s }
+func (f *PythonFacade) GetBrowserEnvironment(id string) (browserenv.Status, error) {
+	return f.browser.Status(f.lifecycle.Context(), id)
+}
+func (f *PythonFacade) InstallBrowserEnvironment(id string) (browserenv.Status, error) {
+	return f.browser.Install(f.lifecycle.Context(), id)
+}
+func (f *PythonFacade) CancelBrowserOperation(id string) { f.browser.Cancel(id) }

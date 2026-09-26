@@ -460,7 +460,7 @@ func validateDynamicResearchRoute(route ResearchRoute, context ResearchStarterCo
 		return false, nil, routeError("动态研究路线必须形成研究设计、经过 Python 计算的结果或证据交付稿")
 	}
 	if hasDraft && !hasDesign && !hasResults {
-		if _, hasEvidence := positions["evidence_extraction"]; !hasEvidence {
+		if _, hasEvidence := positions["evidence_extraction"]; !hasEvidence && len(context.SelectedMaterials) == 0 {
 			return false, nil, routeError("仅有交付稿的动态研究路线必须包含证据提取阶段")
 		}
 	}
@@ -642,12 +642,16 @@ func dynamicResearchStarterTemplate() Template {
 				ID: "explore", Name: "AI 综合 Skill 并设计研究路线", Kind: NodeAgentStage, Arguments: raw(`{}`),
 				PromptVersion: "research-starter-semantic-v6", ReviewPolicy: AIReviewAuto, SkillRouting: true,
 				AllowedTools: []string{
+					"builtin.mcp.list", "builtin.tools.search",
 					"builtin.resource.open", "builtin.resource.search",
 					"builtin.attachment.list", "builtin.document.inspect", "builtin.document.read", "builtin.document.search",
 					"builtin.knowledge.search", "builtin.research.catalog", "builtin.research.search", "builtin.research.fetch",
+					"builtin.web.search", "builtin.web.open", "builtin.browser.open",
 					"builtin.workspace.list", "builtin.workspace.read_text",
 				},
 				Prompt: `你是 SciAide 科研模式的动态研究架构师。先依据课题、交付目标、资源快照和 available_skills 元数据完成候选重排，再从 resource_actions 的真实候选中选择加载操作，通过 builtin.resource.open 加载 1 至 4 个对当前课题不可替代且彼此互补的核心科研 Skill。不要把召回候选全部加载，不要为了凑数加载近义、重复或仅弱相关的 Skill，也不要声称采用未实际加载的 Skill。长 Skill 返回章节目录时，只读取规划当前路线所需的章节并读完相关章节。读取资料时只选择宿主签发的 actionId；Skill 名称、附件 ID、目录路径、章节定位和分页位置由宿主解析，不提交自由定位参数。综合核心 Skill 的理论、方法、适用条件和限制，生成 1 至 3 条真正适合当前课题的语义路线。
+
+selectedMaterials 是用户明确指定的参考材料清单，不是实验数据，也不代表已经读取或可以直接据此下结论。按需通过资源检索和宿主签发的读取操作了解内容；不得仅凭文件名推断发现。后续宿主会安排这些资料的确认、索引和证据评估；是否还需公共文献检索按实际研究目标决定，不因已有一两份资料宣称证据充分。
 
 工具调用期间可以不输出说明文字，工具结果会由宿主记录。完成必要的工具调用后，必须在同一响应末尾提交一个完整、可解析且符合下方 Schema 的路线 JSON。即使资料不足，也要在 missingInformation、blockers 或 limitations 中说明缺口，不得只返回普通文本或半截 JSON。
 

@@ -60,6 +60,12 @@ func TestProjectArchiveRoundTripRestoresFilesAndExcludesSecrets(t *testing.T) {
 		t.Fatalf("attachment import = %#v, %v", batch, err)
 	}
 	originalAttachment := batch.Attachments[0]
+	if _, err := attachments.CollectMaterial(ctx, created.ID, "", originalAttachment.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := attachments.SaveMaterial(ctx, created.ID, "", originalAttachment.ID, "研究者原始记录", "导出前的人工备注", true); err != nil {
+		t.Fatal(err)
+	}
 	artifacts := artifact.NewService(NewArtifactRepository(store.DB()), projects)
 	saved, err := artifacts.RegisterWorkspaceFile(ctx, artifact.RegisterWorkspaceCommand{ProjectID: created.ID, Path: source, Name: "研究产物"})
 	if err != nil {
@@ -109,6 +115,13 @@ func TestProjectArchiveRoundTripRestoresFilesAndExcludesSecrets(t *testing.T) {
 	values, err := attachments.List(ctx, restored.Project.ID)
 	if err != nil || len(values) != 1 || values[0].ID == originalAttachment.ID || values[0].SHA256 != originalAttachment.SHA256 {
 		t.Fatalf("restored attachments = %#v, %v", values, err)
+	}
+	restoredMaterial, err := attachments.GetMaterial(ctx, restored.Project.ID, "", values[0].ID)
+	if err != nil || restoredMaterial.Title != "研究者原始记录" || restoredMaterial.Notes != "导出前的人工备注" || !restoredMaterial.Archived || !restoredMaterial.Collected {
+		t.Fatalf("restored material-library metadata = %#v, %v", restoredMaterial, err)
+	}
+	if visible, err := attachments.ListMaterials(ctx, restored.Project.ID, ""); err != nil || len(visible) != 0 {
+		t.Fatalf("archived metadata was not preserved in restored listing: %#v, %v", visible, err)
 	}
 	loaded, parsed, err := attachments.Parsed(ctx, restored.Project.ID, values[0].ID)
 	if err != nil || loaded.Status != attachment.StatusReady || len(parsed.Units) == 0 || !strings.Contains(parsed.Units[0].Content, "可信证据") {

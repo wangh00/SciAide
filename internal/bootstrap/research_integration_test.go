@@ -64,6 +64,25 @@ func TestResearchCandidateMetadataImportReachesKnowledgeIndexIdempotently(t *tes
 	if err != nil || len(page.Items) != 1 {
 		t.Fatalf("candidates = %#v, %v", page, err)
 	}
+	// Saving a pending candidate is independent from scientific inclusion/import.
+	collectedPending, err := application.ResearchFacade.CollectCandidate(created.ID, page.Items[0].ID, "")
+	if err != nil || !collectedPending.Reusable || collectedPending.ContentKind != "metadata_abstract" {
+		t.Fatalf("collect pending=%#v %v", collectedPending, err)
+	}
+	unchanged, err := repository.GetCandidate(ctx, created.ID, page.Items[0].ID)
+	if err != nil || unchanged.ReviewStatus != appresearch.ReviewPending || unchanged.ImportStatus != appresearch.ImportNotImported {
+		t.Fatalf("collect mutated workflow state: %#v %v", unchanged, err)
+	}
+	collectedAgain, err := application.ResearchFacade.CollectCandidate(created.ID, page.Items[0].ID, "")
+	if err != nil || collectedAgain.ID != collectedPending.ID {
+		t.Fatalf("duplicate collection: %#v %v", collectedAgain, err)
+	}
+	if err := application.KnowledgeFacade.ArchiveMaterial(created.ID, "", collectedPending.ID); err != nil {
+		t.Fatal(err)
+	}
+	if list, err := application.KnowledgeFacade.ListLibraryMaterials(created.ID); err != nil || len(list) != 0 {
+		t.Fatalf("cleared library not empty: %#v %v", list, err)
+	}
 	candidate, err := application.ResearchFacade.UpdateReview(appresearch.ReviewCommand{ProjectID: created.ID, CandidateID: page.Items[0].ID, Status: appresearch.ReviewIncluded, Note: "integration fixture"})
 	if err != nil || candidate.ReviewStatus != appresearch.ReviewIncluded {
 		t.Fatalf("review = %#v, %v", candidate, err)
@@ -94,6 +113,28 @@ func TestResearchCandidateMetadataImportReachesKnowledgeIndexIdempotently(t *tes
 		time.Sleep(20 * time.Millisecond)
 	}
 	result, err := application.knowledge.Search(ctx, created.ID, "epsilon forty two", 5)
+	if err != nil || len(result.Matches) != 0 {
+		t.Fatalf("uncollected automatic material leaked into default search: %#v %v", result, err)
+	}
+	available, err := application.KnowledgeFacade.ListReferenceMaterials(created.ID, "")
+	if library, err := application.KnowledgeFacade.ListLibraryMaterials(created.ID); err != nil || len(library) != 0 {
+		t.Fatalf("automatic import restored removed user library entry: %#v %v", library, err)
+	}
+	if err != nil || len(available) != 0 {
+		t.Fatalf("uncollected material selectable: %#v %v", available, err)
+	}
+	if _, err = application.ResearchFacade.CollectCandidate(created.ID, candidate.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	library, libraryErr := application.KnowledgeFacade.ListLibraryMaterials(created.ID)
+	if libraryErr != nil || len(library) != 1 || library[0].IndexChunks == nil || *library[0].IndexChunks < 1 || library[0].ExtractedRunes < 1 {
+		t.Fatalf("missing material index summary: %#v %v", library, libraryErr)
+	}
+	available, err = application.KnowledgeFacade.ListReferenceMaterials(created.ID, "")
+	if err != nil || len(available) != 1 || available[0].ID != imported.Attachment.ID || available[0].OriginalName != candidate.Preferred.Title {
+		t.Fatalf("collected reference mismatch: %#v %v", available, err)
+	}
+	result, err = application.knowledge.Search(ctx, created.ID, "epsilon forty two", 5)
 	if err != nil || len(result.Matches) == 0 || result.Matches[0].AttachmentID != imported.Attachment.ID {
 		t.Fatalf("knowledge search = %#v, %v", result, err)
 	}
