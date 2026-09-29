@@ -12,7 +12,7 @@ import (
 
 const (
 	IndexSchemaVersion = 3
-	ChunkingVersion    = "bounded-unit-v2"
+	ChunkingVersion    = "bounded-unit-v4"
 	// MaxSearchQueryRunes is shared by the public tool contract and the
 	// knowledge service. Keeping it here prevents Workflow edges from allowing
 	// a query that the downstream local search cannot accept.
@@ -220,6 +220,7 @@ type Repository interface {
 	MarkVersionReady(ctx context.Context, versionID, projectID string, at time.Time) error
 	Enqueue(ctx context.Context, value attachment.Attachment, version IndexVersion, force bool, at time.Time) (ImportJob, bool, error)
 	ListDocuments(ctx context.Context, projectID string) ([]Document, error)
+	ListIndexableDocuments(ctx context.Context, projectID string) ([]Document, error)
 	ListLatestJobs(ctx context.Context, projectID string) ([]ImportJob, error)
 	CancelQueued(ctx context.Context, projectID, documentID string, at time.Time) (ImportJob, bool, error)
 	CancelRunning(ctx context.Context, work Work, at time.Time) error

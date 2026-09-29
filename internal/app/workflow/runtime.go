@@ -417,11 +417,12 @@ type subjectToolCalls interface {
 }
 
 type RuntimeService struct {
-	repository     RuntimeRepository
-	workflows      Repository
-	projects       ProjectLoader
-	literature     LiteratureCandidateReader
-	materialLoader interface {
+	evidenceMaterials evidenceMaterialReader
+	repository        RuntimeRepository
+	workflows         Repository
+	projects          ProjectLoader
+	literature        LiteratureCandidateReader
+	materialLoader    interface {
 		ReferenceMaterials(context.Context, string, string, []string) ([]attachment.Attachment, error)
 	}
 	tasks          researchtask.Validator
@@ -1402,8 +1403,9 @@ type citationSelectionAuditSnapshot struct {
 
 func auditCitationSelection(input json.RawMessage, selected []tool.CitationRef, accepted bool) citationSelectionAuditSnapshot {
 	var envelope struct {
-		Candidates []tool.CitationRef `json:"candidates"`
-		Screening  json.RawMessage    `json:"screening"`
+		SelectedMaterialOnly bool               `json:"selectedMaterialOnly"`
+		Candidates           []tool.CitationRef `json:"candidates"`
+		Screening            json.RawMessage    `json:"screening"`
 	}
 	_ = json.Unmarshal(input, &envelope)
 	result := citationSelectionAuditSnapshot{
@@ -1468,6 +1470,9 @@ func auditCitationSelection(input json.RawMessage, selected []tool.CitationRef, 
 		result.FullTextEvidenceObserved = fullTextObserved
 		result.MetadataOrAbstractOnly = len(selected) > 0 && !fullTextObserved
 		result.HostMinimumCoverageMet = result.DistinctDocumentCount >= 2 && fullTextObserved
+	}
+	if envelope.SelectedMaterialOnly {
+		result.HostMinimumCoverageMet = result.DistinctDocumentCount >= 1 && fullTextObserved
 	}
 	result.ScreeningStrength = strings.TrimSpace(screening.Coverage.Strength)
 	sufficient := screening.Coverage.SufficientForClaimedScope
@@ -2125,6 +2130,7 @@ func (s *RuntimeService) drive(ctx context.Context, runID string) error {
 			input, err := bindNodeInput(detail, node)
 			if err == nil {
 				input = addResearchSourceContext(detail, node, input)
+				input, err = s.bindRevisionMaterials(ctx, detail, node, input)
 			}
 			inputErrorCode := "WORKFLOW_INPUT_BINDING_FAILED"
 			if err == nil {
@@ -2152,6 +2158,12 @@ func (s *RuntimeService) drive(ctx context.Context, runID string) error {
 		}
 		switch node.Kind {
 		case NodeHumanConfirmation, NodeCandidateSelection, NodeCitationSelection:
+			if handled, err := s.reuseSelectedMaterials(ctx, detail, *step, node); handled || err != nil {
+				if err != nil {
+					return s.failDrive(ctx, detail, *step, "WORKFLOW_MATERIAL_REUSE_FAILED", err.Error(), StepFailed, RunFailed)
+				}
+				continue
+			}
 			if handled, err := s.autoSelectEvidenceCitations(ctx, detail, *step, node); handled || err != nil {
 				if err != nil {
 					return err
@@ -2202,12 +2214,17 @@ func (s *RuntimeService) driveAI(ctx context.Context, detail RunDetail, step Ste
 			return s.failBlockedStep(ctx, detail, "WORKFLOW_AI_TOOL_DEFINITION_CHANGED", fmt.Errorf("AI 阶段工具 %s 的定义已变化，请重新保存研究方案", frozen.QualifiedName))
 		}
 		if node.Kind == NodeAgentStage && !agentStageToolSafe(current) {
-			return s.failBlockedStep(ctx, detail, "WORKFLOW_AI_TOOL_UNSAFE", fmt.Errorf("AI 阶段工具 %s 不再满足只读、幂等的科研观察边界，请改用显式 Workflow 节点", frozen.QualifiedName))
+			return s.failBlockedStep(ctx, detail, "WORKFLOW_AI_TOOL_UNSAFE", fmt.Errorf("AI 阶段工具 %s 不满足幂等观察或宿主限定的任务材料保存边界，请改用显式 Workflow 节点", frozen.QualifiedName))
 		}
 	}
 	execution, exists, err := s.repository.GetAIExecutionForStep(ctx, step.ID, step.Attempt)
 	if err != nil {
 		return err
+	}
+	if !exists || (execution.Status != "running" && execution.Status != "prepared") {
+		if handled, err := s.refreshChangedEvidence(ctx, detail, step, node); handled || err != nil {
+			return s.finishEvidenceRefresh(ctx, detail, step, err)
+		}
 	}
 	node = literaturePhaseNode(node, step.Input)
 	node = selectedEvidencePhaseNode(node, step.Input)
@@ -2280,6 +2297,11 @@ func (s *RuntimeService) driveAI(ctx context.Context, detail RunDetail, step Ste
 	execution.ModelProfileID, execution.ModelID, execution.ReasoningLevel = state.ModelProfileID, state.ModelID, state.ReasoningLevel
 	execution.OutputText, execution.InputTokens, execution.OutputTokens, execution.ReasoningTokens, execution.ModelTurns = state.Text, state.InputTokens, state.OutputTokens, state.ReasoningTokens, state.ModelTurns
 	execution.ErrorCode, execution.ErrorMessage, execution.UpdatedAt, execution.CompletedAt = state.ErrorCode, state.ErrorMessage, now, &completed
+	if state.Status == "completed" || state.Status == "failed" {
+		if handled, err := s.refreshChangedEvidence(ctx, detail, step, node); handled || err != nil {
+			return s.finishEvidenceRefresh(ctx, detail, step, err)
+		}
+	}
 	switch state.Status {
 	case "completed":
 		return s.completeAIExecution(context.Background(), detail, step, node, execution, true)
@@ -2532,6 +2554,11 @@ func (s *RuntimeService) completeAIExecution(ctx context.Context, detail RunDeta
 			Info selectedEvidenceInput `json:"_selectedEvidence"`
 		}
 		json.Unmarshal(step.Input, &in)
+		if in.Info.Phase != "batch" {
+			if handled, err := s.supplementLocalEvidence(ctx, detail, step, structured); handled || err != nil {
+				return s.finishEvidenceRefresh(ctx, detail, step, err)
+			}
+		}
 		if in.Info.Phase == "batch" {
 			return s.completeSelectedEvidenceBatch(ctx, detail, step, execution)
 		}
@@ -3038,6 +3065,8 @@ This is an independent delivery review. Issue arrays may contain only unresolved
 			trustedReviewInstruction += `
 
 Return revisionPlan with exactly one item for EVERY requiredCorrections entry (correctionIndex is its zero-based index); return [] only when requiredCorrections is empty. For each item select nodeId only from stage_input.revisionTargets, explain reason using frozen evidence, and explain whyNotLater: why merely editing a later stage cannot repair this defect. Use the earliest stage actually requiring a change, not automatically the report stage. If the correction needs new data, evidence, or a user decision that the frozen inputs cannot supply, set needsUserInput=true and specify requiredInput; nodeId may be empty only in this case. Otherwise needsUserInput=false and requiredInput="". Never pretend rerunning can supply missing user material. The host will validate full coverage and take the earliest legitimate stage across all corrections; this is an advisory plan requiring explicit user confirmation, not permission to run or modify anything.`
+			trustedReviewInstruction += `
+Trace each erroneous claim back through the supplied evidenceScreening/evidenceContext and method context, not just the final prose. If an incorrect population, comparator, effect interpretation or unsupported claim already occurs in evidence synthesis, select evidence_screening when offered; correcting only the report leaves a reusable upstream error. Do not confuse immutable source excerpts with AI-derived synthesis: reinterpret the latter against the former, never rewrite original evidence. If source text itself is missing or damaged, request corrected material rather than inventing it.`
 		}
 		if usesTrackedReview(node) {
 			trustedReviewInstruction += trackedReviewInstruction
@@ -4390,7 +4419,11 @@ func (s *RuntimeService) commitToolResult(ctx context.Context, detail RunDetail,
 	if code, err := validateResearchToolResult(detail, step, call); err != nil {
 		return s.failDrive(ctx, detail, step, code, err.Error(), StepFailed, RunFailed)
 	}
-	output, err := encodeToolOutput(*call.Result)
+	result, err := mergeLocalEvidenceResults(detail, step, *call.Result)
+	if err != nil {
+		return s.failDrive(ctx, detail, step, "WORKFLOW_EVIDENCE_SNAPSHOT_INVALID", err.Error(), StepFailed, RunFailed)
+	}
+	output, err := encodeToolOutput(result)
 	if err != nil {
 		return err
 	}
@@ -4863,6 +4896,9 @@ func bindNodeInput(detail RunDetail, node CompiledNode) (json.RawMessage, error)
 		}
 		arguments[edge.ToPort] = cloneRaw(value)
 	}
+	if node.ID == "evidence_search" {
+		bindSupplementaryEvidenceQueries(detail, arguments)
+	}
 	if node.ID == "python_analysis" && node.Kind == NodePython {
 		implementation, ok := stepMap["method_implementation"]
 		if ok && implementation.Status == StepCompleted {
@@ -4924,6 +4960,15 @@ func bindNodeInput(detail RunDetail, node CompiledNode) (json.RawMessage, error)
 			return nil, err
 		}
 		criteria, err := researchAcceptanceCriteria(contract)
+		if strings.HasPrefix(node.PromptVersion, "dynamic-independent-review-v5") || strings.HasPrefix(node.PromptVersion, dynamicResearchReviewVersion) {
+			arguments["requireOriginalDelivery"] = true
+			criteria = appendOriginalDeliveryCriterion(criteria)
+		}
+		if strings.HasPrefix(node.PromptVersion, dynamicResearchReviewVersion) && arguments["evidenceScreening"] != nil {
+			arguments["requireEvidenceGapCheck"] = true
+			criteria = appendEvidenceGapCriterion(criteria)
+			arguments["unsupportedAbsenceClaims"] = unsupportedReportAbsenceClaims(mustJSON(arguments))
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -4943,7 +4988,7 @@ func bindNodeInput(detail RunDetail, node CompiledNode) (json.RawMessage, error)
 		}
 		arguments["reviewHistory"] = history
 	}
-	if revision, ok := pendingReviewRevision(detail, node.ID); ok {
+	if revision, ok := pendingReviewRevision(detail, node.ID); ok && !(node.ID == "evidence_screening" && node.PromptVersion == selectedEvidenceVersion) {
 		encoded, err := json.Marshal(revision)
 		if err != nil {
 			return nil, fmt.Errorf("encode independent-review revision context: %w", err)
@@ -4955,6 +5000,13 @@ func bindNodeInput(detail RunDetail, node CompiledNode) (json.RawMessage, error)
 			return nil, fmt.Errorf("decode independent-review revision context")
 		}
 		arguments["_reviewRevision"] = value
+	}
+	// Evidence analysis can span multiple attempts. Carry the correction and
+	// its source identity across batch continuations, not just the first batch.
+	if node.ID == "evidence_screening" && node.PromptVersion == selectedEvidenceVersion {
+		if revision, ok := evidenceReviewRevision(detail, node.ID); ok {
+			arguments["_reviewRevision"] = revision
+		}
 	}
 	if node.Kind == NodeAIAnalysis || node.Kind == NodeAgentStage {
 		if revision := pendingUserRevision(detail, node.ID); revision != nil {

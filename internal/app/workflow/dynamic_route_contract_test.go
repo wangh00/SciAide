@@ -9,6 +9,7 @@ import (
 
 	"github.com/wangh00/SciAide/internal/app/attachment"
 	"github.com/wangh00/SciAide/internal/app/knowledge"
+	"github.com/wangh00/SciAide/internal/app/tool"
 )
 
 func TestDynamicQuestionQueryMatchesLocalKnowledgeSearchLimit(t *testing.T) {
@@ -78,6 +79,93 @@ func TestDataDeliveryReceivesActualImplementationAndResults(t *testing.T) {
 	}
 }
 
+func TestSemanticLocalExtractionDoesNotInventPublicDiscovery(t *testing.T) {
+	for _, tc := range []struct {
+		name                 string
+		materials, discovery bool
+	}{
+		{"selected-full-text", true, false},
+		{"no-materials-needs-discovery", false, false},
+		{"explicit-discovery-with-materials", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			route := ResearchRoute{RouteID: "single-paper", Title: "三种运动方式的单篇中文对照与可信度", AvailableNow: true,
+				StagePlans: []ResearchStagePlan{
+					{StageID: "question_refinement", Objective: "明确边界"},
+					{StageID: "evidence_extraction", Objective: "从指定全文提取证据"},
+					{StageID: "report_drafting", Objective: "形成中文对照表"},
+					{StageID: "independent_review", Objective: "独立核验"},
+					{StageID: "delivery_gate", Objective: "核验交付"},
+					{StageID: "report_publication", Objective: "发布报告"},
+				}}
+			starter := ResearchStarterContext{ResearchIdea: "比较三种运动，只用指定全文", PlannerVersion: dynamicResearchPlannerVersion, StageCatalog: dynamicResearchStageCatalog()}
+			if tc.materials {
+				starter.SelectedMaterials = []attachment.MessageReference{{AttachmentID: "bmj-full-text", OriginalName: "bmj-2023-075847.full.pdf"}}
+			}
+			if tc.discovery {
+				route.StagePlans = append(route.StagePlans, ResearchStagePlan{StageID: "literature_discovery", Objective: "补充公共文献"})
+			}
+			projected, err := materializeSemanticResearchRoute(route, starter)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantDiscovery := !tc.materials || tc.discovery
+			if slices.Contains(projected.StageIDs, "literature_discovery") != wantDiscovery {
+				t.Fatalf("projected route: %v", projected.StageIDs)
+			}
+			for _, layer := range projected.Layers {
+				for _, stage := range layer.Stages {
+					if stage.Methods == nil || stage.SkillNames == nil || stage.Inputs == nil || stage.Outputs == nil {
+						t.Fatalf("nullable presentation lists: %#v", stage)
+					}
+				}
+			}
+			template, _, _, err := routeDefinition(projected, starter)
+			if err != nil {
+				t.Fatal(err)
+			}
+			nodes := map[string]Node{}
+			for _, node := range template.Definition.Nodes {
+				nodes[node.ID] = node
+			}
+			for _, id := range []string{"literature_query_expansion", "literature_discovery", "candidate_screening"} {
+				if _, exists := nodes[id]; exists != wantDiscovery {
+					t.Fatalf("unexpected %s presence=%v", id, exists)
+				}
+			}
+			for _, id := range []string{"candidate_review", "evidence_import", "evidence_sync", "evidence_search", "evidence_screening", "evidence_extraction", "method_selection", "independent_review", "delivery_gate"} {
+				if _, exists := nodes[id]; !exists {
+					t.Fatalf("missing %s", id)
+				}
+			}
+			if tc.materials && !strings.Contains(string(nodes["candidate_review"].Arguments), "bmj-full-text") {
+				t.Fatal("explicit material lost")
+			}
+			if tc.materials && !tc.discovery {
+				if !strings.Contains(string(nodes["candidate_review"].Arguments), `"reuseSelectedMaterials":true`) {
+					t.Fatal("local selection not reused")
+				}
+				for _, n := range nodes {
+					if n.Kind == NodeAgentStage {
+						for _, name := range n.AllowedTools {
+							if name == "builtin.knowledge.search" || name == "builtin.web.search" || name == "builtin.web.open" {
+								t.Fatal("unscoped retrieval allowed", n.ID, name)
+							}
+						}
+					}
+				}
+			}
+			registry := referenceTemplateRegistry(t)
+			if err := registry.Register(stdcontext.Background(), fixtureTool{definition: tool.Definition{QualifiedName: "builtin.research.workflow.report", Version: "1", Description: "report fixture", Risk: tool.RiskHigh, InputSchema: raw(`{"type":"object","properties":{"name":{"type":"string"},"citations":{"type":"array"},"reportDraft":{"type":"object"},"reviewGate":{"type":"object"}}}`), OutputSchema: raw(`{"type":"object"}`)}}); err != nil {
+				t.Fatal(err)
+			}
+			if compiled, err := NewCompiler(registry).Compile(stdcontext.Background(), template.Definition); err != nil {
+				t.Fatalf("%v: %#v", err, compiled.Diagnostics)
+			}
+		})
+	}
+}
+
 func TestDynamicRouteWithOnlySelectedMaterialsSkipsDiscoveryButKeepsEvidenceChain(t *testing.T) {
 	route := ResearchRoute{
 		RouteID: "local-materials", Title: "本地资料综合", AvailableNow: true,
@@ -102,6 +190,16 @@ func TestDynamicRouteWithOnlySelectedMaterialsSkipsDiscoveryButKeepsEvidenceChai
 	nodes := make([]string, 0, len(template.Definition.Nodes))
 	for _, node := range template.Definition.Nodes {
 		nodes = append(nodes, node.ID)
+		if node.ID == "independent_review" {
+			for _, name := range node.AllowedTools {
+				if name == "builtin.knowledge.search" || name == "builtin.workspace.read_text" || name == "builtin.workspace.list" {
+					t.Fatal("local review gained unscoped material access", name)
+				}
+			}
+			if node.PromptVersion != dynamicResearchReviewVersion {
+				t.Fatal("new review contract not frozen")
+			}
+		}
 	}
 	for _, absent := range []string{"literature_query_expansion", "literature_discovery", "candidate_screening"} {
 		if slices.Contains(nodes, absent) {

@@ -489,7 +489,7 @@ test("all route display text passes through the user-facing terminology filter",
   assert.match(source, /researchRouteUserText\(route\.reason\)/);
   assert.match(source, /researchRouteUserText\(currentRoute\.reason\)/);
   assert.match(source, /researchRouteUserText\(layer\.objective\)/);
-  assert.match(source, /stage\.methods\.map\(researchRouteUserText\)/);
+  assert.match(source, /\(stage\.methods \?\? \[\]\)\.map\(researchRouteUserText\)/);
   assert.match(source, /currentRoute\.requiredResources\.map\(researchRouteUserText\)/);
   assert.match(source, /当前没有可引用的文献材料，请先检索并选择与本课题相关的文献/);
   assert.match(source, /当前项目/);

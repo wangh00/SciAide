@@ -5,6 +5,7 @@ export type ResearchRevisionProposal = {
   status: 'pending' | 'superseded' | 'confirmed'; canConfirm: boolean;
   nodeId: string; label: string; summary: string; changes: string[]; reason: string;
   affectedStages: string[]; repeatsSideEffects: boolean; createdAt: string;
+  materials?: Array<{attachmentId: string; name: string; sha256: string}>;
 };
 
 export function ResearchRevisionCards({ proposals, busy, conversationId, confirm }: {
@@ -30,6 +31,8 @@ export function ResearchRevisionCards({ proposals, busy, conversationId, confirm
       const body = <>
         <p className="research-revision-goal">{proposal.summary}</p>
         <ul>{proposal.changes.map((change, index) => <li key={index}>{change}</li>)}</ul>
+        {!!proposal.materials?.length && <div><b>确认后纳入的补充文献</b><ul>{proposal.materials.map(material => <li key={material.attachmentId}>{material.name}</li>)}</ul><p>先索引与核验证据，再更新报告；不会重新搜索候选文献。</p></div>}
+        {proposal.nodeId === 'evidence_import' && !proposal.materials?.length && <p role="status"><b>此方案未绑定补充文献。</b>只会重新导入任务原有材料；文字中提到的附件不会自动纳入。如需补充全文，请先让 AI 重新生成列出文件的方案，再确认。</p>}
         <dl><dt>返修起点</dt><dd>{proposal.label}</dd><dt>将重新执行</dt><dd>{proposal.affectedStages.join(' → ')}</dd></dl>
         <details><summary>起点依据</summary><p>{proposal.reason}</p></details>
       </>;

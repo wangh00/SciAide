@@ -149,6 +149,9 @@ func TestRevisionRecommendationNeedsUserInputAndLegacyUnavailable(t *testing.T) 
 	if result.Status != "needs_input" || result.NodeID != "" || len(result.AffectedStages) != 0 || !strings.Contains(result.Summary, "提供原始随访数据") {
 		t.Fatalf("needs input=%+v", result)
 	}
+	if len(result.RequiredInputs) != 1 || result.RequiredInputs[0] != "提供原始随访数据" {
+		t.Fatalf("missing actionable requirements: %+v", result)
+	}
 	if _, err := resolveReviewRevisionRequest(detail, detail.Steps[5], RetryCommand{UseRecommendation: true, ExpectedReviewSHA256: result.ReviewOutputSHA256}); err == nil {
 		t.Fatal("missing input authorized recommended retry")
 	}

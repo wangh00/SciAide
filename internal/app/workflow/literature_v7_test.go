@@ -15,6 +15,7 @@ func withProviderQueryFixture(d tool.Definition) tool.Definition {
 	}
 	if d.QualifiedName == "builtin.knowledge.search" {
 		schema := decodeObject(d.InputSchema)
+		schema["properties"].(map[string]any)["queries"] = map[string]any{"type": "array", "items": map[string]any{"type": "string"}}
 		schema["properties"].(map[string]any)["perDocument"] = map[string]any{"type": "boolean"}
 		d.InputSchema = mustJSON(schema)
 		out := decodeObject(d.OutputSchema)

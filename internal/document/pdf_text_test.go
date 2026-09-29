@@ -2,13 +2,91 @@ package document
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode"
 
 	pdfreader "github.com/ledongthuc/pdf"
 )
+
+func TestPDFSimpleFontUnicodeAndDifferences(t *testing.T) {
+	for _, tc := range []struct{ name, encoding, cmap, stream, want string }{
+		{"unicode", `/Encoding << /BaseEncoding /WinAnsiEncoding /Differences [16 /zero.tf 17 /f_f_i] >>`, `2 beginbfchar <10> <0036> <11> <006600660069> endbfchar`, `BT /F1 12 Tf 72 720 Td [(x) <10> <11>] TJ ET`, "x6ffi"},
+		{"range", `/Encoding /WinAnsiEncoding`, `1 beginbfrange <10> <12> <0030> endbfrange`, `BT /F1 12 Tf 72 720 Td (x) Tj <101112> Tj ET`, "x012"},
+		{"range-array", `/Encoding /WinAnsiEncoding`, `1 beginbfrange <10> <11> [<2212> <0035>] endbfrange`, `BT /F1 12 Tf 72 720 Td <1011> Tj ET`, "−5"},
+		{"differences", `/Encoding << /BaseEncoding /WinAnsiEncoding /Differences [16 /six.tf /f_f /fi.g0330] >>`, "", `BT /F1 12 Tf 72 720 Td <10111292> Tj ET`, "6fffi’"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "mapping.pdf")
+			font := `<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica ` + tc.encoding
+			if tc.cmap != "" {
+				font += ` /ToUnicode 6 0 R`
+			}
+			font += ` >>`
+			objects := []string{`<< /Type /Catalog /Pages 2 0 R >>`, `<< /Type /Pages /Kids [3 0 R] /Count 1 >>`, `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>`, font, fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(tc.stream), tc.stream)}
+			if tc.cmap != "" {
+				objects = append(objects, fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(tc.cmap), tc.cmap))
+			}
+			writePDFObjects(t, path, objects)
+			p, err := Parse(context.Background(), path, FormatPDF)
+			if err != nil || len(p.Units) != 1 || p.Units[0].Content != tc.want {
+				t.Fatalf("parsed=%+v err=%v want=%q", p, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestPDFUnknownGlyphIsNotInvented(t *testing.T) {
+	text, err := joinPDFGlyphs(context.Background(), []pdfreader.Text{{S: "\uf800", FontSize: 12}})
+	if err != nil || text != "[无法解码字形:U+F800]" {
+		t.Fatalf("%q %v", text, err)
+	}
+	if text, err := joinPDFGlyphs(context.Background(), []pdfreader.Text{{S: "\x13", FontSize: 12}}); err != nil || text != "[无法解码字形:U+0013]" {
+		t.Fatal("unmapped control must be explicitly marked")
+	}
+}
+
+func TestPDFBMJUnicodeRegression(t *testing.T) {
+	path := os.Getenv("SCIAIDE_TEST_BMJ_PDF")
+	if path == "" {
+		t.Skip("local paper fixture not configured")
+	}
+	p, err := Parse(context.Background(), path, FormatPDF)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var text strings.Builder
+	for _, unit := range p.Units {
+		text.WriteString(unit.Content)
+		text.WriteByte('\n')
+	}
+	for _, phrase := range []string{"n=1210", "−0.62", "−0.80 to −0.45", "n=1047", "−0.55", "n=643", "−0.49", "95%"} {
+		if !strings.Contains(text.String(), phrase) {
+			t.Errorf("missing verified original text %q", phrase)
+		}
+	}
+	for _, r := range text.String() {
+		if unicode.IsControl(r) && !unicode.IsSpace(r) {
+			t.Fatalf("unmapped character %U", r)
+		}
+	}
+	if p.Metadata["textPages"] != "17" || p.Truncated {
+		t.Fatalf("coverage=%v truncated=%v", p.Metadata, p.Truncated)
+	}
+	if output := os.Getenv("SCIAIDE_TEST_BMJ_PARSED_OUTPUT"); output != "" {
+		data, err := json.MarshalIndent(p, "", "  ")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = os.WriteFile(output, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
 
 func TestPDFPositionedTJWordsAndLines(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "positioned.pdf")

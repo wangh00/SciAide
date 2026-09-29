@@ -7,8 +7,8 @@ import (
 )
 
 func (s *Service) SearchResearchEvidence(ctx context.Context, projectID, taskID string, o SearchOptions) (SearchResult, error) {
-	if len(o.DocumentIDs) != 1 || o.Limit < 1 || o.Limit > 3 {
-		return SearchResult{}, fmt.Errorf("research evidence requires one document and at most three chunks")
+	if len(o.DocumentIDs) != 1 || o.Limit < 1 || o.Limit > 20 {
+		return SearchResult{}, fmt.Errorf("research evidence requires one document and at most twenty chunks")
 	}
 	o.EvidenceMode = true
 	if taskID != "" {

@@ -46,7 +46,7 @@ func researchStageCatalogEqual(left, right []ResearchStage) bool {
 // deterministically, then the trusted catalog supplies order, ports and
 // checkpoints. A legacy route is first converted to semantic plans so old
 // frozen Runs remain readable without making the planner depend on layers.
-func materializeSemanticResearchRoute(route ResearchRoute) (ResearchRoute, error) {
+func materializeSemanticResearchRoute(route ResearchRoute, contexts ...ResearchStarterContext) (ResearchRoute, error) {
 	semantic := len(route.StagePlans) > 0
 	if len(route.StagePlans) == 0 {
 		if len(route.Layers) > 0 {
@@ -123,7 +123,15 @@ func materializeSemanticResearchRoute(route ResearchRoute) (ResearchRoute, error
 			}
 		}
 	}
-	ensureChain("literature_discovery", "candidate_review", "evidence_extraction")
+	// Explicit local references satisfy the material source prerequisite. Do
+	// not invent public discovery when the planner selected extraction only.
+	evidenceChain := []string{"literature_discovery", "candidate_review", "evidence_extraction"}
+	if len(contexts) > 0 && len(contexts[0].SelectedMaterials) > 0 {
+		if _, discoveryRequested := plans["literature_discovery"]; !discoveryRequested {
+			evidenceChain = []string{"candidate_review", "evidence_extraction"}
+		}
+	}
+	ensureChain(evidenceChain...)
 	ensureChain("data_preflight", "method_implementation", "dependency_preparation", "python_analysis", "result_interpretation")
 	if _, selected := plans["report_publication"]; selected {
 		for _, id := range []string{"report_drafting", "evidence_extraction"} {
@@ -132,7 +140,7 @@ func materializeSemanticResearchRoute(route ResearchRoute) (ResearchRoute, error
 				plans[id] = ResearchStagePlan{StageID: id, Objective: stage.Name}
 			}
 		}
-		ensureChain("literature_discovery", "candidate_review", "evidence_extraction")
+		ensureChain(evidenceChain...)
 	}
 	if _, selected := plans["report_drafting"]; selected {
 		// A report without design, computed results or a complete evidence chain
@@ -140,7 +148,7 @@ func materializeSemanticResearchRoute(route ResearchRoute) (ResearchRoute, error
 		// the model explicitly selected a report-only path.
 		if _, design := plans["research_design"]; !design {
 			if _, results := plans["result_interpretation"]; !results {
-				ensureChain("literature_discovery", "candidate_review", "evidence_extraction")
+				ensureChain(evidenceChain...)
 			}
 		}
 	}
@@ -158,10 +166,15 @@ func materializeSemanticResearchRoute(route ResearchRoute) (ResearchRoute, error
 			objective = stage.Name
 		}
 		checkpoint := stage.StageID == "candidate_review" || stage.StageID == "evidence_extraction"
+		inputs := append([]string{}, stage.Requires...)
+		if stage.StageID == "candidate_review" && len(evidenceChain) == 2 {
+			inputs = []string{"selected_materials"}
+			checkpoint = false
+		}
 		orderedStages = append(orderedStages, ResearchRouteStage{
 			StageID: stage.StageID, Objective: objective,
-			Methods: append([]string(nil), plan.Methods...), SkillNames: append([]string(nil), plan.SkillNames...),
-			Inputs: append([]string(nil), stage.Requires...), Outputs: append([]string(nil), stage.Provides...), HumanCheckpoint: checkpoint,
+			Methods: append([]string{}, plan.Methods...), SkillNames: append([]string{}, plan.SkillNames...),
+			Inputs: inputs, Outputs: append([]string{}, stage.Provides...), HumanCheckpoint: checkpoint,
 		})
 	}
 	if len(orderedIDs) == 0 {
@@ -169,6 +182,13 @@ func materializeSemanticResearchRoute(route ResearchRoute) (ResearchRoute, error
 	}
 	route.StageIDs = orderedIDs
 	route.Layers = materializeResearchRouteLayers(orderedStages)
+	if len(evidenceChain) == 2 {
+		for index := range route.Layers {
+			if route.Layers[index].LayerID == "evidence" {
+				route.Layers[index].Objective = "确认指定的本地材料，并提取可核验的研究证据。"
+			}
+		}
+	}
 	if len(route.ReviewCheckpoints) == 0 {
 		route.ReviewCheckpoints = []string{"独立二次审查", "交付条件核验"}
 	}
@@ -396,8 +416,14 @@ func validateDynamicResearchRoute(route ResearchRoute, context ResearchStarterCo
 	if route.StageIDs[0] != "question_refinement" {
 		return false, nil, routeError("动态研究路线必须从明确研究边界开始")
 	}
+	evidenceChain := []string{"literature_discovery", "candidate_review", "evidence_extraction"}
+	_, hasDiscovery := positions["literature_discovery"]
+	localMaterialsOnly := len(context.SelectedMaterials) > 0 && !hasDiscovery
+	if localMaterialsOnly {
+		evidenceChain = []string{"candidate_review", "evidence_extraction"}
+	}
 	for _, group := range [][]string{
-		{"literature_discovery", "candidate_review", "evidence_extraction"},
+		evidenceChain,
 		{"data_preflight", "method_implementation", "dependency_preparation", "python_analysis", "result_interpretation"},
 	} {
 		included := 0
@@ -434,6 +460,9 @@ func validateDynamicResearchRoute(route ResearchRoute, context ResearchStarterCo
 		"result_interpretation":  {"python_analysis"},
 		"delivery_gate":          {"independent_review"},
 		"report_publication":     {"report_drafting", "independent_review", "delivery_gate", "evidence_extraction"},
+	}
+	if localMaterialsOnly {
+		dependencies["candidate_review"] = []string{"question_refinement"}
 	}
 	for stageID, required := range dependencies {
 		stagePosition, included := positions[stageID]

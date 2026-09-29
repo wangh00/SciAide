@@ -481,6 +481,117 @@ func TestCancelledTaskKnowledgeDocumentCanBeRetriedInItsScope(t *testing.T) {
 	}
 }
 
+func TestArchivedTaskDocumentsDoNotBlockNewKnowledgeImport(t *testing.T) {
+	for _, state := range []string{"ready-old-version", "queued", "running"} {
+		t.Run(state, func(t *testing.T) {
+			ctx := context.Background()
+			root := t.TempDir()
+			store, err := sqlite.Open(ctx, filepath.Join(root, "archive.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			projects := project.NewService(sqlite.NewProjectRepository(store.DB()), filepath.Join(root, "workspaces"), filepath.Join(root, "trash"))
+			p, err := projects.Create(ctx, "Archived knowledge", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			tasks := sqlite.NewResearchTaskRepository(store.DB())
+			if err := tasks.Upsert(ctx, researchtask.UpsertCommand{ID: "old-task", ProjectID: p.ID, Title: "Old", OriginKind: researchtask.OriginTemplate, At: time.Now().UTC()}); err != nil {
+				t.Fatal(err)
+			}
+			attachments := attachment.NewService(sqlite.NewAttachmentRepository(store.DB()), projects)
+			attachments.SetTaskValidator(tasks)
+			repo := sqlite.NewKnowledgeRepository(store.DB())
+			service := knowledge.NewService(repo, projects, attachments)
+			service.SetTaskValidator(tasks)
+			source := filepath.Join(root, "paper.txt")
+			if err := os.WriteFile(source, []byte("Exercise depression evidence from full text."), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			old, err := attachments.ImportPathsForTask(ctx, p.ID, []string{source}, "old-task")
+			if err != nil || len(old.Attachments) != 1 {
+				t.Fatalf("old import: %#v %v", old, err)
+			}
+			if err := service.Enqueue(ctx, old.Attachments[0]); err != nil {
+				t.Fatal(err)
+			}
+			if state == "ready-old-version" {
+				if _, err := service.SearchWithOptions(ctx, p.ID, knowledge.SearchOptions{Query: "exercise", ResearchTaskID: "old-task"}); err != nil {
+					t.Fatal(err)
+				}
+				// Simulate the pre-upgrade index, as in the real failure.
+				if _, err := store.DB().ExecContext(ctx, `UPDATE knowledge_index_versions SET chunking_version='bounded-unit-v2' WHERE project_id=?`, p.ID); err != nil {
+					t.Fatal(err)
+				}
+				cache, err := sql.Open("sqlite", filepath.Join(project.PrivateDataPath(p), "cache", "knowledge", "index-v1.db"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, err = cache.ExecContext(ctx, `UPDATE index_metadata SET value='bounded-unit-v2' WHERE key='chunking_version'`)
+				closeErr := cache.Close()
+				if err != nil || closeErr != nil {
+					t.Fatalf("old cache identity: %v %v", err, closeErr)
+				}
+			} else if state == "running" {
+				if _, found, err := repo.ClaimNext(ctx, p.ID, time.Now().UTC()); err != nil || !found {
+					t.Fatalf("claim: %v %v", found, err)
+				}
+			}
+			before, err := repo.ListDocuments(ctx, p.ID)
+			if err != nil || len(before) != 1 {
+				t.Fatalf("before: %#v %v", before, err)
+			}
+			if err := tasks.Archive(ctx, p.ID, "old-task", time.Now().UTC()); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := repo.Recover(ctx, time.Now().UTC()); err != nil {
+				t.Fatal(err)
+			}
+			fresh, err := attachments.ImportPaths(ctx, p.ID, []string{source})
+			if err != nil || len(fresh.Attachments) != 1 {
+				t.Fatalf("fresh import: %#v %v", fresh, err)
+			}
+			if err := service.Enqueue(ctx, fresh.Attachments[0]); err != nil {
+				t.Fatalf("new import blocked by archive: %v", err)
+			}
+			if _, err := service.Start(); err != nil {
+				t.Fatal(err)
+			}
+			defer service.Close()
+			deadline := time.Now().Add(10 * time.Second)
+			for {
+				result, err := service.Search(ctx, p.ID, "exercise depression", 5)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(result.Matches) == 1 && result.Matches[0].AttachmentID == fresh.Attachments[0].ID {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("new document not searchable: %#v", result)
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			version, found, err := repo.ReadyVersion(ctx, p.ID)
+			if err != nil || !found || version.ChunkingVersion != knowledge.ChunkingVersion {
+				t.Fatalf("index not activated: %#v %v", version, err)
+			}
+			after, found, err := repo.GetDocument(ctx, p.ID, before[0].ID)
+			if err != nil || !found || after.Status != before[0].Status || after.IndexVersionID != before[0].IndexVersionID || !after.UpdatedAt.Equal(before[0].UpdatedAt) {
+				t.Fatalf("archive mutated: %#v %v", after, err)
+			}
+			status, err := repo.ProjectStatus(ctx, p.ID)
+			if err != nil || status.Documents != 1 || status.Ready != 1 || status.QueuedJobs != 0 || status.RunningJobs != 0 {
+				t.Fatalf("active status: %#v %v", status, err)
+			}
+			if _, _, err := repo.Enqueue(ctx, old.Attachments[0], version, true, time.Now().UTC()); state == "ready-old-version" && err == nil {
+				t.Fatal("archived document write guard was weakened")
+			}
+		})
+	}
+}
+
 func TestProjectSharedKnowledgeIsReadOnlyInsideTaskView(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()

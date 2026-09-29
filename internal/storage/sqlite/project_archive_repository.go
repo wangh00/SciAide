@@ -1223,6 +1223,9 @@ func rewriteProjectSnapshot(ctx context.Context, db *sql.DB, oldProjectID string
 	if _, err := tx.ExecContext(ctx, `UPDATE knowledge_documents SET status='failed',error_message='restored interrupted indexing task' WHERE status='indexing'`); err != nil {
 		return err
 	}
+	if _, err := tx.ExecContext(ctx, `UPDATE research_candidate_task_imports SET pending_sha256='',pending_kind=''`); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `UPDATE research_candidates SET import_status='failed',import_error='restored interrupted research import' WHERE import_status='importing'`); err != nil {
 		return err
 	}

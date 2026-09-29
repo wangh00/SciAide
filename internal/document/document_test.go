@@ -184,6 +184,11 @@ func writePDFStream(t *testing.T, path, stream string) {
 		`<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>`,
 	}
 	objects = append(objects, fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(stream), stream))
+	writePDFObjects(t, path, objects)
+}
+
+func writePDFObjects(t *testing.T, path string, objects []string) {
+	t.Helper()
 	var output bytes.Buffer
 	output.WriteString("%PDF-1.4\n")
 	offsets := make([]int, len(objects)+1)

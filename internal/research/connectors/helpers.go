@@ -2,7 +2,6 @@ package connectors
 
 import (
 	"encoding/json"
-	"html"
 	"net/url"
 	"regexp"
 	"sort"
@@ -11,9 +10,9 @@ import (
 	"time"
 
 	appresearch "github.com/wangh00/SciAide/internal/app/research"
+	"github.com/wangh00/SciAide/internal/researchtext"
 )
 
-var tagsPattern = regexp.MustCompile(`<[^>]+>`)
 var yearPattern = regexp.MustCompile(`(?:^|[^0-9])((?:18|19|20|21)[0-9]{2})(?:[^0-9]|$)`)
 
 func rawSnapshot(value any) json.RawMessage {
@@ -25,8 +24,7 @@ func rawSnapshot(value any) json.RawMessage {
 }
 
 func plainText(value string) string {
-	value = tagsPattern.ReplaceAllString(value, " ")
-	return strings.Join(strings.Fields(html.UnescapeString(value)), " ")
+	return researchtext.Plain(value)
 }
 
 func yearFrom(value string) int {

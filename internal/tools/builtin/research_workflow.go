@@ -154,19 +154,7 @@ var researchWorkflowNetworkPermissions = []tool.PermissionRequirement{
 	{Kind: tool.PermissionNetworkDomain, Resource: "api.semanticscholar.org:443"},
 }
 
-var researchFullTextNetworkPermissions = []tool.PermissionRequirement{
-	{Kind: tool.PermissionNetworkDomain, Resource: "idp.nature.com:443"},
-	{Kind: tool.PermissionNetworkDomain, Resource: "arxiv.org:443"},
-	{Kind: tool.PermissionNetworkDomain, Resource: "export.arxiv.org:443"},
-	{Kind: tool.PermissionNetworkDomain, Resource: "europepmc.org:443"},
-	{Kind: tool.PermissionNetworkDomain, Resource: "www.ebi.ac.uk:443"},
-	{Kind: tool.PermissionNetworkDomain, Resource: "pmc.ncbi.nlm.nih.gov:443"},
-	{Kind: tool.PermissionNetworkDomain, Resource: "www.ncbi.nlm.nih.gov:443"},
-	{Kind: tool.PermissionNetworkDomain, Resource: "www.semanticscholar.org:443"},
-	{Kind: tool.PermissionNetworkDomain, Resource: "semanticscholar.org:443"},
-	{Kind: tool.PermissionNetworkDomain, Resource: "www.nature.com:443"},
-	{Kind: tool.PermissionNetworkDomain, Resource: "jamanetwork.com:443"},
-}
+var researchFullTextNetworkPermissions = tool.ResearchMaterialNetworkPermissions()
 
 func (*ResearchWorkflowSearch) Definition(context.Context) (tool.Definition, error) {
 	d := tool.Definition{QualifiedName: ResearchWorkflowSearchName, Version: "7", Risk: tool.RiskModerate, Idempotent: true,
@@ -422,13 +410,7 @@ func (t *ResearchWorkflowReport) Invoke(ctx context.Context, invocation tool.Inv
 	}
 	markdownBody, _ := args.ReportDraft["markdown"].(string)
 	analysisSnapshot, _ := json.Marshal(args.ReportDraft)
-	reportSummary := make(map[string]any, len(args.ReportDraft))
-	for key, value := range args.ReportDraft {
-		if key != "markdown" {
-			reportSummary[key] = value
-		}
-	}
-	markdown := composeWorkflowReport(markdownBody, args.Citations, reportSummary, args.SourceArtifacts)
+	markdown := composeWorkflowReport(markdownBody, args.Citations, args.SourceArtifacts)
 	value, err := t.service.PublishReport(ctx, researchworkflow.ReportRequest{ProjectID: invocation.ProjectID, WorkflowRunID: invocation.RunID, ResearchTaskID: invocation.ResearchTaskID, ToolCallID: invocation.CallID, IdempotencyKey: stableWorkflowOperationKey(invocation), Name: args.Name, Markdown: markdown, Citations: args.Citations, Analysis: analysisSnapshot, SourceArtifacts: args.SourceArtifacts, ReviewGate: args.ReviewGate})
 	if err != nil {
 		return tool.Result{}, workflowReportError(err)
@@ -454,18 +436,11 @@ func workflowReportError(err error) error {
 	}
 }
 
-func composeWorkflowReport(body string, citations []tool.CitationRef, analysis map[string]any, artifacts []tool.ArtifactRef) string {
+func composeWorkflowReport(body string, citations []tool.CitationRef, artifacts []tool.ArtifactRef) string {
 	var result strings.Builder
 	result.WriteString(strings.TrimSpace(body))
-	if len(analysis) > 0 {
-		encoded, _ := json.MarshalIndent(analysis, "", "  ")
-		if len(encoded) > 24*1024 {
-			encoded = encoded[:24*1024]
-		}
-		result.WriteString("\n\n## 分析执行摘要\n\n```json\n")
-		result.Write(encoded)
-		result.WriteString("\n```")
-	}
+	// The full Analysis snapshot stays in PublishReport's immutable audit.
+	// It is not user-facing prose and must not be appended as internal JSON.
 	if len(artifacts) > 0 {
 		result.WriteString("\n\n## 分析产物\n")
 		for _, value := range artifacts {

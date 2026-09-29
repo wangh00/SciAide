@@ -20,9 +20,16 @@ test('side-effect consent and busy state gate recommended execution',()=>{
  assert.match(render({confirmed:true,busy:true}),/<button[^>]*class="primary"[^>]*disabled/);
 });
 test('legacy and input-blocked reviews never fall back to modifying the report',()=>{
- for(const value of [undefined,{status:'unavailable',summary:'旧审查无建议',repeatsSideEffects:false},{status:'needs_input',summary:'先补充原始资料',repeatsSideEffects:false}]) {
+ for(const value of [undefined,{status:'unavailable',summary:'旧审查无建议',repeatsSideEffects:false}]) {
   const html=render({recommendation:value});assert.match(html,/<button[^>]*class="primary"[^>]*disabled/);assert.doesNotMatch(html,/只修改报告内容（默认）/);
  }
+});
+test('input-blocked review replaces dead retry with explicit gaps and copy action',()=>{
+ const html=render({recommendation:{status:'needs_input',summary:'先补充资料',requiredInputs:['核查 bmj.full.pdf 是否进入索引','确认研究人群'],repeatsSideEffects:false}});
+ assert.match(html,/复制补充要求/);assert.match(html,/核查 bmj.full.pdf 是否进入索引/);assert.match(html,/确认研究人群/);assert.match(html,/请新建任务/);
+ assert.doesNotMatch(html,/<button[^>]*class="primary"[^>]*disabled/);assert.doesNotMatch(html,/<span>按建议修改/);
+ assert.match(render({busy:true,recommendation:{status:'needs_input',summary:'缺文件'}}),/<button[^>]*class="primary"[^>]*disabled/);
+ assert.match(source,/navigator.clipboard.writeText/);assert.match(source,/复制失败/);
 });
 test('recommendations with unknown targets or missing review identity are disabled',()=>{
  assert.match(render({recommendation:{...recommendation,nodeId:'unknown'}}),/<button[^>]*class="primary"[^>]*disabled/);

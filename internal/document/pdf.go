@@ -20,6 +20,8 @@ const (
 
 const pdfEdgeLineWindow = 4
 
+const PDFParserVersion = "pdf-v4"
+
 type pdfPage struct {
 	number int
 	lines  []string
@@ -37,6 +39,7 @@ func parsePDF(ctx context.Context, path string) (Parsed, error) {
 	}
 	extracted := make([]pdfPage, 0, min(pages, 1_000))
 	analyzedRunes := 0
+	unmappedGlyphs := 0
 	analysisTruncated := false
 	for pageNumber := 1; pageNumber <= pages; pageNumber++ {
 		if err := ctx.Err(); err != nil {
@@ -46,6 +49,7 @@ func parsePDF(ctx context.Context, path string) (Parsed, error) {
 		if err != nil {
 			return Parsed{}, fmt.Errorf("extract PDF page %d: %w", pageNumber, err)
 		}
+		unmappedGlyphs += strings.Count(text, "[无法解码字形:")
 		remaining := maxPDFAnalysisRunes - analyzedRunes
 		textRunes := []rune(text)
 		if len(textRunes) > remaining {
@@ -92,7 +96,12 @@ func parsePDF(ctx context.Context, path string) (Parsed, error) {
 		"emptyPages":       strconv.Itoa(emptyPages),
 		"sections":         strconv.Itoa(sectionCount),
 		"removedEdgeLines": strconv.Itoa(removedEdges),
-		"structureParser":  "pdf-v3",
+		"structureParser":  PDFParserVersion,
+	}
+	if unmappedGlyphs > 0 {
+		metadata["unmappedGlyphs"] = strconv.Itoa(unmappedGlyphs)
+		metadata["textQualityWarning"] = "部分字体字符缺少可用的 Unicode 映射，已标注无法解码；不得据此猜测数字或文字，请对照 PDF 原图或提供 OCR 文本。"
+		collect.add("warning", "document:text-quality", "文本解析局限", metadata["textQualityWarning"])
 	}
 	return Parsed{Units: collect.units, Metadata: metadata, Truncated: collect.truncated || analysisTruncated, ExtractedRunes: collect.runes}, nil
 }

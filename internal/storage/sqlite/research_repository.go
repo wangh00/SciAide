@@ -237,6 +237,9 @@ func (r *ResearchRepository) UpdateCandidateTaskImport(ctx context.Context, comm
 		return appresearch.CandidateTaskImport{}, fmt.Errorf("save research task candidate import: %w", err)
 	}
 	if command.Status == appresearch.ImportImported && command.AttachmentID != "" {
+		if _, err := tx.ExecContext(ctx, `UPDATE research_candidate_task_imports SET pending_sha256='',pending_kind='' WHERE id=? AND pending_sha256=(SELECT sha256 FROM attachments WHERE id=?)`, importID, command.AttachmentID); err != nil {
+			return appresearch.CandidateTaskImport{}, err
+		}
 		if err := syncBibliographyMaterialForAttachment(ctx, tx, projectID, candidateID, command.AttachmentID, taskID, command.Kind, command.At); err != nil {
 			return appresearch.CandidateTaskImport{}, err
 		}
@@ -306,11 +309,47 @@ func (r *ResearchRepository) UpdateImportState(ctx context.Context, command appr
 }
 
 func (r *ResearchRepository) RecoverImports(ctx context.Context, at time.Time) (int64, error) {
-	result, err := r.db.ExecContext(ctx, `UPDATE research_candidates SET import_status='failed',import_kind='',attachment_id=NULL,import_error='application stopped before the research import completed',updated_at=? WHERE import_status='importing'`, formatTime(at))
+	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, fmt.Errorf("recover research imports: %w", err)
+		return 0, err
 	}
-	return result.RowsAffected()
+	defer tx.Rollback()
+	var count int64
+	for _, table := range []string{"research_candidates", "research_candidate_task_imports"} {
+		result, err := tx.ExecContext(ctx, `UPDATE `+table+` SET import_status=CASE WHEN attachment_id IS NOT NULL AND import_kind<>'' THEN 'imported' ELSE 'failed' END,import_error='application stopped before the research import completed; previous material retained',updated_at=? WHERE import_status='importing'`, formatTime(at))
+		if err != nil {
+			return 0, fmt.Errorf("recover research imports: %w", err)
+		}
+		n, _ := result.RowsAffected()
+		count += n
+	}
+	if err := tx.Commit(); err != nil {
+		return count, err
+	}
+	rows, err := r.db.QueryContext(ctx, `SELECT project_id,candidate_id,research_task_id FROM research_candidate_task_imports WHERE pending_sha256<>''`)
+	if err != nil {
+		return count, err
+	}
+	pending := [][3]string{}
+	for rows.Next() {
+		var identity [3]string
+		if err := rows.Scan(&identity[0], &identity[1], &identity[2]); err != nil {
+			rows.Close()
+			return count, err
+		}
+		pending = append(pending, identity)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return count, err
+	}
+	for _, identity := range pending {
+		if _, err := r.RecoverMaterialIntent(ctx, identity[0], identity[1], identity[2]); err != nil {
+			return count, err
+		}
+	}
+	return count, nil
 }
 
 type researchSQLExecutor interface {

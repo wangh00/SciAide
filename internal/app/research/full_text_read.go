@@ -2,18 +2,16 @@ package research
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"unicode/utf8"
 
+	"github.com/wangh00/SciAide/internal/app/attachment"
 	"github.com/wangh00/SciAide/internal/document"
 )
 
-// Read a selected task candidate for targeted verification without replacing
-// the task's imported attachment or its frozen citation index.
+// Availability is a capability hint, not evidence that full text was read.
 func (s *DiscoveryService) FullTextAvailability(candidate Candidate) string {
 	if reader, ok := s.materializer.(interface{ FullTextAvailability(Candidate) string }); ok {
 		return reader.FullTextAvailability(candidate)
@@ -44,19 +42,21 @@ func (s *DiscoveryService) ReadCandidateFullText(ctx context.Context, projectID,
 	if c.ReviewStatus != ReviewIncluded {
 		return nil, fmt.Errorf("full-text verification requires a selected candidate")
 	}
-	p, err := s.projects.Get(ctx, projectID)
+	_, err = s.projects.Get(ctx, projectID)
 	if err != nil {
 		return nil, err
 	}
 	if s.materializer == nil {
 		return nil, fmt.Errorf("full-text reader unavailable")
 	}
-	snapshot, _ := json.Marshal(c.Records)
-	key := fmt.Sprintf("%s/%s/%s/%x", projectID, taskID, candidateID, sha256.Sum256(snapshot))
-	if parsed, sha, ok := s.fullTexts.get(key); ok {
-		return fullTextResult(ctx, c, parsed, sha, query, true)
+	reader, ok := s.attachments.(interface {
+		ParsedForTask(context.Context, string, string, string) (attachment.Attachment, document.Parsed, error)
+	})
+	if !ok {
+		return nil, fmt.Errorf("persistent task full-text reader unavailable")
 	}
-	material, err := s.materializer.Materialize(ctx, p, c, MaterializeFullText)
+	previousID := c.AttachmentID
+	imported, err := s.ImportCandidate(ctx, ImportCandidateCommand{ProjectID: projectID, ResearchTaskID: taskID, CandidateID: candidateID, Mode: MaterializeFullText})
 	if err != nil {
 		var unavailable interface{ FullTextUnavailable() bool }
 		if ctx.Err() == nil && errors.As(err, &unavailable) && unavailable.FullTextUnavailable() {
@@ -64,13 +64,23 @@ func (s *DiscoveryService) ReadCandidateFullText(ctx context.Context, projectID,
 		}
 		return nil, err
 	}
-	defer s.materializer.Cleanup(material)
-	parsed, err := document.Parse(ctx, material.Path, document.FormatPDF)
+	if imported.Candidate.ImportKind != ImportFullText || imported.Attachment.ID == "" {
+		return nil, fmt.Errorf("full-text import did not produce a persistent PDF")
+	}
+	stored, parsed, err := reader.ParsedForTask(ctx, projectID, taskID, imported.Attachment.ID)
 	if err != nil {
 		return nil, err
 	}
-	s.fullTexts.put(key, parsed, material.SHA256)
-	return fullTextResult(ctx, c, parsed, material.SHA256, query, false)
+	result, err := fullTextResult(ctx, c, parsed, stored.SHA256, query, previousID == stored.ID)
+	if err != nil {
+		return nil, err
+	}
+	result["attachmentId"] = stored.ID
+	result["previousAttachmentId"] = previousID
+	result["materialSaved"] = true
+	result["citationStatus"] = "saved_material_requires_workflow_reindex"
+	result["nextAction"] = "宿主将核对冻结材料；材料变化时自动重新索引、检索引用并重新综合。当前片段不是新签发引用，勿用旧摘要标记支持全文新增结论。"
+	return result, nil
 }
 
 func fullTextResult(ctx context.Context, c Candidate, parsed document.Parsed, sha, query string, cached bool) (map[string]any, error) {

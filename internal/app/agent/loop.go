@@ -527,6 +527,7 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 	structuredCorrectionAttempts := 0
 	structuredCorrection := ""
 	structuredCandidate := ""
+	var quoteRepair *citationRepair
 	contentCorrectionAttempts := 0
 	plannerSkillCorrectionAttempts := 0
 	// A durable workflow_ai_chat_runs binding is itself a host-owned
@@ -740,7 +741,14 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 			fallbackNote = multimodalFallbackNote(*fallbackResult)
 		}
 		if submissionPhase {
-			request = stageSubmissionRequest(request, researchGuidance.StructuredOutputSchema)
+			schema := researchGuidance.StructuredOutputSchema
+			if quoteRepair != nil {
+				schema = quoteRepair.submissionSchema(schema)
+			}
+			request = stageSubmissionRequest(request, schema)
+			if quoteRepair != nil {
+				request.Messages = append(request.Messages, model.Message{Role: model.RoleSystem, Content: quoteRepair.instruction()})
+			}
 		}
 		turnStartedAt := l.now()
 		conversationRequestAttempted := true
@@ -897,13 +905,19 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 				}
 				journalActive = false // the audited candidate is now immutable
 			}
+			var patchErr error
+			if quoteRepair != nil {
+				// Raw patch is already journaled; only the merged full candidate
+				// reaches validation and the terminal stage answer.
+				turn.text, patchErr = quoteRepair.merge(turn.text)
+			}
 			// A Workflow AI stage has a frozen structured-output contract. Some
 			// gateways stop after a progress sentence even though the request was
 			// otherwise successful. Give the same Chat Run one bounded continuation
 			// before committing that sentence as the terminal assistant answer. The
 			// Same-run submission validation below and the Workflow host both apply
 			// the same deterministic normalization and Schema validation.
-			if workflowStructuredOutputRequired && !submissionPhase && !hasStructuredCandidate(turn.text, researchGuidance.StructuredOutputSchema) && !workflow.HasAIStageOutputCandidate(turn.text, researchGuidance.StructuredOutputSchema) {
+			if workflowStructuredOutputRequired && patchErr == nil && !submissionPhase && !hasStructuredCandidate(turn.text, researchGuidance.StructuredOutputSchema) && !workflow.HasAIStageOutputCandidate(turn.text, researchGuidance.StructuredOutputSchema) {
 				if structuredCorrectionAttempts < maxStructuredContinuationAttempts {
 					structuredCorrectionAttempts++
 					structuredCorrection = structuredOutputContinuation()
@@ -918,8 +932,8 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 			validatedText := turn.text
 			if workflowStructuredOutputRequired && len(researchGuidance.StructuredOutputSchema) > 0 {
 				var normalized json.RawMessage
-				var validationErr error
-				if validator, ok := l.research.(researchSubmissionValidator); ok {
+				validationErr := patchErr
+				if validator, ok := l.research.(researchSubmissionValidator); patchErr == nil && ok {
 					workflowRunID, workflowStepID := researchGuidance.WorkflowRunID, researchGuidance.WorkflowStepID
 					if workflowContractFound {
 						workflowRunID, workflowStepID = workflowContract.WorkflowRunID, workflowContract.WorkflowStepID
@@ -934,7 +948,7 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 						}
 						validationErr = hostErr
 					}
-				} else {
+				} else if patchErr == nil {
 					normalized, _, validationErr = workflow.NormalizeAIStageSubmission(turn.text, researchGuidance.StructuredOutputSchema)
 				}
 				if validationErr != nil {
@@ -951,6 +965,17 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 					contentCorrectionAttempts++
 					structuredCandidate = turn.text
 					structuredCorrection = "The preceding assistant message is the rejected result candidate, not an accepted stage result. Host submission validation failed: " + validationMessage + ". Correct only the result against the original frozen schema and output protocol, and submit the complete corrected result. Keep the same research conclusions and evidence unless the validation error requires a change. Do not repeat completed tools, file reads, searches, calculations, or Skill loads; their results remain in this conversation. Do not return another progress report."
+					if patchErr == nil {
+						quoteRepair = nil
+						var issue *workflow.CitationQuoteError
+						if errors.As(validationErr, &issue) {
+							quoteRepair = newCitationRepair(turn.text, researchGuidance.StructuredOutputSchema, issue)
+						}
+					}
+					if quoteRepair != nil {
+						structuredCandidate = string(quoteRepair.base)
+						structuredCorrection += "\n" + quoteRepair.instruction()
+					}
 					_ = l.finishModelTurn(run.ID, run.ModelTurns, journalActive, chat.ModelTurnCompleted, turn.finishReason, len(turn.providerItems))
 					l.observer.Retrying(*run, RetryStatus{Phase: "workflow_content_validation", Attempt: contentCorrectionAttempts, MaxAttempts: maxWorkflowContentCorrections, Message: fmt.Sprintf("正在同一科研上下文内修正提交结果（第 %d/%d 次）", contentCorrectionAttempts, maxWorkflowContentCorrections)})
 					continue

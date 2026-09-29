@@ -2,9 +2,9 @@
 
 面向科研工作者的本地优先桌面 AI 助手。从研究问题出发，辅助完成文献检索、证据整理、数据分析、报告审查与返修，让结论能回到证据、结果能回到代码。
 
-**当前版本：v1.0.1 · Windows x64**
+**当前版本：v1.0.2 · Windows x64**
 
-[下载程序](https://github.com/wangh00/SciAide/releases/tag/v1.0.1) · [更新记录](CHANGELOG.md) · [开发状态](docs/CURRENT_STATE.md) · [开发指南](docs/development.md)
+[下载程序](https://github.com/wangh00/SciAide/releases/tag/v1.0.2) · [更新记录](CHANGELOG.md) · [开发状态](docs/CURRENT_STATE.md) · [开发指南](docs/development.md)
 
 ## 自由对话与项目工作区
 
@@ -60,7 +60,7 @@
 
 ## 下载与开始使用
 
-1. 从 [v1.0.1 Release](https://github.com/wangh00/SciAide/releases/tag/v1.0.1) 下载 `SciAide.exe`，在 Windows x64 上运行。需要 Microsoft Edge WebView2 Runtime。
+1. 从 [v1.0.2 Release](https://github.com/wangh00/SciAide/releases/tag/v1.0.2) 下载 `SciAide.exe`，在 Windows x64 上运行。需要 Microsoft Edge WebView2 Runtime。
 2. 在“模型与 API”中配置自己的服务地址、模型和密钥，先测试连接。
 3. 新建项目，选择工作区。自由对话可以直接提问；科研模式输入研究问题后确认路线，有数据时按流程上传。
 4. 数据分析按任务需要配置 Python 环境和依赖。文献研究不要求先准备 Python。

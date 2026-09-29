@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"github.com/go-pdf/fpdf"
 	"image"
 	"image/color"
 	"image/png"
@@ -16,6 +18,53 @@ import (
 	"github.com/wangh00/SciAide/internal/app/project"
 	"github.com/wangh00/SciAide/internal/document"
 )
+
+func TestPDFParserUpgradePreservesLegacyCacheAndIdentity(t *testing.T) {
+	ctx := context.Background()
+	workspace := t.TempDir()
+	createPrivateFixture(t, workspace)
+	source := filepath.Join(workspace, "paper.pdf")
+	pdf := fpdf.New("P", "mm", "A4", "")
+	pdf.AddPage()
+	pdf.SetFont("Arial", "", 12)
+	pdf.Text(10, 20, "Exercise effect 0.62")
+	if err := pdf.OutputFileAndClose(source); err != nil {
+		t.Fatal(err)
+	}
+	repo := &attachmentMemoryRepository{values: map[string]Attachment{}}
+	service := NewService(repo, attachmentProjectLoader{value: project.Project{ID: "project", WorkspacePath: workspace}})
+	first, err := service.ImportPaths(ctx, "project", []string{source})
+	if err != nil || len(first.Attachments) != 1 {
+		t.Fatalf("%+v %v", first, err)
+	}
+	v := first.Attachments[0]
+	legacy := document.Parsed{SchemaVersion: document.SchemaVersion, Format: document.FormatPDF, Metadata: map[string]string{"structureParser": "pdf-v3"}, Units: []document.Unit{{Index: 1, Kind: "page", Locator: "page:1", Content: "old"}}, ExtractedRunes: 3}
+	data, _ := json.Marshal(legacy)
+	oldPath := filepath.Join(project.PrivateDataPath(project.Project{WorkspacePath: workspace}), filepath.FromSlash(v.CacheRelativePath))
+	if err := os.WriteFile(oldPath, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	currentPath := filepath.Join(project.PrivateDataPath(project.Project{WorkspacePath: workspace}), filepath.FromSlash(versionedPDFCache(v).CacheRelativePath))
+	if err := os.Remove(currentPath); err != nil {
+		t.Fatal(err)
+	}
+	second, err := service.ImportPaths(ctx, "project", []string{source})
+	if err != nil || len(second.Errors) != 0 || len(second.Attachments) != 1 || second.Attachments[0].ID != v.ID {
+		t.Fatalf("%+v %v", second, err)
+	}
+	_, parsed, err := service.Parsed(ctx, "project", v.ID)
+	if err != nil || parsed.Metadata["structureParser"] != document.PDFParserVersion {
+		t.Fatalf("%+v %v", parsed, err)
+	}
+	kept, err := os.ReadFile(oldPath)
+	if err != nil || !bytes.Equal(kept, data) {
+		t.Fatal("old cache changed")
+	}
+	_, old, err := service.ParsedForIndexVersion(ctx, "project", v.ID, "bounded-unit-v3")
+	if err != nil || old.Units[0].Content != "old" {
+		t.Fatalf("legacy=%+v %v", old, err)
+	}
+}
 
 type attachmentMemoryRepository struct{ values map[string]Attachment }
 

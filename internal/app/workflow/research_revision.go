@@ -8,7 +8,7 @@ type ResearchRevisionTarget struct {
 	RepeatsSideEffects bool   `json:"repeatsSideEffects"`
 }
 
-// Only explicit user-selected, completed method/result ancestors may be
+// Only explicit user-selected, completed evidence/method/result ancestors may be
 // revised. The original question and frozen input data remain unchanged.
 func researchRevisionTargets(detail RunDetail) []ResearchRevisionTarget {
 	if detail.Run.Status != RunFailed {
@@ -35,6 +35,9 @@ func researchRevisionTargets(detail RunDetail) []ResearchRevisionTarget {
 func researchRevisionCandidates(detail RunDetail, producer, gate Step) []ResearchRevisionTarget {
 	nodes := compilationNodeMap(detail.Run.Compilation)
 	allowed := stringSetOf([]string{producer.NodeID, "method_selection", "research_design", "method_implementation", "result_interpretation", "report_drafting"})
+	if n := nodes["evidence_screening"]; n.Kind == NodeAgentStage && n.PromptVersion == selectedEvidenceVersion {
+		allowed[n.ID] = true
+	}
 	result := []ResearchRevisionTarget{}
 	for index := len(detail.Steps) - 1; index >= 0; index-- {
 		step := detail.Steps[index]

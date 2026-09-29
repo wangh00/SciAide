@@ -22,29 +22,31 @@ type ResearchDiscussionBinding struct {
 }
 
 type ResearchRevisionProposal struct {
-	ID                 string    `json:"id"`
-	RunID              string    `json:"runId"`
-	ChatRunID          string    `json:"chatRunId"`
-	UserMessageID      string    `json:"userMessageId"`
-	SourceCallID       string    `json:"-"`
-	Status             string    `json:"status"`
-	SnapshotSHA256     string    `json:"snapshotSha256"`
-	NodeID             string    `json:"nodeId"`
-	Label              string    `json:"label"`
-	Summary            string    `json:"summary"`
-	Changes            []string  `json:"changes"`
-	Reason             string    `json:"reason"`
-	AffectedStages     []string  `json:"affectedStages"`
-	RepeatsSideEffects bool      `json:"repeatsSideEffects"`
-	CreatedAt          time.Time `json:"createdAt"`
-	CanConfirm         bool      `json:"canConfirm"`
+	Materials          []RevisionMaterial `json:"materials,omitempty"`
+	ID                 string             `json:"id"`
+	RunID              string             `json:"runId"`
+	ChatRunID          string             `json:"chatRunId"`
+	UserMessageID      string             `json:"userMessageId"`
+	SourceCallID       string             `json:"-"`
+	Status             string             `json:"status"`
+	SnapshotSHA256     string             `json:"snapshotSha256"`
+	NodeID             string             `json:"nodeId"`
+	Label              string             `json:"label"`
+	Summary            string             `json:"summary"`
+	Changes            []string           `json:"changes"`
+	Reason             string             `json:"reason"`
+	AffectedStages     []string           `json:"affectedStages"`
+	RepeatsSideEffects bool               `json:"repeatsSideEffects"`
+	CreatedAt          time.Time          `json:"createdAt"`
+	CanConfirm         bool               `json:"canConfirm"`
 }
 
 type ProposeResearchRevisionCommand struct {
-	NodeID  string   `json:"nodeId"`
-	Summary string   `json:"summary"`
-	Changes []string `json:"changes"`
-	Reason  string   `json:"reason"`
+	AttachmentIDs []string `json:"attachmentIds,omitempty"`
+	NodeID        string   `json:"nodeId"`
+	Summary       string   `json:"summary"`
+	Changes       []string `json:"changes"`
+	Reason        string   `json:"reason"`
 }
 
 type ConfirmResearchRevisionCommand struct {
@@ -92,7 +94,19 @@ func completedRevisionTargets(detail RunDetail) []ResearchRevisionTarget {
 	if producer == nil {
 		return nil
 	}
-	return researchRevisionCandidates(detail, *producer, *gate)
+	result := researchRevisionCandidates(detail, *producer, *gate)
+	for _, id := range []string{"evidence_import"} {
+		step := findStepByNode(detail.Steps, id)
+		if step == nil || step.Status != StepCompleted || !workflowNodeReaches(detail.Run.Compilation, id, gate.NodeID) {
+			continue
+		}
+		n := nodes[id]
+		if id == "evidence_import" && !revisionMaterialChain(detail) {
+			continue
+		}
+		result = append(result, ResearchRevisionTarget{NodeID: id, Label: n.Name, RepeatsSideEffects: revisionSuffixSideEffects(detail, step.Ordinal)})
+	}
+	return result
 }
 
 func newResearchRevisionProposal(detail RunDetail, command ProposeResearchRevisionCommand) (ResearchRevisionProposal, error) {
@@ -152,6 +166,13 @@ func (s *RuntimeService) ProposeResearchRevision(ctx context.Context, chatRunID,
 	if err != nil {
 		return proposal, err
 	}
+	if err := validateRevisionMaterialSelection(command); err != nil {
+		return proposal, err
+	}
+	proposal.Materials, err = s.prepareRevisionMaterials(ctx, detail, command)
+	if err != nil {
+		return proposal, err
+	}
 	proposal.ID, err = s.newID()
 	if err != nil {
 		return proposal, err
@@ -208,6 +229,9 @@ func (s *RuntimeService) ConfirmResearchRevision(ctx context.Context, command Co
 	if !slices.Equal(verified.AffectedStages, proposal.AffectedStages) || verified.RepeatsSideEffects != proposal.RepeatsSideEffects {
 		return RunDetail{}, fmt.Errorf("返修影响范围已变化，请重新生成方案")
 	}
+	if err := s.validateRevisionMaterials(ctx, detail, *proposal); err != nil {
+		return RunDetail{}, err
+	}
 	start := findStepByNode(detail.Steps, proposal.NodeID)
 	event, err := s.event(detail.Run.ID, "workflow.user_revision_queued", map[string]any{"proposal": proposal, "startOrdinal": start.Ordinal, "priorOutput": start.Output}, s.now())
 	if err != nil {
@@ -221,9 +245,10 @@ func (s *RuntimeService) ConfirmResearchRevision(ctx context.Context, command Co
 }
 
 type ResearchTaskReadCommand struct {
-	Section string `json:"section"`
-	NodeID  string `json:"nodeId,omitempty"`
-	Offset  int    `json:"offset,omitempty"`
+	AttachmentID string `json:"attachmentId,omitempty"`
+	Section      string `json:"section"`
+	NodeID       string `json:"nodeId,omitempty"`
+	Offset       int    `json:"offset,omitempty"`
 }
 
 func (s *RuntimeService) ReadResearchTask(ctx context.Context, chatRunID string, command ResearchTaskReadCommand) (json.RawMessage, error) {
@@ -245,6 +270,29 @@ func (s *RuntimeService) ReadResearchTask(ctx context.Context, chatRunID string,
 		value = rawObject(map[string]any{"runId": detail.Run.ID, "status": detail.Run.Status, "stageCount": len(detail.Steps), "stages": researchDiscussionStages(detail), "revisionTargets": completedRevisionTargets(detail), "registeredDeliverables": detail.RegisteredDeliverables})
 	case "inputs":
 		value = detail.Run.Inputs
+	case "supplemental_materials", "supplemental_content":
+		repo, ok := s.repository.(discussionMaterialsRepository)
+		if !ok {
+			return nil, fmt.Errorf("discussion material storage unavailable")
+		}
+		ids, readErr := repo.DiscussionAttachmentIDs(ctx, detail.Run.ID)
+		if readErr != nil {
+			return nil, readErr
+		}
+		if command.Section == "supplemental_content" {
+			if !slices.Contains(ids, command.AttachmentID) {
+				return nil, fmt.Errorf("该资料未在当前任务的用户对话中发送")
+			}
+			reader, ok := s.materialLoader.(interface {
+				ReadRevisionMaterial(context.Context, string, string, string) (json.RawMessage, error)
+			})
+			if !ok {
+				return nil, fmt.Errorf("supplemental material reader unavailable")
+			}
+			value, err = reader.ReadRevisionMaterial(ctx, detail.Run.ProjectID, detail.Run.ConversationID, command.AttachmentID)
+		} else {
+			value = rawObject(map[string]any{"attachmentIds": ids, "instruction": "These files were sent in user discussion, not automatically adopted as evidence. Read supplemental_content with attachmentId and offset before proposing. Only explicit user confirmation can add selected files to research; use attachmentIds and evidence_import in a revision proposal."})
+		}
 	case "outputs":
 		value = detail.Run.Outputs
 	case "stage_input", "stage_output":

@@ -81,6 +81,7 @@ func New() *Service {
 }
 
 func (s *Service) Materialize(ctx context.Context, selected project.Project, candidate appresearch.Candidate, mode appresearch.MaterializeMode) (appresearch.MaterializedCandidate, error) {
+	candidate, _ = appresearch.RecoverCandidateAbstracts(candidate)
 	if err := ctx.Err(); err != nil {
 		return appresearch.MaterializedCandidate{}, err
 	}
@@ -526,6 +527,11 @@ func metadataMarkdown(candidate appresearch.Candidate) string {
 		text.WriteString("\n")
 	}
 	return bounded(text.String(), maxMetadataRunes)
+}
+
+// Exact deterministic bytes allow already-repaired imports to remain idempotent.
+func (s *Service) MetadataSHA256(candidate appresearch.Candidate) string {
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(metadataMarkdown(candidate))))
 }
 
 func createStagingFile(selected project.Project, extension string) (string, *os.File, error) {

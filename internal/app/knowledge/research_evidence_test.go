@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 )
@@ -51,4 +52,63 @@ func TestResearchEvidenceUsesAbstractChunksNotHeaderSnippet(t *testing.T) {
 	if _, err := index.completeResearchEvidence(context.Background(), out, SearchOptions{DocumentIDs: []string{"doc"}, Limit: 3}); err == nil {
 		t.Fatal("tampered source accepted")
 	}
+}
+
+// Optional read-only replay against a user-authorized index. Never rebuilds or
+// mutates the running project, and checks the same round-robin selection policy.
+func TestBMJComplementaryEvidenceReadOnlyReplay(t *testing.T) {
+	path := os.Getenv("SCIAIDE_TEST_BMJ_INDEX")
+	if path == "" {
+		t.Skip("optional BMJ index")
+	}
+	db, err := sql.Open("sqlite", "file:"+strings.ReplaceAll(path, "\\", "/")+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	var doc string
+	if err := db.QueryRow(`SELECT document_id FROM documents WHERE original_name='bmj-2023-075847.full.pdf'`).Scan(&doc); err != nil {
+		t.Fatal(err)
+	}
+	index := projectIndex{db: db, version: IndexVersion{ID: "fixture", RetrievalEngine: RetrievalEngine}}
+	queries := []string{"walking jogging yoga resistance training depressive symptoms adults network meta-analysis", "results effect estimate confidence credible interval", "methods population eligibility", "limitations certainty risk bias acceptability", "acceptability dropping out dropout odds ratio"}
+	groups := [][]Match{}
+	for _, query := range queries {
+		options := SearchOptions{Query: query, Limit: 20, DocumentIDs: []string{doc}, EvidenceMode: true}
+		matches, _, err := index.SearchWithOptions(context.Background(), options, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		matches, err = index.completeResearchEvidence(context.Background(), matches, options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		groups = append(groups, matches)
+	}
+	seen := map[string]bool{}
+	quotes := ""
+	count := 0
+	for rank := 0; rank < 20; rank++ {
+		for _, group := range groups {
+			if rank >= len(group) {
+				continue
+			}
+			m := group[rank]
+			if seen[m.ChunkID] {
+				continue
+			}
+			seen[m.ChunkID] = true
+			if count < 20 {
+				quotes += m.Snippet + "\n"
+				count++
+			}
+		}
+	}
+	for _, term := range []string{"1210", "1047", "643", "−0.62", "−0.55", "−0.49", "CINeMA", "odds ratio 0.55", "0.31 to 0.99", "0.57, 0.35 to 0.94"} {
+		if !strings.Contains(quotes, term) {
+			t.Errorf("missing actual result %s in selected %d chunks", term, count)
+		}
+	}
+	t.Logf("retrieved %d exact-source chunks including all three modalities and CINeMA", count)
 }

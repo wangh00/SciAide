@@ -32,7 +32,9 @@ func buildChunks(documentValue Document, parsed document.Parsed) ([]Chunk, error
 		if unit.Index <= 0 || strings.TrimSpace(unit.Locator) == "" || strings.TrimSpace(unit.Content) == "" {
 			return nil, fmt.Errorf("parsed document contains an invalid source unit")
 		}
-		for _, span := range splitUnitContent(unit.Content) {
+		// Pending jobs frozen before upgrade must keep their old algorithm.
+		spans := splitUnitContentVersion(unit.Content, documentValue.ChunkingVersion == "bounded-unit-v2")
+		for _, span := range spans {
 			contentHash := sha256.Sum256([]byte(span.Content))
 			contentDigest := hex.EncodeToString(contentHash[:])
 			identity := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%s\x00%d\x00%s\x00%d\x00%d\x00%s", documentValue.ID, documentValue.ChunkingVersion, unit.Index, unit.Locator, span.Start, span.End, contentDigest)))
@@ -48,21 +50,29 @@ func buildChunks(documentValue Document, parsed document.Parsed) ([]Chunk, error
 }
 
 func splitUnitContent(value string) []textSpan {
-	runes := []rune(strings.TrimSpace(value))
-	if len(runes) == 0 {
+	return splitUnitContentVersion(value, false)
+}
+
+func splitUnitContentVersion(value string, legacy bool) []textSpan {
+	if legacy {
+		value = strings.TrimSpace(value)
+	}
+	runes := []rune(value)
+	first, last := trimSpan(runes, 0, len(runes))
+	if first == last {
 		return nil
 	}
 	if len(runes) <= maximumChunkRunes {
-		return []textSpan{{Content: string(runes), Start: 0, End: len(runes)}}
+		return []textSpan{{Content: string(runes[first:last]), Start: first, End: last}}
 	}
 	result := make([]textSpan, 0, (len(runes)/targetChunkRunes)+1)
-	start := 0
+	start := first
 	for start < len(runes) {
 		hardEnd := min(len(runes), start+maximumChunkRunes)
 		end := hardEnd
 		if hardEnd < len(runes) {
 			target := min(hardEnd, start+targetChunkRunes)
-			end = chooseChunkEnd(runes, start, target, hardEnd)
+			end = chooseChunkEndVersion(runes, start, target, hardEnd, legacy)
 		}
 		contentStart, contentEnd := trimSpan(runes, start, end)
 		if contentEnd > contentStart {
@@ -71,7 +81,10 @@ func splitUnitContent(value string) []textSpan {
 		if end >= len(runes) {
 			break
 		}
-		next := max(start+1, end-chunkOverlapRunes)
+		next := chooseChunkStart(runes, start, end)
+		if legacy {
+			next = max(start+1, end-chunkOverlapRunes)
+		}
 		for next < end && unicode.IsSpace(runes[next]) {
 			next++
 		}
@@ -81,14 +94,24 @@ func splitUnitContent(value string) []textSpan {
 }
 
 func chooseChunkEnd(value []rune, start, target, hardEnd int) int {
+	return chooseChunkEndVersion(value, start, target, hardEnd, false)
+}
+
+func chooseChunkEndVersion(value []rune, start, target, hardEnd int, legacy bool) int {
+	boundary := func(index int) bool {
+		if legacy {
+			return strings.ContainsRune("\n\r.!?;。！？；", value[index])
+		}
+		return strongBoundary(value, index)
+	}
 	for index := target; index < hardEnd; index++ {
-		if strongBoundary(value[index]) {
+		if boundary(index) {
 			return index + 1
 		}
 	}
 	minimum := min(target, start+minimumChunkRunes)
 	for index := target - 1; index >= minimum; index-- {
-		if strongBoundary(value[index]) {
+		if boundary(index) {
 			return index + 1
 		}
 	}
@@ -105,13 +128,33 @@ func chooseChunkEnd(value []rune, start, target, hardEnd int) int {
 	return hardEnd
 }
 
-func strongBoundary(value rune) bool {
-	switch value {
-	case '\n', '\r', '.', '!', '?', ';', '。', '！', '？', '；':
+func strongBoundary(value []rune, index int) bool {
+	switch value[index] {
+	case '.', '!', '?', ';':
+		return index+1 == len(value) || unicode.IsSpace(value[index+1])
+	case '\n', '\r', '。', '！', '？', '；':
 		return true
 	default:
 		return false
 	}
+}
+
+// Prefer sentence starts, then words, with bounded overlap and guaranteed
+// progress even when the source contains an oversized unbroken token.
+func chooseChunkStart(value []rune, start, end int) int {
+	target := max(start+1, end-chunkOverlapRunes)
+	lower := max(start+1, end-400)
+	for i := target; i >= lower; i-- {
+		if strongBoundary(value, i-1) {
+			return i
+		}
+	}
+	for i := target; i >= lower; i-- {
+		if unicode.IsSpace(value[i-1]) || unicode.Is(unicode.Han, value[i]) {
+			return i
+		}
+	}
+	return target
 }
 
 func trimSpan(value []rune, start, end int) (int, int) {

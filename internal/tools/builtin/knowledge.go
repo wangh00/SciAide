@@ -44,6 +44,7 @@ func (*SearchKnowledge) Definition(context.Context) (tool.Definition, error) {
 	}
 	var schema map[string]any
 	_ = json.Unmarshal(d.InputSchema, &schema)
+	schema["properties"].(map[string]any)["queries"] = map[string]any{"type": "array", "maxItems": 11, "items": map[string]any{"type": "string", "minLength": 1, "maxLength": knowledge.MaxSearchQueryRunes}}
 	schema["properties"].(map[string]any)["perDocument"] = map[string]any{"type": "boolean"}
 	d.InputSchema, _ = json.Marshal(schema)
 	var out map[string]any
@@ -58,6 +59,7 @@ func (t *SearchKnowledge) Invoke(ctx context.Context, invocation tool.Invocation
 		return tool.Result{}, fmt.Errorf("knowledge search is not configured")
 	}
 	var args struct {
+		Queries     []string          `json:"queries"`
 		PerDocument bool              `json:"perDocument"`
 		Query       string            `json:"query"`
 		Limit       int               `json:"limit"`
@@ -75,12 +77,34 @@ func (t *SearchKnowledge) Invoke(ctx context.Context, invocation tool.Invocation
 			return tool.Result{}, fmt.Errorf("per-document retrieval requires 1-100 explicit document IDs")
 		}
 		combined := tool.Result{Status: tool.ResultSuccess, Citations: []tool.CitationRef{}, Artifacts: []tool.ArtifactRef{}}
-		perDocumentLimit := 3
-		if len(args.DocumentIDs) > 85 {
-			perDocumentLimit = 2
+		queries := append([]string{args.Query}, args.Queries...)
+		if len(args.Queries) > 11 {
+			return tool.Result{}, fmt.Errorf("at most eleven supplementary queries are allowed")
 		}
+		uniqueQueries := []string{}
+		querySeen := map[string]bool{}
+		for _, q := range queries {
+			q = strings.TrimSpace(q)
+			if q == "" || len([]rune(q)) > knowledge.MaxSearchQueryRunes {
+				return tool.Result{}, fmt.Errorf("invalid evidence query")
+			}
+			if !querySeen[q] {
+				uniqueQueries = append(uniqueQueries, q)
+				querySeen[q] = true
+			}
+		}
+		perDocumentLimit := args.Limit
+		if perDocumentLimit == 0 {
+			perDocumentLimit = 3
+		}
+		if perDocumentLimit < 1 || perDocumentLimit > 20 {
+			return tool.Result{}, fmt.Errorf("invalid evidence limit")
+		}
+		// Bound the entire frozen citation set, not just each individual search.
+		perDocumentLimit = min(perDocumentLimit, 240/len(args.DocumentIDs))
 		coverage := []map[string]any{}
 		seen := map[string]bool{}
+		evidenceBytes := 0
 		for _, id := range args.DocumentIDs {
 			if seen[id] {
 				continue
@@ -89,25 +113,58 @@ func (t *SearchKnowledge) Invoke(ctx context.Context, invocation tool.Invocation
 			if err := ctx.Err(); err != nil {
 				return tool.Result{}, err
 			}
-			child := invocation
-			child.Arguments, _ = json.Marshal(map[string]any{"query": args.Query, "limit": perDocumentLimit, "documentIds": []string{id}, "formats": args.Formats})
-			var value tool.Result
-			var err error
-			if reader, ok := t.knowledge.(researchEvidenceSearcher); ok {
-				result, readErr := reader.SearchResearchEvidence(ctx, invocation.ProjectID, invocation.ResearchTaskID, knowledge.SearchOptions{Query: args.Query, Limit: perDocumentLimit, DocumentIDs: []string{id}, Formats: args.Formats})
-				if readErr != nil {
-					return tool.Result{}, readErr
+			selected := []tool.CitationRef{}
+			documentBytes := 0
+			citationSeen := map[string]bool{}
+			limited := false
+			// Round-robin complementary searches so one broad query cannot crowd
+			// out results/methods/limitations. Quotes remain intact verified chunks.
+			results := []tool.Result{}
+			for _, q := range uniqueQueries {
+				child := invocation
+				child.Arguments, _ = json.Marshal(map[string]any{"query": q, "limit": perDocumentLimit, "documentIds": []string{id}, "formats": args.Formats})
+				var value tool.Result
+				if reader, ok := t.knowledge.(researchEvidenceSearcher); ok {
+					result, readErr := reader.SearchResearchEvidence(ctx, invocation.ProjectID, invocation.ResearchTaskID, knowledge.SearchOptions{Query: q, Limit: perDocumentLimit, DocumentIDs: []string{id}, Formats: args.Formats})
+					if readErr != nil {
+						return tool.Result{}, readErr
+					}
+					value, err = NewSearchKnowledge(frozenResearchSearch{result}).Invoke(ctx, tool.Invocation{RunID: invocation.RunID, ProjectID: invocation.ProjectID, Arguments: child.Arguments})
+				} else {
+					value, err = t.Invoke(ctx, child)
 				}
-				value, err = NewSearchKnowledge(frozenResearchSearch{result}).Invoke(ctx, tool.Invocation{RunID: invocation.RunID, ProjectID: invocation.ProjectID, Arguments: child.Arguments})
-			} else {
-				value, err = t.Invoke(ctx, child)
+				if err != nil {
+					return tool.Result{}, err
+				}
+				results = append(results, value)
+				limited = limited || value.Truncated
 			}
-			if err != nil {
-				return tool.Result{}, err
+			for rank := 0; rank < perDocumentLimit; rank++ {
+				for _, value := range results {
+					if rank >= len(value.Citations) {
+						continue
+					}
+					c := value.Citations[rank]
+					if citationSeen[c.ChunkID] {
+						continue
+					}
+					citationSeen[c.ChunkID] = true
+					quoteJSON, _ := json.Marshal(c)
+					if len(selected) == perDocumentLimit || evidenceBytes+len(quoteJSON) > 120*1024 || documentBytes+len(quoteJSON) > 80*1024 {
+						limited = true
+						continue
+					}
+					selected = append(selected, c)
+					evidenceBytes += len(quoteJSON)
+					documentBytes += len(quoteJSON)
+				}
 			}
-			combined.Citations = append(combined.Citations, value.Citations...)
-			combined.Artifacts = append(combined.Artifacts, value.Artifacts...)
-			coverage = append(coverage, map[string]any{"documentId": id, "excerptCount": len(value.Citations), "searchCompleted": true, "fullTextRead": false, "selectionLimited": len(value.Citations) >= perDocumentLimit, "readingUnit": "verified_index_chunk"})
+			combined.Citations = append(combined.Citations, selected...)
+			if len(results) > 0 {
+				combined.Artifacts = append(combined.Artifacts, results[0].Artifacts...)
+			}
+			combined.Truncated = combined.Truncated || limited
+			coverage = append(coverage, map[string]any{"documentId": id, "excerptCount": len(selected), "searchCompleted": true, "fullTextRead": false, "selectionLimited": limited, "readingUnit": "verified_index_chunk", "queries": uniqueQueries})
 		}
 		combined.Structured, _ = json.Marshal(map[string]any{"query": args.Query, "matches": []any{}, "totalMatches": len(combined.Citations), "status": map[string]any{}, "documentCoverage": coverage})
 		combined.Text = fmt.Sprintf("Searched %d selected documents separately; returned %d excerpts. This is excerpt retrieval, not full-text reading. Documents with zero matches remain in documentCoverage.", len(coverage), len(combined.Citations))

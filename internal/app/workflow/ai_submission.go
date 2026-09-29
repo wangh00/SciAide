@@ -3,6 +3,7 @@ package workflow
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -130,13 +131,28 @@ func (s *RuntimeService) ValidateResearchSubmission(ctx context.Context, convers
 	if err != nil {
 		return nil, &apperr.Error{Code: "WORKFLOW_AI_SUBMISSION_INVALID", UserMessage: "科研阶段提交未通过输出检查", Details: err.Error(), Cause: err}
 	}
+	chatRunID := ""
 	for _, execution := range detail.AIExecutions {
 		if execution.WorkflowStepID == step.ID && execution.Attempt == step.Attempt && execution.InputSHA256 == step.InputSHA256 {
+			chatRunID = execution.ChatRunID
 			value = canonicalCitationSubmission(value, detail, *step, node, execution.ChatRunID)
 			break
 		}
 	}
+	changes, refreshErr := s.changedEvidenceMaterials(ctx, detail, *step, node)
+	if refreshErr != nil {
+		return nil, refreshErr
+	}
+	// The terminal response remains an audit draft, never a completed result.
+	// The host will rewind evidence stages instead of validating stale claims.
+	if len(changes) > 0 {
+		return value, nil
+	}
 	if err := validateWorkflowAIStageOutput(node, value, step.Input); err != nil {
+		var quoteErr *CitationQuoteError
+		if errors.As(err, &quoteErr) {
+			err = modelVisibleQuoteError(quoteErr, workflowCitationSeedsFromSteps(detail.Run.Compilation, detail.Steps, *step), chatRunID)
+		}
 		return nil, &apperr.Error{Code: "WORKFLOW_AI_SUBMISSION_INVALID", UserMessage: "科研阶段提交未通过业务检查", Details: err.Error(), Cause: err}
 	}
 	return value, nil

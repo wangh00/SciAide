@@ -145,11 +145,11 @@ func (r *KnowledgeRepository) CanActivate(ctx context.Context, projectID, versio
 		COALESCE(SUM(status='ready'),0),
 		COALESCE(SUM(status IN ('pending','indexing')),0),
 		COALESCE(SUM(status='failed'),0)
-		FROM knowledge_documents WHERE project_id=? AND index_version_id=?`, strings.TrimSpace(projectID), strings.TrimSpace(versionID)).Scan(&readyDocuments, &activeJobs, &failedDocuments); err != nil {
+		FROM knowledge_documents d WHERE project_id=? AND index_version_id=? AND `+indexableKnowledgeDocument, strings.TrimSpace(projectID), strings.TrimSpace(versionID)).Scan(&readyDocuments, &activeJobs, &failedDocuments); err != nil {
 		return false, fmt.Errorf("read knowledge index activation progress: %w", err)
 	}
 	var queuedOrRunning int
-	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM knowledge_import_jobs WHERE project_id=? AND index_version_id=? AND status IN ('queued','running')`, strings.TrimSpace(projectID), strings.TrimSpace(versionID)).Scan(&queuedOrRunning); err != nil {
+	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM knowledge_import_jobs j JOIN knowledge_documents d ON d.id=j.document_id AND d.project_id=j.project_id WHERE j.project_id=? AND j.index_version_id=? AND j.status IN ('queued','running') AND `+indexableKnowledgeDocument, strings.TrimSpace(projectID), strings.TrimSpace(versionID)).Scan(&queuedOrRunning); err != nil {
 		return false, fmt.Errorf("read knowledge index active jobs: %w", err)
 	}
 	return readyDocuments == expectedDocuments && activeJobs == 0 && failedDocuments == 0 && queuedOrRunning == 0, nil
@@ -263,7 +263,21 @@ func (r *KnowledgeRepository) Enqueue(ctx context.Context, value attachment.Atta
 }
 
 func (r *KnowledgeRepository) ListDocuments(ctx context.Context, projectID string) ([]knowledge.Document, error) {
-	rows, err := r.db.QueryContext(ctx, knowledgeDocumentSelect+` WHERE project_id=? ORDER BY created_at DESC,id`, strings.TrimSpace(projectID))
+	return r.listDocuments(ctx, projectID, "")
+}
+
+// Index maintenance excludes archived task resources without deleting their
+// historical records or weakening the database ownership guards.
+func (r *KnowledgeRepository) ListIndexableDocuments(ctx context.Context, projectID string) ([]knowledge.Document, error) {
+	return r.listDocuments(ctx, projectID, " AND "+indexableKnowledgeDocument)
+}
+
+const indexableKnowledgeDocument = `(d.scope_kind='project_shared' OR (d.scope_kind='task' AND EXISTS (
+	SELECT 1 FROM research_tasks t WHERE t.id=d.research_task_id AND t.project_id=d.project_id AND t.status<>'archived'
+)))`
+
+func (r *KnowledgeRepository) listDocuments(ctx context.Context, projectID, filter string) ([]knowledge.Document, error) {
+	rows, err := r.db.QueryContext(ctx, knowledgeDocumentSelect+` WHERE project_id=?`+filter+` ORDER BY created_at DESC,id`, strings.TrimSpace(projectID))
 	if err != nil {
 		return nil, fmt.Errorf("list knowledge documents: %w", err)
 	}
@@ -381,11 +395,11 @@ func (r *KnowledgeRepository) Recover(ctx context.Context, at time.Time) (int64,
 		return 0, fmt.Errorf("begin knowledge job recovery: %w", err)
 	}
 	defer tx.Rollback()
-	result, err := tx.ExecContext(ctx, `UPDATE knowledge_import_jobs SET status='queued',stage='queued',error_message='',started_at=NULL,updated_at=? WHERE status='running'`, formatTime(at))
+	result, err := tx.ExecContext(ctx, `UPDATE knowledge_import_jobs SET status='queued',stage='queued',error_message='',started_at=NULL,updated_at=? WHERE status='running' AND document_id IN (SELECT d.id FROM knowledge_documents d WHERE `+indexableKnowledgeDocument+`)`, formatTime(at))
 	if err != nil {
 		return 0, fmt.Errorf("recover knowledge jobs: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE knowledge_documents SET status='pending',error_message='',updated_at=? WHERE status='indexing'`, formatTime(at)); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE knowledge_documents AS d SET status='pending',error_message='',updated_at=? WHERE status='indexing' AND `+indexableKnowledgeDocument, formatTime(at)); err != nil {
 		return 0, fmt.Errorf("recover knowledge documents: %w", err)
 	}
 	count, err := result.RowsAffected()
@@ -404,7 +418,7 @@ func (r *KnowledgeRepository) ClaimNext(ctx context.Context, projectID string, a
 		return knowledge.Work{}, false, fmt.Errorf("begin knowledge job claim: %w", err)
 	}
 	defer tx.Rollback()
-	query := knowledgeWorkSelect + ` WHERE j.status='queued' AND v.status IN ('building','ready')`
+	query := knowledgeWorkSelect + ` WHERE j.status='queued' AND v.status IN ('building','ready') AND ` + indexableKnowledgeDocument
 	args := []any{}
 	if projectID = strings.TrimSpace(projectID); projectID != "" {
 		query += ` AND j.project_id=?`
@@ -514,11 +528,11 @@ func (r *KnowledgeRepository) Requeue(ctx context.Context, work knowledge.Work, 
 
 func (r *KnowledgeRepository) ProjectStatus(ctx context.Context, projectID string) (knowledge.ProjectStatus, error) {
 	var value knowledge.ProjectStatus
-	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(status='ready'),0),COALESCE(SUM(status='pending'),0),COALESCE(SUM(status='indexing'),0),COALESCE(SUM(status='failed'),0) FROM knowledge_documents WHERE project_id=? AND scope_kind IN ('project_shared','task')`, strings.TrimSpace(projectID)).Scan(
+	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(status='ready'),0),COALESCE(SUM(status='pending'),0),COALESCE(SUM(status='indexing'),0),COALESCE(SUM(status='failed'),0) FROM knowledge_documents d WHERE project_id=? AND `+indexableKnowledgeDocument, strings.TrimSpace(projectID)).Scan(
 		&value.Documents, &value.Ready, &value.Pending, &value.Indexing, &value.Failed); err != nil {
 		return value, fmt.Errorf("read project knowledge status: %w", err)
 	}
-	if err := r.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(j.status='queued'),0),COALESCE(SUM(j.status='running'),0) FROM knowledge_import_jobs j JOIN knowledge_documents d ON d.id=j.document_id AND d.project_id=j.project_id WHERE j.project_id=? AND d.scope_kind IN ('project_shared','task')`, strings.TrimSpace(projectID)).Scan(&value.QueuedJobs, &value.RunningJobs); err != nil {
+	if err := r.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(j.status='queued'),0),COALESCE(SUM(j.status='running'),0) FROM knowledge_import_jobs j JOIN knowledge_documents d ON d.id=j.document_id AND d.project_id=j.project_id WHERE j.project_id=? AND `+indexableKnowledgeDocument, strings.TrimSpace(projectID)).Scan(&value.QueuedJobs, &value.RunningJobs); err != nil {
 		return value, fmt.Errorf("read project knowledge jobs: %w", err)
 	}
 	return value, nil

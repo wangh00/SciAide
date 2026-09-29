@@ -3,7 +3,7 @@
   "name": "SciAide",
   "outputfilename": "SciAide",
   "info": {
-    "productVersion": "1.0.1"
+    "productVersion": "1.0.2"
   },
   "frontend:install": "npm ci --include=dev",
   "frontend:build": "npm run build",

@@ -16,6 +16,7 @@ type ResearchRevisionRecommendation struct {
 	Label              string   `json:"label,omitempty"`
 	Summary            string   `json:"summary"`
 	Reasons            []string `json:"reasons,omitempty"`
+	RequiredInputs     []string `json:"requiredInputs,omitempty"`
 	AffectedStages     []string `json:"affectedStages,omitempty"`
 	RepeatsSideEffects bool     `json:"repeatsSideEffects"`
 	ReviewOutputSHA256 string   `json:"reviewOutputSha256,omitempty"`
@@ -243,7 +244,7 @@ func researchRevisionRecommendation(detail RunDetail) *ResearchRevisionRecommend
 			missing := strings.TrimSpace(item.RequiredInput)
 			if !seenInput[missing] {
 				seenInput[missing] = true
-				missingInputs = append(missingInputs, boundedWorkflowText(missing, 180))
+				missingInputs = append(missingInputs, missing)
 			}
 		}
 		result.Reasons = append(result.Reasons, reason)
@@ -256,10 +257,8 @@ func researchRevisionRecommendation(detail RunDetail) *ResearchRevisionRecommend
 	}
 	if needsInput {
 		result.Status = "needs_input"
-		if len(missingInputs) > 3 {
-			missingInputs = append(missingInputs[:3], "其余资料见审查依据")
-		}
-		result.Summary = "需先补充或确认：" + strings.Join(missingInputs, "；") + "。补充前不能按建议返修，单纯重跑无法补齐。"
+		result.RequiredInputs = missingInputs
+		result.Summary = "需先补充或确认：" + strings.Join(missingInputs, "；") + "。当前审查未给出可直接执行的完整返修方案，不会默认只修改报告。"
 		return result
 	}
 	if earliest == nil {

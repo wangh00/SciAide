@@ -9,6 +9,15 @@ const source = await readFile(new URL("./App.tsx", import.meta.url), "utf8");
 const pager = await readFile(new URL("./ResearchTaskTimeline.tsx", import.meta.url), "utf8");
 const row = (id, sequence, extra={}) => ({id, sequence:String(sequence), ...extra});
 
+test("saved full text explains local refresh without failure or retry controls", () => {
+  const history=source.slice(source.indexOf("const researchTimelineLabels:"),source.indexOf("function WorkflowResearchDesignCard("));
+  const exports={};
+  vm.runInNewContext(ts.transpileModule(history+"\nexports.render=ResearchTimelineHistory;",{compilerOptions:{jsx:ts.JsxEmit.React,target:ts.ScriptTarget.ES2022}}).outputText,{exports,React});
+  const element=exports.render({entry:{kind:"event",eventType:"workflow.evidence_refreshed",snapshot:{}}});
+  assert.equal(element.props["aria-label"],"补充全文已保存");
+  assert.match(element.props.children.props.children,/不会重新检索或初筛/);
+});
+
 test("snapshot ordering preserves nanoseconds and variable precision fractions", () => {
   assert.equal(compareRunCreatedAt("2026-09-10T12:00:00.1Z","2026-09-10T12:00:00.11Z"),-1);
   assert.equal(compareRunCreatedAt("2026-09-10T12:00:00.123400Z","2026-09-10T12:00:00.123100Z"),1);

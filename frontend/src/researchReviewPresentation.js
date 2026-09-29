@@ -58,8 +58,8 @@ export function presentReviewIssue(raw, key) {
     return { title: '说明结果是如何复核的', explanation: '清楚区分生成结果与复核结果的步骤，并保留复核记录和是否通过的结论。', raw };
   }
   const guidance = categories[key] || categories.requiredCorrections;
-  const technical = /\b[A-Za-z]+(?:_[A-Za-z0-9]+)+\b|\b[A-Za-z]+\.[A-Za-z]+\b|[A-Za-z]{12,}|[{}]/.test(text);
-  return { title: '', explanation: technical ? guidance : text || guidance, raw };
+  // Identifiers often locate the defect; never replace them with a platitude.
+  return { title: '', explanation: text || guidance, raw };
 }
 
 export function reviewFeedbackModel(issues) {

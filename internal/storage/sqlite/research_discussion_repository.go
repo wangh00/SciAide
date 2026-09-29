@@ -22,6 +22,30 @@ func (r *WorkflowRuntimeRepository) ResolveResearchDiscussion(ctx context.Contex
 	return binding, nil
 }
 
+// Only attachments actually sent by the user in this discussion are eligible;
+// uploads sitting in a picker and attachments from internal AI runs are not.
+func (r *WorkflowRuntimeRepository) DiscussionAttachmentIDs(ctx context.Context, runID string) ([]string, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT DISTINCT json_extract(mp.payload_json,'$.attachmentId')
+		FROM workflow_conversations wc JOIN messages m ON m.conversation_id=wc.conversation_id
+		JOIN runs cr ON cr.id=m.run_id JOIN message_parts mp ON mp.message_id=m.id
+		WHERE wc.workflow_run_id=? AND m.role='user' AND mp.part_type='media'
+		AND NOT EXISTS(SELECT 1 FROM workflow_ai_chat_runs b WHERE b.chat_run_id=cr.id)
+		AND json_extract(mp.payload_json,'$.attachmentId') IS NOT NULL ORDER BY m.rowid,mp.ordinal`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		result = append(result, id)
+	}
+	return result, rows.Err()
+}
+
 // Ordinary chat identity, latest human turn, delivery status, registration and
 // latest task ownership are checked again inside the write transaction.
 func validateDiscussionProposalState(ctx context.Context, tx *sql.Tx, proposal workflow.ResearchRevisionProposal, requireCompletedChat bool) error {

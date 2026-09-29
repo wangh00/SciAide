@@ -20,8 +20,8 @@ test('six required corrections are not double-counted with four categorized find
  const model=presentation.reviewFeedbackModel(issues);assert.equal(model.items.length,6);assert.equal(model.classifiedCount,4);assert.equal(model.correctionCount,6);assert.match(model.summary,/6 项修改/);assert.doesNotMatch(model.summary,/10/);
  for(let i=0;i<6;i++){assert.equal(model.items[i].raw,sample[i]);assert.doesNotMatch(model.items[i].title+model.items[i].explanation,/researchContract|workspace|workflow|mean_diff|light_hours|ANCOVA|peer-review|delivery gate/);}
 });
-test('unknown technical issues use cautious category guidance and keep exact evidence',()=>{
- const raw='新工具 model_abc.internal_field 不匹配';const item=presentation.presentReviewIssue(raw,'methodIssues');assert.equal(item.raw,raw);assert.doesNotMatch(item.explanation,/internal_field/);assert.doesNotMatch(item.explanation,/已经修复|可以交付|无需处理/);
+test('unknown technical issues keep concrete instructions instead of generic guidance',()=>{
+ const raw='新工具 model_abc.internal_field 不匹配';const item=presentation.presentReviewIssue(raw,'methodIssues');assert.equal(item.raw,raw);assert.equal(item.explanation,raw);assert.doesNotMatch(item.explanation,/已经修复|可以交付|无需处理/);
 });
 test('ordinary researcher wording is preserved rather than replaced with generic text',()=>{
  const raw='请说明为何排除 6 名缺失随访记录的参与者。';assert.equal(presentation.presentReviewIssue(raw,'requiredCorrections').explanation,raw);
@@ -65,9 +65,15 @@ test('specific actionable headings are still displayed',()=>{
  const html=renderToStaticMarkup(React.createElement(exports.ResearchReviewFeedback,{issues}));
  assert.match(html,/<b>把两组差异的计算方向说明清楚<\/b>/);
 });
-test('original technical evidence is available but collapsed by default',()=>{
+test('specific rewritten explanations also show original requirement without expanding details',()=>{
  const html=renderToStaticMarkup(React.createElement(exports.ResearchReviewFeedback,{issues,errorCode:'TOOL_INVOCATION_FAILED',errorMessage:'原始门禁错误'}));
- const details=html.indexOf('<details');assert.ok(details>0);assert.doesNotMatch(html.slice(0,details),/TOOL_INVOCATION_FAILED|researchContract|mean_diff/);assert.match(html.slice(details),/TOOL_INVOCATION_FAILED/);assert.match(html.slice(details),/researchContract/);assert.doesNotMatch(html,/<details[^>]*\bopen/);
+ const details=html.indexOf('<details');assert.ok(details>0);assert.doesNotMatch(html.slice(0,details),/TOOL_INVOCATION_FAILED/);assert.match(html.slice(0,details),/researchContract|mean_diff/);assert.match(html.slice(details),/TOOL_INVOCATION_FAILED/);assert.doesNotMatch(html,/<details[^>]*\bopen/);
+});
+test('full text import correction remains actionable in the visible card',()=>{
+ const raw='请将 bmj-2023-075847.full.pdf 纳入正文索引；目前只有 metadata.md，随后重新综合并更新报告，不要补写未核验的全文细节。';
+ const html=renderToStaticMarkup(React.createElement(exports.ResearchReviewFeedback,{issues:{groups:[{key:'requiredCorrections',label:'必须修正',items:[raw]}]}}));
+ const visible=html.slice(0,html.indexOf('<details'));
+ assert.ok(visible.includes(raw));assert.doesNotMatch(visible,/按审查意见补齐内容/);
 });
 test('tracked findings keep stable IDs and suggestions do not become blockers',()=>{
  const tracked=presentation.reviewTrackingModel({reviewFindings:[

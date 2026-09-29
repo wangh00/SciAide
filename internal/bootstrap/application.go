@@ -54,7 +54,7 @@ import (
 	wailstransport "github.com/wangh00/SciAide/internal/transport/wails"
 )
 
-const Version = "1.0.1"
+const Version = "1.0.2"
 
 type Options struct {
 	RootDir            string
@@ -486,6 +486,7 @@ func New(options Options) (*Application, error) {
 	}
 	workflowAIBridge.SetProcessRuntimeReader(localProcessRunner)
 	workflowRuntime.SetLiteratureCandidateReader(researchWorkflowService)
+	workflowRuntime.SetEvidenceMaterialReader(researchDiscovery)
 	workflowAIBridge.AddProcessRuntimeReader(pythonProcessRunner)
 	if err := workflowRuntime.SetAIStageExecutor(workflowAIBridge); err != nil {
 		_ = store.Close()

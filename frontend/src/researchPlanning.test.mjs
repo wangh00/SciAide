@@ -20,6 +20,40 @@ const compiled = ts.transpileModule(
 const exports = {};
 vm.runInNewContext(compiled, { exports, require: createRequire(import.meta.url) });
 
+const detailEnd = source.indexOf("const researchActivityStatusText", end);
+const detailExports = {};
+const detailCompiled = ts.transpileModule(
+  'import * as React from "react";\n' + source.slice(start, detailEnd) +
+    "\nexport { ResearchRouteDetailDialog };",
+  { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.React, target: ts.ScriptTarget.ES2022 } },
+).outputText;
+vm.runInNewContext(detailCompiled, {
+  exports: detailExports, require: createRequire(import.meta.url),
+  createPortal: (children) => children, document: { body: {} },
+  ModalBackdrop: ({ children }) => React.createElement("div", null, children),
+  Icon: () => null, researchStageLabels: {},
+});
+
+test("route details render Go null arrays and omitted stage methods without crashing", () => {
+  for (const empty of [null, undefined, []]) {
+    const route = {
+      routeId: "single-paper", title: "单篇全文对照", reason: "仅用本地材料", validation: "ready",
+      stageIds: ["question_refinement", "delivery_gate"], blockers: [],
+      requiredResources: ["bmj-2023-075847.full.pdf"], deliverables: ["中文对照表"], reviewCheckpoints: ["独立核验"],
+      layers: [{ layerId: "delivery", title: "核验", stages: [
+        { stageId: "question_refinement", objective: "明确边界", methods: empty, skillNames: ["critical-thinking"], inputs: empty, outputs: ["研究问题"] },
+        { stageId: "delivery_gate", objective: "检查交付", methods: empty, skillNames: empty, inputs: ["审查"], outputs: empty },
+      ] }],
+    };
+    const plan = { routes: [route], recommendedRouteId: route.routeId, selectedSkills: [{ name: "critical-thinking", role: "核验", limitations: empty }] };
+    const html = renderToStaticMarkup(React.createElement(detailExports.ResearchRouteDetailDialog, { route, plan, busy: false, close() {}, adopt() {} }));
+    assert.match(html, /研究路线详情/);
+    assert.match(html, /检查交付/);
+    assert.match(html, /采用并开始任务/);
+    assert.match(html, /bmj-2023-075847.full.pdf/);
+  }
+});
+
 test("ready design shows later research conditions without pretending they are resolved", () => {
   const route = {
     validation: "ready", availableNow: true, blockers: [],

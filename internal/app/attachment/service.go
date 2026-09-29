@@ -687,6 +687,7 @@ func (s *Service) ParsedForTask(ctx context.Context, projectID, taskID, attachme
 }
 
 func (s *Service) ensureParsedLocked(ctx context.Context, selectedProject project.Project, value Attachment) (document.Parsed, error) {
+	value = versionedPDFCache(value)
 	root, err := os.OpenRoot(project.PrivateDataPath(selectedProject))
 	if err != nil {
 		return document.Parsed{}, err
@@ -703,6 +704,13 @@ func (s *Service) ensureParsedLocked(ctx context.Context, selectedProject projec
 }
 
 func validParsedCache(parsed document.Parsed, value Attachment) bool {
+	if value.Format == document.FormatPDF && parsed.Metadata["structureParser"] != document.PDFParserVersion {
+		return false
+	}
+	return validParsedCacheStructure(parsed, value)
+}
+
+func validParsedCacheStructure(parsed document.Parsed, value Attachment) bool {
 	if parsed.SchemaVersion != document.SchemaVersion || parsed.Format != value.Format || parsed.ExtractedRunes < 0 || parsed.ExtractedRunes > document.MaxExtractedRunes {
 		return false
 	}
@@ -722,7 +730,51 @@ func validParsedCache(parsed document.Parsed, value Attachment) bool {
 	return used == parsed.ExtractedRunes
 }
 
+// Old queued index jobs must not replace their frozen parser generation with
+// newly decoded text. Their original cache remains available for that purpose.
+func (s *Service) ParsedForIndexVersion(ctx context.Context, projectID, attachmentID, chunkingVersion string) (Attachment, document.Parsed, error) {
+	if chunkingVersion != "bounded-unit-v2" && chunkingVersion != "bounded-unit-v3" {
+		return s.Parsed(ctx, projectID, attachmentID)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	value, err := s.repository.Get(ctx, attachmentID)
+	if err != nil || value.ProjectID != projectID {
+		return Attachment{}, document.Parsed{}, fmt.Errorf("index attachment is unavailable")
+	}
+	if value.Format != document.FormatPDF {
+		p, err := s.projects.Get(ctx, projectID)
+		if err != nil {
+			return value, document.Parsed{}, err
+		}
+		parsed, err := s.ensureParsedLocked(ctx, p, value)
+		return value, parsed, err
+	}
+	p, err := s.projects.Get(ctx, projectID)
+	if err != nil {
+		return value, document.Parsed{}, err
+	}
+	if err = project.VerifyPrivateDataLayout(p); err != nil {
+		return value, document.Parsed{}, err
+	}
+	root, err := os.OpenRoot(project.PrivateDataPath(p))
+	if err != nil {
+		return value, document.Parsed{}, err
+	}
+	defer root.Close()
+	data, err := root.ReadFile(filepath.FromSlash(value.CacheRelativePath))
+	var parsed document.Parsed
+	// UnitCount on the attachment may already reflect a newer derived cache.
+	legacy := value
+	legacy.Status = StatusParsing
+	if err != nil || json.Unmarshal(data, &parsed) != nil || !validParsedCacheStructure(parsed, legacy) || parsed.Metadata["structureParser"] == document.PDFParserVersion {
+		return value, document.Parsed{}, fmt.Errorf("旧版 PDF 索引缓存不可用；请重新导入材料以建立新版索引，不能覆盖旧版引用依据")
+	}
+	return value, parsed, nil
+}
+
 func (s *Service) parseAndPersistLocked(ctx context.Context, selectedProject project.Project, value Attachment) (document.Parsed, error) {
+	value = versionedPDFCache(value)
 	rootPath := project.PrivateDataPath(selectedProject)
 	original := filepath.Join(rootPath, filepath.FromSlash(value.StorageRelativePath))
 	if !insidePath(rootPath, original) {
@@ -781,6 +833,15 @@ func (s *Service) parseAndPersistLocked(ctx context.Context, selectedProject pro
 		return document.Parsed{}, err
 	}
 	return parsed, nil
+}
+
+// Keep earlier derived text intact for audit; original PDF bytes and persisted
+// attachment identity are unchanged. Each parser generation has its own cache.
+func versionedPDFCache(value Attachment) Attachment {
+	if value.Format == document.FormatPDF {
+		value.CacheRelativePath = filepath.ToSlash(filepath.Join("cache", "documents", document.PDFParserVersion, value.ID+".json"))
+	}
+	return value
 }
 
 func verifyStoredObject(path string, expectedSize int64, expectedHash string) error {

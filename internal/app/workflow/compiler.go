@@ -117,6 +117,7 @@ func (c *Compiler) Compile(ctx context.Context, definition Definition) (Compilat
 			draft.required["candidates"] = true
 			draft.inputs["screening"] = TypeObject
 			draft.inputs["referenceMaterials"] = TypeArray
+			draft.inputs["reuseSelectedMaterials"] = TypeBoolean
 			draft.outputs["selectedCandidateIds"] = TypeArray
 			draft.outputs["selectedAttachmentIds"] = TypeArray
 			draft.outputs["selectionAudit"] = TypeObject
@@ -130,6 +131,7 @@ func (c *Compiler) Compile(ctx context.Context, definition Definition) (Compilat
 			draft.inputs["candidates"] = TypeCitations
 			draft.required["candidates"] = true
 			draft.inputs["screening"] = TypeObject
+			draft.inputs["selectedMaterialOnly"] = TypeBoolean
 			draft.outputs["citations"] = TypeCitations
 			draft.outputs["selectionAudit"] = TypeObject
 			diagnostics = validateArguments(node.Arguments, draft.inputs, path+".arguments", diagnostics)
@@ -229,7 +231,7 @@ func (c *Compiler) Compile(ctx context.Context, definition Definition) (Compilat
 					continue
 				}
 				if node.Kind == NodeAgentStage && !agentStageToolSafe(definition) {
-					diagnostics = append(diagnostics, diagnostic("error", "unsafe_agent_tool", toolPath, "Agent Stage tools must be idempotent observation tools and may only require Workspace read or network access; use explicit Workflow nodes for execution, writes, dependency changes, secrets or external paths"))
+					diagnostics = append(diagnostics, diagnostic("error", "unsafe_agent_tool", toolPath, "Agent Stage tools must be idempotent observation tools or the exact host-defined selected-task material capability; use explicit Workflow nodes for other writes, execution, dependency changes, secrets or external paths"))
 					continue
 				}
 				permissions, _ := json.Marshal(definition.Permissions)
@@ -348,6 +350,12 @@ func (c *Compiler) Compile(ctx context.Context, definition Definition) (Compilat
 }
 
 func agentStageToolSafe(definition tool.Definition) bool {
+	// A single content-addressed task-material capability is explicitly allowed;
+	// this is not a blanket workspace.write exception or a name-only allowlist.
+	if tool.IsResearchMaterialDefinition(definition) {
+		return true
+	}
+
 	if !definition.Idempotent || (definition.Risk != tool.RiskLow && definition.Risk != tool.RiskModerate) {
 		return false
 	}

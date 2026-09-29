@@ -1083,7 +1083,7 @@ func annotateStarterRoutesForSelection(plan *ResearchStarterPlan, context Resear
 		route.ValidationError = ""
 		// New planner output is semantic only. Compile it before any route
 		// validation so the model never controls executable order or ports.
-		if materialized, materializeErr := materializeSemanticResearchRoute(*route); materializeErr != nil {
+		if materialized, materializeErr := materializeSemanticResearchRoute(*route, context); materializeErr != nil {
 			markInvalidResearchRoute(route, materializeErr.Error())
 			continue
 		} else {
@@ -1237,7 +1237,7 @@ func routeDefinition(route ResearchRoute, starter ResearchStarterContext) (Templ
 	if starter.PlannerVersion != dynamicResearchPlannerVersion {
 		return Template{}, nil, false, fmt.Errorf("候选路线必须由当前动态研究规划器生成")
 	}
-	materialized, err := materializeSemanticResearchRoute(route)
+	materialized, err := materializeSemanticResearchRoute(route, starter)
 	if err != nil {
 		return Template{}, nil, false, err
 	}

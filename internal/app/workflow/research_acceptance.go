@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-const dynamicResearchReviewVersion = "dynamic-independent-review-v4"
+const dynamicResearchReviewVersion = "dynamic-independent-review-v6"
 
 func isResearchAcceptanceSchema(schema json.RawMessage) bool {
 	return isIndependentReviewSchema(schema) && schemaDeclaresProperty(schema, "acceptanceChecks")
@@ -30,7 +30,7 @@ func researchAcceptanceReviewSchema() json.RawMessage {
 	_ = json.Unmarshal(independentReviewSchema(), &schema)
 	schema["required"] = append(schema["required"].([]any), "acceptanceChecks")
 	schema["properties"].(map[string]any)["acceptanceChecks"] = map[string]any{
-		"type": "array", "minItems": 1, "maxItems": 30,
+		"type": "array", "minItems": 1, "maxItems": 32,
 		"items": map[string]any{
 			"type": "object", "additionalProperties": false,
 			"required": []string{"criterionId", "status", "basis"},
@@ -65,8 +65,10 @@ func researchAcceptanceCriteria(contract json.RawMessage) ([]ResearchAcceptanceC
 
 func validateResearchAcceptance(output, input json.RawMessage) error {
 	var stage struct {
-		Contract json.RawMessage               `json:"researchContract"`
-		Criteria []ResearchAcceptanceCriterion `json:"acceptanceCriteria"`
+		RequireOriginalDelivery bool                          `json:"requireOriginalDelivery"`
+		RequireEvidenceGapCheck bool                          `json:"requireEvidenceGapCheck"`
+		Contract                json.RawMessage               `json:"researchContract"`
+		Criteria                []ResearchAcceptanceCriterion `json:"acceptanceCriteria"`
 	}
 	if json.Unmarshal(input, &stage) != nil {
 		return fmt.Errorf("科研验收输入无效")
@@ -74,6 +76,13 @@ func validateResearchAcceptance(output, input json.RawMessage) error {
 	expected, err := researchAcceptanceCriteria(stage.Contract)
 	if err != nil {
 		return err
+	}
+	if stage.RequireOriginalDelivery {
+		expected = appendOriginalDeliveryCriterion(expected)
+	}
+	originalDeliveryIndex := len(expected) - 1
+	if stage.RequireEvidenceGapCheck {
+		expected = appendEvidenceGapCriterion(expected)
 	}
 	if len(stage.Criteria) != len(expected) {
 		return fmt.Errorf("验收清单与冻结研究目标不一致")
@@ -106,7 +115,57 @@ func validateResearchAcceptance(output, input json.RawMessage) error {
 	if failed && (review.Approved || len(review.Corrections) == 0) {
 		return fmt.Errorf("验收条件尚未满足：必须拒绝交付并给出可执行的修正要求")
 	}
+	if stage.RequireOriginalDelivery {
+		var scope struct {
+			Screening struct {
+				Coverage struct {
+					Sufficient *bool `json:"sufficientForClaimedScope"`
+				} `json:"coverage"`
+			} `json:"evidenceScreening"`
+		}
+		_ = json.Unmarshal(input, &scope)
+		if scope.Screening.Coverage.Sufficient != nil && !*scope.Screening.Coverage.Sufficient {
+			for _, check := range review.Checks {
+				if check.CriterionID == expected[originalDeliveryIndex].ID && check.Status != "not_met" {
+					return fmt.Errorf("当前证据尚不足以支持原始范围；接受有限证据不等于完成原始交付，最后一项必须为 not_met")
+				}
+			}
+		}
+	}
+	if stage.RequireEvidenceGapCheck {
+		if claims := unsupportedReportAbsenceClaims(input); len(claims) > 0 {
+			for _, check := range review.Checks {
+				if check.CriterionID == expected[len(expected)-1].ID && check.Status != "not_met" {
+					return fmt.Errorf("交付稿存在没有对应原文依据的未报告断言：%s；缺项验收必须 not_met，要求补查或改为尚未核验，不能仅因缺项清单为空而放行", claims[0])
+				}
+			}
+		}
+		var scope struct {
+			Screening struct {
+				Gaps []evidenceGap `json:"evidenceGaps"`
+			} `json:"evidenceScreening"`
+		}
+		_ = json.Unmarshal(input, &scope)
+		for _, g := range scope.Screening.Gaps {
+			if !g.Required || g.Status == "explicitly_not_reported" {
+				continue
+			}
+			for _, check := range review.Checks {
+				if check.CriterionID == expected[len(expected)-1].ID && check.Status != "not_met" {
+					return fmt.Errorf("核心缺项 %s 尚未核验；缺项审查必须为 not_met，不能把未检索到当原文未报告", g.Field)
+				}
+			}
+		}
+	}
 	return nil
+}
+
+func appendEvidenceGapCriterion(criteria []ResearchAcceptanceCriterion) []ResearchAcceptanceCriterion {
+	return append(criteria, ResearchAcceptanceCriterion{ID: fmt.Sprintf("criterion-%d", len(criteria)+1), Text: "逐项核对报告中的缺项断言（含自增表格列）：未检索到、无法读取、原文明示未报告必须区分；仅前两种不能写成原文未报告。对照 evidenceScreening.evidenceGaps、实际补查记录和当前原文，而非只复述报告。核心字段仍未核验则不通过并回到证据综合；非核心字段可省略或明确尚未核验。OR/RR/HR 与绝对发生率等不同指标不能混填。审查通过不证明通读全文或穷尽检索。"})
+}
+
+func appendOriginalDeliveryCriterion(criteria []ResearchAcceptanceCriterion) []ResearchAcceptanceCriterion {
+	return append(criteria, ResearchAcceptanceCriterion{ID: fmt.Sprintf("criterion-%d", len(criteria)+1), Text: "原始研究目标要求的核心交付已实际完成；未核验、待补充、空白字段以及仅接受有限证据初稿，均不能代替要求的结果。没有编造数据不等于已完成任务。"})
 }
 
 // Preserve the existing tool contract: the full review (including criterion

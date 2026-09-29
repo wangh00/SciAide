@@ -2,6 +2,7 @@ package connectors
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -9,6 +10,26 @@ import (
 
 	appresearch "github.com/wangh00/SciAide/internal/app/research"
 )
+
+func TestEuropePMCStatisticalAbstractSurvivesConnector(t *testing.T) {
+	abstract := `<h4>Results</h4>β=-0.72, p<.005), each additional class improved 0.72 points.<h4>Conclusion</h4>Association.`
+	server, client := fixtureServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"resultList": map[string]any{"result": []any{map[string]string{"id": "123", "source": "MED", "title": "Heated yoga", "abstractText": abstract}}}})
+	})
+	defer server.Close()
+	works, err := newEuropePMC(client, server.URL).Search(context.Background(), appresearch.SearchOptions{Query: "yoga", Limit: 20})
+	if err != nil || len(works) != 1 {
+		t.Fatal(works, err)
+	}
+	if !strings.Contains(works[0].Abstract, "p<.005") || !strings.Contains(works[0].Abstract, "each additional class") {
+		t.Fatal(works[0].Abstract)
+	}
+	var snapshot europePMCRecord
+	if json.Unmarshal(works[0].RawSnapshot, &snapshot) != nil || snapshot.Abstract != abstract {
+		t.Fatal("raw evidence changed")
+	}
+}
 
 func fixtureServer(t *testing.T, handler http.HandlerFunc) (*httptest.Server, *Client) {
 	t.Helper()

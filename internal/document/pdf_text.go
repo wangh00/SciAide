@@ -31,11 +31,29 @@ func positionedPDFText(ctx context.Context, page pdfreader.Page) (text string, e
 	synthetic := map[int]bool{}
 	position := 0
 	var encoding pdfreader.TextEncoding
+	var unicodeMap map[byte]string
+	var mappingErr error
+	mappings := map[string]map[byte]string{}
 	decodedLength := func(raw string) int {
 		if encoding == nil {
 			return utf8.RuneCountInString(raw)
 		}
 		return utf8.RuneCountInString(encoding.Decode(raw))
+	}
+	advance := func(raw string) {
+		length := decodedLength(raw)
+		if unicodeMap != nil {
+			if length != len(raw) || position+length > len(glyphs) {
+				mappingErr = fmt.Errorf("simple-font PDF glyph alignment mismatch")
+				return
+			}
+			for i := 0; i < len(raw); i++ {
+				if decoded, ok := unicodeMap[raw[i]]; ok {
+					glyphs[position+i].S = decoded
+				}
+			}
+		}
+		position += length
 	}
 	pdfreader.Interpret(page.V.Key("Contents"), func(stack *pdfreader.Stack, op string) {
 		args := make([]pdfreader.Value, stack.Len())
@@ -45,11 +63,19 @@ func positionedPDFText(ctx context.Context, page pdfreader.Page) (text string, e
 		switch op {
 		case "Tf":
 			if len(args) == 2 {
-				encoding = page.Font(args[0].Name()).Encoder()
+				name := args[0].Name()
+				font := page.Font(name)
+				encoding = font.Encoder()
+				var ok bool
+				unicodeMap, ok = mappings[name]
+				if !ok && mappingErr == nil {
+					unicodeMap, mappingErr = simplePDFUnicode(font)
+					mappings[name] = unicodeMap
+				}
 			}
 		case "Tj", "'", "\"":
 			if len(args) > 0 {
-				position += decodedLength(args[len(args)-1].RawString())
+				advance(args[len(args)-1].RawString())
 			}
 		case "TJ":
 			if len(args) != 1 {
@@ -58,7 +84,7 @@ func positionedPDFText(ctx context.Context, page pdfreader.Page) (text string, e
 			for n := 0; n < args[0].Len(); n++ {
 				v := args[0].Index(n)
 				if v.Kind() == pdfreader.String {
-					position += decodedLength(v.RawString())
+					advance(v.RawString())
 				}
 			}
 			for n := decodedLength("\n"); n > 0; n-- {
@@ -67,6 +93,9 @@ func positionedPDFText(ctx context.Context, page pdfreader.Page) (text string, e
 			}
 		}
 	})
+	if mappingErr != nil {
+		return "", mappingErr
+	}
 	if position != len(glyphs) {
 		return "", fmt.Errorf("PDF glyph stream alignment mismatch")
 	}
@@ -99,6 +128,15 @@ func joinPDFGlyphs(ctx context.Context, glyphs []pdfreader.Text) (string, error)
 			return "", fmt.Errorf("invalid PDF glyph coordinates")
 		}
 		value := pdfLigatures.Replace(glyph.S)
+		var visible strings.Builder
+		for _, r := range value {
+			if r == '\ufffd' || (unicode.IsControl(r) && !unicode.IsSpace(r)) || unicode.Is(unicode.Co, r) {
+				fmt.Fprintf(&visible, "[无法解码字形:%U]", r)
+			} else {
+				visible.WriteRune(r)
+			}
+		}
+		value = visible.String()
 		first, _ := utf8.DecodeRuneInString(value)
 		if havePrevious {
 			size := math.Max(1, math.Min(math.Abs(previous.FontSize), math.Abs(glyph.FontSize)))

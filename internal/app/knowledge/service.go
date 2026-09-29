@@ -1008,7 +1008,7 @@ func fitSearchResultBudget(values []Match, maximum int) []Match {
 }
 
 func (s *Service) queueMissingProjectDocuments(ctx context.Context, selectedProject project.Project, version IndexVersion) error {
-	documents, err := s.repository.ListDocuments(ctx, selectedProject.ID)
+	documents, err := s.repository.ListIndexableDocuments(ctx, selectedProject.ID)
 	if err != nil {
 		return fmt.Errorf("list selected knowledge documents: %w", err)
 	}
@@ -1102,7 +1102,7 @@ func (s *Service) ensureProjectVersion(ctx context.Context, projectID string) (p
 }
 
 func (s *Service) readyVersionSearchable(ctx context.Context, selectedProject project.Project, version IndexVersion) (bool, error) {
-	documents, err := s.repository.ListDocuments(ctx, selectedProject.ID)
+	documents, err := s.repository.ListIndexableDocuments(ctx, selectedProject.ID)
 	if err != nil {
 		return false, fmt.Errorf("list ready knowledge documents: %w", err)
 	}
@@ -1133,7 +1133,7 @@ func (s *Service) tryActivate(ctx context.Context, selectedProject project.Proje
 	if version.Status == IndexReady {
 		return true, nil
 	}
-	documents, err := s.repository.ListDocuments(ctx, selectedProject.ID)
+	documents, err := s.repository.ListIndexableDocuments(ctx, selectedProject.ID)
 	if err != nil {
 		return false, fmt.Errorf("list selected documents for index activation: %w", err)
 	}
@@ -1229,7 +1229,16 @@ func (s *Service) processNext(ctx context.Context, projectID string) (bool, erro
 		cancel()
 		s.unregisterRunning(work.Job.ID)
 	}()
-	value, parsed, processErr := s.attachments.Parsed(jobCtx, work.ProjectID(), work.Job.AttachmentID)
+	var value attachment.Attachment
+	var parsed document.Parsed
+	var processErr error
+	if versioned, ok := s.attachments.(interface {
+		ParsedForIndexVersion(context.Context, string, string, string) (attachment.Attachment, document.Parsed, error)
+	}); ok {
+		value, parsed, processErr = versioned.ParsedForIndexVersion(jobCtx, work.ProjectID(), work.Job.AttachmentID, work.Version.ChunkingVersion)
+	} else {
+		value, parsed, processErr = s.attachments.Parsed(jobCtx, work.ProjectID(), work.Job.AttachmentID)
+	}
 	if processErr == nil {
 		if value.ID != work.Job.AttachmentID || value.ProjectID != work.Job.ProjectID || value.SHA256 != work.Document.AttachmentSHA256 || value.Status != attachment.StatusReady {
 			processErr = fmt.Errorf("attachment changed before knowledge indexing")

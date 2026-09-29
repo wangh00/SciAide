@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -232,7 +233,7 @@ type ImportCandidateResult struct {
 }
 
 type DiscoveryService struct {
-	fullTexts    fullTextCache
+	importMu     sync.Mutex
 	research     *Service
 	repository   DiscoveryRepository
 	projects     DiscoveryProjectLoader
@@ -523,6 +524,8 @@ func (s *DiscoveryService) UpdateReview(ctx context.Context, command ReviewComma
 }
 
 func (s *DiscoveryService) ImportCandidate(ctx context.Context, command ImportCandidateCommand) (result ImportCandidateResult, returnErr error) {
+	s.importMu.Lock()
+	defer s.importMu.Unlock()
 	projectID, candidateID := strings.TrimSpace(command.ProjectID), strings.TrimSpace(command.CandidateID)
 	researchTaskID := strings.TrimSpace(command.ResearchTaskID)
 	selected, err := s.projects.Get(ctx, projectID)
@@ -558,6 +561,18 @@ func (s *DiscoveryService) ImportCandidate(ctx context.Context, command ImportCa
 		if !supported {
 			return result, fmt.Errorf("task-isolated research imports are not supported by this repository")
 		}
+		if recovery, ok := s.repository.(interface {
+			RecoverMaterialIntent(context.Context, string, string, string) (bool, error)
+		}); ok {
+			// No import row on the first request is normal; lookup before recovery.
+			if _, found, err := taskRepository.GetCandidateTaskImport(ctx, projectID, candidateID, researchTaskID); err != nil {
+				return result, err
+			} else if found {
+				if _, err := recovery.RecoverMaterialIntent(ctx, projectID, candidateID, researchTaskID); err != nil {
+					return result, err
+				}
+			}
+		}
 		if state, found, stateErr := taskRepository.GetCandidateTaskImport(ctx, projectID, candidateID, researchTaskID); stateErr != nil {
 			return result, stateErr
 		} else if found {
@@ -568,6 +583,14 @@ func (s *DiscoveryService) ImportCandidate(ctx context.Context, command ImportCa
 	// must still pass through the scoped attachment importer: the candidate
 	// row stores only the latest attachment ID and must not silently point a
 	// different research task at another task's attachment.
+	repairMetadata := false
+	if researchTaskID != "" && mode != MaterializeFullText && candidate.ImportKind != ImportFullText {
+		// Only an explicit task import (including a confirmed evidence rewind)
+		// may create corrected bytes. Reads and application startup never do.
+		if recovered, changed := RecoverCandidateAbstracts(candidate); changed {
+			candidate, repairMetadata = recovered, true
+		}
+	}
 	if candidate.ImportStatus == ImportImported && candidate.AttachmentID != "" && researchTaskID == "" && (mode != MaterializeFullText || candidate.ImportKind == ImportFullText) {
 		return ImportCandidateResult{Candidate: candidate, Warning: candidate.ImportError}, nil
 	}
@@ -576,12 +599,21 @@ func (s *DiscoveryService) ImportCandidate(ctx context.Context, command ImportCa
 			Get(context.Context, string) (attachment.Attachment, error)
 		}); ok {
 			if existing, getErr := scoped.Get(ctx, candidate.AttachmentID); getErr == nil && existing.ProjectID == projectID && (existing.ScopeKind == attachment.ScopeProjectShared || existing.ScopeKind == attachment.ScopeTask && existing.ResearchTaskID == strings.TrimSpace(command.ResearchTaskID)) {
-				return ImportCandidateResult{Candidate: candidate, Attachment: existing, Warning: candidate.ImportError}, nil
+				if repairMetadata {
+					fingerprint, ok := s.materializer.(interface{ MetadataSHA256(Candidate) string })
+					repairMetadata = !ok || fingerprint.MetadataSHA256(candidate) != existing.SHA256
+				}
+				if !repairMetadata {
+					if err := s.knowledge.Enqueue(ctx, existing); err != nil {
+						return result, err
+					}
+					return ImportCandidateResult{Candidate: candidate, Attachment: existing, Warning: candidate.ImportError}, nil
+				}
 			}
 		}
 	}
 	now := s.now()
-	stateCommand := ImportStateCommand{ProjectID: projectID, CandidateID: candidateID, ResearchTaskID: researchTaskID, Status: ImportImporting, At: now}
+	stateCommand := ImportStateCommand{ProjectID: projectID, CandidateID: candidateID, ResearchTaskID: researchTaskID, Status: ImportImporting, Kind: candidate.ImportKind, AttachmentID: candidate.AttachmentID, At: now}
 	if taskRepository != nil {
 		if _, err := taskRepository.UpdateCandidateTaskImport(ctx, stateCommand); err != nil {
 			return result, err
@@ -609,6 +641,15 @@ func (s *DiscoveryService) ImportCandidate(ctx context.Context, command ImportCa
 		return result, err
 	}
 	defer s.materializer.Cleanup(materialized)
+	if researchTaskID != "" && (materialized.Kind == ImportFullText || repairMetadata) {
+		if intents, ok := s.repository.(interface {
+			RecordMaterialIntent(context.Context, string, string, string, string, ImportKind) error
+		}); ok {
+			if err := intents.RecordMaterialIntent(ctx, projectID, candidateID, researchTaskID, materialized.SHA256, materialized.Kind); err != nil {
+				return result, err
+			}
+		}
+	}
 	var imported attachment.Attachment
 	if scoped, ok := s.attachments.(ResearchTaskAttachmentImporter); ok {
 		imported, err = scoped.ImportResearchStagedForTask(ctx, projectID, materialized.Path, materialized.Name, command.ResearchTaskID)
@@ -621,21 +662,26 @@ func (s *DiscoveryService) ImportCandidate(ctx context.Context, command ImportCa
 	if materialized.SHA256 != "" && !strings.EqualFold(materialized.SHA256, imported.SHA256) {
 		return result, fmt.Errorf("research attachment SHA256 changed between download and import")
 	}
-	if err := s.knowledge.Enqueue(ctx, imported); err != nil {
-		return result, err
-	}
+	// Once bytes exist, finish the tiny durable binding even if cancellation arrived.
+	persistCtx, cancelPersist := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancelPersist()
 	stateCommand = ImportStateCommand{ProjectID: projectID, CandidateID: candidateID, ResearchTaskID: researchTaskID, Status: ImportImported, Kind: materialized.Kind, AttachmentID: imported.ID, At: s.now()}
 	stateCommand.ErrorMessage = materialized.Warning
 	if taskRepository != nil {
 		var state CandidateTaskImport
-		state, err = taskRepository.UpdateCandidateTaskImport(ctx, stateCommand)
+		state, err = taskRepository.UpdateCandidateTaskImport(persistCtx, stateCommand)
 		if err == nil {
 			candidate.ImportStatus, candidate.ImportKind, candidate.AttachmentID, candidate.ImportError = state.Status, state.Kind, state.AttachmentID, state.ErrorMessage
 		}
 	} else {
-		candidate, err = s.repository.UpdateImportState(ctx, stateCommand)
+		candidate, err = s.repository.UpdateImportState(persistCtx, stateCommand)
 	}
 	if err != nil {
+		return result, err
+	}
+	// candidate now contains the bound attachment; failure cleanup preserves it.
+	// The attachment is bound before indexing; explicit sync repairs a cancelled queue.
+	if err := s.knowledge.Enqueue(persistCtx, imported); err != nil {
 		return result, err
 	}
 	return ImportCandidateResult{Candidate: candidate, Attachment: imported, Warning: materialized.Warning}, nil

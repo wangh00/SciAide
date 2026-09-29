@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-const selectedEvidenceVersion = "selected-evidence-v5"
+const selectedEvidenceVersion = "selected-evidence-v6"
 
 var evidenceMarkerPattern = regexp.MustCompile(`\[K-[A-Za-z0-9_-]+\]`)
 
@@ -19,8 +19,10 @@ const selectedEvidenceInstruction = "用户已确认纳入材料。本阶段按�
 func selectedEvidenceSchema() json.RawMessage {
 	s := decodeObject(evidenceScreeningSchema())
 	p := s["properties"].(map[string]any)
+	p["supplementalQueries"] = map[string]any{"type": "array", "maxItems": 4, "items": map[string]any{"type": "string", "minLength": 1, "maxLength": 200}}
+	p["evidenceGaps"] = evidenceGapSchema()
 	p["documentAnalyses"] = map[string]any{"type": "array", "maxItems": 5, "items": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"documentId", "finding", "applicability", "limitations", "references"}, "properties": map[string]any{
-		"documentId": map[string]any{"type": "string", "minLength": 1}, "finding": map[string]any{"type": "string", "minLength": 1, "maxLength": 900}, "applicability": map[string]any{"type": "string", "minLength": 1, "maxLength": 600}, "limitations": map[string]any{"type": "string", "minLength": 1, "maxLength": 600}, "references": map[string]any{"type": "array", "maxItems": 3, "items": map[string]any{"type": "string"}},
+		"documentId": map[string]any{"type": "string", "minLength": 1}, "finding": map[string]any{"type": "string", "minLength": 1, "maxLength": 900}, "applicability": map[string]any{"type": "string", "minLength": 1, "maxLength": 600}, "limitations": map[string]any{"type": "string", "minLength": 1, "maxLength": 600}, "references": map[string]any{"type": "array", "maxItems": 20, "items": map[string]any{"type": "string"}},
 	}}}
 	p["citationAssessments"].(map[string]any)["maxItems"] = 300
 	assessment := p["citationAssessments"].(map[string]any)["items"].(map[string]any)
@@ -41,6 +43,9 @@ type selectedEvidenceInput struct {
 
 func prepareSelectedEvidence(detail RunDetail, input json.RawMessage) (json.RawMessage, error) {
 	args := decodeObject(input)
+	_, rounds := supplementaryEvidenceQueries(detail)
+	args["localEvidenceSearchRoundsRemaining"] = max(0, 2-rounds)
+	args["localEvidenceSearchQueries"], _ = supplementaryEvidenceQueries(detail)
 	docs := stringSliceValue(args["documentIds"])
 	docs = appendUnique(nil, docs...)
 	if len(docs) == 0 || len(docs) > 100 {
@@ -175,8 +180,12 @@ func selectedEvidencePhaseNode(node CompiledNode, input json.RawMessage) Compile
 		delete(p, "documentAnalyses")
 	}
 	node.Prompt = selectedEvidenceOverviewInstruction
+	node.Prompt += "\n对于已经索引的本地全文，当前检索片段未出现不代表原文未报告。关键结果、方法、适用人群或可信度缺失时，提供 supplementalQueries（1至4个简短学术检索式，针对缺项且保留研究主题）；宿主最多两轮在同一批所选文档中补查并重新签发引用，再进入人工确认。不要请求重新上传已存在的文件。补查额度耗尽后明确尚未核验和具体缺口，不得编造数据或声称已完成原始任务。单篇文献任务不以文献篇数不足判定失败，按要求的字段覆盖判断。"
+	if in.Info.Phase != "batch" && schemaDeclaresProperty(node.OutputSchema, "evidenceGaps") {
+		node.Prompt += "\n" + evidenceGapInstruction
+	}
 	node.Prompt += "\nmaterialOrigin=user_selected 表示用户指定的资料，不代表相关、可信或已获得全文。按原文判断采用、背景或排除，并在documentAnalyses中说明。没有candidateId的资料不能调用builtin.research.full_text.read；仅使用当前索引签发的引用，不能凭文件名编造题录。"
-	node.Prompt += "\n初始材料以已有摘要为主。仅关键结论、冲突或缺失方法/结果需要时调用builtin.research.full_text.read，candidateId从importedMaterials逐字取，query指定要核验的具体结果词。fullTextAvailability=unavailable的材料不要调用；requestable_not_verified仅表示存在可尝试入口，不表示已获得全文。单篇一次，返回status=unavailable时核验未完成，保留原证据限制并继续其他材料，不重复请求。来源失败后继续其他材料并披露限制，不循环下载。工具是核验信息，不产生新[K]引用，也不更改已冻结材料；超出原签发证据的结论仍须标为待补证，不能静默提升为已支持。"
+	node.Prompt += "\n初始材料可能是摘要，也可能是已经上传的全文；按材料来源与实际原文判断，不预设只有摘要。仅关键结论、冲突或缺失方法/结果需要时调用builtin.research.full_text.read，candidateId从importedMaterials逐字取，query指定要核验的具体结果词。fullTextAvailability=unavailable的材料不要调用；requestable_not_verified仅表示存在可尝试入口，不表示已获得全文。单篇一次，返回status=unavailable时核验未完成，保留原证据限制并继续其他材料，不重复请求。来源失败后继续其他材料并披露限制，不循环下载。全文成功后保存为本任务新材料，旧附件和冻结引用不覆盖。宿主会自动从材料同步与引用检索重新进入综合，不重新检索候选。当前工具片段尚未签发新[K]引用，不用旧摘要引用支持全文新增结论；等待更新后提供的新引用。importKind=full_text表示已经保存全文，改用当前资源读取，不重复下载。"
 	node.Prompt += "\n每条推荐引用的supportingQuote必须逐字摘录当前candidate.quote中直接支持reason的连续原句，不能用同文档其他块替代。仅题名作者DOI等题录不得推荐为效果依据。缺关键统计先核查已提供的完整块，不把界面短片段的截断当来源缺失。sourceLevel按当前片段实际内容判断，不按PDF扩展名。独立研究数需要跨文档试验身份核对；文档数不是独立试验数。"
 	node.Prompt += "\n最终citationAssessments只评估实际推荐的引用及需要指出问题的引用，不逐条重写全部检索摘录。推荐标记必须有对应非exclude判定。无引用的文档记录明确说明未用于结论的原因。"
 	if in.Info.Phase == "batch" {
@@ -218,6 +227,9 @@ func validateSelectedEvidence(output, input json.RawMessage) error {
 		}
 	}
 	if in.Info.Phase != "batch" {
+		if err := validateEvidenceGaps(output, input); err != nil {
+			return err
+		}
 		// Unused background material need not block a claim supported by other
 		// evidence; every document must still disclose its disposition.
 		var result struct {
@@ -251,7 +263,7 @@ func validateSelectedEvidence(output, input json.RawMessage) error {
 				q := strings.TrimSpace(a.SupportingQuote)
 				c := byRef[a.Reference]
 				if q == "" || !strings.Contains(c.Quote, q) {
-					return fmt.Errorf("citation %s supportingQuote must occur in this exact source excerpt；请从该引用对应的 candidate.quote 复制连续原文，不要改写数字、合并其他片段或使用同文献的另一引用。词内连字符与空白排版差异已自动处理，仍不匹配时请重新选择原句或排除该引用", a.Reference)
+					return &CitationQuoteError{Reference: a.Reference, SupportingQuote: a.SupportingQuote, CandidateQuote: c.Quote}
 				}
 				if strings.Contains(c.Quote, "## Bibliographic metadata") && !strings.Contains(c.Quote, "## Abstract") {
 					return fmt.Errorf("citation %s contains bibliographic metadata, not result evidence", a.Reference)
