@@ -293,7 +293,7 @@ func (s *Service) importOneWithScope(ctx context.Context, selectedProject projec
 	}
 	format, supported := document.FormatForName(formatName)
 	if sourcePath == "" || !supported {
-		return Attachment{}, fmt.Errorf("supported formats are PDF, DOCX, XLSX, TXT, Markdown, CSV, TSV, JPEG, PNG and WebP")
+		return Attachment{}, fmt.Errorf("supported formats are PDF, DOCX, XLSX, TXT, Markdown, CSV, TSV, Python/R/Julia/MATLAB/SQL source text, JPEG, PNG and WebP")
 	}
 	absSource, err := filepath.Abs(sourcePath)
 	if err != nil {

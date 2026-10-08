@@ -1,0 +1,16 @@
+[
+  {
+    "input": "02-data/materials/initial/wine-red-initial-1000.csv",
+    "rows": 1000,
+    "columns": 14,
+    "missing_cells": 0,
+    "shape_checked_all_rows": true
+  },
+  {
+    "input": "02-data/materials/followup/wine-red-full-1599.csv",
+    "rows": 1599,
+    "columns": 14,
+    "missing_cells": 0,
+    "shape_checked_all_rows": true
+  }
+]

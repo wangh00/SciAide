@@ -11,6 +11,7 @@ import (
 
 	"github.com/wangh00/SciAide/internal/app/citation"
 	"github.com/wangh00/SciAide/internal/app/conversation"
+	"github.com/wangh00/SciAide/internal/app/tool"
 	"github.com/wangh00/SciAide/internal/modelcap"
 )
 
@@ -350,15 +351,18 @@ func completeAssistantMessageWithCitations(ctx context.Context, tx *sql.Tx, mess
 		}
 		seenIDs[value.ID] = struct{}{}
 		seenReferences[value.Reference] = struct{}{}
-		var trustedCall int
+		var toolName, structured string
 		if err := tx.QueryRowContext(ctx, `
-			SELECT count(*)
+			SELECT tc.tool_name,COALESCE(tr.structured_json,'')
 			FROM tool_calls tc
 			JOIN tool_results tr ON tr.tool_call_id=tc.id
-			WHERE tc.id=? AND tc.run_id=? AND tc.tool_name IN (?,?) AND tc.status='completed' AND tr.status='success'`, value.ToolCallID, runID, citation.KnowledgeToolName, citation.WorkflowSeedToolName).Scan(&trustedCall); err != nil {
+			WHERE tc.id=? AND tc.run_id=? AND tc.status='completed' AND tr.status='success'`, value.ToolCallID, runID).Scan(&toolName, &structured); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("citation tool call is not a successful trusted evidence source")
+			}
 			return fmt.Errorf("verify citation tool call: %w", err)
 		}
-		if trustedCall != 1 {
+		if !citation.IsTrustedKnowledgeCall(tool.Call{ToolName: toolName, Status: tool.CallCompleted, Result: &tool.Result{Status: tool.ResultSuccess, Structured: json.RawMessage(structured)}}) {
 			return fmt.Errorf("citation tool call is not a successful trusted evidence source")
 		}
 		bibliographyID, snapshot, level, snapshotErr := bibliographySnapshotForAttachment(ctx, tx, projectID, value.AttachmentID, updatedAt)

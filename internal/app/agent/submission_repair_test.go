@@ -152,6 +152,37 @@ func TestWorkflowSubmissionCorrectionBudgetExhausted(t *testing.T) {
 	}
 }
 
+func TestWorkflowQuoteFailureKeepsLongDiagnosticOutOfVisibleError(t *testing.T) {
+	bad := `{"items":["value"],"state":"ready"}`
+	scripts := make([][]fake.Step, maxWorkflowContentCorrections+1)
+	for i := range scripts {
+		scripts[i] = submissionScript(bad)
+	}
+	loop, state, provider := newLoopFixture(t, nil, scripts...)
+	bindSubmissionRepair(loop, state)
+	issue := &workflow.CitationQuoteError{Reference: "[K-A]", SupportingQuote: "Invented result.", CandidateQuote: strings.Repeat("Long original source. ", 100)}
+	validationErr := &apperr.Error{Code: "WORKFLOW_AI_SUBMISSION_INVALID", UserMessage: "科研阶段提交未通过业务检查", Details: issue.Error(), Cause: issue}
+	host := &submissionHostFixture{staticResearchGuidance: loop.research.(*staticResearchGuidance), errors: []error{validationErr, validationErr, validationErr}}
+	loop.research = host
+	if got := loop.Run(context.Background(), state.run.ID); got != OutcomeFailed || state.run.ErrorCode != "WORKFLOW_AI_CONTENT_REPAIR_EXHAUSTED" || len(provider.Requests()) != 3 {
+		t.Fatalf("outcome=%s run=%#v", got, state.run)
+	}
+	message := state.run.ErrorMessage
+	if len([]rune(message)) > 220 || !strings.Contains(message, "[K-A]") || !strings.Contains(message, "重试当前阶段") || strings.Contains(message, issue.SupportingQuote) || strings.Contains(message, "candidate.quote") {
+		t.Fatalf("error banner still contains source/repair instructions: %q", message)
+	}
+	if !strings.Contains(state.run.ErrorDetails, issue.CandidateQuote) || !strings.Contains(state.run.ErrorDetails, issue.SupportingQuote) {
+		t.Fatal("detailed quote diagnostic was lost")
+	}
+	requests := provider.Requests()
+	if !strings.Contains(requests[1].Messages[len(requests[1].Messages)-1].Content, issue.CandidateQuote) {
+		t.Fatal("short banner replaced full model repair context")
+	}
+	if state.messages[1].Parts[0].Text != "" {
+		t.Fatal("failed result committed")
+	}
+}
+
 func TestWorkflowSubmissionRepairRetainsCompletedToolResults(t *testing.T) {
 	first := []fake.Step{
 		{Event: model.Event{Type: model.EventToolCall, ToolCall: &model.ToolCall{ID: "read-once", Name: "builtin.fixture", Arguments: json.RawMessage(`{"query":"paper"}`)}}},

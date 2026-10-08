@@ -9,11 +9,11 @@ import (
 	"github.com/wangh00/SciAide/internal/app/tool"
 )
 
-const researchReportVersion = "dynamic-report-v5"
+const researchReportVersion = "dynamic-report-v6"
 const retrievalAppendixHeading = "## 附录：检索方法记录"
 
 func usesReportProvenance(node CompiledNode) bool {
-	return node.ID == "report_drafting" && (node.PromptVersion == researchReportVersion || strings.HasPrefix(node.PromptVersion, researchReportVersion+"-"))
+	return node.ID == "report_drafting" && (node.PromptVersion == researchReportVersion || strings.HasPrefix(node.PromptVersion, researchReportVersion+"-") || node.PromptVersion == "dynamic-report-v5" || strings.HasPrefix(node.PromptVersion, "dynamic-report-v5-"))
 }
 
 func reportRetrievalAppendix(input json.RawMessage) (string, error) {

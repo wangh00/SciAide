@@ -3,6 +3,7 @@ package citation
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -72,7 +73,7 @@ func Resolve(runID, messageID, text string, calls []tool.Call, at time.Time) []c
 	candidates := make(map[string]candidate)
 	ambiguous := make(map[string]struct{})
 	for _, call := range calls {
-		if call.ID == "" || call.RunID != runID || !trustedCitationTool(call.ToolName) || call.Status != tool.CallCompleted || call.Result == nil || call.Result.Status != tool.ResultSuccess {
+		if call.ID == "" || call.RunID != runID || !IsTrustedKnowledgeCall(call) {
 			continue
 		}
 		for _, ref := range call.Result.Citations {
@@ -115,8 +116,27 @@ func Resolve(runID, messageID, text string, calls []tool.Call, at time.Time) []c
 	return result
 }
 
-func trustedCitationTool(name string) bool {
-	return name == KnowledgeToolName || name == WorkflowSeedToolName
+func HasKnowledgeReferences(text string) bool {
+	return len(extractMarkers(text)) != 0
+}
+
+// IsTrustedKnowledgeCall is shared by resolution and terminal persistence so
+// adding a host evidence reader cannot leave the two layers with different
+// source allowlists. A generic resource read is not itself evidence.
+func IsTrustedKnowledgeCall(call tool.Call) bool {
+	if call.Status != tool.CallCompleted || call.Result == nil || call.Result.Status != tool.ResultSuccess {
+		return false
+	}
+	if call.ToolName == KnowledgeToolName || call.ToolName == WorkflowSeedToolName || call.ToolName == "builtin.knowledge.read" {
+		return true
+	}
+	if call.ToolName != "builtin.resource.open" {
+		return false
+	}
+	var env struct {
+		Source string `json:"sourceTool"`
+	}
+	return json.Unmarshal(call.Result.Structured, &env) == nil && env.Source == "builtin.knowledge.read"
 }
 
 func validKnowledgeRef(runID string, ref tool.CitationRef) bool {

@@ -65,7 +65,7 @@ func TestResearchDiscussionNegotiatesThenConfirmsAfterRestart(t *testing.T) {
 		_ = json.Unmarshal(body, &request)
 		discussion := false
 		for _, tool := range request.Tools {
-			if tool.Function.Name == "research_task_read" {
+			if tool.Function.Name == "research_revision_propose" {
 				discussion = true
 			}
 		}
@@ -290,6 +290,12 @@ func TestResearchDiscussionNegotiatesThenConfirmsAfterRestart(t *testing.T) {
 		t.Fatalf("proposal replacement=%+v", second.RevisionProposals)
 	}
 	repository := sqlite.NewWorkflowRuntimeRepository(app.store.DB())
+	if page, err := app.workflow.ReadResearchTask(context.Background(), secondChat.ID, workflow.ResearchTaskReadCommand{Section: "artifacts"}); err != nil || !json.Valid(page) || !strings.Contains(string(page), "artifacts") {
+		t.Fatalf("task-scoped artifact inventory unavailable: %s, %v", page, err)
+	}
+	if len(second.RevisionProposals[1].ReusedStages) == 0 {
+		t.Fatal("revision card did not disclose reused upstream results")
+	}
 	for _, section := range []string{"messages", "attempts", "tool_calls", "revisions"} {
 		if raw, err := repository.ReadResearchDiscussionRecords(context.Background(), completed.Run.ID, section, ""); err != nil || !json.Valid(raw) {
 			t.Fatalf("section=%s err=%v", section, err)
@@ -358,6 +364,62 @@ func TestResearchDiscussionNegotiatesThenConfirmsAfterRestart(t *testing.T) {
 		t.Fatal("double confirmation accepted")
 	}
 	revised := waitForWorkflowState(t, app, project.ID, completed.Run.ID, workflow.RunCompleted, 20*time.Second)
+	baselinePersisted := false
+	for _, event := range revised.Events {
+		if event.Type == "workflow.user_revision_queued" && strings.Contains(string(event.Payload), "comparisonBaseline") {
+			baselinePersisted = true
+		}
+	}
+	if !baselinePersisted {
+		t.Fatal("confirmed revision lost persistent comparison baseline")
+	}
+	index, err := app.workflow.ReadResearchTask(context.Background(), secondChat.ID, workflow.ResearchTaskReadCommand{Section: "revision_index"})
+	if err != nil || !strings.Contains(string(index), confirm.ProposalID) {
+		t.Fatalf("revision index=%s, %v", index, err)
+	}
+	for _, section := range []string{"revision_stage_input", "revision_stage_output"} {
+		page, err := app.workflow.ReadResearchTask(context.Background(), secondChat.ID, workflow.ResearchTaskReadCommand{Section: section, RevisionID: confirm.ProposalID, NodeID: "research_design"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var envelope struct {
+			Content string `json:"content"`
+		}
+		if err := json.Unmarshal(page, &envelope); err != nil {
+			t.Fatal(err)
+		}
+		var historical struct {
+			Attempt    int             `json:"attempt"`
+			Historical bool            `json:"historical"`
+			Value      json.RawMessage `json:"value"`
+		}
+		if err := json.Unmarshal([]byte(envelope.Content), &historical); err != nil {
+			t.Fatal(err)
+		}
+		for _, step := range completed.Steps {
+			if step.NodeID != "research_design" {
+				continue
+			}
+			want := step.Output
+			if section == "revision_stage_input" {
+				want = step.Input
+			}
+			var expected, actual any
+			_ = json.Unmarshal(want, &expected)
+			_ = json.Unmarshal(historical.Value, &actual)
+			left, _ := json.Marshal(expected)
+			right, _ := json.Marshal(actual)
+			if string(left) != string(right) || historical.Attempt != step.Attempt || !historical.Historical {
+				t.Fatal("historical record changed")
+			}
+		}
+	}
+	if _, err := app.workflow.ReadResearchTask(context.Background(), secondChat.ID, workflow.ResearchTaskReadCommand{Section: "revision_stage_output", RevisionID: "missing", NodeID: "research_design"}); err == nil {
+		t.Fatal("missing revision accepted")
+	}
+	if _, err := sqlite.NewWorkflowRuntimeRepository(app.store.DB()).ReadResearchRevisionSnapshot(context.Background(), "another-run", confirm.ProposalID); err == nil {
+		t.Fatal("cross-run revision exposed")
+	}
 	revisedTimeline := readTimeline(project.ID, completed.Run.ResearchTaskID)
 	deliveries, activeDeliveries := 0, 0
 	for _, entry := range revisedTimeline {

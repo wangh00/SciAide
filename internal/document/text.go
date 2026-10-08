@@ -21,6 +21,7 @@ func parseText(ctx context.Context, path string, format Format) (Parsed, error) 
 	defer file.Close()
 	reader := bufio.NewReader(file)
 	collect := collector{}
+	language := SourceLanguage(path)
 	var chunk strings.Builder
 	startLine, line := 1, 0
 	flush := func(endLine int) bool {
@@ -33,7 +34,24 @@ func parseText(ctx context.Context, path string, format Format) (Parsed, error) 
 			kind = "rows"
 			locator = fmt.Sprintf("rows:%d-%d", startLine, endLine)
 		}
-		ok := collect.add(kind, locator, "", chunk.String())
+		ok := true
+		if language != "" {
+			// Generic prose extraction trims leading whitespace, corrupting
+			// Python indentation at chunk boundaries. Keep source verbatim.
+			content := []rune(chunk.String())
+			remaining := MaxExtractedRunes - collect.runes
+			if len(content) > remaining {
+				content = content[:remaining]
+				collect.truncated = true
+			}
+			if len(content) > 0 {
+				collect.units = append(collect.units, Unit{Kind: "source", Locator: locator, Content: string(content)})
+				collect.runes += len(content)
+			}
+			ok = !collect.truncated
+		} else {
+			ok = collect.add(kind, locator, "", chunk.String())
+		}
 		chunk.Reset()
 		startLine = endLine + 1
 		return ok
@@ -64,5 +82,10 @@ func parseText(ctx context.Context, path string, format Format) (Parsed, error) 
 		line = 1
 	}
 	flush(line)
-	return Parsed{Units: collect.units, Truncated: collect.truncated, ExtractedRunes: collect.runes}, nil
+	metadata := map[string]string{}
+	if language != "" {
+		metadata["sourceLanguage"] = language
+		metadata["executionStatus"] = "not_executed"
+	}
+	return Parsed{Units: collect.units, Metadata: metadata, Truncated: collect.truncated, ExtractedRunes: collect.runes}, nil
 }

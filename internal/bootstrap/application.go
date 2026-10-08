@@ -54,7 +54,7 @@ import (
 	wailstransport "github.com/wangh00/SciAide/internal/transport/wails"
 )
 
-const Version = "1.0.2"
+const Version = "1.0.3"
 
 type Options struct {
 	RootDir            string
@@ -287,6 +287,7 @@ func New(options Options) (*Application, error) {
 		builtin.NewListAttachments(attachmentService), builtin.NewInspectDocument(attachmentService),
 		builtin.NewReadDocument(attachmentService), builtin.NewSearchDocument(attachmentService),
 		builtin.NewSearchKnowledge(knowledgeService),
+		builtin.NewReadKnowledge(knowledgeService),
 		builtin.NewResearchCatalog(researchService), builtin.NewResearchSearch(researchService),
 		builtin.NewResearchFetch(researchService),
 		builtin.NewResearchFullTextRead(researchDiscovery),
@@ -487,6 +488,7 @@ func New(options Options) (*Application, error) {
 	workflowAIBridge.SetProcessRuntimeReader(localProcessRunner)
 	workflowRuntime.SetLiteratureCandidateReader(researchWorkflowService)
 	workflowRuntime.SetEvidenceMaterialReader(researchDiscovery)
+	researchWorkflowService.SetIndexedEvidenceSources(workflowRuntime)
 	workflowAIBridge.AddProcessRuntimeReader(pythonProcessRunner)
 	if err := workflowRuntime.SetAIStageExecutor(workflowAIBridge); err != nil {
 		_ = store.Close()

@@ -204,6 +204,9 @@ func TestRevisionPlanPromptAndGateRespectFrozenSchema(t *testing.T) {
 	if prompt := buildAIStagePrompt(detail, detail.Steps[4], node); !strings.Contains(prompt, "Return revisionPlan") {
 		t.Fatal("new review lacks revision instruction")
 	}
+	if prompt := buildAIStagePrompt(detail, detail.Steps[4], node); !strings.Contains(prompt, "these alone are NOT missing user input") || !strings.Contains(prompt, "do not request a second chat/model planning pass") {
+		t.Fatal("review still delegates ordinary confirmation to another plan")
+	}
 	node.OutputSchema = independentReviewSchema()
 	if prompt := buildAIStagePrompt(detail, detail.Steps[4], node); strings.Contains(prompt, "Return revisionPlan") {
 		t.Fatal("legacy schema was instructed to emit invalid new field")
@@ -266,5 +269,32 @@ func TestRetryRecommendationRequiresExplicitConfirmationBeforeReset(t *testing.T
 	command.ExpectedReviewSHA256 = "stale"
 	if _, err := service.Retry(context.Background(), command); err == nil || repository.resets != 1 {
 		t.Fatalf("stale request=%v resets=%d", err, repository.resets)
+	}
+}
+
+func TestReviewRetryShowsPendingPublicationWithoutDuplicateConsent(t *testing.T) {
+	detail := recommendationFixture(t)
+	// Pending publication is part of the continuation scope, not a repeated
+	// action. Only the producer-through-gate interval is reset in SQLite.
+	detail.Run.Compilation.Nodes[2].SideEffect = false
+	detail.Run.Compilation.Nodes = append(detail.Run.Compilation.Nodes, CompiledNode{ID: "publish", Name: "Publish results", Kind: NodeTool, SideEffect: true})
+	detail.Steps = append(detail.Steps, Step{ID: "publish-step", NodeID: "publish", Ordinal: 6, Status: StepQueued})
+	recommendation := researchRevisionRecommendation(detail)
+	if recommendation == nil || recommendation.Status != "recommended" || recommendation.RepeatsSideEffects || len(recommendation.AffectedStages) != 7 || recommendation.AffectedStages[6] != "Publish results" {
+		t.Fatalf("actual suffix omitted: %+v", recommendation)
+	}
+	detail.Run.ResearchTaskID = "task-test"
+	detail.Run.InputsSHA256 = hashJSON(detail.Run.Inputs)
+	encoded, err := canonicalJSON(detail.Run.Compilation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	detail.Run.CompilationSHA256 = hashBytes(encoded)
+	detail.Run.Compilation.CompilationSHA256 = detail.Run.CompilationSHA256
+	repository := &recommendationRetryRepository{detail: detail}
+	service := &RuntimeService{repository: repository, projects: fixedProjectLoader{value: project.Project{WorkspacePath: t.TempDir()}}, permissions: permission.NewEngine(nil), tools: tool.NewService(nil, tool.JSONSchemaValidator{}), now: time.Now, newID: func() (string, error) { return "id", nil }, closed: true}
+	command := RetryCommand{RunID: detail.Run.ID, StepID: detail.Steps[5].ID, UseRecommendation: true, ExpectedReviewSHA256: recommendation.ReviewOutputSHA256}
+	if _, err := service.Retry(context.Background(), command); err != nil || repository.resets != 1 || repository.decision != nil {
+		t.Fatal(err, repository.resets)
 	}
 }

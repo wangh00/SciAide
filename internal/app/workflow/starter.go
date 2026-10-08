@@ -74,6 +74,7 @@ type ResourceSnapshot struct {
 }
 
 type ResearchStarterContext struct {
+	Capabilities      []ResearchCapability          `json:"capabilities,omitempty"`
 	SelectedMaterials []attachment.MessageReference `json:"selectedMaterials,omitempty"`
 	ResearchIdea      string                        `json:"researchIdea"`
 	ResourceSnapshot  ResourceSnapshot              `json:"resourceSnapshot"`
@@ -309,6 +310,7 @@ func (s *StarterService) Start(ctx context.Context, command StartResearchCommand
 	inputs, err := json.Marshal(map[string]any{"starter_context": ResearchStarterContext{
 		ResearchIdea: command.ResearchIdea, ResourceSnapshot: snapshot,
 		SelectedMaterials: references,
+		Capabilities:      researchCapabilities(),
 		StageCatalog:      dynamicResearchStageCatalog(), PlannerVersion: dynamicResearchPlannerVersion,
 	}})
 	if err != nil {

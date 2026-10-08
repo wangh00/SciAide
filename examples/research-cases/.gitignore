@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+
+# Reading copies stay local; their licenses do not grant public redistribution.
+/01-literature/materials/**/*.pdf
+/01-literature/materials/**/*.pages.txt

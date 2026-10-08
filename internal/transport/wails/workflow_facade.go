@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
@@ -241,6 +242,24 @@ func (f *WorkflowFacade) ListProjectRuns(projectID string, limit int) ([]workflo
 
 func (f *WorkflowFacade) GetRun(projectID, runID string) (workflow.RunDetail, error) {
 	return f.runtime.Get(f.lifecycle.Context(), projectID, runID)
+}
+
+func (f *WorkflowFacade) DownloadExecutedPythonCode(projectID, runID, nodeID string, attempt int) (string, error) {
+	source, err := f.runtime.ExecutedPythonCode(f.lifecycle.Context(), projectID, runID, nodeID, attempt)
+	if err != nil {
+		return "", err
+	}
+	destination, err := runtime.SaveFileDialog(f.lifecycle.Context(), runtime.SaveDialogOptions{
+		Title: "下载实际执行的 Python 源码", DefaultFilename: source.FileName,
+		Filters: []runtime.FileFilter{{DisplayName: "Python source (*.py)", Pattern: "*.py"}},
+	})
+	if err != nil || destination == "" {
+		return "", err
+	}
+	if err := os.WriteFile(destination, []byte(source.Code), 0600); err != nil {
+		return "", err
+	}
+	return destination, nil
 }
 
 // GetRunByConversation restores the research workspace for a conversation

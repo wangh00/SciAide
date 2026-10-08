@@ -2,8 +2,14 @@ import { reviewFeedbackModel, ReviewIssues } from './researchReviewPresentation.
 
 export function ResearchReviewFeedback({ issues, errorCode, errorMessage }: { issues?: ReviewIssues | null; errorCode?: string; errorMessage?: string }) {
   const model = reviewFeedbackModel(issues);
+  const findings = issues?.findings ?? [];
+  const repeated = findings.filter(item => item.status === 'open' && (item.origin === 'existing' || item.origin === 'reopened')).length;
+  const newIssues = findings.filter(item => item.status === 'open' && item.origin === 'new').length;
+  const resolved = findings.filter(item => item.status === 'resolved').length;
   return <div className="research-review-feedback">
-    <div className="research-review-summary"><b>{model.title}</b><p>{model.summary}</p><small>下面列出具体修改要求；说明不能替代审查原文。</small></div>
+    <div className="research-review-summary"><span className="research-review-eyebrow">独立审查 · 待返修</span><b>{model.title}</b><p>{model.summary}</p></div>
+    {findings.length > 0 && <div className="research-review-progress" aria-label="审查问题变化"><span>仍未解决或重新出现 <b>{repeated}</b></span><span>新增 <b>{newIssues}</b></span><span>已解决 <b>{resolved}</b></span></div>}
+    {repeated > 0 && <p className="research-review-repeat" role="status">有 {repeated} 项既有问题尚未解决，不代表每轮都是新问题。请先核对下面的修改要求及返修起点。</p>}
     {model.items.length > 0 && <ol className="research-review-fixes">{model.items.map((item, index) => <li key={index}>{item.title && <b>{item.title}</b>}<p>{item.explanation}</p>{item.title && <div><b>审查原文</b><p>{item.raw}</p></div>}</li>)}</ol>}
     {!!issues?.findings?.length && <details className="research-review-technical"><summary>逐项复核记录 · {issues.findings.filter(item => item.status === 'open').length} 项待修正 · {issues.findings.filter(item => item.status === 'resolved').length} 项已解决 · {issues.findings.filter(item => item.status === 'withdrawn').length} 项已撤回</summary>
       <ol>{issues.findings.map(item => <li key={item.id}><b>{item.status === 'resolved' ? '已解决' : item.status === 'withdrawn' ? '已撤回' : item.origin === 'reopened' ? '重新发现' : item.origin === 'existing' ? '仍待修正' : '新增问题'}：{item.summary}</b><p>{item.location}：{item.reason}</p>{item.changeReason && <p>{item.changeReason}</p>}<small>{item.id}</small></li>)}</ol>

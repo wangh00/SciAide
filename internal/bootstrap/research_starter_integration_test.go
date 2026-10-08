@@ -325,6 +325,14 @@ func TestDynamicEmpiricalResearchRouteCompletesAndRegistersReviewedReport(t *tes
 	var reviewMu sync.Mutex
 	reviewCount := 0
 	server := newResearchStarterOutputTestServer(t, func(output map[string]any, _ string) {
+		if _, implementation := output["analysisInput"]; implementation {
+			output["outputDeclarations"] = []any{map[string]any{"name": "comparison", "format": "csv"}, map[string]any{"name": "figure", "format": "svg"}, map[string]any{"name": "source", "format": "py"}}
+			output["_fixturePythonCode"] = strings.TrimSuffix(workflowAITestImplementationCode(), "result") + `
+Path(SCIAIDE_OUTPUTS[2]).write_text("metric,value\nrowCount,3\n", encoding="utf-8")
+Path(SCIAIDE_OUTPUTS[4]).write_text("def row_count(rows):\n    return len(rows)\n", encoding="utf-8")
+Path(SCIAIDE_OUTPUTS[3]).write_text('<svg xmlns="http://www.w3.org/2000/svg" width="100" height="40"><text x="5" y="20">3 rows</text></svg>', encoding="utf-8")
+result`
+		}
 		checks, ok := output["acceptanceChecks"].([]any)
 		if !ok {
 			return
@@ -463,6 +471,26 @@ func TestDynamicEmpiricalResearchRouteCompletesAndRegistersReviewedReport(t *tes
 		t.Fatalf("empirical delivery assessment=%+v", completed.DeliveryAssessment)
 	}
 	for _, step := range completed.Steps {
+		if step.NodeID == "python_analysis" {
+			var output struct {
+				Artifacts []tool.ArtifactRef `json:"artifacts"`
+			}
+			if err := json.Unmarshal(step.Output, &output); err != nil {
+				t.Fatal(err)
+			}
+			found := map[string]bool{}
+			for _, file := range output.Artifacts {
+				if strings.HasSuffix(file.WorkspacePath, "-comparison.csv") || strings.HasSuffix(file.WorkspacePath, "-figure.svg") || strings.HasSuffix(file.WorkspacePath, "-source.py") {
+					if file.SHA256 == "" || file.SizeBytes == 0 {
+						t.Fatal("declared artifact has no byte identity", file)
+					}
+					found[filepath.Ext(file.WorkspacePath)] = true
+				}
+			}
+			if !found[".csv"] || !found[".svg"] || !found[".py"] {
+				t.Fatal("declared multi-output artifacts missing", output.Artifacts)
+			}
+		}
 		if step.NodeID == "python_analysis" && step.Attempt != 2 {
 			t.Fatalf("Python attempt=%d", step.Attempt)
 		}
@@ -480,6 +508,33 @@ func TestDynamicEmpiricalResearchRouteCompletesAndRegistersReviewedReport(t *tes
 	refreshed, err := application.WorkflowFacade.GetRun(projectValue.ID, completed.Run.ID)
 	if err != nil || refreshed.ArtifactCount == 0 {
 		t.Fatalf("reviewed report was not registered as a research artifact: count=%d, err=%v", refreshed.ArtifactCount, err)
+	}
+	files, err := application.ArtifactFacade.ListTaskArtifacts(projectValue.ID, completed.Run.ResearchTaskID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checked := map[string]bool{}
+	for _, file := range files {
+		detail, err := application.ArtifactFacade.GetTaskArtifact(projectValue.ID, completed.Run.ResearchTaskID, file.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, version := range detail.Versions {
+			if !strings.HasSuffix(version.FileName, "-comparison.csv") && !strings.HasSuffix(version.FileName, "-figure.svg") && !strings.HasSuffix(version.FileName, "-source.py") {
+				continue
+			}
+			if _, err := application.ArtifactFacade.PreviewTaskArtifactVersion(projectValue.ID, completed.Run.ResearchTaskID, version.ID); err != nil {
+				t.Fatal(err)
+			}
+			integrity, err := application.ArtifactFacade.CheckTaskArtifactIntegrity(projectValue.ID, completed.Run.ResearchTaskID, version.ID)
+			if err != nil || string(integrity.Status) != "verified" {
+				t.Fatalf("artifact integrity=%+v, %v", integrity, err)
+			}
+			checked[filepath.Ext(version.FileName)] = true
+		}
+	}
+	if !checked[".csv"] || !checked[".svg"] || !checked[".py"] {
+		t.Fatal("declared artifacts not accessible through task artifact library")
 	}
 }
 

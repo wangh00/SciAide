@@ -22,31 +22,36 @@ type ResearchDiscussionBinding struct {
 }
 
 type ResearchRevisionProposal struct {
-	Materials          []RevisionMaterial `json:"materials,omitempty"`
-	ID                 string             `json:"id"`
-	RunID              string             `json:"runId"`
-	ChatRunID          string             `json:"chatRunId"`
-	UserMessageID      string             `json:"userMessageId"`
-	SourceCallID       string             `json:"-"`
-	Status             string             `json:"status"`
-	SnapshotSHA256     string             `json:"snapshotSha256"`
-	NodeID             string             `json:"nodeId"`
-	Label              string             `json:"label"`
-	Summary            string             `json:"summary"`
-	Changes            []string           `json:"changes"`
-	Reason             string             `json:"reason"`
-	AffectedStages     []string           `json:"affectedStages"`
-	RepeatsSideEffects bool               `json:"repeatsSideEffects"`
-	CreatedAt          time.Time          `json:"createdAt"`
-	CanConfirm         bool               `json:"canConfirm"`
+	SourceVersion      *ResearchSourceVersion `json:"sourceVersion,omitempty"`
+	DataVersion        *ResearchDataVersion   `json:"dataVersion,omitempty"`
+	Materials          []RevisionMaterial     `json:"materials,omitempty"`
+	ID                 string                 `json:"id"`
+	RunID              string                 `json:"runId"`
+	ChatRunID          string                 `json:"chatRunId"`
+	UserMessageID      string                 `json:"userMessageId"`
+	SourceCallID       string                 `json:"-"`
+	Status             string                 `json:"status"`
+	SnapshotSHA256     string                 `json:"snapshotSha256"`
+	NodeID             string                 `json:"nodeId"`
+	Label              string                 `json:"label"`
+	Summary            string                 `json:"summary"`
+	Changes            []string               `json:"changes"`
+	Reason             string                 `json:"reason"`
+	AffectedStages     []string               `json:"affectedStages"`
+	ReusedStages       []string               `json:"reusedStages,omitempty"`
+	RepeatsSideEffects bool                   `json:"repeatsSideEffects"`
+	CreatedAt          time.Time              `json:"createdAt"`
+	CanConfirm         bool                   `json:"canConfirm"`
 }
 
 type ProposeResearchRevisionCommand struct {
-	AttachmentIDs []string `json:"attachmentIds,omitempty"`
-	NodeID        string   `json:"nodeId"`
-	Summary       string   `json:"summary"`
-	Changes       []string `json:"changes"`
-	Reason        string   `json:"reason"`
+	SourceInputs  *RevisionSourceSelection `json:"sourceInputs,omitempty"`
+	DataInputs    *RevisionDataSelection   `json:"dataInputs,omitempty"`
+	AttachmentIDs []string                 `json:"attachmentIds,omitempty"`
+	NodeID        string                   `json:"nodeId"`
+	Summary       string                   `json:"summary"`
+	Changes       []string                 `json:"changes"`
+	Reason        string                   `json:"reason"`
 }
 
 type ConfirmResearchRevisionCommand struct {
@@ -56,8 +61,8 @@ type ConfirmResearchRevisionCommand struct {
 	Confirmed  bool   `json:"confirmed"`
 }
 
-// This capability is separate from Retry: completed deliveries are never
-// reopened by a model call, and the storage transition must be atomic.
+// This capability is separate from Retry: delivered/rejected tasks are never
+// reopened by a model call, and the user confirmation transition is atomic.
 type ResearchDiscussionRepository interface {
 	ResolveResearchDiscussion(context.Context, string) (ResearchDiscussionBinding, error)
 	ReadResearchDiscussionRecords(context.Context, string, string, string) (json.RawMessage, error)
@@ -95,7 +100,7 @@ func completedRevisionTargets(detail RunDetail) []ResearchRevisionTarget {
 		return nil
 	}
 	result := researchRevisionCandidates(detail, *producer, *gate)
-	for _, id := range []string{"evidence_import"} {
+	for _, id := range []string{"evidence_import", "data_preflight"} {
 		step := findStepByNode(detail.Steps, id)
 		if step == nil || step.Status != StepCompleted || !workflowNodeReaches(detail.Run.Compilation, id, gate.NodeID) {
 			continue
@@ -104,14 +109,55 @@ func completedRevisionTargets(detail RunDetail) []ResearchRevisionTarget {
 		if id == "evidence_import" && !revisionMaterialChain(detail) {
 			continue
 		}
+		if id == "data_preflight" && !revisionDataChain(detail) {
+			continue
+		}
 		result = append(result, ResearchRevisionTarget{NodeID: id, Label: n.Name, RepeatsSideEffects: revisionSuffixSideEffects(detail, step.Ordinal)})
+	}
+	return result
+}
+
+// Only a verified scientific rejection can enter discussion-based repair.
+// Transport failures, corrupt submissions and arbitrary failed runs cannot.
+func rejectedDiscussionReview(detail RunDetail) (*Step, json.RawMessage, error) {
+	if detail.Run.Status != RunFailed || detail.Run.WorkflowPurpose == PurposeResearchStarter || len(detail.RegisteredDeliverables) != 0 {
+		return nil, nil, fmt.Errorf("当前任务不是可讨论返修的审查拒绝状态")
+	}
+	nodes := compilationNodeMap(detail.Run.Compilation)
+	for i := range detail.Steps {
+		gate := &detail.Steps[i]
+		if gate.Status == StepFailed && gate.ErrorCode == "RESEARCH_REVIEW_NOT_APPROVED" && isReviewGateNode(nodes[gate.NodeID]) {
+			_, output, err := currentRejectedReview(detail, *gate)
+			return gate, output, err
+		}
+	}
+	return nil, nil, fmt.Errorf("当前任务没有一致的独立审查拒绝记录")
+}
+
+func discussionRevisionTargets(detail RunDetail) []ResearchRevisionTarget {
+	if detail.Run.Status == RunCompleted {
+		return completedRevisionTargets(detail)
+	}
+	if _, _, err := rejectedDiscussionReview(detail); err != nil {
+		return nil
+	}
+	result := researchRevisionTargets(detail)
+	gate, _, _ := rejectedDiscussionReview(detail)
+	// New materials/data remain opt-in and must follow an already supported
+	// frozen route, exactly as on a delivered task.
+	for _, id := range []string{"evidence_import", "data_preflight"} {
+		step := findStepByNode(detail.Steps, id)
+		if step == nil || step.Status != StepCompleted || step.Ordinal >= gate.Ordinal || !workflowNodeReaches(detail.Run.Compilation, id, gate.NodeID) || (id == "evidence_import" && !revisionMaterialChain(detail)) || (id == "data_preflight" && !revisionDataChain(detail)) {
+			continue
+		}
+		result = append(result, ResearchRevisionTarget{NodeID: id, Label: compilationNodeMap(detail.Run.Compilation)[id].Name, RepeatsSideEffects: revisionSuffixSideEffects(detail, step.Ordinal)})
 	}
 	return result
 }
 
 func newResearchRevisionProposal(detail RunDetail, command ProposeResearchRevisionCommand) (ResearchRevisionProposal, error) {
 	var target *ResearchRevisionTarget
-	for _, value := range completedRevisionTargets(detail) {
+	for _, value := range discussionRevisionTargets(detail) {
 		if value.NodeID == strings.TrimSpace(command.NodeID) {
 			copy := value
 			target = &copy
@@ -119,7 +165,7 @@ func newResearchRevisionProposal(detail RunDetail, command ProposeResearchRevisi
 		}
 	}
 	if target == nil {
-		return ResearchRevisionProposal{}, fmt.Errorf("当前任务不能从该阶段返修；仅支持已交付但尚未登记的当前任务")
+		return ResearchRevisionProposal{}, fmt.Errorf("当前任务不能从该阶段返修；请选择已交付或独立审查拒绝任务的可用修改起点")
 	}
 	command.Summary, command.Reason = strings.TrimSpace(command.Summary), strings.TrimSpace(command.Reason)
 	if command.Summary == "" || len([]rune(command.Summary)) > 1000 || command.Reason == "" || len([]rune(command.Reason)) > 2000 || len(command.Changes) == 0 || len(command.Changes) > 20 {
@@ -138,6 +184,9 @@ func newResearchRevisionProposal(detail RunDetail, command ProposeResearchRevisi
 	sort.Slice(stages, func(i, j int) bool { return stages[i].Ordinal < stages[j].Ordinal })
 	nodes := compilationNodeMap(detail.Run.Compilation)
 	for _, step := range stages {
+		if step.Ordinal < start.Ordinal && step.Status == StepCompleted {
+			proposal.ReusedStages = append(proposal.ReusedStages, nonEmptyMessage(nodes[step.NodeID].Name, step.NodeID))
+		}
 		if step.Ordinal >= start.Ordinal {
 			proposal.AffectedStages = append(proposal.AffectedStages, nonEmptyMessage(nodes[step.NodeID].Name, step.NodeID))
 			proposal.RepeatsSideEffects = proposal.RepeatsSideEffects || nodes[step.NodeID].SideEffect
@@ -170,6 +219,14 @@ func (s *RuntimeService) ProposeResearchRevision(ctx context.Context, chatRunID,
 		return proposal, err
 	}
 	proposal.Materials, err = s.prepareRevisionMaterials(ctx, detail, command)
+	if err != nil {
+		return proposal, err
+	}
+	proposal.DataVersion, err = s.prepareRevisionData(ctx, detail, command)
+	if err != nil {
+		return proposal, err
+	}
+	proposal.SourceVersion, err = s.prepareRevisionSource(ctx, detail, command)
 	if err != nil {
 		return proposal, err
 	}
@@ -232,8 +289,14 @@ func (s *RuntimeService) ConfirmResearchRevision(ctx context.Context, command Co
 	if err := s.validateRevisionMaterials(ctx, detail, *proposal); err != nil {
 		return RunDetail{}, err
 	}
+	if err := s.validateRevisionData(ctx, detail, *proposal); err != nil {
+		return RunDetail{}, err
+	}
+	if err := s.validateRevisionSource(ctx, detail, *proposal); err != nil {
+		return RunDetail{}, err
+	}
 	start := findStepByNode(detail.Steps, proposal.NodeID)
-	event, err := s.event(detail.Run.ID, "workflow.user_revision_queued", map[string]any{"proposal": proposal, "startOrdinal": start.Ordinal, "priorOutput": start.Output}, s.now())
+	event, err := s.event(detail.Run.ID, "workflow.user_revision_queued", map[string]any{"proposal": proposal, "startOrdinal": start.Ordinal, "priorOutput": start.Output, "comparisonBaseline": researchComparisonBaseline(detail)}, s.now())
 	if err != nil {
 		return RunDetail{}, err
 	}
@@ -245,6 +308,7 @@ func (s *RuntimeService) ConfirmResearchRevision(ctx context.Context, command Co
 }
 
 type ResearchTaskReadCommand struct {
+	RevisionID   string `json:"revisionId,omitempty"`
 	AttachmentID string `json:"attachmentId,omitempty"`
 	Section      string `json:"section"`
 	NodeID       string `json:"nodeId,omitempty"`
@@ -258,18 +322,35 @@ func (s *RuntimeService) ReadResearchTask(ctx context.Context, chatRunID string,
 	}
 	binding, err := repository.ResolveResearchDiscussion(ctx, chatRunID)
 	if err != nil {
-		return nil, err
+		return s.readResearchStageTask(ctx, chatRunID, command)
 	}
 	detail, err := s.repository.GetRun(ctx, binding.ProjectID, binding.WorkflowRunID)
 	if err != nil {
 		return nil, err
 	}
+	return s.readResearchTaskDetail(ctx, detail, command)
+}
+
+// Both discussion and stage execution read the same exact task records. Only
+// the durable binding differs; revision proposals still use discussion alone.
+func (s *RuntimeService) readResearchTaskDetail(ctx context.Context, detail RunDetail, command ResearchTaskReadCommand) (json.RawMessage, error) {
+	repository, ok := s.repository.(ResearchDiscussionRepository)
+	if !ok {
+		return nil, fmt.Errorf("research task record storage is not configured")
+	}
 	var value json.RawMessage
+	var err error
 	switch command.Section {
 	case "overview":
-		value = rawObject(map[string]any{"runId": detail.Run.ID, "status": detail.Run.Status, "stageCount": len(detail.Steps), "stages": researchDiscussionStages(detail), "revisionTargets": completedRevisionTargets(detail), "registeredDeliverables": detail.RegisteredDeliverables})
+		value = rawObject(map[string]any{"runId": detail.Run.ID, "status": detail.Run.Status, "stageCount": len(detail.Steps), "stages": researchDiscussionStages(detail), "revisionTargets": discussionRevisionTargets(detail), "evidenceReselection": researchEvidenceReselection(detail), "registeredDeliverables": detail.RegisteredDeliverables})
 	case "inputs":
 		value = detail.Run.Inputs
+	case "effective_inputs":
+		value, err = ResearchEffectiveInputs(detail)
+	case "data_inputs":
+		value, err = researchDataInputsRecord(detail)
+	case "source_inputs", "source_content":
+		value, err = s.researchSourceRecord(ctx, detail, command)
 	case "supplemental_materials", "supplemental_content":
 		repo, ok := s.repository.(discussionMaterialsRepository)
 		if !ok {
@@ -284,17 +365,33 @@ func (s *RuntimeService) ReadResearchTask(ctx context.Context, chatRunID string,
 				return nil, fmt.Errorf("该资料未在当前任务的用户对话中发送")
 			}
 			reader, ok := s.materialLoader.(interface {
-				ReadRevisionMaterial(context.Context, string, string, string) (json.RawMessage, error)
+				ReadDiscussionMaterial(context.Context, string, string, string) (json.RawMessage, error)
 			})
 			if !ok {
 				return nil, fmt.Errorf("supplemental material reader unavailable")
 			}
-			value, err = reader.ReadRevisionMaterial(ctx, detail.Run.ProjectID, detail.Run.ConversationID, command.AttachmentID)
+			value, err = reader.ReadDiscussionMaterial(ctx, detail.Run.ProjectID, detail.Run.ConversationID, command.AttachmentID)
 		} else {
-			value = rawObject(map[string]any{"attachmentIds": ids, "instruction": "These files were sent in user discussion, not automatically adopted as evidence. Read supplemental_content with attachmentId and offset before proposing. Only explicit user confirmation can add selected files to research; use attachmentIds and evidence_import in a revision proposal."})
+			value = rawObject(map[string]any{"attachmentIds": ids, "instruction": "These files were sent in user discussion, not automatically adopted. Read supplemental_content with attachmentId and offset before proposing. Literature uses attachmentIds and evidence_import. Tables use dataInputs (complete retainedPaths + attachmentIds) and data_preflight. Read data_inputs to identify the current data set. Single Python source uses sourceInputs.attachmentIds and method_implementation (or data_preflight with new tables); inspect dependencies and adapt, never execute the upload itself. source_inputs identifies the current confirmed reference; source_content reads it after confirmation. Only explicit user confirmation adopts a selection."})
 		}
 	case "outputs":
 		value = detail.Run.Outputs
+	case "revision_index":
+		value, err = repository.ReadResearchDiscussionRecords(ctx, detail.Run.ID, command.Section, "")
+	case "revision_stage_input", "revision_stage_output", "revision_inputs", "revision_source_inputs", "revision_artifacts":
+		reader, ok := s.repository.(interface {
+			ReadResearchRevisionSnapshot(context.Context, string, string) (json.RawMessage, error)
+		})
+		if !ok {
+			return nil, fmt.Errorf("research revision reader unavailable")
+		}
+		var snapshot json.RawMessage
+		snapshot, err = reader.ReadResearchRevisionSnapshot(ctx, detail.Run.ID, command.RevisionID)
+		if err == nil {
+			value, err = researchRevisionRecord(snapshot, command)
+		}
+	case "artifacts":
+		value = rawObject(map[string]any{"artifacts": researchArtifactInventory(detail), "instruction": "Current completed-stage artifacts only. Use exact task workspace paths with existing read tools; binary content may require an appropriate reader. For older versions read revision_index then revision_artifacts with revisionId. This inventory does not prove files still exist or grant new permissions."})
 	case "stage_input", "stage_output":
 		step := findStepByNode(detail.Steps, command.NodeID)
 		if step == nil {
@@ -324,7 +421,7 @@ func researchDiscussionPage(value json.RawMessage, command ResearchTaskReadComma
 	runes := []rune(string(value))
 	end := min(command.Offset+6000, len(runes))
 	for {
-		page := rawObject(map[string]any{"section": command.Section, "nodeId": command.NodeID, "offset": command.Offset, "content": string(runes[command.Offset:end]), "nextOffset": end, "totalCharacters": len(runes), "hasMore": end < len(runes), "sha256": hashJSON(value)})
+		page := rawObject(map[string]any{"section": command.Section, "nodeId": command.NodeID, "revisionId": command.RevisionID, "offset": command.Offset, "content": string(runes[command.Offset:end]), "nextOffset": end, "totalCharacters": len(runes), "hasMore": end < len(runes), "sha256": hashJSON(value)})
 		// Leave room for the generic tool-result envelope and JSON escaping.
 		if len([]rune(string(page))) < tool.MaxModelContextRunes-1000 || end-command.Offset <= 1 {
 			return page
@@ -369,7 +466,11 @@ func pendingUserRevision(detail RunDetail, nodeID string) *ResearchRevisionPropo
 }
 
 func validateDiscussionDelivery(detail RunDetail) error {
-	for _, name := range []string{"report_draft", "research_design"} {
+	if detail.Run.Status == RunFailed {
+		_, _, err := rejectedDiscussionReview(detail)
+		return err
+	}
+	for _, name := range []string{"report_draft", "research_design", "interpretation"} {
 		if _, found := researchOutputDeclaration(detail.Run.Compilation, name); found {
 			return ValidateReviewedOutput(detail, name)
 		}

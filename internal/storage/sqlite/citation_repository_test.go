@@ -15,6 +15,19 @@ import (
 )
 
 func TestMessageCitationsPersistAcrossReopen(t *testing.T) {
+	testMessageCitationsPersistAcrossReopen(t, citation.KnowledgeToolName, nil)
+}
+
+func TestIndexedReadMessageCitationsPersistAcrossReopen(t *testing.T) {
+	for _, name := range []string{"builtin.knowledge.read", "builtin.resource.open"} {
+		t.Run(name, func(t *testing.T) {
+			testMessageCitationsPersistAcrossReopen(t, name, json.RawMessage(`{"sourceTool":"builtin.knowledge.read"}`))
+		})
+	}
+}
+
+func testMessageCitationsPersistAcrossReopen(t *testing.T, toolName string, structured json.RawMessage) {
+	t.Helper()
 	ctx := context.Background()
 	root := t.TempDir()
 	databasePath := filepath.Join(root, "citations.db")
@@ -22,6 +35,7 @@ func TestMessageCitationsPersistAcrossReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer store.Close()
 	projects := project.NewService(NewProjectRepository(store.DB()), filepath.Join(root, "workspaces"), filepath.Join(root, "trash"))
 	createdProject, err := projects.Create(ctx, "Citations", "")
 	if err != nil {
@@ -49,14 +63,34 @@ func TestMessageCitationsPersistAcrossReopen(t *testing.T) {
 	reference := citation.KnowledgeReference(run.ID, "index-v3", "chunk", quoteSHA256)
 	value := conversation.Citation{ID: "citation", MessageID: assistant.ID, RunID: run.ID, ToolCallID: "call", ProjectID: createdProject.ID, Reference: reference, Ordinal: 0, IndexVersionID: "index-v3", DocumentID: "document", AttachmentID: "attachment", ChunkID: "chunk", SourceName: "paper.pdf", MIMEType: "application/pdf", Locator: "page:4", Title: "Results", Quote: quote, QuoteSHA256: quoteSHA256, SourceStart: 10, SourceEnd: 36, CreatedAt: completedAt}
 	toolRepository := NewToolRepository(store.DB())
-	if err := toolRepository.Create(ctx, tool.Call{ID: "call", RunID: run.ID, ProviderCallID: "provider-call", ToolName: citation.KnowledgeToolName, ToolVersion: "3", Arguments: json.RawMessage(`{"query":"question"}`), Status: tool.CallRunning, Risk: tool.RiskLow, Permissions: []tool.PermissionRequirement{}, Idempotent: true, CreatedAt: now, StartedAt: &now, UpdatedAt: now}); err != nil {
+	if err := toolRepository.Create(ctx, tool.Call{ID: "call", RunID: run.ID, ProviderCallID: "provider-call", ToolName: toolName, ToolVersion: "3", Arguments: json.RawMessage(`{"query":"question"}`), Status: tool.CallRunning, Risk: tool.RiskLow, Permissions: []tool.PermissionRequirement{}, Idempotent: true, CreatedAt: now, StartedAt: &now, UpdatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
 	toolCitation := tool.CitationRef{Kind: citation.KindKnowledgeChunk, Reference: reference, ProjectID: createdProject.ID, IndexVersionID: value.IndexVersionID, DocumentID: value.DocumentID, AttachmentID: value.AttachmentID, ChunkID: value.ChunkID, SourceName: value.SourceName, MIMEType: value.MIMEType, Locator: value.Locator, Title: value.Title, Quote: quote, QuoteSHA256: quoteSHA256, SourceStart: value.SourceStart, SourceEnd: value.SourceEnd}
-	if err := toolRepository.Finish(ctx, "call", tool.CallRunning, tool.CallCompleted, tool.Result{Status: tool.ResultSuccess, Text: reference + "\n" + quote, Citations: []tool.CitationRef{toolCitation}, CreatedAt: completedAt}, "", "", completedAt); err != nil {
+	if toolName != citation.KnowledgeToolName {
+		// The failure seen in production also occurs when an old seed and a
+		// later actual read issue the same marker: Resolve selects the reader.
+		seed := tool.Call{ID: "seed", RunID: run.ID, ProviderCallID: "seed-provider", ToolName: citation.WorkflowSeedToolName, ToolVersion: "1", Arguments: json.RawMessage(`{}`), Status: tool.CallRunning, Risk: tool.RiskLow, Permissions: []tool.PermissionRequirement{}, CreatedAt: now.Add(-time.Second), UpdatedAt: now}
+		if err := toolRepository.Create(ctx, seed); err != nil {
+			t.Fatal(err)
+		}
+		if err := toolRepository.Finish(ctx, seed.ID, tool.CallRunning, tool.CallCompleted, tool.Result{Status: tool.ResultSuccess, Citations: []tool.CitationRef{toolCitation}, CreatedAt: completedAt}, "", "", completedAt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := toolRepository.Finish(ctx, "call", tool.CallRunning, tool.CallCompleted, tool.Result{Status: tool.ResultSuccess, Text: reference + "\n" + quote, Structured: structured, Citations: []tool.CitationRef{toolCitation}, CreatedAt: completedAt}, "", "", completedAt); err != nil {
 		t.Fatal(err)
 	}
 	answer := "answer " + reference
+	calls, err := toolRepository.ListByRun(ctx, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved := citation.Resolve(run.ID, assistant.ID, answer, calls, completedAt)
+	if len(resolved) != 1 || resolved[0].ToolCallID != "call" {
+		t.Fatal("actual reader did not resolve", resolved)
+	}
+	value = resolved[0]
 	run.Status, run.FinishReason, run.UpdatedAt, run.CompletedAt = chat.RunCompleted, "stop", completedAt, &completedAt
 	invalid := value
 	invalid.Reference = "[K-000000000000]"
@@ -74,6 +108,81 @@ func TestMessageCitationsPersistAcrossReopen(t *testing.T) {
 	for _, message := range unchangedMessages {
 		if message.ID == assistant.ID && (message.Status != conversation.MessageStreaming || message.Parts[0].Text != "" || len(message.Citations) != 0) {
 			t.Fatalf("failed completion changed assistant message = %#v", message)
+		}
+	}
+	// Existing provenance/identity checks must still roll back the whole save.
+	for _, mutation := range []struct {
+		query string
+		value any
+	}{
+		{`UPDATE tool_calls SET tool_name=? WHERE id='call'`, "builtin.workspace.read_text"},
+		{`UPDATE tool_calls SET status=? WHERE id='call'`, "failed"},
+		{`UPDATE tool_results SET status=? WHERE tool_call_id='call'`, "error"},
+	} {
+		if _, err := store.DB().ExecContext(ctx, mutation.query, mutation.value); err != nil {
+			t.Fatal(err)
+		}
+		if err := runRepository.Complete(ctx, run, answer, []conversation.Citation{value}); err == nil {
+			t.Fatal("untrusted source completed the run")
+		}
+		if _, err := store.DB().ExecContext(ctx, `UPDATE tool_calls SET tool_name=?,status='completed',run_id=? WHERE id='call'`, toolName, run.ID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.DB().ExecContext(ctx, `UPDATE tool_results SET status='success' WHERE tool_call_id='call'`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if toolName == "builtin.resource.open" {
+		for _, body := range []string{`{}`, `{"sourceTool":"builtin.document.read"}`, `{"sourceTool":42}`, `{"sourceTool":"builtin.workspace.read_text"}`} {
+			if _, err := store.DB().ExecContext(ctx, `UPDATE tool_results SET structured_json=? WHERE tool_call_id='call'`, body); err != nil {
+				t.Fatal(err)
+			}
+			if err := runRepository.Complete(ctx, run, answer, []conversation.Citation{value}); err == nil {
+				t.Fatal("non-indexed resource citation accepted")
+			}
+		}
+		if _, err := store.DB().ExecContext(ctx, `UPDATE tool_results SET structured_json=? WHERE tool_call_id='call'`, string(structured)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, invalid := range []conversation.Citation{func() conversation.Citation { v := value; v.ProjectID = "other-project"; return v }(), func() conversation.Citation { v := value; v.QuoteSHA256 = citation.QuoteSHA256("changed"); return v }()} {
+		if err := runRepository.Complete(ctx, run, answer, []conversation.Citation{invalid}); err == nil {
+			t.Fatal("changed citation accepted")
+		}
+	}
+	otherConversation, err := conversation.NewService(conversationRepository).Create(ctx, createdProject.ID, "other run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherRun := chat.Run{ID: "other-run", ConversationID: otherConversation.ID, UserMessageID: "other-user", AssistantMessageID: "other-assistant", ModelProfileID: "profile", ModelID: "model", Status: chat.RunRunning, CreatedAt: now, UpdatedAt: now}
+	otherUser, otherAssistant := user, assistant
+	otherUser.ID, otherUser.RunID, otherUser.ConversationID = otherRun.UserMessageID, otherRun.ID, otherRun.ConversationID
+	otherUser.Parts = []conversation.MessagePart{{ID: "other-user-part", MessageID: otherUser.ID, Type: "text", CreatedAt: now}}
+	otherAssistant.ID, otherAssistant.RunID, otherAssistant.ConversationID = otherRun.AssistantMessageID, otherRun.ID, otherRun.ConversationID
+	otherAssistant.Parts = []conversation.MessagePart{{ID: "other-assistant-part", MessageID: otherAssistant.ID, Type: "text", CreatedAt: now}}
+	if err := runRepository.CreateWithMessages(ctx, otherRun, otherUser, otherAssistant); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `UPDATE tool_calls SET run_id=? WHERE id='call'`, otherRun.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := runRepository.Complete(ctx, run, answer, []conversation.Citation{value}); err == nil {
+		t.Fatal("foreign Run source completed answer")
+	}
+	if _, err := store.DB().ExecContext(ctx, `UPDATE tool_calls SET run_id=? WHERE id='call'`, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	unchangedRun, err = runRepository.Get(ctx, run.ID)
+	if err != nil || unchangedRun.Status != chat.RunRunning {
+		t.Fatal("rejected citation changed run", err)
+	}
+	unchangedMessages, err = conversationRepository.ListMessages(ctx, createdConversation.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, message := range unchangedMessages {
+		if message.ID == assistant.ID && (message.Status != conversation.MessageStreaming || message.Parts[0].Text != "" || len(message.Citations) != 0) {
+			t.Fatal("rejected citation changed message")
 		}
 	}
 	if err := runRepository.Complete(ctx, run, answer, []conversation.Citation{value}); err != nil {

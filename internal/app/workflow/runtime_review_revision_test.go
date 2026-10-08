@@ -84,6 +84,68 @@ func TestBoundProducerInputIncludesPendingReviewRevision(t *testing.T) {
 	}
 }
 
+func TestReviewRevisionSurvivesFailedRepairAttemptsUntilReplaced(t *testing.T) {
+	detail := reviewRevisionFixture()
+	_, _, revision, err := reviewRevisionContext(detail, detail.Steps[2])
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, _ := json.Marshal(revision)
+	detail.Events = []RuntimeEvent{{Type: "workflow.review_revision_queued", Payload: payload}}
+	step := &detail.Steps[0]
+	step.Status = StepQueued
+	for _, status := range []string{"failed", "cancelled", "interrupted"} {
+		step.Attempt++
+		detail.AIExecutions = append(detail.AIExecutions, AIExecution{WorkflowStepID: step.ID, Attempt: step.Attempt, Status: status})
+		input, err := bindNodeInput(detail, detail.Run.Compilation.Nodes[0])
+		if err != nil || !strings.Contains(string(input), `"baseline is undefined"`) || !strings.Contains(string(input), `"_reviewRevision"`) {
+			t.Fatalf("%s attempt lost immutable review corrections: %s %v", status, input, err)
+		}
+	}
+	// A successfully accepted replacement ends the correction's lifetime.
+	step.Attempt++
+	detail.AIExecutions = append(detail.AIExecutions, AIExecution{WorkflowStepID: step.ID, Attempt: step.Attempt, Status: "completed"})
+	if _, ok := pendingReviewRevision(detail, step.NodeID); ok {
+		t.Fatal("completed replacement leaked an old review into a later revision")
+	}
+}
+
+func TestReviewRevisionDoesNotFallBackPastNewerGenerationOrMissingAttempt(t *testing.T) {
+	for _, boundary := range []string{"user", "review-other-target", "tampered", "missing", "running"} {
+		t.Run(boundary, func(t *testing.T) {
+			detail := reviewRevisionFixture()
+			_, _, revision, err := reviewRevisionContext(detail, detail.Steps[2])
+			if err != nil {
+				t.Fatal(err)
+			}
+			payload, _ := json.Marshal(revision)
+			detail.Events = []RuntimeEvent{{Type: "workflow.review_revision_queued", Payload: payload}}
+			step := &detail.Steps[0]
+			step.Status = StepQueued
+			switch boundary {
+			case "user":
+				detail.Events = append(detail.Events, RuntimeEvent{Type: "workflow.user_revision_queued", Payload: raw(`{}`)})
+			case "review-other-target":
+				revision.ProducerNodeID = "other"
+				payload, _ = json.Marshal(revision)
+				detail.Events = append(detail.Events, RuntimeEvent{Type: "workflow.review_revision_queued", Payload: payload})
+			case "tampered":
+				revision.IndependentReview = raw(`{"approved":true}`)
+				payload, _ = json.Marshal(revision)
+				detail.Events = append(detail.Events, RuntimeEvent{Type: "workflow.review_revision_queued", Payload: payload})
+			case "missing":
+				step.Attempt++
+			case "running":
+				step.Attempt++
+				detail.AIExecutions = append(detail.AIExecutions, AIExecution{WorkflowStepID: step.ID, Attempt: step.Attempt, Status: "running"})
+			}
+			if _, ok := pendingReviewRevision(detail, step.NodeID); ok {
+				t.Fatal("old correction survived supersession, tampering or incomplete attempt history")
+			}
+		})
+	}
+}
+
 func TestIndependentReviewOutputRejectsContradictoryApproval(t *testing.T) {
 	valid := json.RawMessage(`{"approved":false,"unsupportedClaims":[],"citationIssues":[],"numericIssues":[],"methodIssues":["undefined baseline"],"requiredCorrections":["define baseline"]}`)
 	if err := validateIndependentReviewOutput(valid); err != nil {

@@ -21,3 +21,7 @@
 # This vendored tree is verified by a byte-for-byte SHA256 manifest. Preserve
 # upstream line endings and whitespace exactly on every platform.
 internal/opensciskill/defaultskills/** -text whitespace=-trailing-space,-blank-at-eof
+
+# Case source/data identity and SHA256 lists refer to exact prepared bytes.
+# Preserve upstream data whitespace and checksums in public clean checkouts.
+examples/research-cases/** -text whitespace=-trailing-space,-blank-at-eof

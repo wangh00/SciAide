@@ -80,6 +80,9 @@ func Parse(ctx context.Context, path string, format Format) (Parsed, error) {
 }
 
 func FormatForName(name string) (Format, bool) {
+	if SourceLanguage(name) != "" {
+		return FormatText, true
+	}
 	switch strings.ToLower(filepath.Ext(strings.TrimSpace(name))) {
 	case ".txt":
 		return FormatText, true
@@ -97,6 +100,24 @@ func FormatForName(name string) (Format, bool) {
 		return FormatImage, true
 	default:
 		return "", false
+	}
+}
+
+// Source imports are inert text documents, not executable capabilities.
+func SourceLanguage(name string) string {
+	switch strings.ToLower(filepath.Ext(strings.TrimSpace(name))) {
+	case ".py":
+		return "python"
+	case ".r":
+		return "r"
+	case ".jl":
+		return "julia"
+	case ".m":
+		return "matlab-or-octave"
+	case ".sql":
+		return "sql"
+	default:
+		return ""
 	}
 }
 

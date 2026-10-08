@@ -167,6 +167,12 @@ func NewUserFacingError(message string) error {
 	return UserFacingError{message: message}
 }
 
+// A business decision is not a transport/invocation failure.
+type BusinessDecisionError struct{ Code, Message string }
+
+func (e BusinessDecisionError) Error() string             { return e.Message }
+func (e BusinessDecisionError) UserFacingMessage() string { return e.Message }
+
 func userFacingMessage(err error) (string, bool) {
 	var safe interface{ UserFacingMessage() string }
 	if !errors.As(err, &safe) {

@@ -276,8 +276,19 @@ func RetryAfter(err error) time.Duration {
 func StreamErrorRetryable(errorType, code string) bool {
 	errorType = strings.ToLower(strings.TrimSpace(errorType))
 	code = strings.ToLower(strings.TrimSpace(code))
+	if permanentStreamIdentity(errorType) || permanentStreamIdentity(code) {
+		return false
+	}
+	// A specific code owns the decision; a generic wrapper must not turn an
+	// invalid request, unknown code or exhausted account quota into retries.
+	if !genericStreamIdentity(code) {
+		errorType = ""
+	}
 	// Match the explicit transport failure, not the generic upstream wrapper.
 	if code == "stream_read_error" || (code == "" && errorType == "stream_read_error") {
+		return true
+	}
+	if streamConcurrencyLimited(errorType, code) {
 		return true
 	}
 	value := errorType + " " + code
@@ -287,6 +298,56 @@ func StreamErrorRetryable(errorType, code string) bool {
 		}
 	}
 	return false
+}
+
+func genericStreamIdentity(value string) bool {
+	return value == "" || value == "error" || value == "upstream_error" || value == "api_error"
+}
+
+func permanentStreamIdentity(value string) bool {
+	switch value {
+	case "invalid_api_key", "authentication_error", "permission_error", "permission_denied", "unauthorized", "forbidden",
+		"invalid_request_error", "invalid_parameter", "invalid_parameters", "context_length_exceeded", "model_not_found",
+		"insufficient_quota", "quota_exceeded", "billing_hard_limit_reached", "content_policy_violation":
+		return true
+	}
+	return false
+}
+
+// Some gateways replace the provider's specific outage code with a generic
+// upstream wrapper. Recognize only this unambiguous whole outage message,
+// never a free-text "retry" substring or a message overriding a specific code.
+var temporaryServiceMessage = regexp.MustCompile(`^(?:the )?service is temporarily unavailable[.!]?(?: please retry later[.!]?)?$`)
+
+func streamTemporaryServiceMessage(errorType, code, message string) bool {
+	errorType = strings.ToLower(strings.TrimSpace(errorType))
+	code = strings.ToLower(strings.TrimSpace(code))
+	if !genericStreamIdentity(errorType) || !genericStreamIdentity(code) {
+		return false
+	}
+	return temporaryServiceMessage.MatchString(strings.ToLower(strings.Join(strings.Fields(message), " ")))
+}
+
+func streamConcurrencyLimited(errorType, code string) bool {
+	// Only the observed explicit code is transient, not arbitrary messages or
+	// wrappers containing "concurrency". A specific permanent code takes priority.
+	errorType = strings.ToLower(strings.TrimSpace(errorType))
+	code = strings.ToLower(strings.TrimSpace(code))
+	return code == "gateway_concurrency_limit" || (code == "" && errorType == "gateway_concurrency_limit")
+}
+
+// ClassifyStreamError is shared by all provider envelopes. The original error
+// payload remains in details; SSE errors do not invent an HTTP status.
+func ClassifyStreamError(errorType, providerCode, message, details string) error {
+	if !permanentStreamIdentity(strings.ToLower(strings.TrimSpace(errorType))) && streamConcurrencyLimited(errorType, providerCode) {
+		return ErrorWithDetails("MODEL_RATE_LIMITED", "模型服务账户并发已达上限，请稍后重试。", details, true, nil)
+	}
+	retryable := StreamErrorRetryable(errorType, providerCode) || streamTemporaryServiceMessage(errorType, providerCode, message)
+	code := "MODEL_REQUEST_REJECTED"
+	if retryable {
+		code = "MODEL_UNAVAILABLE"
+	}
+	return ErrorWithDetails(code, message, details, retryable, nil)
 }
 
 func ProviderErrorMessage(body []byte) string {

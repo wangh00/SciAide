@@ -142,7 +142,7 @@ func (f *KnowledgeFacade) DownloadMaterial(projectID, taskID, id string) error {
 
 // Candidate uploads are staged in task scope, not indexed or shared until selected.
 func (f *KnowledgeFacade) ChooseReferenceMaterials(projectID, taskID string) (attachment.ImportBatch, error) {
-	paths, err := runtime.OpenMultipleFilesDialog(f.lifecycle.Context(), runtime.OpenDialogOptions{Title: "添加参考资料", Filters: []runtime.FileFilter{{DisplayName: "研究资料", Pattern: "*.pdf;*.docx;*.txt;*.md;*.markdown"}}})
+	paths, err := runtime.OpenMultipleFilesDialog(f.lifecycle.Context(), runtime.OpenDialogOptions{Title: "添加参考资料", Filters: []runtime.FileFilter{{DisplayName: "研究资料", Pattern: "*.py;*.r;*.jl;*.m;*.sql;*.pdf;*.docx;*.txt;*.md;*.markdown"}}})
 	if err != nil || len(paths) == 0 {
 		return attachment.ImportBatch{Attachments: []attachment.Attachment{}, Errors: []attachment.ImportError{}}, err
 	}
@@ -187,8 +187,8 @@ func (f *KnowledgeFacade) ChooseAndImportDocuments(projectID string) (attachment
 	paths, err := runtime.OpenMultipleFilesDialog(f.lifecycle.Context(), runtime.OpenDialogOptions{
 		Title: "添加到项目资料库",
 		Filters: []runtime.FileFilter{{
-			DisplayName: "科研文档 (*.pdf;*.docx;*.xlsx;*.txt;*.md;*.csv;*.tsv)",
-			Pattern:     "*.pdf;*.docx;*.xlsx;*.txt;*.md;*.markdown;*.csv;*.tsv",
+			DisplayName: "科研文档与源码 (*.py;*.r;*.jl;*.m;*.sql;*.pdf;*.docx;*.xlsx;*.txt;*.md;*.csv;*.tsv)",
+			Pattern:     "*.py;*.r;*.jl;*.m;*.sql;*.pdf;*.docx;*.xlsx;*.txt;*.md;*.markdown;*.csv;*.tsv",
 		}},
 	})
 	if err != nil || len(paths) == 0 {
@@ -210,7 +210,7 @@ func (f *KnowledgeFacade) ChooseAndImportDocuments(projectID string) (attachment
 }
 
 func (f *KnowledgeFacade) ChooseAndImportTaskDocuments(projectID, taskID string) (attachment.ImportBatch, error) {
-	paths, err := runtime.OpenMultipleFilesDialog(f.lifecycle.Context(), runtime.OpenDialogOptions{Title: "导入当前科研任务资料", Filters: []runtime.FileFilter{{DisplayName: "科研文档 (*.pdf;*.docx;*.xlsx;*.txt;*.md;*.csv;*.tsv)", Pattern: "*.pdf;*.docx;*.xlsx;*.txt;*.md;*.markdown;*.csv;*.tsv"}}})
+	paths, err := runtime.OpenMultipleFilesDialog(f.lifecycle.Context(), runtime.OpenDialogOptions{Title: "导入当前科研任务资料", Filters: []runtime.FileFilter{{DisplayName: "科研文档与源码 (*.py;*.r;*.jl;*.m;*.sql;*.pdf;*.docx;*.xlsx;*.txt;*.md;*.csv;*.tsv)", Pattern: "*.py;*.r;*.jl;*.m;*.sql;*.pdf;*.docx;*.xlsx;*.txt;*.md;*.markdown;*.csv;*.tsv"}}})
 	if err != nil || len(paths) == 0 {
 		return attachment.ImportBatch{Attachments: []attachment.Attachment{}, Errors: []attachment.ImportError{}}, err
 	}

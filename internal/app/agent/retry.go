@@ -2,11 +2,13 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand/v2"
 	"time"
 
 	"github.com/wangh00/SciAide/internal/app/chat"
+	"github.com/wangh00/SciAide/internal/apperr"
 	"github.com/wangh00/SciAide/internal/model"
 	"github.com/wangh00/SciAide/internal/modelcap"
 	"github.com/wangh00/SciAide/internal/modelutil"
@@ -19,6 +21,7 @@ const (
 
 type RetryStatus struct {
 	Phase       string `json:"phase"`
+	Reason      string `json:"reason,omitempty"`
 	Attempt     int    `json:"attempt"`
 	MaxAttempts int    `json:"maxAttempts"`
 	DelayMillis int64  `json:"delayMillis"`
@@ -80,7 +83,19 @@ func (l *Loop) retryWait(ctx context.Context, run chat.Run, phase string, attemp
 	if phase == "request" {
 		message = fmt.Sprintf("请求未建立，正在重试 %d/%d", attempt, maxAttempts)
 	}
-	l.observer.Retrying(run, RetryStatus{Phase: phase, Attempt: attempt, MaxAttempts: maxAttempts, DelayMillis: delay.Milliseconds(), Message: message})
+	reason := ""
+	var appErr *apperr.Error
+	if errors.As(err, &appErr) {
+		switch appErr.Code {
+		case "MODEL_RATE_LIMITED":
+			reason = "rate_limit"
+			message = fmt.Sprintf("模型服务限流，正在等待后重试 %d/%d", attempt, maxAttempts)
+		case "MODEL_UNAVAILABLE":
+			reason = "service_unavailable"
+			message = fmt.Sprintf("模型服务暂时不可用，正在等待后重试 %d/%d", attempt, maxAttempts)
+		}
+	}
+	l.observer.Retrying(run, RetryStatus{Phase: phase, Reason: reason, Attempt: attempt, MaxAttempts: maxAttempts, DelayMillis: delay.Milliseconds(), Message: message})
 	return l.sleep(ctx, delay)
 }
 
@@ -98,6 +113,9 @@ func (l *Loop) openModelStream(ctx context.Context, run chat.Run, chatModel mode
 			return nil, ctx.Err()
 		}
 		if !modelutil.IsRetryable(err) || retry >= maxRequestRetries {
+			if modelutil.IsRetryable(err) && retry >= maxRequestRetries {
+				err = retryExhaustedError(err, "request", maxRequestRetries)
+			}
 			return nil, err
 		}
 		retried = true
@@ -132,6 +150,9 @@ func (l *Loop) runModelStream(ctx context.Context, run chat.Run, chatModel model
 			return result, actualReasoningLevel, ctx.Err()
 		}
 		if !modelutil.IsRetryable(receiveErr) || streamRetries >= maxStreamRetries {
+			if modelutil.IsRetryable(receiveErr) && streamRetries >= maxStreamRetries {
+				receiveErr = retryExhaustedError(receiveErr, "stream", maxStreamRetries)
+			}
 			return result, actualReasoningLevel, receiveErr
 		}
 		streamRetries++
@@ -140,4 +161,19 @@ func (l *Loop) runModelStream(ctx context.Context, run chat.Run, chatModel model
 		}
 		reconnecting = true
 	}
+}
+
+func retryExhaustedError(err error, phase string, retries int) error {
+	var original *apperr.Error
+	if !errors.As(err, &original) {
+		return err
+	}
+	copy := *original
+	copy.Cause = err
+	copy.UserMessage = fmt.Sprintf("模型服务恢复重试已达上限（已重试 %d 次），当前请求已停止。请稍后重试。", retries)
+	if copy.Details != "" {
+		copy.Details += "\n"
+	}
+	copy.Details += fmt.Sprintf("Recovery stopped after %d %s retries; no incomplete result was accepted.", retries, phase)
+	return &copy
 }

@@ -875,7 +875,18 @@ func appendArtifactFiles(ctx context.Context, db *sql.DB, snapshot *projectarchi
 }
 
 func appendWorkflowInputFiles(ctx context.Context, db *sql.DB, snapshot *projectarchive.Snapshot) error {
-	rows, err := db.QueryContext(ctx, `SELECT COALESCE(research_task_id,''),inputs_json,compilation_json FROM workflow_runs ORDER BY id`)
+	// Proposal snapshots are immutable task files even before confirmation.
+	// Include every version, not only the original run inputs, so restored
+	// research never references a missing confirmed data set.
+	rows, err := db.QueryContext(ctx, `SELECT COALESCE(research_task_id,''),inputs_json,compilation_json FROM workflow_runs
+		UNION ALL
+		SELECT COALESCE(wr.research_task_id,''),json_object('input_paths',json_group_array(json_extract(f.value,'$.relativePath'))),wr.compilation_json
+		FROM research_revision_proposals p JOIN workflow_runs wr ON wr.id=p.workflow_run_id
+		JOIN json_each(p.proposal_json,'$.dataVersion.files') f GROUP BY p.id
+		UNION ALL
+		SELECT COALESCE(wr.research_task_id,''),json_group_array(json_extract(f.value,'$.relativePath')),''
+		FROM research_revision_proposals p JOIN workflow_runs wr ON wr.id=p.workflow_run_id
+		JOIN json_each(p.proposal_json,'$.sourceVersion.files') f GROUP BY p.id`)
 	if err != nil {
 		return err
 	}
@@ -886,11 +897,16 @@ func appendWorkflowInputFiles(ctx context.Context, db *sql.DB, snapshot *project
 		if err := rows.Scan(&taskID, &inputsJSON, &compilationJSON); err != nil {
 			return err
 		}
-		var compilation workflow.Compilation
-		if json.Unmarshal([]byte(compilationJSON), &compilation) != nil {
-			return fmt.Errorf("archived Workflow compilation is invalid")
+		var paths []string
+		if compilationJSON == "" {
+			err = json.Unmarshal([]byte(inputsJSON), &paths)
+		} else {
+			var compilation workflow.Compilation
+			if json.Unmarshal([]byte(compilationJSON), &compilation) != nil {
+				return fmt.Errorf("archived Workflow compilation is invalid")
+			}
+			paths, err = workflow.FrozenInputPaths(compilation, json.RawMessage(inputsJSON))
 		}
-		paths, err := workflow.FrozenInputPaths(compilation, json.RawMessage(inputsJSON))
 		if err != nil {
 			return fmt.Errorf("inspect archived Workflow inputs: %w", err)
 		}
@@ -995,6 +1011,25 @@ func allocateArchiveIDs(ctx context.Context, db *sql.DB, maps *archiveIDMaps) er
 		if err := rows.Close(); err != nil {
 			return err
 		}
+	}
+	// Kernel protocol execution IDs are independently unique, not the audit
+	// row's primary key. Restoring beside the original must remap both.
+	rows, err := db.QueryContext(ctx, `SELECT execution_id FROM python_kernel_executions ORDER BY execution_id`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var old string
+		if err := rows.Scan(&old); err != nil {
+			return err
+		}
+		if _, err := maps.allocate("python_kernel_execution_ids", old); err != nil {
+			return err
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
 	}
 	return nil
 }
@@ -1153,7 +1188,15 @@ func rewriteProjectSnapshot(ctx context.Context, db *sql.DB, oldProjectID string
 		{"research_evidence_entries", "bibliography_id", "research_bibliographies"},
 		{"python_environments", "id", "python_environments"},
 		{"python_kernel_executions", "id", "python_kernel_executions"},
+		{"python_kernel_executions", "execution_id", "python_kernel_execution_ids"},
 		{"python_kernel_executions", "environment_id", "python_environments"},
+	}
+	// Conversation ownership is encoded as a prefixed ID, not a research-task
+	// foreign key. Preserve privacy while remapping restored conversations.
+	for oldID, newID := range maps.values["conversations"] {
+		if _, err := tx.ExecContext(ctx, `UPDATE attachments SET research_task_id=? WHERE scope_kind='conversation' AND research_task_id=?`, "conversation:"+newID, "conversation:"+oldID); err != nil {
+			return fmt.Errorf("remap conversation attachment owner: %w", err)
+		}
 	}
 	for _, mapping := range updateMappings {
 		if err := updateMappedColumn(ctx, tx, mapping.table, mapping.column, maps.values[mapping.target]); err != nil {
@@ -1463,6 +1506,7 @@ func rewriteWorkflowRunSnapshots(ctx context.Context, tx *sql.Tx, maps *archiveI
 		update string
 		label  string
 	}{
+		{`SELECT tool_call_id,structured_json FROM tool_results WHERE json_valid(structured_json) ORDER BY tool_call_id`, `UPDATE tool_results SET structured_json=? WHERE tool_call_id=?`, "Tool result structured payload"},
 		{`SELECT id,arguments_json FROM tool_calls WHERE workflow_run_id IS NOT NULL ORDER BY id`, `UPDATE tool_calls SET arguments_json=? WHERE id=?`, "Workflow ToolCall arguments"},
 		{`SELECT id,context_json FROM workflow_human_decisions ORDER BY id`, `UPDATE workflow_human_decisions SET context_json=? WHERE id=?`, "Workflow human decision context"},
 		{`SELECT id,payload_json FROM workflow_events ORDER BY id`, `UPDATE workflow_events SET payload_json=? WHERE id=?`, "Workflow event payload"},
@@ -1590,6 +1634,15 @@ func rewriteWorkflowPayload(raw []byte, maps *archiveIDMaps, oldProjectID, proje
 		switch typed := current.(type) {
 		case map[string]any:
 			for childKey, child := range typed {
+				// Host revision identity is an ID in the proposal table, not an
+				// artifact ID. Embedded confirmed events need the same remapping
+				// as the proposal rows and timeline cards.
+				if childKey == "id" {
+					if original, ok := child.(string); ok && maps.values["research_revision_proposals"][original] != "" {
+						typed[childKey] = maps.get("research_revision_proposals", original)
+						continue
+					}
+				}
 				typed[childKey] = walk(child, childKey)
 			}
 			return typed
@@ -1599,6 +1652,9 @@ func rewriteWorkflowPayload(raw []byte, maps *archiveIDMaps, oldProjectID, proje
 			}
 			return typed
 		case string:
+			if key == "executionId" {
+				return maps.getFirst(typed, "workflow_ai_executions", "python_kernel_execution_ids")
+			}
 			if key == "projectId" && typed == oldProjectID {
 				return projectID
 			}

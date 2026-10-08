@@ -6,6 +6,7 @@ import vm from "node:vm";
 import ts from "typescript";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import {loadTsx} from './testTsxLoader.mjs';
 
 const source = await readFile(new URL("./App.tsx", import.meta.url), "utf8");
 function segment(start, end) {
@@ -16,11 +17,11 @@ function segment(start, end) {
 const compiled = ts.transpileModule('import * as React from "react";\n' +
   segment("function workflowResearchDesign(", "const workflowResearchDesignSections") +
   segment("function ResearchDeliveryStatus(", "function WorkflowInteractionCards(") +
-  "\nexport { workflowResearchDesign, workflowResearchReport, workflowRevisionConversationId, ResearchDeliveryStatus, ResearchAcceptanceDetails };", {
+  "\nexport { workflowResearchDesign, workflowResearchReport, workflowResearchInterpretation, workflowRevisionConversationId, ResearchDeliveryStatus, ResearchAcceptanceDetails };", {
   compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.React, target: ts.ScriptTarget.ES2022 },
 }).outputText;
 const exports = {};
-vm.runInNewContext(compiled, { exports, require: createRequire(import.meta.url), WorkflowResearchReportCard: () => null, WorkflowResearchDesignCard: () => null, ResearchRevisionCards: () => null });
+vm.runInNewContext(compiled, { exports, require: createRequire(import.meta.url), ResearchCard: loadTsx(new URL('./ResearchCard.tsx',import.meta.url)).ResearchCard, WorkflowResearchReportCard: () => null, WorkflowResearchDesignCard: () => null, ResearchRevisionCards: () => null });
 
 test("completed flag and approved boolean alone cannot expose a final report", () => {
   const detail = { run: { status: "completed", outputs: { delivery_gate: { approved: true }, report_draft: { markdown: "# Report", methodSummary: "Method", confidence: "medium" } } } };
@@ -31,6 +32,14 @@ test("completed flag and approved boolean alone cannot expose a final report", (
   assert.equal(exports.workflowResearchReport(detail).markdown, "# Report");
   detail.run.status = "failed";
   assert.equal(exports.workflowResearchReport(detail), null);
+});
+
+test("host-verified scientific rejection supports discussion but never exposes a delivered report", () => {
+ const d={run:{status:'failed',conversationId:'research-chat',outputs:{}},discussionRevisionAvailable:true};
+ assert.equal(exports.workflowRevisionConversationId(d),'research-chat');
+ assert.equal(exports.workflowResearchReport(d),null);
+ d.discussionRevisionAvailable=false;assert.equal(exports.workflowRevisionConversationId(d),'');
+ d.discussionRevisionAvailable=true;d.registeredDeliverables=['report_draft'];assert.equal(exports.workflowRevisionConversationId(d),'');
 });
 
 test("revision placeholder is offered only for the current reviewed unregistered report", () => {
@@ -61,7 +70,7 @@ test("composer revision hint respects conversation scope and execution precedenc
     context.researchRevisionReady = vm.runInNewContext(readyExpression, context);
     return vm.runInNewContext(expression, context);
   };
-  assert.equal(hint({}), "结论不对？向AI提出疑问并令其返修...");
+  assert.equal(hint({}), "继续讨论、补充文献、比较方法或更新数据；确认方案后再执行…");
   for (const overrides of [{ workspaceMode: "chat" }, { conversationId: "other" }, { researchRevisionConversationId: "" }]) {
     assert.equal(hint(overrides), "向 SciAide 描述研究问题，或输入 / 使用命令…");
   }
@@ -69,6 +78,29 @@ test("composer revision hint respects conversation scope and execution precedenc
   assert.match(hint({ busy: true }), /正在回答，可先编辑下一条消息/);
   assert.match(hint({ busy: true, activeRunIsWorkflowAI: true }), /当前科研阶段由 AI 自主执行/);
   assert.match(source, /return \(\) => publishRevisionConversationId\(""\)/);
+});
+
+test("reviewed design and report-free analysis also expose the same discussion entry", () => {
+  const ready = {run: {conversationId: "research-chat", workflowPurpose: "user_plan", status: "completed", outputs: {delivery_gate: {approved: true}, interpretation: {summary: "sum=3", computedFacts: ["3"], confidence: "medium"}}}, deliveryAssessment: {status: "reviewed"}, registeredDeliverables: []};
+  assert.equal(exports.workflowRevisionConversationId(ready), "research-chat");
+  assert.equal(exports.workflowResearchInterpretation(ready).summary, "sum=3");
+  for (const mutate of [
+    detail => { detail.registeredDeliverables = ["interpretation"]; },
+    detail => { detail.run.status = "running"; },
+    detail => { detail.deliveryAssessment.status = "unverified"; },
+    detail => { detail.run.outputs.delivery_gate.approved = false; },
+    detail => { detail.run.outputs.interpretation = null; },
+    detail => { detail.run.outputs.interpretation.confidence = "certain"; },
+    detail => { detail.run.outputs.report_draft = {markdown: ""}; },
+    detail => { detail.run.outputs.research_design = {}; },
+  ]) {
+    const detail = structuredClone(ready); mutate(detail);
+    assert.equal(exports.workflowRevisionConversationId(detail), "");
+  }
+  ready.run.outputs = {delivery_gate: {approved: true}, research_design: {title: "Design", researchQuestion: "Question", status: "research_design_not_empirical_result"}};
+  assert.equal(exports.workflowRevisionConversationId(ready), "research-chat");
+  ready.registeredDeliverables = ["research_design"];
+  assert.equal(exports.workflowRevisionConversationId(ready), "");
 });
 
 test("only the current completed event owns registration actions", () => {
@@ -110,7 +142,7 @@ test("existing retry card takes precedence and final artifacts retain acceptance
   const assessment = {status:"revision_required", label:"结果", summary:"需要返修"};
   assert.equal(renderToStaticMarkup(React.createElement(exports.ResearchDeliveryStatus, {runStatus:"failed", assessment, recoveryVisible:true})), "");
   assert.match(renderToStaticMarkup(React.createElement(exports.ResearchDeliveryStatus, {runStatus:"failed", assessment})), /需要返修/);
-  assert.match(source, /WorkflowResearchReportCard assessment=\{runDetail.deliveryAssessment\}/);
+  assert.match(source, /WorkflowResearchReportCard [^\n]*assessment=\{runDetail.deliveryAssessment\}/);
   assert.match(source, /WorkflowResearchDesignCard assessment=\{runDetail.deliveryAssessment\}/);
 });
 

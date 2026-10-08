@@ -37,6 +37,22 @@ func researchSubmissionDiagnostic(err error) string {
 	return strings.Join(parts, "\n")
 }
 
+// The model needs the complete diagnostic; the conversation error does not.
+// Keep source excerpts and repair instructions in ErrorDetails, not the banner.
+func researchSubmissionFailureMessage(err error) string {
+	message := "科研结果经两次修正仍未通过检查，当前阶段已停止。"
+	var quoteErrors *workflow.CitationQuoteErrors
+	var quoteErr *workflow.CitationQuoteError
+	if errors.As(err, &quoteErrors) {
+		message += "多条引用摘录仍与对应原文不匹配。"
+	} else if errors.As(err, &quoteErr) {
+		message += "引用 " + tool.SafeActivityText(quoteErr.Reference, 80) + " 的摘录与对应原文不匹配。"
+	} else {
+		message += "阶段结果仍不符合输出格式或内容要求。"
+	}
+	return message + "详细原因已保留在诊断信息中；可重试当前阶段，无需新建任务或重新上传材料。"
+}
+
 func filterResearchTools(definitions []tool.Definition, guidance workflow.ResearchGuidance) ([]tool.Definition, map[string]struct{}) {
 	allowed := make(map[string]struct{}, len(guidance.AllowedToolNames))
 	for _, name := range guidance.AllowedToolNames {

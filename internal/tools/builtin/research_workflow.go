@@ -117,7 +117,7 @@ func (*ResearchWorkflowReviewGate) Invoke(_ context.Context, invocation tool.Inv
 	issues := len(args.Review.UnsupportedClaims) + len(args.Review.CitationIssues) + len(args.Review.NumericIssues) + len(args.Review.MethodIssues)
 	corrections := len(args.Review.RequiredCorrections)
 	if !args.Review.Approved || issues > 0 || corrections > 0 {
-		return tool.Result{}, tool.NewUserFacingError(fmt.Sprintf("独立审查未通过：审查记录列出 %d 条分类意见，并归纳为 %d 条必须修正项；当前结果不会交付", issues, corrections))
+		return tool.Result{}, tool.BusinessDecisionError{Code: "RESEARCH_REVIEW_NOT_APPROVED", Message: fmt.Sprintf("独立审查未通过：审查记录列出 %d 条分类意见，并归纳为 %d 条必须修正项；当前结果不会交付", issues, corrections)}
 	}
 	reviewBytes, _ := json.Marshal(args.Review)
 	reviewDigest := sha256.Sum256(reviewBytes)

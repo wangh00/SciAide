@@ -45,6 +45,25 @@ func TestDiscussionRevisionScopeAndSnapshot(t *testing.T) {
 	}
 }
 
+func TestDiscussionCanReviseReviewedAnalysisWithoutReport(t *testing.T) {
+	d := reviewedDeliveryFixture(t)
+	d.Run.Compilation.Outputs[0].Name = "interpretation"
+	var outputs map[string]json.RawMessage
+	if err := json.Unmarshal(d.Run.Outputs, &outputs); err != nil {
+		t.Fatal(err)
+	}
+	outputs["interpretation"] = outputs["research_design"]
+	delete(outputs, "research_design")
+	d.Run.Outputs = mustJSON(outputs)
+	if err := validateDiscussionDelivery(d); err != nil {
+		t.Fatal("reviewed analysis requires an unnecessary report", err)
+	}
+	d.Steps[1].Status = StepQueued
+	if err := validateDiscussionDelivery(d); err == nil {
+		t.Fatal("unreviewed analysis accepted")
+	}
+}
+
 func TestDiscussionPagesSurviveActualModelResultLimit(t *testing.T) {
 	value := rawObject(map[string]any{"content": strings.Repeat("中文\\\"\n\t", 5000)})
 	var recovered strings.Builder

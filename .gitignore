@@ -30,6 +30,7 @@ __pycache__/
 
 # Local test, review, and development cache
 /.tmp/
+/examples/research-cases.zip
 
 # IDE / OS
 .idea/

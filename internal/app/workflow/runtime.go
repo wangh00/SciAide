@@ -152,6 +152,8 @@ type RunDetail struct {
 	DeliveryAssessment           *ResearchDeliveryAssessment     `json:"deliveryAssessment,omitempty"`
 	ReviewRevisionTargets        []ResearchRevisionTarget        `json:"reviewRevisionTargets,omitempty"`
 	ReviewRevisionRecommendation *ResearchRevisionRecommendation `json:"reviewRevisionRecommendation,omitempty"`
+	DiscussionRevisionAvailable  bool                            `json:"discussionRevisionAvailable"`
+	EvidenceReselection          *ResearchEvidenceReselection    `json:"evidenceReselection,omitempty"`
 }
 
 // ToolActivity is the safe Workflow-level projection of a tool call. Raw
@@ -168,6 +170,7 @@ type ToolActivity struct {
 	Arguments      json.RawMessage              `json:"arguments,omitempty"`
 	Permissions    []tool.PermissionRequirement `json:"permissions"`
 	OutputSummary  string                       `json:"outputSummary,omitempty"`
+	ErrorCode      string                       `json:"errorCode,omitempty"`
 	ErrorMessage   string                       `json:"errorMessage,omitempty"`
 	StdoutTail     string                       `json:"stdoutTail,omitempty"`
 	StderrTail     string                       `json:"stderrTail,omitempty"`
@@ -317,9 +320,11 @@ type AIStageExecutor interface {
 }
 
 type ResearchGuidance struct {
-	WorkflowRunID  string `json:"workflowRunId"`
-	WorkflowStepID string `json:"workflowStepId,omitempty"`
-	SystemContext  string `json:"systemContext"`
+	WorkflowRunID         string   `json:"workflowRunId"`
+	WorkflowStepID        string   `json:"workflowStepId,omitempty"`
+	SelectedAttachmentIDs []string `json:"-"`
+	SelectedOnly          bool     `json:"-"`
+	SystemContext         string   `json:"systemContext"`
 	// Execution already receives frozen inputs in its stage prompt. Discussion
 	// keeps the fuller state; execution must not replay those values twice.
 	ExecutionSystemContext string   `json:"-"`
@@ -766,6 +771,8 @@ func (s *RuntimeService) projectDetail(ctx context.Context, result RunDetail) Ru
 	result.DeliveryAssessment = assessResearchDelivery(result)
 	result.ReviewRevisionTargets = researchRevisionTargets(result)
 	result.ReviewRevisionRecommendation = researchRevisionRecommendation(result)
+	result.DiscussionRevisionAvailable = len(discussionRevisionTargets(result)) > 0
+	result.EvidenceReselection = researchEvidenceReselection(result)
 	return result
 }
 
@@ -782,7 +789,7 @@ func (s *RuntimeService) workflowToolActivities(ctx context.Context, runID strin
 	}
 	activities := make([]ToolActivity, 0, len(calls))
 	for _, call := range calls {
-		activity := ToolActivity{ID: call.ID, StepID: stepByCall[call.ID], ToolName: call.ToolName, Status: call.Status, Risk: call.Risk, Summary: tool.SafeActivityText(workflowToolSummary(call), 180), Arguments: tool.SafeActivityArguments(call.Arguments), Permissions: tool.SafeActivityPermissions(call.Permissions), ErrorMessage: tool.SafeActivityText(call.ErrorMessage, 500), CreatedAt: call.CreatedAt, StartedAt: call.StartedAt, CompletedAt: call.CompletedAt}
+		activity := ToolActivity{ID: call.ID, StepID: stepByCall[call.ID], ToolName: call.ToolName, Status: call.Status, Risk: call.Risk, Summary: tool.SafeActivityText(workflowToolSummary(call), 180), Arguments: tool.SafeActivityArguments(call.Arguments), Permissions: tool.SafeActivityPermissions(call.Permissions), ErrorCode: call.ErrorCode, ErrorMessage: tool.SafeActivityText(call.ErrorMessage, 500), CreatedAt: call.CreatedAt, StartedAt: call.StartedAt, CompletedAt: call.CompletedAt}
 		if call.Result != nil {
 			activity.OutputSummary = workflowCompactText(call.Result.Text)
 			activity.DurationMillis = call.Result.Meta.DurationMillis
@@ -1124,6 +1131,7 @@ func (s *RuntimeService) Decide(ctx context.Context, command HumanDecisionComman
 		return RunDetail{}, fmt.Errorf("decision context is invalid or too large")
 	}
 	output := json.RawMessage(`{"approved":false}`)
+	decisionEvidence := map[string]any{}
 	if node.Kind == NodeCandidateSelection {
 		if !command.Approved {
 			return s.rejectHumanDecision(ctx, detail, *step, command, contextJSON, "CANDIDATE_SELECTION_REJECTED", "用户取消了候选筛选")
@@ -1239,7 +1247,7 @@ func (s *RuntimeService) Decide(ctx context.Context, command HumanDecisionComman
 			evidenceStatus = "no_verified_citations"
 		} else if audit := auditCitationSelection(step.Input, citations, command.AcceptLimitedEvidence); audit.RequiresLimitedAcceptance {
 			if !command.AcceptLimitedEvidence {
-				return RunDetail{}, fmt.Errorf("AI 证据审核判断当前选择不足以覆盖原研究范围，或遗漏了推荐的核心摘录；请补充选择，或明确勾选“以有限证据继续”后生成低置信初稿")
+				return RunDetail{}, fmt.Errorf("AI 证据审核判断当前选择不足以覆盖原研究范围，或遗漏了推荐摘录；请补充选择，或明确勾选“以有限证据继续”后生成有边界的初稿；置信程度与原目标完成情况仍须按实际证据判断")
 			}
 			evidenceStatus = "limited_citations_accepted"
 		}
@@ -1263,13 +1271,31 @@ func (s *RuntimeService) Decide(ctx context.Context, command HumanDecisionComman
 		if outputErr != nil {
 			return RunDetail{}, fmt.Errorf("最新 AI 回答不是可提交的阶段结果：%w", outputErr)
 		}
-		structured = canonicalCitationSubmission(structured, detail, *step, node, latest.ChatRunID)
-		if usesTrackedReview(node) || usesReportProvenance(node) {
-			if err := validateWorkflowAIStageOutput(node, structured, step.Input); err != nil {
+		validationStep := *step
+		if node.ID == "evidence_screening" {
+			if accepted, sourceHash, ok := acceptedIndexedEvidence(detail, *step); ok {
+				input := decodeObject(step.Input)
+				input["candidates"] = accepted
+				input["indexedReadRanges"] = indexedReadRanges(detail)
+				validationStep.Input = mustJSON(input)
+				decisionEvidence["evidenceCandidates"] = accepted
+				decisionEvidence["evidenceSourceOutputSha256"] = sourceHash
+			}
+		}
+		citations, citationErr := s.workflowAICitationSeeds(ctx, detail, validationStep)
+		if citationErr != nil {
+			return RunDetail{}, fmt.Errorf("最新 AI 回答的引用快照无效：%w", citationErr)
+		}
+		structured = restoreWorkflowCitationMarkers(structured, citations, latest.ChatRunID)
+		if node.ID == "evidence_screening" {
+			structured = canonicalSupportingQuotes(structured, validationStep.Input)
+		}
+		if usesTrackedReview(node) || usesReportProvenance(node) || node.ID == "evidence_screening" {
+			if err := validateWorkflowAIStageOutput(node, structured, validationStep.Input); err != nil {
 				return RunDetail{}, err
 			}
 		}
-		if node.ID == "method_implementation" && node.PromptVersion == dynamicImplementationPromptVersion {
+		if node.ID == "method_implementation" && supportsDynamicImplementationProtocol(node.PromptVersion) {
 			if err := validateWorkflowAIStageOutput(node, structured, step.Input); err != nil {
 				return RunDetail{}, err
 			}
@@ -1280,12 +1306,11 @@ func (s *RuntimeService) Decide(ctx context.Context, command HumanDecisionComman
 				return RunDetail{}, fmt.Errorf("最新实现与确认卡片不一致，请重新生成并核对变化后确认")
 			}
 		}
-		citations, citationErr := s.workflowAICitationSeeds(ctx, detail, *step)
-		if citationErr != nil {
-			return RunDetail{}, fmt.Errorf("最新 AI 回答的引用快照无效：%w", citationErr)
+		outputData := map[string]any{"analysis": json.RawMessage(structured), "text": latest.Text, "revisionChatRunId": latest.ChatRunID, "outputSha256": hashJSON(structured)}
+		for k, v := range decisionEvidence {
+			outputData[k] = v
 		}
-		structured = restoreWorkflowCitationMarkers(structured, citations, latest.ChatRunID)
-		output, _ = json.Marshal(map[string]any{"analysis": json.RawMessage(structured), "text": latest.Text, "revisionChatRunId": latest.ChatRunID, "outputSha256": hashJSON(structured)})
+		output, _ = json.Marshal(outputData)
 		contextJSON, _ = json.Marshal(map[string]any{"adoptedChatRunId": latest.ChatRunID, "outputSha256": hashJSON(structured)})
 	} else {
 		output, _ = json.Marshal(map[string]any{"approved": command.Approved, "context": json.RawMessage(contextJSON)})
@@ -1300,7 +1325,17 @@ func (s *RuntimeService) Decide(ctx context.Context, command HumanDecisionComman
 	if err != nil {
 		return RunDetail{}, err
 	}
-	event, _ := s.event(command.RunID, "workflow.human_decided", map[string]any{"stepId": step.ID, "approved": command.Approved}, s.now())
+	decisionEvent := map[string]any{"stepId": step.ID, "approved": command.Approved}
+	if candidates, ok := decisionEvidence["evidenceCandidates"]; ok {
+		decisionEvent["evidenceCandidatesSha256"] = hashJSON(mustJSON(candidates))
+		decisionEvent["evidenceSourceOutputSha256"] = decisionEvidence["evidenceSourceOutputSha256"]
+		var adopted struct {
+			Analysis json.RawMessage `json:"analysis"`
+		}
+		_ = json.Unmarshal(output, &adopted)
+		decisionEvent["outputSha256"] = hashJSON(adopted.Analysis)
+	}
+	event, _ := s.event(command.RunID, "workflow.human_decided", decisionEvent, s.now())
 	if final {
 		nextOrdinal = len(detail.Steps)
 	}
@@ -1613,17 +1648,23 @@ func (s *RuntimeService) Retry(ctx context.Context, command RetryCommand) (RunDe
 	if err != nil {
 		return detail, err
 	}
-	if detail.Run.Status != RunFailed && detail.Run.Status != RunInterrupted {
-		return detail, fmt.Errorf("only failed or interrupted Workflow Runs can retry")
+	if detail.Run.Status != RunFailed && detail.Run.Status != RunInterrupted && detail.Run.Status != RunCancelled {
+		return detail, fmt.Errorf("only failed, interrupted or explicitly cancelled AI Workflow Runs can retry")
 	}
 	if _, validationErr := s.validateRunSnapshots(ctx, detail); validationErr != nil {
 		return detail, validationErr
 	}
 	step := findStep(detail.Steps, command.StepID)
-	if step == nil || (step.Status != StepFailed && step.Status != StepInterrupted && step.Status != StepOutcomeUnknown) {
+	if step == nil || (step.Status != StepFailed && step.Status != StepInterrupted && step.Status != StepOutcomeUnknown && step.Status != StepCancelled) {
 		return RunDetail{}, fmt.Errorf("Workflow step is not retryable")
 	}
 	node := compilationNodeMap(detail.Run.Compilation)[step.NodeID]
+	if step.Status == StepCancelled && detail.Run.Status != RunCancelled {
+		return detail, fmt.Errorf("已取消阶段只能在已取消任务中显式恢复")
+	}
+	if detail.Run.Status == RunCancelled && (step.Status != StepCancelled || step.Ordinal != detail.Run.CurrentStep || (node.Kind != NodeAgentStage && node.Kind != NodeAIAnalysis)) {
+		return detail, fmt.Errorf("已取消任务仅支持显式恢复当前 AI 阶段；有副作用或结果未知的工具步骤不能直接恢复")
+	}
 	if isReviewGateNode(node) {
 		targetID, requestErr := resolveReviewRevisionRequest(detail, *step, command)
 		if requestErr != nil {
@@ -1633,13 +1674,13 @@ func (s *RuntimeService) Retry(ctx context.Context, command RetryCommand) (RunDe
 		if revisionErr != nil {
 			return RunDetail{}, revisionErr
 		}
-		if command.UseRecommendation {
+		if command.UseRecommendation || compilationNodeMap(detail.Run.Compilation)[producer.NodeID].Kind == NodeCitationSelection {
 			_, fullReview, err := currentRejectedReview(detail, *step)
 			if err != nil {
 				return RunDetail{}, err
 			}
 			revision.IndependentReview, revision.ReviewOutputSHA256 = cloneRaw(fullReview), hashJSON(fullReview)
-			revision.UsedRecommendation = true
+			revision.UsedRecommendation = command.UseRecommendation
 		}
 		event, eventErr := s.event(detail.Run.ID, "workflow.review_revision_queued", revision, s.now())
 		if eventErr != nil {
@@ -2130,6 +2171,8 @@ func (s *RuntimeService) drive(ctx context.Context, runID string) error {
 			input, err := bindNodeInput(detail, node)
 			if err == nil {
 				input = addResearchSourceContext(detail, node, input)
+				input = bindIndexedEvidence(detail, node, input)
+				input = bindPreviousCitationSelection(detail, node, input)
 				input, err = s.bindRevisionMaterials(ctx, detail, node, input)
 			}
 			inputErrorCode := "WORKFLOW_INPUT_BINDING_FAILED"
@@ -2251,19 +2294,20 @@ func (s *RuntimeService) driveAI(ctx context.Context, detail RunDetail, step Ste
 			return idErr
 		}
 		promptText := buildAIStagePrompt(detail, step, node)
+		promptVersion := reportExecutionPromptVersion(node, promptText)
 		citations, citationErr := s.workflowAICitationSeeds(ctx, detail, step)
 		if citationErr != nil {
 			return s.failDrive(ctx, detail, step, "WORKFLOW_AI_CITATIONS_INVALID", citationErr.Error(), StepFailed, RunFailed)
 		}
 		state, startErr := aiExecutor.Start(ctx, AIStartCommand{
 			ExecutionID: executionID, WorkflowRunID: detail.Run.ID, WorkflowStepID: step.ID, ConversationID: detail.Run.ConversationID,
-			Attempt: step.Attempt, NodeKind: node.Kind, PromptVersion: node.PromptVersion, PromptText: promptText, PromptSHA256: hashStrings(promptText),
+			Attempt: step.Attempt, NodeKind: node.Kind, PromptVersion: promptVersion, PromptText: promptText, PromptSHA256: hashStrings(promptText),
 			InputSHA256: step.InputSHA256, AllowedTools: allowed, OutputSchema: cloneRaw(node.OutputSchema), OutputSchemaSHA256: node.OutputSchemaSHA256, Citations: citations,
 		})
 		if startErr != nil {
 			return s.failDrive(ctx, detail, step, "WORKFLOW_AI_START_FAILED", startErr.Error(), StepFailed, RunFailed)
 		}
-		event, _ := s.event(detail.Run.ID, "workflow.ai_started", map[string]any{"stepId": step.ID, "executionId": state.ExecutionID, "chatRunId": state.ChatRunID, "modelProfileId": state.ModelProfileID, "modelId": state.ModelID, "promptVersion": node.PromptVersion}, s.now())
+		event, _ := s.event(detail.Run.ID, "workflow.ai_started", map[string]any{"stepId": step.ID, "executionId": state.ExecutionID, "chatRunId": state.ChatRunID, "modelProfileId": state.ModelProfileID, "modelId": state.ModelID, "promptVersion": promptVersion}, s.now())
 		if eventErr := s.repository.RecordEvent(ctx, event); eventErr != nil {
 			_ = aiExecutor.Cancel(context.Background(), AIExecution{ID: state.ExecutionID, ChatRunID: state.ChatRunID})
 			now := s.now()
@@ -2274,7 +2318,7 @@ func (s *RuntimeService) driveAI(ctx context.Context, detail RunDetail, step Ste
 			_ = s.repository.FinishAIExecution(context.Background(), execution)
 			return s.failDrive(context.Background(), detail, step, execution.ErrorCode, execution.ErrorMessage, StepFailed, RunFailed)
 		}
-		execution = AIExecution{ID: state.ExecutionID, WorkflowRunID: detail.Run.ID, WorkflowStepID: step.ID, ChatRunID: state.ChatRunID, Attempt: step.Attempt, NodeKind: node.Kind}
+		execution = AIExecution{ID: state.ExecutionID, WorkflowRunID: detail.Run.ID, WorkflowStepID: step.ID, ChatRunID: state.ChatRunID, Attempt: step.Attempt, NodeKind: node.Kind, InputSHA256: step.InputSHA256}
 	}
 	state, err := waitForAIStage(ctx, aiExecutor, execution, func(waited time.Duration) {
 		if waited > 0 && int(waited.Seconds())%10 == 0 {
@@ -2282,6 +2326,11 @@ func (s *RuntimeService) driveAI(ctx context.Context, detail RunDetail, step Ste
 			_ = s.repository.RecordEvent(context.Background(), event)
 		}
 	})
+	// A provider may return a response or error after ignoring cancellation.
+	// Keep this old driver from changing an explicitly restored step.
+	if ctx.Err() != nil {
+		return nil
+	}
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return nil
@@ -2290,7 +2339,7 @@ func (s *RuntimeService) driveAI(ctx context.Context, detail RunDetail, step Ste
 		execution.Status, execution.ErrorCode, execution.ErrorMessage = "failed", "WORKFLOW_AI_STATE_FAILED", err.Error()
 		execution.UpdatedAt, execution.CompletedAt = now, &now
 		_ = s.repository.FinishAIExecution(context.Background(), execution)
-		return s.failDrive(context.Background(), detail, step, execution.ErrorCode, execution.ErrorMessage, StepFailed, RunFailed)
+		return s.failDrive(ctx, detail, step, execution.ErrorCode, execution.ErrorMessage, StepFailed, RunFailed)
 	}
 	now := s.now()
 	completed := now
@@ -2304,19 +2353,19 @@ func (s *RuntimeService) driveAI(ctx context.Context, detail RunDetail, step Ste
 	}
 	switch state.Status {
 	case "completed":
-		return s.completeAIExecution(context.Background(), detail, step, node, execution, true)
+		return s.completeAIExecution(ctx, detail, step, node, execution, true)
 	case "cancelled":
 		execution.Status = "cancelled"
 		_ = s.repository.FinishAIExecution(context.Background(), execution)
-		return s.failDrive(context.Background(), detail, step, "WORKFLOW_AI_CANCELLED", "AI 阶段已取消", StepCancelled, RunCancelled)
+		return s.failDrive(ctx, detail, step, "WORKFLOW_AI_CANCELLED", "AI 阶段已取消", StepCancelled, RunCancelled)
 	case "interrupted":
 		execution.Status = "interrupted"
 		_ = s.repository.FinishAIExecution(context.Background(), execution)
-		return s.failDrive(context.Background(), detail, step, "WORKFLOW_AI_INTERRUPTED", state.ErrorMessage, StepInterrupted, RunInterrupted)
+		return s.failDrive(ctx, detail, step, "WORKFLOW_AI_INTERRUPTED", state.ErrorMessage, StepInterrupted, RunInterrupted)
 	default:
 		execution.Status = "failed"
 		_ = s.repository.FinishAIExecution(context.Background(), execution)
-		return s.failDrive(context.Background(), detail, step, state.ErrorCode, state.ErrorMessage, StepFailed, RunFailed)
+		return s.failDrive(ctx, detail, step, state.ErrorCode, state.ErrorMessage, StepFailed, RunFailed)
 	}
 }
 
@@ -2324,7 +2373,7 @@ func validateAIStageProtocol(node CompiledNode) error {
 	if node.ID == "candidate_screening" && strings.HasPrefix(node.PromptVersion, "dynamic-candidate-screening-") && node.PromptVersion != literatureScreeningVersion {
 		return fmt.Errorf("该任务使用旧版文献筛选协议，请新建科研任务以使用分层综合")
 	}
-	if node.ID == "method_implementation" && node.PromptVersion != dynamicImplementationPromptVersion {
+	if node.ID == "method_implementation" && !supportsDynamicImplementationProtocol(node.PromptVersion) {
 		return fmt.Errorf("该科研任务使用旧版分析实现协议，无法在当前版本中继续；请新建科研任务后重新运行")
 	}
 	return nil
@@ -2341,7 +2390,11 @@ func validateCompilationAIProtocols(compilation Compilation) error {
 
 func (s *RuntimeService) workflowAICitationSeeds(ctx context.Context, detail RunDetail, current Step) ([]tool.CitationRef, error) {
 	nodes := compilationNodeMap(detail.Run.Compilation)
-	result, err := workflowCandidateCitationSeeds(detail.Run.Compilation, detail.Steps, current)
+	indexed, err := s.verifiedIndexedEvidence(ctx, detail)
+	if err != nil {
+		return nil, err
+	}
+	result, err := workflowCandidateCitationSeeds(detail.Run.Compilation, detail.Steps, current, indexed)
 	if err != nil {
 		return nil, err
 	}
@@ -2368,6 +2421,7 @@ func (s *RuntimeService) workflowAICitationSeeds(ctx context.Context, detail Run
 		return nil, fmt.Errorf("load Workflow citation evidence: %w", err)
 	}
 	available := make([]tool.CitationRef, 0)
+	available = append(available, indexed...)
 	for _, call := range calls {
 		if call.ToolName == citation.KnowledgeToolName && call.Status == tool.CallCompleted && call.Result != nil && call.Result.Status == tool.ResultSuccess {
 			available = append(available, call.Result.Citations...)
@@ -2467,9 +2521,30 @@ func (s *RuntimeService) completeAIExecution(ctx context.Context, detail RunDeta
 		structured = cloneRaw(execution.Output)
 		parseErr = (tool.JSONSchemaValidator{}).Validate(node.OutputSchema, structured)
 	}
+	validationInput := step.Input
+	var currentReads []tool.CitationRef
 	if parseErr == nil {
-		structured = canonicalCitationSubmission(structured, detail, step, node, execution.ChatRunID)
-		parseErr = validateWorkflowAIStageOutput(node, structured, step.Input)
+		if node.ID == "evidence_screening" {
+			var evidenceErr error
+			structured, validationInput, currentReads, evidenceErr = s.indexedAIStageSubmission(ctx, detail, step, node, execution, structured)
+			if evidenceErr != nil {
+				return s.failDrive(ctx, detail, step, "WORKFLOW_AI_CITATIONS_INVALID", evidenceErr.Error(), StepFailed, RunFailed)
+			}
+		} else {
+			structured = canonicalCitationSubmission(structured, detail, step, node, execution.ChatRunID)
+		}
+		parseErr = validateWorkflowAIStageOutput(node, structured, validationInput)
+	}
+	// An incomplete collection draft may still checkpoint genuinely new source
+	// content. A complete, validated synthesis uses the observed reads directly;
+	// neither old-window eviction nor a new read discards a valid result.
+	// No recommended citations can also be a valid bounded result (for
+	// example, all checked material is inapplicable). Do not infer a collection
+	// draft solely from an empty recommendation list.
+	if parseErr != nil {
+		if handled, err := s.checkpointIndexedEvidence(ctx, detail, step, node, execution); handled || err != nil {
+			return s.finishEvidenceRefresh(ctx, detail, step, err)
+		}
 	}
 	// A format error must not replace the model's current scientific decision
 	// with a field splice or an older response. Only equivalent representation
@@ -2529,6 +2604,17 @@ func (s *RuntimeService) completeAIExecution(ctx context.Context, detail RunDeta
 	if citationErr != nil {
 		return s.failDrive(ctx, detail, step, "WORKFLOW_AI_CITATIONS_INVALID", citationErr.Error(), StepFailed, RunFailed)
 	}
+	// The accepted citation window can include exact current-Chat tool results,
+	// verified above. Downstream selection must see this same window.
+	if len(currentReads) > 0 {
+		var accepted struct {
+			Candidates []tool.CitationRef `json:"candidates"`
+		}
+		if err := json.Unmarshal(validationInput, &accepted); err != nil {
+			return err
+		}
+		citations = accepted.Candidates
+	}
 	structured = restoreWorkflowCitationMarkers(structured, citations, execution.ChatRunID)
 	outputSHA256 := hashJSON(structured)
 	if !finish && (execution.OutputSHA256 != outputSHA256 || hashJSON(execution.Output) != outputSHA256) {
@@ -2548,19 +2634,26 @@ func (s *RuntimeService) completeAIExecution(ctx context.Context, detail RunDeta
 	if reviewErr != nil {
 		return s.failDrive(ctx, detail, step, "WORKFLOW_IMPLEMENTATION_REVIEW_INVALID", reviewErr.Error(), StepFailed, RunFailed)
 	}
-	output, _ := json.Marshal(map[string]any{"analysis": json.RawMessage(structured), "text": execution.OutputText, "implementationReview": decisionReview})
+	outputData := map[string]any{"analysis": json.RawMessage(structured), "text": execution.OutputText, "implementationReview": decisionReview}
+	eventData := map[string]any{"stepId": step.ID, "executionId": execution.ID, "outputSha256": outputSHA256, "reviewPolicy": node.ReviewPolicy}
+	if len(currentReads) > 0 {
+		outputData["evidenceCandidates"] = citations
+		eventData["evidenceCandidatesSha256"] = hashJSON(mustJSON(citations))
+		eventData["indexedEvidence"] = indexedEvidencePage{Key: localEvidenceMaterialKey(detail), Run: execution.ChatRunID, StepID: step.ID, ExecutionID: execution.ID, Attempt: step.Attempt, Citations: currentReads, AcceptedOutputSHA256: outputSHA256}
+	}
+	output, _ := json.Marshal(outputData)
 	if node.ID == "evidence_screening" && node.PromptVersion == selectedEvidenceVersion {
 		var in struct {
 			Info selectedEvidenceInput `json:"_selectedEvidence"`
 		}
 		json.Unmarshal(step.Input, &in)
 		if in.Info.Phase != "batch" {
-			if handled, err := s.supplementLocalEvidence(ctx, detail, step, structured); handled || err != nil {
+			if handled, err := s.supplementLocalEvidenceWithEvidence(ctx, detail, step, structured, eventData["indexedEvidence"]); handled || err != nil {
 				return s.finishEvidenceRefresh(ctx, detail, step, err)
 			}
 		}
 		if in.Info.Phase == "batch" {
-			return s.completeSelectedEvidenceBatch(ctx, detail, step, execution)
+			return s.completeSelectedEvidenceBatchWithEvidence(ctx, detail, step, execution, eventData["indexedEvidence"])
 		}
 	}
 	if node.ID == "candidate_screening" && node.PromptVersion == literatureScreeningVersion {
@@ -2570,7 +2663,7 @@ func (s *RuntimeService) completeAIExecution(ctx context.Context, detail RunDeta
 		return nil
 	}
 	if node.Kind == NodeAgentStage && (node.ReviewPolicy != AIReviewAuto || decisionReview != nil) {
-		event, _ := s.event(detail.Run.ID, "workflow.agent_stage_review_requested", map[string]any{"stepId": step.ID, "executionId": execution.ID, "outputSha256": outputSHA256}, now)
+		event, _ := s.event(detail.Run.ID, "workflow.agent_stage_review_requested", eventData, now)
 		return s.repository.WaitAgentStage(ctx, detail.Run.ID, step.ID, output, now, event)
 	}
 	nextOrdinal := step.Ordinal + 1
@@ -2582,7 +2675,7 @@ func (s *RuntimeService) completeAIExecution(ctx context.Context, detail RunDeta
 	if final {
 		eventType = "workflow.completed"
 	}
-	event, _ := s.event(detail.Run.ID, eventType, map[string]any{"stepId": step.ID, "executionId": execution.ID, "outputSha256": outputSHA256, "reviewPolicy": node.ReviewPolicy}, now)
+	event, _ := s.event(detail.Run.ID, eventType, eventData, now)
 	return s.repository.CompleteStep(ctx, detail.Run.ID, step.ID, output, nextOrdinal, final, outputs, now, event)
 }
 
@@ -2949,7 +3042,7 @@ func requiredWorkflowSkills(runInputs json.RawMessage, step Step, node CompiledN
 	// Method synthesis loads only Skills assigned to that stage. Independent
 	// review re-opens every core Skill frozen for the adopted route so it can
 	// verify original method boundaries rather than an earlier summary.
-	all := node.ID == "independent_review"
+	all := node.ID == "independent_review" && !strings.Contains(node.PromptVersion, focusedReviewVersion)
 	stageIDs := map[string]bool{node.ID: true}
 	switch node.ID {
 	case "method_implementation":
@@ -2971,6 +3064,17 @@ func requiredWorkflowSkills(runInputs json.RawMessage, step Step, node CompiledN
 		}
 	}
 	return required
+}
+
+// New reviewers can consult all frozen route Skills, but need not reload
+// every unrelated tool manual. Legacy stage requirements remain unchanged.
+func availableWorkflowSkills(runInputs json.RawMessage, step Step, node CompiledNode) map[string]ResearchSkillSelection {
+	if node.ID == "independent_review" && strings.Contains(node.PromptVersion, focusedReviewVersion) {
+		legacy := node
+		legacy.PromptVersion = ""
+		return requiredWorkflowSkills(runInputs, step, legacy)
+	}
+	return requiredWorkflowSkills(runInputs, step, node)
 }
 
 func workflowRouteSkills(value json.RawMessage) []ResearchSkillSelection {
@@ -3024,8 +3128,19 @@ func waitForAIStage(ctx context.Context, executor AIStageExecutor, execution AIE
 }
 
 func buildAIStagePrompt(detail RunDetail, step Step, node CompiledNode) string {
+	node.Prompt = reportAssessmentPrompt(node)
 	trustedRevisionInstruction := ""
-	if node.ID == "method_implementation" && node.PromptVersion == dynamicImplementationPromptVersion {
+	taskMemoryInstruction := ""
+	for _, frozen := range node.AllowedTools {
+		if frozen.QualifiedName == ResearchTaskReadTool {
+			taskMemoryInstruction = researchStageReadInstruction
+			break
+		}
+	}
+	if version, err := CurrentResearchSourceVersion(detail); err == nil && version != nil && len(version.Files) > 0 && taskMemoryInstruction != "" {
+		taskMemoryInstruction += "\n" + researchSourceInstruction
+	}
+	if node.ID == "method_implementation" && supportsDynamicImplementationProtocol(node.PromptVersion) {
 		trustedRevisionInstruction = `
 Implementation normally continues automatically. Include researchChanges in your structured output: [] only when implementing the existing frozen method without changing scientific decisions. Changes to population, endpoints, sample exclusion, missingness handling, test selection, thresholds, multiplicity, assumptions or acceptance criteria MUST be declared as {before,after,reason,impact} items for human confirmation. Never label a scientific change as a technical fix.
 For _pythonRepair, priorImplementation is the actual previously executed implementation. Make the smallest code correction, preserve methodSummary, analysisInput, assumptions, limitations, expectedOutputs and outputDeclarations exactly unless a scientific change is genuinely necessary and explicitly declared. Fix API/types/fonts without rewriting statistical methods. Do not weaken checks to force success. Return the complete code and metadata. A maximum of three consecutive automatic repair rounds is allowed; do not claim execution succeeded without Kernel evidence.`
@@ -3036,6 +3151,13 @@ For _pythonRepair, priorImplementation is the actual previously executed impleme
 
 This is a recorded revision attempt after an independent review rejected the previous result. The stage_input._reviewRevision object contains the immutable prior result and review. Produce a corrected replacement, not a commentary on the review. Resolve every actionable issue or explicitly remove/qualify the unsupported claim; preserve valid parts and never invent evidence, numbers, citations, or completed work. Prior review suggestions remain subject to the trusted citation contract: a request to remove valid [K-...] links for appearance alone must not break report provenance. Keep valid links and correct substantive findings without narrating the policy conflict. Remove existing reviewer/formatting-policy commentary from report fields; do not substitute a neutral interface explanation or move that commentary into report limitations. Historical review records remain in the host audit, not in the research deliverable.`
 	}
+	if len(stageInput["_reviewCorrections"]) > 0 {
+		trustedRevisionInstruction += "\nThis stage has a recorded _reviewCorrections checklist for this confirmed generation. Apply every assigned correction to a replacement result, preserve valid parts of priorOutput, and disclose unresolved evidence limitations. allKnownCorrections is the complete goal across the repair chain: use newly adopted evidence to resolve relevant downstream omissions, not only items originally assigned to this stage. Other stages own their own checklist. Review requests are not scientific source evidence and must not appear as policy commentary in the report."
+	}
+	if isIndependentReviewSchema(node.OutputSchema) {
+		trustedRevisionInstruction += "\nAbsence language is a semantic scientific assessment, never a keyword veto. absenceClaimCandidates are only contexts to inspect; a negation such as '不得写成原文未报告', a comparison procedure or a scope statement is NOT a claim of absence. unsupportedAbsenceClaims is a legacy empty field. Where the user allows 'not discussed', evaluate a bounded checked-source conclusion from recorded pages/sections; do not demand that authors explicitly state everything they did not discuss."
+		trustedRevisionInstruction += "\n" + reviewCompletenessInstruction + "\n" + reportConfidenceInstruction
+	}
 	if node.ID == "method_implementation" && len(stageInput["_pythonRepair"]) > 0 {
 		trustedRevisionInstruction += `
 
@@ -3044,7 +3166,7 @@ This is an automatic repair attempt after the generated Python implementation fa
 	if len(stageInput["_userRevision"]) > 0 {
 		trustedRevisionInstruction += `
 
-The user explicitly confirmed a negotiated revision. stage_input._userRevision contains the final agreed goal, changes and replay scope. Apply ALL agreed changes relevant to this stage, preserve valid unaffected work, and produce a complete replacement result, not a discussion. Downstream stages must use the new outputs and the independent review must verify that these changes were actually implemented. Do not claim that a previous approval covers the revised result. This request cannot change frozen input files, invent missing evidence, bypass tools or remove required review checks.`
+The user explicitly confirmed a negotiated revision. stage_input._userRevision contains the final agreed goal, changes and replay scope. Apply ALL agreed changes relevant to this stage, preserve valid unaffected work, and produce a complete replacement result, not a discussion. When comparisonBaseline is present, treat it as historical evidence, not current output. If the user requested a method comparison, preserve the original method/result labels and compare against actual newly computed results; disclose missing or truncated baseline values rather than inventing differences. Downstream stages must use the new outputs and the independent review must verify that these changes were actually implemented. Do not claim that a previous approval covers the revised result. This request cannot change frozen input files, invent missing evidence, bypass tools or remove required review checks.`
 	}
 	if previous, ok := latestAIOutputValidationFailure(detail, step); ok {
 		trustedRevisionInstruction += `
@@ -3061,10 +3183,13 @@ For this research-starter route error, keep every declared stage and its order, 
 		trustedReviewInstruction = `
 
 This is an independent delivery review. Issue arrays may contain only unresolved, actionable defects. Never place passed checks, "no issue found" statements, general cautions, or accepted limitations in issue arrays. Put passed checks in verifiedClaims and residual caveats in limitations. approved=true requires unsupportedClaims, citationIssues, numericIssues, methodIssues, and requiredCorrections all to be empty. Any non-empty issue array requires approved=false and corresponding actionable requiredCorrections. Review the stored draft under the trusted citation contract: valid [K-...] links are required, not internal terminology leakage or a publication-style defect. Verify their source and claim support instead of requesting their removal or manual renumbering. Do not demand a citation-policy explanation in the report. If internal reviewer or interface commentary remains, request its removal while preserving valid markers and scientific limitations; do not require a replacement process note in any report field.`
+		trustedReviewInstruction += ` Frozen upstream evidenceScreening is the subject of review, not your editable output. If its checkedScope lacks a matching document/locator in the host's actual indexedReadRanges, reject with the gap criterion not_met and actionable corrections; do not invent reads or attempt to change the frozen input. Recorded ranges prove only returned blocks, not full-page/full-document reading. A user's limited citation selection is not permission to add unselected citations or to approve an incomplete original deliverable.`
+		trustedReviewInstruction += ` Review the COMPLETE original research request and each acceptance criterion in this pass, not just the last correction or the most obvious blank. Include all currently known defects that prevent the requested deliverable in requiredCorrections; suggestions are only optional improvements. Distinguish evidence already present in accepted screening but not selected from evidence requiring a new read or new user material. Check the actual offered selection list before attributing omissions to the user. When evidence_extraction is an available target, it reopens citation selection using the accepted synthesis, without rerunning screening; use it for adoption of existing evidence, not scientific synthesis errors. Limited-evidence continuation authorizes a provisional draft only, never silently changes the research question or final acceptance scope. Judge confidence by source independence, relevance and claim support, not counts of files or fragments. Read relevant source passages for disputed claims through exposed resource actions when available; Skills inform method review, not empirical evidence. Indexed PDF text is extracted text, not a visual check of the original page. New reads cannot retroactively amend frozen upstream checkedScope or introduce unselected report citations.`
 		if schemaDeclaresProperty(node.OutputSchema, "revisionPlan") {
 			trustedReviewInstruction += `
 
 Return revisionPlan with exactly one item for EVERY requiredCorrections entry (correctionIndex is its zero-based index); return [] only when requiredCorrections is empty. For each item select nodeId only from stage_input.revisionTargets, explain reason using frozen evidence, and explain whyNotLater: why merely editing a later stage cannot repair this defect. Use the earliest stage actually requiring a change, not automatically the report stage. If the correction needs new data, evidence, or a user decision that the frozen inputs cannot supply, set needsUserInput=true and specify requiredInput; nodeId may be empty only in this case. Otherwise needsUserInput=false and requiredInput="". Never pretend rerunning can supply missing user material. The host will validate full coverage and take the earliest legitimate stage across all corrections; this is an advisory plan requiring explicit user confirmation, not permission to run or modify anything.`
+			trustedReviewInstruction += ` Ordinary retry confirmation and citation adoption through the existing evidence_extraction selection are already handled by the host; these alone are NOT missing user input. For adoption-only corrections backed by accepted evidence, choose evidence_extraction with needsUserInput=false and requiredInput="". The user will directly confirm the repair, then select citations before downstream execution. Genuine new materials, unresolved research boundaries or decisions not represented by that selection still require needsUserInput=true. Complete the repair plan in this review; do not request a second chat/model planning pass to repackage these same corrections.`
 			trustedReviewInstruction += `
 Trace each erroneous claim back through the supplied evidenceScreening/evidenceContext and method context, not just the final prose. If an incorrect population, comparator, effect interpretation or unsupported claim already occurs in evidence synthesis, select evidence_screening when offered; correcting only the report leaves a reusable upstream error. Do not confuse immutable source excerpts with AI-derived synthesis: reinterpret the latter against the former, never rewrite original evidence. If source text itself is missing or damaged, request corrected material rather than inventing it.`
 		}
@@ -3088,7 +3213,11 @@ Trace each erroneous claim back through the supplied evidenceScreening/evidenceC
 		sort.Strings(names)
 		var builder strings.Builder
 		builder.WriteString("\n\nFrozen Skill requirements for this stage:\n")
-		builder.WriteString("Before substantive work, call builtin.skill.load for every Skill listed below and no others. These names come from the host-validated route snapshot; do not substitute or browse for a different Skill.\n")
+		if node.ID == "independent_review" && strings.Contains(node.PromptVersion, focusedReviewVersion) {
+			builder.WriteString("Before substantive work, call builtin.skill.load for every required Skill listed below. Other frozen route Skills listed for targeted consultation may be loaded when relevant, but are not mandatory. Do not substitute or browse for a Skill outside the host-validated route snapshot.\n")
+		} else {
+			builder.WriteString("Before substantive work, call builtin.skill.load for every Skill listed below and no others. These names come from the host-validated route snapshot; do not substitute or browse for a different Skill.\n")
+		}
 		builder.WriteString("If a Skill returns a section index, load only the sections relevant to this stage and finish any truncated relevant section. Do not read unrelated sections or attachments merely to increase coverage.\n")
 		if node.ID == "independent_review" {
 			builder.WriteString("This is an independent re-read: inspect the original Skill sections needed to verify method assumptions and limitations. Do not rely only on an earlier stage summary.\n")
@@ -3102,6 +3231,14 @@ Trace each erroneous claim back through the supplied evidenceScreening/evidenceC
 		}
 		requiredSkillsInstruction = builder.String()
 	}
+	if node.ID == "independent_review" && strings.Contains(node.PromptVersion, focusedReviewVersion) {
+		names := []string{}
+		for name := range availableWorkflowSkills(detail.Run.Inputs, step, node) {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		requiredSkillsInstruction += "\nOther frozen route Skills are available for targeted consultation: " + strings.Join(names, ", ") + ". First map actual delivery gaps and disputed source passages; consult only relevant Skill sections for those method questions. Do not reload every manual or use Skill loading as evidence that research claims were verified.\n"
+	}
 	implementationContractInstruction := ""
 	if node.ID == "method_implementation" {
 		implementationContractInstruction = `
@@ -3111,13 +3248,13 @@ Trusted SciAide Python Kernel contract:
 - SCIAIDE_DATA is the pre-defined Python object decoded from analysisInput.
 - SCIAIDE_OUTPUTS is a pre-defined Python list of staging output paths. Write the declared JSON result to index 0 and Markdown method record to index 1.
 - These names are Python globals, not environment variables. Never access them through os.environ or os.getenv.
-- The Kernel automatically captures open Matplotlib figures as PNG artifacts. Do not call savefig, do not create a diagnostics directory, and do not write any file other than SCIAIDE_OUTPUTS[0] and SCIAIDE_OUTPUTS[1]. In particular, never pass an extensionless filename to Matplotlib or open a path merely to hash a figure.
+- The Kernel automatically captures open Matplotlib figures as PNG artifacts. For explicit figure files, use savefig only with a matching declared SCIAIDE_OUTPUTS path. Write only to assigned SCIAIDE_OUTPUTS entries; do not create a diagnostics directory. In particular, never pass an extensionless filename to Matplotlib or open a path merely to hash a figure.
 - The final Python source must be a separate fenced python block. Never embed source code in the JSON metadata, never wrap another Markdown fence inside the Python source, and do not write any text after the closing python fence.`
 	}
 	workspaceFilesInstruction := trustedWorkspaceFilesInstruction(detail)
 	clarificationInstruction := ""
 	if node.ID == "explore" {
-		clarificationInstruction = `
+		clarificationInstruction = researchCapabilityPlanningInstruction + `
 
 Planning clarification contract:
 - Return the optional clarification property only when the user's original idea leaves a high-impact research choice unresolved.
@@ -3128,6 +3265,8 @@ Planning clarification contract:
 	structuredStageInstruction := `
 
 Structured-stage completion protocol:
+- Work interactively with tool results within the current stage: read relevant material, inspect the returned evidence, then decide whether another exposed tool call is useful. Do not fabricate a fixed call sequence or stop after the first result when a targeted follow-up is needed. Reuse already obtained results. Technical refinements within the agreed goal and permissions do not require a new research task; substantive changes still use the existing confirmation flow.
+- Distinguish an execution error, a missing prerequisite, an unresolved scientific question and a completed exploratory finding. A null or unexpected finding is not itself a failed study; report what the evidence supports and give a concrete next step rather than changing the question to force a positive result.
 - You may call tools silently while gathering the current stage inputs. Tool calls and their results are already recorded by SciAide; do not stop after a progress update.
 - A response that only says what you will do, what you are checking, or that Skill loading is complete is not a completed stage and will be rejected.
 - After all necessary tool calls, finish the response with the complete structured output required below. Do not end with a status sentence, an apology, or a partial JSON object.
@@ -3163,14 +3302,14 @@ End the response with exactly these two blocks in this order:
 Additional input/output contract (overrides earlier fixed-two-output wording):
 SCIAIDE_INPUTS contains every selected file in frozen order. Read the preflight files[] list; identify each file's role, columns, join keys, duplicate keys and unmatched records before combining. Do not silently ignore additional files or concatenate unrelated tables. Describe uncertain relationships in assumptions/limitations and the method review for user confirmation.
 SCIAIDE_DATA is a parameter object, not a DataFrame. Load tables from SCIAIDE_INPUTS.
-Optionally declare outputDeclarations as an ordered array of {"name":"cleaned_data","format":"csv"}; names must be lowercase identifiers, not paths. Supported formats: csv, tsv, xlsx, json, md, png, svg, pdf; at most 14 additional outputs with unique names. The host assigns SCIAIDE_OUTPUTS[2+i] to declaration i. Write every declared output; missing files fail publication. The first two outputs remain results JSON and methods Markdown. You may use savefig only with a declared SCIAIDE_OUTPUTS path of the matching format. Do not invent paths or directories. Open Matplotlib figures remain automatically captured. Report actual input usage and generated outputs in the returned summary, never claim an unwritten artifact exists.
+Optionally declare outputDeclarations as an ordered array of {"name":"cleaned_data","format":"csv"}; names must be lowercase identifiers, not paths. Supported formats: csv, tsv, xlsx, json, md, png, svg, pdf, py, txt; at most 14 additional outputs with unique names. The host assigns SCIAIDE_OUTPUTS[2+i] to declaration i. Write every declared output; missing files fail publication. The first two outputs remain results JSON and methods Markdown. You may use savefig only with a declared SCIAIDE_OUTPUTS path of the matching format. Do not invent paths or directories. Python/text files may be delivered as reusable source or notes; writing a source file does not execute it or make it a verified standalone reproduction. Open Matplotlib figures remain automatically captured. Report actual input usage and generated outputs in the returned summary, never claim an unwritten artifact exists.
 `
 	}
 	modelInput := step.Input
 	if node.ID == "candidate_screening" && node.PromptVersion == literatureScreeningVersion {
 		modelInput = literatureModelInput(step.Input)
 	}
-	return ResearchModeSystemRules + requiredSkillsInstruction + implementationContractInstruction + clarificationInstruction + structuredStageInstruction + workspaceFilesInstruction + trustedHostAudit + `
+	return ResearchModeSystemRules + requiredSkillsInstruction + implementationContractInstruction + clarificationInstruction + structuredStageInstruction + taskMemoryInstruction + workspaceFilesInstruction + trustedHostAudit + `
 
 Current audited stage instructions:
 ` + strings.TrimSpace(node.Prompt) + trustedRevisionInstruction + trustedReviewInstruction + `
@@ -3220,6 +3359,22 @@ func trustedWorkspaceFilesInstruction(detail RunDetail) string {
 	for _, path := range exactWorkflowInputPaths(detail.Run.Inputs) {
 		add(path)
 	}
+	if inputs, err := ResearchEffectiveInputs(detail); err == nil {
+		for _, path := range exactWorkflowInputPaths(inputs) {
+			add(path)
+		}
+	}
+	var previousData struct {
+		Paths []string `json:"dataPaths"`
+	}
+	if json.Unmarshal(priorResearchComparison(detail), &previousData) == nil {
+		for _, path := range previousData.Paths {
+			add(path)
+		}
+	}
+	for _, item := range priorResearchArtifacts(detail) {
+		add(item.Artifact.WorkspacePath)
+	}
 	for _, stage := range detail.Steps {
 		if stage.Status != StepCompleted || len(stage.Output) == 0 {
 			continue
@@ -3242,9 +3397,9 @@ func trustedWorkspaceFilesInstruction(detail RunDetail) string {
 		return ""
 	}
 	return "\n\nTrusted current-task Workspace file inventory (host-derived JSON data):\n" +
-		"- You may read only a path shown in this inventory and only through the exposed Workspace tool.\n" +
+		"- Read exact paths shown here, or in current-task artifacts/revision_artifacts/revision_inputs/revision_source_inputs returned by an exposed builtin.research.task.read tool, only through the exposed Workspace tool.\n" +
 		"- Use these paths verbatim. Do not guess, rename, substitute analysis-input or research-inputs directories, or use paths from another task.\n" +
-		"- If the required file is absent from this inventory, do not call builtin.workspace.read_text for a guessed path; report the missing prerequisite.\n" +
+		"- If a required file is absent, consult exposed task records for its exact identity; never call builtin.workspace.read_text for a guessed path. If no authorized record identifies it, report the missing prerequisite.\n" +
 		"<workspace_files>\n" + string(encoded) + "\n</workspace_files>"
 }
 
@@ -3267,8 +3422,11 @@ type reviewHostExecution struct {
 }
 
 type reviewHostAuditSnapshot struct {
+	SourceVersion          *ResearchSourceVersion          `json:"sourceVersion,omitempty"`
 	WorkflowRunID          string                          `json:"workflowRunId"`
 	RunInputsSHA256        string                          `json:"runInputsSha256,omitempty"`
+	EffectiveInputsSHA256  string                          `json:"effectiveInputsSha256,omitempty"`
+	DataVersion            *ResearchDataVersion            `json:"dataVersion,omitempty"`
 	EvidenceStatus         string                          `json:"evidenceStatus"`
 	EvidenceDecision       string                          `json:"evidenceDecision,omitempty"`
 	EvidenceSelectionAudit *citationSelectionAuditSnapshot `json:"evidenceSelectionAudit,omitempty"`
@@ -3281,6 +3439,11 @@ func independentReviewHostAudit(detail RunDetail) string {
 		RunInputsSHA256: cleanReviewHash(detail.Run.InputsSHA256),
 		EvidenceStatus:  "not_declared",
 	}
+	if inputs, err := ResearchEffectiveInputs(detail); err == nil {
+		snapshot.EffectiveInputsSHA256 = hashJSON(inputs)
+		snapshot.DataVersion, _ = currentResearchDataVersion(detail)
+	}
+	snapshot.SourceVersion, _ = CurrentResearchSourceVersion(detail)
 	nodes := compilationNodeMap(detail.Run.Compilation)
 	for _, step := range detail.Steps {
 		if step.Status != StepCompleted {
@@ -3304,7 +3467,7 @@ func independentReviewHostAudit(detail RunDetail) string {
 					snapshot.EvidenceDecision = fmt.Sprintf("The host recorded %d selected verified citations; validate only the supplied frozen citation markers.", len(evidence.Citations))
 				case "limited_citations_accepted":
 					snapshot.EvidenceStatus = evidence.EvidenceStatus
-					snapshot.EvidenceDecision = fmt.Sprintf("The user explicitly accepted proceeding with %d selected excerpts after the AI evidence screen found limited coverage or omitted recommended evidence. This permits only a scope-limited draft and never upgrades evidence sufficiency, confidence, directness, or publication readiness. Treat any stronger claim as an actionable defect.", len(evidence.Citations))
+					snapshot.EvidenceDecision = fmt.Sprintf("The user explicitly accepted continuing draft generation with %d selected excerpts despite limited coverage or unselected recommendations. This decision is not a scientific score or approval of the original deliverable. Evaluate claim support, evidence coverage and application uncertainty separately; do not force low confidence or upgrade confidence solely from acceptance or fragment counts. Preserve genuine limitations and the original research contract. Review every required component before final approval; disclosed missing required results are still missing.", len(evidence.Citations))
 				}
 			}
 		}
@@ -4472,6 +4635,18 @@ func (s *RuntimeService) validateRunSnapshots(ctx context.Context, detail RunDet
 	if err := s.validateWorkspaceInputFilesAtTask(ctx, detail.Run.ProjectID, ports, detail.Run.Inputs, taskID); err != nil {
 		return "WORKFLOW_INPUT_SNAPSHOT_INVALID", err
 	}
+	effective, err := ResearchEffectiveInputs(detail)
+	if err != nil {
+		return "WORKFLOW_DATA_VERSION_INVALID", err
+	}
+	if !rawJSONEqual(effective, detail.Run.Inputs) {
+		if err := s.validateWorkspaceInputFilesAtTask(ctx, detail.Run.ProjectID, ports, effective, taskID); err != nil {
+			return "WORKFLOW_DATA_VERSION_INVALID", err
+		}
+	}
+	if err := s.validateConfirmedResearchSource(ctx, detail); err != nil {
+		return "WORKFLOW_SOURCE_VERSION_INVALID", err
+	}
 	return "", nil
 }
 
@@ -4960,14 +5135,17 @@ func bindNodeInput(detail RunDetail, node CompiledNode) (json.RawMessage, error)
 			return nil, err
 		}
 		criteria, err := researchAcceptanceCriteria(contract)
-		if strings.HasPrefix(node.PromptVersion, "dynamic-independent-review-v5") || strings.HasPrefix(node.PromptVersion, dynamicResearchReviewVersion) {
+		if isDynamicAcceptanceReview(node.PromptVersion) {
 			arguments["requireOriginalDelivery"] = true
 			criteria = appendOriginalDeliveryCriterion(criteria)
 		}
-		if strings.HasPrefix(node.PromptVersion, dynamicResearchReviewVersion) && arguments["evidenceScreening"] != nil {
+		if isDynamicGapReview(node.PromptVersion) && arguments["evidenceScreening"] != nil {
 			arguments["requireEvidenceGapCheck"] = true
 			criteria = appendEvidenceGapCriterion(criteria)
-			arguments["unsupportedAbsenceClaims"] = unsupportedReportAbsenceClaims(mustJSON(arguments))
+			// Historical prompts interpreted this field as a mandatory rejection.
+			// Do not feed heuristic matches into that old semantic contract.
+			arguments["unsupportedAbsenceClaims"] = []string{}
+			arguments["absenceClaimCandidates"] = unsupportedReportAbsenceClaims(mustJSON(arguments))
 		}
 		if err != nil {
 			return nil, err
@@ -4987,6 +5165,9 @@ func bindNodeInput(detail RunDetail, node CompiledNode) (json.RawMessage, error)
 			return nil, err
 		}
 		arguments["reviewHistory"] = history
+	}
+	if checklist := pendingStageReviewCorrections(detail, node.ID); checklist != nil {
+		arguments["_reviewCorrections"] = checklist
 	}
 	if revision, ok := pendingReviewRevision(detail, node.ID); ok && !(node.ID == "evidence_screening" && node.PromptVersion == selectedEvidenceVersion) {
 		encoded, err := json.Marshal(revision)
@@ -5009,10 +5190,25 @@ func bindNodeInput(detail RunDetail, node CompiledNode) (json.RawMessage, error)
 		}
 	}
 	if node.Kind == NodeAIAnalysis || node.Kind == NodeAgentStage {
+		if version, err := CurrentResearchSourceVersion(detail); err != nil {
+			return nil, err
+		} else if version != nil {
+			arguments["researchSourceVersion"] = version
+		}
+		if version, err := currentResearchDataVersion(detail); err != nil {
+			return nil, err
+		} else if version != nil {
+			arguments["researchDataVersion"] = version
+		}
 		if revision := pendingUserRevision(detail, node.ID); revision != nil {
 			arguments["_userRevision"] = map[string]any{"proposalId": revision.ID, "summary": revision.Summary, "changes": revision.Changes, "reason": revision.Reason, "startNodeId": revision.NodeID, "affectedStages": revision.AffectedStages}
 			if prior := priorUserRevisionOutput(detail, node.ID); len(prior) > 0 {
 				arguments["_userRevision"].(map[string]any)["priorOutput"] = prior
+			}
+			if node.ID == "method_implementation" || node.ID == "result_interpretation" || node.ID == "report_drafting" || node.ID == "independent_review" || node.ID == "research_design" || node.ID == "evidence_screening" {
+				if baseline := priorResearchComparison(detail); len(baseline) > 0 {
+					arguments["_userRevision"].(map[string]any)["comparisonBaseline"] = baseline
+				}
 			}
 		}
 	}
@@ -5051,15 +5247,34 @@ func pendingReviewRevision(detail RunDetail, nodeID string) (reviewRevision, boo
 	}
 	for index := len(detail.Events) - 1; index >= 0; index-- {
 		event := detail.Events[index]
+		if event.Type == "workflow.user_revision_queued" {
+			return reviewRevision{}, false
+		}
 		if event.Type != "workflow.review_revision_queued" {
 			continue
 		}
 		var revision reviewRevision
-		if json.Unmarshal(event.Payload, &revision) != nil || revision.ProducerNodeID != nodeID || revision.ProducerStepID != step.ID || revision.NextProducerAttempt != step.Attempt+1 {
-			continue
+		// Only the latest confirmed generation may supply review context. Carry
+		// it across failed format repairs and explicit retries, but never past a
+		// successfully accepted replacement or a newer user/review revision.
+		if json.Unmarshal(event.Payload, &revision) != nil || revision.ProducerNodeID != nodeID || revision.ProducerStepID != step.ID || revision.NextProducerAttempt < 1 || revision.NextProducerAttempt > step.Attempt+1 {
+			return reviewRevision{}, false
 		}
 		if hashJSON(revision.PriorSubject) != revision.PriorSubjectSHA256 || hashJSON(revision.IndependentReview) != revision.ReviewOutputSHA256 {
 			return reviewRevision{}, false
+		}
+		for attempt := revision.NextProducerAttempt; attempt <= step.Attempt; attempt++ {
+			failed := false
+			for _, execution := range detail.AIExecutions {
+				if execution.WorkflowStepID != step.ID || execution.Attempt != attempt {
+					continue
+				}
+				failed = execution.Status == "failed" || execution.Status == "cancelled" || execution.Status == "interrupted"
+				break
+			}
+			if !failed {
+				return reviewRevision{}, false
+			}
 		}
 		return revision, true
 	}
@@ -5106,9 +5321,9 @@ func pendingAutomaticPythonRepair(detail RunDetail, nodeID string) (automaticPyt
 	return automaticPythonRepair{}, false
 }
 
-func workflowCitationSeedsFromSteps(compilation Compilation, steps []Step, current Step) []tool.CitationRef {
+func workflowCitationSeedsFromSteps(compilation Compilation, steps []Step, current Step, indexed ...[]tool.CitationRef) []tool.CitationRef {
 	nodes := compilationNodeMap(compilation)
-	result, _ := workflowCandidateCitationSeeds(compilation, steps, current)
+	result, _ := workflowCandidateCitationSeeds(compilation, steps, current, indexed...)
 	for _, step := range steps {
 		if step.Ordinal >= current.Ordinal || step.Status != StepCompleted || nodes[step.NodeID].Kind != NodeCitationSelection || !workflowNodeReaches(compilation, step.NodeID, current.NodeID) {
 			continue
@@ -5126,7 +5341,7 @@ func workflowCitationSeedsFromSteps(compilation Compilation, steps []Step, curre
 // Evidence screening precedes citation selection. Bind only candidates from
 // its actual completed knowledge-search dependency, including compact coverage
 // projections. Never turn arbitrary markers in stage input into trusted refs.
-func workflowCandidateCitationSeeds(compilation Compilation, steps []Step, current Step) ([]tool.CitationRef, error) {
+func workflowCandidateCitationSeeds(compilation Compilation, steps []Step, current Step, indexed ...[]tool.CitationRef) ([]tool.CitationRef, error) {
 	if current.NodeID != "evidence_screening" {
 		return nil, nil
 	}
@@ -5137,7 +5352,15 @@ func workflowCandidateCitationSeeds(compilation Compilation, steps []Step, curre
 		return nil, fmt.Errorf("invalid evidence screening citation input: %w", err)
 	}
 	nodes := compilationNodeMap(compilation)
-	available := map[string]tool.CitationRef{}
+	// A marker identifies the same indexed excerpt, not every serialized field
+	// of its source snapshot. Retain both search and read snapshots (including
+	// legacy readers without ID), then match the actual frozen candidate exactly.
+	available := map[string][]tool.CitationRef{}
+	for _, values := range indexed {
+		for _, ref := range values {
+			available[ref.Reference] = append(available[ref.Reference], ref)
+		}
+	}
 	for _, edge := range compilation.Edges {
 		source := nodes[edge.FromNode]
 		if edge.ToNode != current.NodeID || edge.ToPort != "candidates" || edge.FromPort != "citations" || source.Tool == nil || source.Tool.QualifiedName != citation.KnowledgeToolName {
@@ -5154,22 +5377,27 @@ func workflowCandidateCitationSeeds(compilation Compilation, steps []Step, curre
 				return nil, fmt.Errorf("invalid knowledge search citation output: %w", err)
 			}
 			for _, ref := range output.Citations {
-				available[ref.Reference] = ref
+				available[ref.Reference] = append(available[ref.Reference], ref)
 			}
 		}
 	}
 	result := make([]tool.CitationRef, 0, len(input.Candidates))
 	for _, candidate := range input.Candidates {
-		ref, ok := available[candidate.Reference]
-		if !ok || candidate.DocumentID != ref.DocumentID || candidate.SourceName != ref.SourceName || candidate.Title != ref.Title || candidate.Quote != ref.Quote {
-			return nil, fmt.Errorf("evidence screening candidate is not backed by its knowledge-search dependency")
-		}
-		if candidate.IndexVersionID != "" {
-			if err := validateCitationSubset([]tool.CitationRef{candidate}, []tool.CitationRef{ref}); err != nil {
-				return nil, err
+		matched := false
+		for _, ref := range available[candidate.Reference] {
+			if candidate.DocumentID != ref.DocumentID || candidate.SourceName != ref.SourceName || candidate.Title != ref.Title || candidate.Quote != ref.Quote {
+				continue
 			}
+			if candidate.IndexVersionID != "" && validateCitationSubset([]tool.CitationRef{candidate}, []tool.CitationRef{ref}) != nil {
+				continue
+			}
+			result = append(result, ref)
+			matched = true
+			break
 		}
-		result = append(result, ref)
+		if !matched {
+			return nil, fmt.Errorf("evidence screening candidate is not backed by its verified source snapshot")
+		}
 		delete(available, candidate.Reference)
 	}
 	if len(result) > citation.MaxSeededKnowledgeCitations {
@@ -5182,7 +5410,7 @@ func canonicalCitationSubmission(value json.RawMessage, detail RunDetail, step S
 	if !usesTrackedReview(node) && node.ID != "evidence_screening" {
 		return value
 	}
-	value = restoreWorkflowCitationMarkers(value, workflowCitationSeedsFromSteps(detail.Run.Compilation, detail.Steps, step), chatRunID)
+	value = restoreWorkflowCitationMarkers(value, workflowCitationSeeds(detail, step), chatRunID)
 	if node.ID == "evidence_screening" {
 		value = canonicalSupportingQuotes(value, step.Input)
 	}

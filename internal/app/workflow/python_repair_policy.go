@@ -70,7 +70,7 @@ func withImplementationChanges(schema json.RawMessage) json.RawMessage {
 // Compare declared scientific metadata deterministically. This is not a proof
 // of arbitrary Python semantics; independent result review remains mandatory.
 func implementationConfirmation(node CompiledNode, input, output json.RawMessage) (*implementationReview, error) {
-	if node.ID != "method_implementation" || node.PromptVersion != dynamicImplementationPromptVersion {
+	if node.ID != "method_implementation" || !supportsDynamicImplementationProtocol(node.PromptVersion) {
 		return nil, nil
 	}
 	var proposed map[string]json.RawMessage

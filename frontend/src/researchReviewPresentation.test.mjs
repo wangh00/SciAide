@@ -86,3 +86,11 @@ test('tracked findings keep stable IDs and suggestions do not become blockers',(
  const html=renderToStaticMarkup(React.createElement(exports.ResearchReviewFeedback,{issues:data}));
  assert.match(html,/1 项待修正 · 1 项已解决 · 0 项已撤回/);assert.match(html,/issue-1-1/);assert.match(html,/可选建议 · 1/);assert.doesNotMatch(html,/<details[^>]*\bopen/);
 });
+
+test('repeat status is visible before expanding technical history and never double-counts corrections',()=>{
+ const findings=[{id:'issue-2-1',status:'open',origin:'existing',summary:'同一引用缺口',reason:'仍未采用',location:'表格',changeReason:'仍未解决'}];
+ const html=renderToStaticMarkup(React.createElement(exports.ResearchReviewFeedback,{issues:{groups:[{key:'requiredCorrections',label:'必须修正',items:['补入引用']}],findings}}));
+ const visible=html.slice(0,html.indexOf('<details'));
+ assert.match(visible,/仍未解决或重新出现/);assert.match(visible,/有 1 项既有问题尚未解决/);assert.match(visible,/1 项修改/);assert.match(visible,/补入引用/);
+ assert.doesNotMatch(visible,/2 项修改|已通过|已解决 1/);
+});

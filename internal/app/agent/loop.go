@@ -272,7 +272,11 @@ func (l *Loop) Run(ctx context.Context, runID string) Outcome {
 		}
 		return OutcomeCancelled
 	}
-	if errors.Is(err, context.DeadlineExceeded) {
+	// Provider connection timeouts may wrap DeadlineExceeded while the run
+	// context is still live. Preserve their classified payload and exhausted
+	// retry message; only an actual context deadline gets the generic message.
+	var classified *apperr.Error
+	if errors.Is(err, context.DeadlineExceeded) && (errors.Is(ctx.Err(), context.DeadlineExceeded) || !errors.As(err, &classified)) {
 		run.ErrorDetails = "超时阶段：读取模型流式响应。\n请求上下文已到期，服务端未返回 HTTP 错误载荷。"
 		_ = l.runs.Update(context.Background(), run)
 		l.fail(&run, "MODEL_REQUEST_TIMEOUT", "当前模型请求超时，已停止等待本次请求。")
@@ -578,7 +582,7 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 			if l.resources == nil {
 				return &apperr.Error{Code: "RESOURCE_INTERFACE_UNAVAILABLE", UserMessage: "科研资源接口未配置，已停止；不会退回自由路径调用。"}
 			}
-			view, resourceErr := l.resources.Prepare(ctx, resource.Request{RunID: run.ID, ProjectID: projectID, WorkflowStepID: researchGuidance.WorkflowStepID, Definitions: definitions, SkillNames: researchGuidance.SkillNames, SkillDiscovery: researchGuidance.SkillDiscovery})
+			view, resourceErr := l.resources.Prepare(ctx, resource.Request{RunID: run.ID, ProjectID: projectID, WorkflowStepID: researchGuidance.WorkflowStepID, Definitions: definitions, SkillNames: researchGuidance.SkillNames, SkillDiscovery: researchGuidance.SkillDiscovery, SelectedOnly: researchGuidance.SelectedOnly, SelectedAttachmentIDs: researchGuidance.SelectedAttachmentIDs})
 			if resourceErr != nil {
 				return &apperr.Error{Code: "RESOURCE_INTERFACE_FAILED", UserMessage: "无法建立当前任务的可信资源接口。", Cause: resourceErr}
 			}
@@ -668,6 +672,7 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 				dynamicState += "\nHost phase override: SUBMIT because the terminal response omitted the required stage result."
 			}
 		}
+		modelDefinitions = executionTaskReadDefinitions(modelDefinitions, workflowAIRun)
 		if discoveryEnabled {
 			systemContext += "\n" + mcpDiscoveryGuidance
 		}
@@ -960,15 +965,18 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 					validationMessage := researchSubmissionDiagnostic(validationErr)
 					if contentCorrectionAttempts >= maxWorkflowContentCorrections {
 						_ = l.finishModelTurn(run.ID, run.ModelTurns, journalActive, chat.ModelTurnFailed, turn.finishReason, len(turn.providerItems))
-						return OutcomeFailed, &apperr.Error{Code: "WORKFLOW_AI_CONTENT_REPAIR_EXHAUSTED", UserMessage: "科研结果在同一上下文内经两次内容修正后仍未通过提交校验；已停止，不会自动重新执行整阶段。" + validationMessage, Details: validationMessage, Cause: validationErr}
+						return OutcomeFailed, &apperr.Error{Code: "WORKFLOW_AI_CONTENT_REPAIR_EXHAUSTED", UserMessage: researchSubmissionFailureMessage(validationErr), Details: validationMessage, Cause: validationErr}
 					}
 					contentCorrectionAttempts++
 					structuredCandidate = turn.text
 					structuredCorrection = "The preceding assistant message is the rejected result candidate, not an accepted stage result. Host submission validation failed: " + validationMessage + ". Correct only the result against the original frozen schema and output protocol, and submit the complete corrected result. Keep the same research conclusions and evidence unless the validation error requires a change. Do not repeat completed tools, file reads, searches, calculations, or Skill loads; their results remain in this conversation. Do not return another progress report."
 					if patchErr == nil {
 						quoteRepair = nil
+						var issues *workflow.CitationQuoteErrors
 						var issue *workflow.CitationQuoteError
-						if errors.As(validationErr, &issue) {
+						if errors.As(validationErr, &issues) {
+							quoteRepair = newCitationRepairs(turn.text, researchGuidance.StructuredOutputSchema, issues.Issues)
+						} else if errors.As(validationErr, &issue) {
 							quoteRepair = newCitationRepair(turn.text, researchGuidance.StructuredOutputSchema, issue)
 						}
 					}
@@ -1076,7 +1084,7 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 				continue
 			}
 			if (resourceMode && resource.WrappedTool(providerCall.Name)) || (resourceInterfaceTool(providerCall.Name) && (!resourceMode || !resourceView.Allows(providerCall.Name, providerCall.Arguments))) {
-				call, rejectErr := l.tools.RejectProviderCall(ctx, l.registry, providerCall.Name, command, "当前阶段只接受本轮资源菜单签发的操作；请通过 builtin.resource.open/search 选择 actionId，不填写路径、Skill 名称或附件 ID。")
+				call, rejectErr := l.tools.RejectProviderCall(ctx, l.registry, providerCall.Name, command, resourceView.RejectionMessage(providerCall.Name, providerCall.Arguments))
 				if rejectErr != nil {
 					return OutcomeFailed, &apperr.Error{Code: "RESOURCE_ACTION_REJECTED", UserMessage: "无法记录未签发的资源操作。", Cause: rejectErr}
 				}
@@ -1122,7 +1130,7 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 			if err != nil {
 				call, err = l.tools.RejectProviderCall(ctx, l.registry, providerCall.Name, command, toolProposalFailureMessage(providerCall.Name, err))
 				if err != nil {
-					return OutcomeFailed, &apperr.Error{Code: "TOOL_CALL_REJECTED", UserMessage: "模型提出了无效或不可用的工具调用。", Cause: err}
+					return OutcomeFailed, &apperr.Error{Code: "TOOL_CALL_REJECTED", UserMessage: "模型提出了无效或不可用的工具调用。", Details: err.Error(), Cause: err}
 				}
 			}
 			proposed = append(proposed, call)
@@ -1961,17 +1969,31 @@ func truncateRunes(value string, limit int) string {
 
 func (l *Loop) complete(run *chat.Run, text, finishReason string) (Outcome, error) {
 	now := l.now()
-	calls, err := l.tools.ListByRun(context.Background(), run.ID)
 	citations := []conversation.Citation(nil)
-	if err == nil {
+	// No citation lookup is needed for a plain answer. If markers are present,
+	// a failed lookup must not silently commit an answer with missing sources.
+	if citation.HasKnowledgeReferences(text) {
+		calls, err := l.tools.ListByRun(context.Background(), run.ID)
+		if err != nil {
+			return OutcomeFailed, completionSaveError("load citation sources", err)
+		}
 		citations = citation.Resolve(run.ID, run.AssistantMessageID, text, calls, now)
 	}
-	run.Status, run.FinishReason, run.ErrorCode, run.ErrorMessage, run.ErrorDetails, run.UpdatedAt, run.CompletedAt = chat.RunCompleted, finishReason, "", "", "", now, &now
-	if err := l.runs.Complete(context.Background(), *run, text, citations); err != nil {
-		return OutcomeFailed, &apperr.Error{Code: "RUN_COMPLETION_SAVE_FAILED", UserMessage: "回答已生成，但正文、引用与运行状态无法完整保存。", Cause: err}
+	// Keep the caller's Run nonterminal until the atomic message/citation/Run
+	// transaction succeeds. Otherwise saving failure diagnostics can mistakenly
+	// persist completed while the actual result transaction has rolled back.
+	completed := *run
+	completed.Status, completed.FinishReason, completed.ErrorCode, completed.ErrorMessage, completed.ErrorDetails, completed.UpdatedAt, completed.CompletedAt = chat.RunCompleted, finishReason, "", "", "", now, &now
+	if err := l.runs.Complete(context.Background(), completed, text, citations); err != nil {
+		return OutcomeFailed, completionSaveError("commit answer, citations and run", err)
 	}
+	*run = completed
 	l.observer.RunCompleted(*run, text)
 	return OutcomeCompleted, nil
+}
+
+func completionSaveError(phase string, err error) error {
+	return &apperr.Error{Code: "RUN_COMPLETION_SAVE_FAILED", UserMessage: "回答已生成，但正文、引用与运行状态无法完整保存。", Details: truncateRunes(phase+": "+err.Error(), 2048), Cause: err}
 }
 
 func (l *Loop) fail(run *chat.Run, code, message string) {

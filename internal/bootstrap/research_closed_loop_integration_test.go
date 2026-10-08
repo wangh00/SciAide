@@ -1,8 +1,12 @@
 package bootstrap
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -14,6 +18,22 @@ import (
 )
 
 func TestResearchClosedLoopRevisesMethodsAfterRestartAndExports(t *testing.T) {
+	testResearchClosedLoopRevisesMethodsAfterRestartAndExports(t, "")
+}
+
+func TestResearchReviewRevisionRecoversTruncatedStreamAndExports(t *testing.T) {
+	testResearchClosedLoopRevisesMethodsAfterRestartAndExports(t, "truncated")
+}
+
+func TestResearchReviewRevisionRecoversProviderOutageAndExports(t *testing.T) {
+	testResearchClosedLoopRevisesMethodsAfterRestartAndExports(t, "service_unavailable")
+}
+
+func TestResearchReviewRevisionKeepsCorrectionsAfterFailureRetryAndRestart(t *testing.T) {
+	testResearchClosedLoopRevisesMethodsAfterRestartAndExports(t, "invalid")
+}
+
+func testResearchClosedLoopRevisesMethodsAfterRestartAndExports(t *testing.T, fault string) {
 	var mu sync.Mutex
 	reviews, methodRevisions := 0, 0
 	server := newResearchStarterOutputTestServer(t, func(output map[string]any, prompt string) {
@@ -38,6 +58,46 @@ func TestResearchClosedLoopRevisesMethodsAfterRestartAndExports(t *testing.T) {
 			}
 		}
 	})
+	endpoint := server.URL
+	var revisionRequests []string
+	if fault != "" {
+		proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, err := io.ReadAll(io.LimitReader(r.Body, 2<<20))
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			prompt := workflowAITestPrompt(body)
+			schema, err := workflowAITestSchema(prompt)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			properties, _ := schema["properties"].(map[string]any)
+			if _, method := properties["methodComponents"]; method && strings.Contains(prompt, "_reviewRevision") {
+				mu.Lock()
+				revisionRequests = append(revisionRequests, string(body))
+				count := len(revisionRequests)
+				mu.Unlock()
+				if count == 1 {
+					w.Header().Set("Content-Type", "text/event-stream")
+					_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"discarded repair draft\"}}]}\n\n")
+					if fault == "truncated" {
+						_, _ = io.WriteString(w, `data: {"choices":[{"delta":{"content":"`)
+					} else if fault == "service_unavailable" {
+						_, _ = io.WriteString(w, "data: {\"type\":\"error\",\"error\":{\"type\":\"upstream_error\",\"code\":\"upstream_error\",\"message\":\"The service is temporarily unavailable. Please retry later.\"}}\n\n")
+					} else {
+						_, _ = io.WriteString(w, `data: {"choices":broken}`)
+					}
+					return
+				}
+			}
+			r.Body = io.NopCloser(bytes.NewReader(body))
+			server.Config.Handler.ServeHTTP(w, r)
+		}))
+		defer proxy.Close()
+		endpoint = proxy.URL
+	}
 	root := t.TempDir()
 	application, err := New(Options{RootDir: root, EventPublisher: workflowAITestPublisher{}})
 	if err != nil {
@@ -45,7 +105,7 @@ func TestResearchClosedLoopRevisesMethodsAfterRestartAndExports(t *testing.T) {
 	}
 	defer func() { _ = application.Close() }()
 	application.Startup(context.Background())
-	profile := saveWorkflowAITestProfile(t, application, server.URL)
+	profile := saveWorkflowAITestProfile(t, application, endpoint)
 	project, err := application.ProjectFacade.CreateProject(wailstransport.CreateProjectRequest{Name: "可返修的研究设计闭环"})
 	if err != nil {
 		t.Fatal(err)
@@ -100,6 +160,34 @@ func TestResearchClosedLoopRevisesMethodsAfterRestartAndExports(t *testing.T) {
 	if _, err := application.WorkflowFacade.Retry(workflow.RetryCommand{ProjectID: project.ID, RunID: failed.Run.ID, StepID: gateID, RevisionNodeID: "method_selection"}); err != nil {
 		t.Fatal(err)
 	}
+	wantMethodAttempt := 2
+	if fault == "invalid" {
+		broken := waitForWorkflowState(t, application, project.ID, failed.Run.ID, workflow.RunFailed, 15*time.Second)
+		var methodStepID string
+		for _, step := range broken.Steps {
+			if step.NodeID == "method_selection" {
+				if step.Status != workflow.StepFailed || step.Attempt != 2 || step.ErrorCode != "MODEL_STREAM_INVALID" {
+					t.Fatalf("unexpected fault state: %+v", step)
+				}
+				methodStepID = step.ID
+			}
+		}
+		if methodStepID == "" {
+			t.Fatal("missing failed method stage")
+		}
+		if err := application.Close(); err != nil {
+			t.Fatal(err)
+		}
+		application, err = New(Options{RootDir: root, EventPublisher: workflowAITestPublisher{}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		application.Startup(context.Background())
+		if _, err := application.WorkflowFacade.Retry(workflow.RetryCommand{ProjectID: project.ID, RunID: failed.Run.ID, StepID: methodStepID}); err != nil {
+			t.Fatal(err)
+		}
+		wantMethodAttempt = 3
+	}
 	completed := waitForWorkflowState(t, application, project.ID, failed.Run.ID, workflow.RunCompleted, 20*time.Second)
 	if completed.Run.ResearchTaskID != failed.Run.ResearchTaskID || completed.DeliveryAssessment == nil || completed.DeliveryAssessment.Status != "reviewed" || completed.DeliveryAssessment.Kind != "research_design" || len(completed.DeliveryAssessment.Checks) == 0 {
 		t.Fatalf("closed-loop assessment=%+v", completed.DeliveryAssessment)
@@ -108,8 +196,11 @@ func TestResearchClosedLoopRevisesMethodsAfterRestartAndExports(t *testing.T) {
 		if step.NodeID == "question_refinement" && (step.Attempt != 1 || string(step.Output) != questionHash) {
 			t.Fatal("method revision changed the original research agreement")
 		}
-		if step.NodeID == "method_selection" && step.Attempt != 2 {
+		if step.NodeID == "method_selection" && step.Attempt != wantMethodAttempt {
 			t.Fatalf("method attempt=%d", step.Attempt)
+		}
+		if step.NodeID == "method_selection" && strings.Contains(string(step.Output), "discarded repair draft") {
+			t.Fatal("failed draft was accepted as research output")
 		}
 	}
 	mu.Lock()
@@ -117,6 +208,14 @@ func TestResearchClosedLoopRevisesMethodsAfterRestartAndExports(t *testing.T) {
 	mu.Unlock()
 	if reviewCount != 2 || revisionCount != 1 {
 		t.Fatalf("reviews=%d methodRevisions=%d", reviewCount, revisionCount)
+	}
+	if fault != "" {
+		mu.Lock()
+		requests := append([]string(nil), revisionRequests...)
+		mu.Unlock()
+		if len(requests) != 2 || !strings.Contains(requests[1], "_reviewRevision") || (fault != "invalid" && requests[0] != requests[1]) {
+			t.Fatal("recovery lost frozen review corrections, repeated stages or changed interrupted turn context")
+		}
 	}
 	secondReview := closedLoopReviewExecution(t, completed, 2)
 	var secondOutput struct {

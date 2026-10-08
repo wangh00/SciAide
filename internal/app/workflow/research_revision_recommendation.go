@@ -205,13 +205,14 @@ func researchRevisionRecommendation(detail RunDetail) *ResearchRevisionRecommend
 		result.Summary = "无法读取当前审查的冻结结果，请手动选择返修起点。"
 		return result
 	}
-	if _, exists := fields["revisionPlan"]; !exists {
-		return result
-	}
 	_, output, err = currentRejectedReview(detail, *gate)
 	if err != nil {
 		result.Summary = "这次返修建议未通过一致性检查，请刷新或手动选择起点。"
 		result.Reasons = []string{err.Error()}
+		return result
+	}
+	result.ReviewOutputSHA256 = hashJSON(output)
+	if _, exists := fields["revisionPlan"]; !exists {
 		return result
 	}
 	targets := researchRevisionTargets(detail)
@@ -266,14 +267,20 @@ func researchRevisionRecommendation(detail RunDetail) *ResearchRevisionRecommend
 		return result
 	}
 	target := byID[earliest.NodeID]
+	if reason := reviewRepairProgress(detail, earliest.NodeID); reason != "" {
+		result.Status = "needs_input"
+		result.Summary = reason
+		result.RequiredInputs = []string{reason}
+		return result
+	}
 	result.Status, result.NodeID, result.Label = "recommended", target.NodeID, target.Label
 	result.RepeatsSideEffects = target.RepeatsSideEffects
-	// Retry resets every step in this ordinal interval, not only the stages
-	// named by individual corrections. Show the actual replay scope in order.
+	// Retry rewinds through the gate, then continues the queued downstream
+	// publication steps. Show the whole execution suffix, not just corrections.
 	stages := append([]Step(nil), detail.Steps...)
 	sort.Slice(stages, func(i, j int) bool { return stages[i].Ordinal < stages[j].Ordinal })
 	for _, stage := range stages {
-		if stage.Ordinal >= earliest.Ordinal && stage.Ordinal <= gate.Ordinal {
+		if stage.Ordinal >= earliest.Ordinal {
 			result.AffectedStages = append(result.AffectedStages, nonEmptyMessage(nodes[stage.NodeID].Name, stage.NodeID))
 		}
 	}
@@ -299,6 +306,12 @@ func resolveReviewRevisionRequest(detail RunDetail, gate Step, command RetryComm
 	if !command.UseRecommendation {
 		if strings.TrimSpace(command.RevisionNodeID) == "" {
 			return "", fmt.Errorf("请明确选择返修起点，或确认采用当前审查的建议")
+		}
+		if target := evidenceReselectionStep(detail); target != nil && strings.TrimSpace(command.RevisionNodeID) == target.NodeID {
+			_, output, err := currentRejectedReview(detail, gate)
+			if err != nil || command.ExpectedReviewSHA256 == "" || hashJSON(output) != command.ExpectedReviewSHA256 {
+				return "", fmt.Errorf("证据补选对应的审查已变化，请刷新后重新确认")
+			}
 		}
 		return strings.TrimSpace(command.RevisionNodeID), nil
 	}

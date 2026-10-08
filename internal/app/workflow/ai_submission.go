@@ -132,12 +132,23 @@ func (s *RuntimeService) ValidateResearchSubmission(ctx context.Context, convers
 		return nil, &apperr.Error{Code: "WORKFLOW_AI_SUBMISSION_INVALID", UserMessage: "科研阶段提交未通过输出检查", Details: err.Error(), Cause: err}
 	}
 	chatRunID := ""
+	var currentExecution AIExecution
 	for _, execution := range detail.AIExecutions {
 		if execution.WorkflowStepID == step.ID && execution.Attempt == step.Attempt && execution.InputSHA256 == step.InputSHA256 {
 			chatRunID = execution.ChatRunID
-			value = canonicalCitationSubmission(value, detail, *step, node, execution.ChatRunID)
+			currentExecution = execution
 			break
 		}
+	}
+	validationInput := step.Input
+	var currentReads []tool.CitationRef
+	if node.ID == "evidence_screening" {
+		value, validationInput, currentReads, err = s.indexedAIStageSubmission(ctx, detail, *step, node, currentExecution, value)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		value = canonicalCitationSubmission(value, detail, *step, node, chatRunID)
 	}
 	changes, refreshErr := s.changedEvidenceMaterials(ctx, detail, *step, node)
 	if refreshErr != nil {
@@ -148,10 +159,23 @@ func (s *RuntimeService) ValidateResearchSubmission(ctx context.Context, convers
 	if len(changes) > 0 {
 		return value, nil
 	}
-	if err := validateWorkflowAIStageOutput(node, value, step.Input); err != nil {
+	if err := validateWorkflowAIStageOutput(node, value, validationInput); err != nil {
+		// Only a genuinely new-content collection draft needs another input;
+		// evicted old blocks do not suppress real submission errors.
+		added, readErr := s.newIndexedEvidence(ctx, detail, *step, node, currentExecution)
+		if readErr != nil {
+			return nil, readErr
+		}
+		if len(added) > 0 {
+			return value, nil
+		}
+		refs := append(workflowCitationSeeds(detail, *step), currentReads...)
+		var quoteErrors *CitationQuoteErrors
 		var quoteErr *CitationQuoteError
-		if errors.As(err, &quoteErr) {
-			err = modelVisibleQuoteError(quoteErr, workflowCitationSeedsFromSteps(detail.Run.Compilation, detail.Steps, *step), chatRunID)
+		if errors.As(err, &quoteErrors) {
+			err = modelVisibleQuoteErrors(quoteErrors, refs, chatRunID)
+		} else if errors.As(err, &quoteErr) {
+			err = modelVisibleQuoteError(quoteErr, refs, chatRunID)
 		}
 		return nil, &apperr.Error{Code: "WORKFLOW_AI_SUBMISSION_INVALID", UserMessage: "科研阶段提交未通过业务检查", Details: err.Error(), Cause: err}
 	}

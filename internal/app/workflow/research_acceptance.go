@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-const dynamicResearchReviewVersion = "dynamic-independent-review-v6"
+const dynamicResearchReviewVersion = "dynamic-independent-review-v7"
 
 func isResearchAcceptanceSchema(schema json.RawMessage) bool {
 	return isIndependentReviewSchema(schema) && schemaDeclaresProperty(schema, "acceptanceChecks")
@@ -83,6 +83,11 @@ func validateResearchAcceptance(output, input json.RawMessage) error {
 	originalDeliveryIndex := len(expected) - 1
 	if stage.RequireEvidenceGapCheck {
 		expected = appendEvidenceGapCriterion(expected)
+		// Persisted review inputs retain their exact criterion wording across
+		// upgrades. Do not invalidate an already frozen review/repair snapshot.
+		if len(stage.Criteria) == len(expected) && stage.Criteria[len(expected)-1].Text == legacyEvidenceGapCriterion {
+			expected[len(expected)-1].Text = legacyEvidenceGapCriterion
+		}
 	}
 	if len(stage.Criteria) != len(expected) {
 		return fmt.Errorf("验收清单与冻结研究目标不一致")
@@ -133,13 +138,9 @@ func validateResearchAcceptance(output, input json.RawMessage) error {
 		}
 	}
 	if stage.RequireEvidenceGapCheck {
-		if claims := unsupportedReportAbsenceClaims(input); len(claims) > 0 {
-			for _, check := range review.Checks {
-				if check.CriterionID == expected[len(expected)-1].ID && check.Status != "not_met" {
-					return fmt.Errorf("交付稿存在没有对应原文依据的未报告断言：%s；缺项验收必须 not_met，要求补查或改为尚未核验，不能仅因缺项清单为空而放行", claims[0])
-				}
-			}
-		}
+		// A keyword occurrence cannot establish a scientific absence claim.
+		// The reviewer evaluates meaning and provenance; the host checks only
+		// the declared unresolved core gaps and review consistency below.
 		var scope struct {
 			Screening struct {
 				Gaps []evidenceGap `json:"evidenceGaps"`
@@ -147,12 +148,25 @@ func validateResearchAcceptance(output, input json.RawMessage) error {
 		}
 		_ = json.Unmarshal(input, &scope)
 		for _, g := range scope.Screening.Gaps {
-			if !g.Required || g.Status == "explicitly_not_reported" {
+			unresolved := g.Required && !evidenceGapResolvedForScope(g)
+			if g.Status == "not_discussed_in_checked_scope" {
+				if err := validateCheckedEvidenceScope(g, input); err != nil {
+					// This is a defect in frozen upstream input, not something the
+					// reviewer can repair. A consistent rejection must be saved so
+					// the user can choose a responsible revision stage. Approval (or
+					// calling this gap check met) still cannot legitimize the claim.
+					if review.Approved {
+						return err
+					}
+					unresolved = true
+				}
+			}
+			if !unresolved {
 				continue
 			}
 			for _, check := range review.Checks {
 				if check.CriterionID == expected[len(expected)-1].ID && check.Status != "not_met" {
-					return fmt.Errorf("核心缺项 %s 尚未核验；缺项审查必须为 not_met，不能把未检索到当原文未报告", g.Field)
+					return fmt.Errorf("缺项 %s 尚未核验或核读范围缺少依据；缺项审查必须为 not_met，不能把未检索到当原文未报告", g.Field)
 				}
 			}
 		}
@@ -160,8 +174,10 @@ func validateResearchAcceptance(output, input json.RawMessage) error {
 	return nil
 }
 
+const legacyEvidenceGapCriterion = "逐项核对报告中的缺项断言（含自增表格列）：未检索到、无法读取、原文明示未报告必须区分；仅前两种不能写成原文未报告。对照 evidenceScreening.evidenceGaps、实际补查记录和当前原文，而非只复述报告。核心字段仍未核验则不通过并回到证据综合；非核心字段可省略或明确尚未核验。OR/RR/HR 与绝对发生率等不同指标不能混填。审查通过不证明通读全文或穷尽检索。"
+
 func appendEvidenceGapCriterion(criteria []ResearchAcceptanceCriterion) []ResearchAcceptanceCriterion {
-	return append(criteria, ResearchAcceptanceCriterion{ID: fmt.Sprintf("criterion-%d", len(criteria)+1), Text: "逐项核对报告中的缺项断言（含自增表格列）：未检索到、无法读取、原文明示未报告必须区分；仅前两种不能写成原文未报告。对照 evidenceScreening.evidenceGaps、实际补查记录和当前原文，而非只复述报告。核心字段仍未核验则不通过并回到证据综合；非核心字段可省略或明确尚未核验。OR/RR/HR 与绝对发生率等不同指标不能混填。审查通过不证明通读全文或穷尽检索。"})
+	return append(criteria, ResearchAcceptanceCriterion{ID: fmt.Sprintf("criterion-%d", len(criteria)+1), Text: "逐项核对报告中的缺项断言（含自增表格列）：区分未检索到、无法读取、原文明示未报告、已核读特定范围未讨论；检索失败不是缺失证明。对照 evidenceScreening.evidenceGaps、实际核读块范围和当前原文，而非只复述报告。范围结论只涵盖实际读取的片段，不自动等于整页或全文已读；不要求作者提供不存在机制的原句。否定、规程和引用反例不是作者缺项断言，应按语义判断。核心字段仍未核验则不通过；非核心字段可省略或明确尚未核验。OR/RR/HR 与绝对发生率等不同指标不能混填。审查通过不证明通读全文或穷尽检索。"})
 }
 
 func appendOriginalDeliveryCriterion(criteria []ResearchAcceptanceCriterion) []ResearchAcceptanceCriterion {

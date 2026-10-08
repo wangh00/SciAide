@@ -376,6 +376,10 @@ func (e *Executor) Execute(ctx context.Context, projectID, callID string) (Execu
 	case (errors.Is(invokeCtx.Err(), context.Canceled) || errors.Is(invokeErr, context.Canceled)) && !(invokeErr == nil && result.Status == ResultCancelled):
 		return e.finishCancelled(call, duration)
 	case invokeErr != nil:
+		var decision BusinessDecisionError
+		if errors.As(invokeErr, &decision) {
+			return e.finishFailure(ctx, call, decision.Code, decision.Message, started, &duration)
+		}
 		if e.onInvocationError != nil {
 			e.onInvocationError(call, invokeErr)
 		}

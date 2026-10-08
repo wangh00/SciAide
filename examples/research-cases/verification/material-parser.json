@@ -1,0 +1,103 @@
+[
+  {
+    "metadata": {},
+    "path": "examples/research-cases/01-literature/materials/followup/prokhorenkova-2018-catboost.pages.txt",
+    "runes": 74379,
+    "truncated": false,
+    "units": 3
+  },
+  {
+    "metadata": {
+      "emptyPages": "0",
+      "pages": "23",
+      "processedPages": "23",
+      "removedEdgeLines": "25",
+      "sections": "86",
+      "structureParser": "pdf-v4",
+      "textPages": "23",
+      "textQualityWarning": "部分字体字符缺少可用的 Unicode 映射，已标注无法解码；不得据此猜测数字或文字，请对照 PDF 原图或提供 OCR 文本。",
+      "unmappedGlyphs": "489"
+    },
+    "path": "examples/research-cases/01-literature/materials/followup/prokhorenkova-2018-catboost.pdf",
+    "runes": 77960,
+    "truncated": false,
+    "units": 87
+  },
+  {
+    "metadata": {},
+    "path": "examples/research-cases/01-literature/materials/initial/breiman-2001-random-forests.pages.txt",
+    "runes": 63933,
+    "truncated": false,
+    "units": 2
+  },
+  {
+    "metadata": {
+      "emptyPages": "1",
+      "pages": "33",
+      "processedPages": "33",
+      "removedEdgeLines": "40",
+      "sections": "55",
+      "structureParser": "pdf-v4",
+      "textPages": "32"
+    },
+    "path": "examples/research-cases/01-literature/materials/initial/breiman-2001-random-forests.pdf",
+    "runes": 59976,
+    "truncated": false,
+    "units": 55
+  },
+  {
+    "metadata": {},
+    "path": "examples/research-cases/01-literature/materials/initial/chen-guestrin-2016-xgboost.pages.txt",
+    "runes": 63873,
+    "truncated": false,
+    "units": 2
+  },
+  {
+    "metadata": {
+      "emptyPages": "0",
+      "pages": "13",
+      "processedPages": "13",
+      "removedEdgeLines": "3",
+      "sections": "63",
+      "structureParser": "pdf-v4",
+      "textPages": "13",
+      "textQualityWarning": "部分字体字符缺少可用的 Unicode 映射，已标注无法解码；不得据此猜测数字或文字，请对照 PDF 原图或提供 OCR 文本。",
+      "unmappedGlyphs": "532"
+    },
+    "path": "examples/research-cases/01-literature/materials/initial/chen-guestrin-2016-xgboost.pdf",
+    "runes": 66962,
+    "truncated": false,
+    "units": 64
+  },
+  {
+    "metadata": {},
+    "path": "examples/research-cases/02-data/materials/DATA_NOTES.md",
+    "runes": 1284,
+    "truncated": false,
+    "units": 1
+  },
+  {
+    "metadata": {},
+    "path": "examples/research-cases/02-data/materials/followup/wine-red-full-1599.csv",
+    "runes": 107865,
+    "truncated": false,
+    "units": 4
+  },
+  {
+    "metadata": {},
+    "path": "examples/research-cases/02-data/materials/initial/wine-red-initial-1000.csv",
+    "runes": 67289,
+    "truncated": false,
+    "units": 3
+  },
+  {
+    "metadata": {
+      "executionStatus": "not_executed",
+      "sourceLanguage": "python"
+    },
+    "path": "examples/research-cases/03-method-reference/materials/ridge_reference.py",
+    "runes": 1666,
+    "truncated": false,
+    "units": 1
+  }
+]

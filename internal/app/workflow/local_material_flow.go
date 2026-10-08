@@ -115,6 +115,10 @@ func bindSupplementaryEvidenceQueries(d RunDetail, args map[string]any) {
 	}
 }
 func (s *RuntimeService) supplementLocalEvidence(ctx context.Context, d RunDetail, step Step, output json.RawMessage) (bool, error) {
+	return s.supplementLocalEvidenceWithEvidence(ctx, d, step, output, nil)
+}
+
+func (s *RuntimeService) supplementLocalEvidenceWithEvidence(ctx context.Context, d RunDetail, step Step, output json.RawMessage, evidence any) (bool, error) {
 	search := findStepByNode(d.Steps, "evidence_search")
 	if search == nil || search.Status != StepCompleted || step.Ordinal != search.Ordinal+1 {
 		return false, nil
@@ -178,7 +182,11 @@ func (s *RuntimeService) supplementLocalEvidence(ctx context.Context, d RunDetai
 	if len(priorSnapshot.Citations) > 240 || len(previousOutput) > 200*1024 {
 		return true, fmt.Errorf("local evidence snapshot exceeds bounded continuation budget")
 	}
-	event, err := s.event(d.Run.ID, "workflow.local_evidence_requested", map[string]any{"stepId": step.ID, "attempt": step.Attempt, "queries": queries, "materialKey": localEvidenceMaterialKey(d), "previousSearchOutput": previousOutput, "previousSearchHash": hashJSON(previousOutput), "round": rounds + 1, "message": "正在所选材料内补查关键原文，不新增文献、不联网。"}, s.now())
+	payload := map[string]any{"stepId": step.ID, "attempt": step.Attempt, "queries": queries, "materialKey": localEvidenceMaterialKey(d), "previousSearchOutput": previousOutput, "previousSearchHash": hashJSON(previousOutput), "round": rounds + 1, "message": "正在所选材料内补查关键原文，不新增文献、不联网。"}
+	if evidence != nil {
+		payload["indexedEvidence"] = evidence
+	}
+	event, err := s.event(d.Run.ID, "workflow.local_evidence_requested", payload, s.now())
 	if err != nil {
 		return true, err
 	}

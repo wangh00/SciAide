@@ -25,7 +25,8 @@ const (
 // SourceKind describes how an attachment entered SciAide. It is separate
 // from ScopeKind: a task-owned file may be a user import or a materialized
 // literature source. Conversation uploads are not research inputs unless
-// explicitly promoted to a new task-owned record after revision confirmation.
+// explicitly promoted to a task-owned evidence record or selected as immutable
+// task-workspace data in a confirmed revision. The original owner never changes.
 type SourceKind string
 
 const (

@@ -1,7 +1,6 @@
 package anthropic
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -442,8 +441,7 @@ func (c *Client) streamOnce(ctx context.Context, request model.ChatRequest, mode
 		}
 		return nil, modelutil.ClassifyStatusWithHeaders(response.StatusCode, response.Header, b)
 	}
-	scanner := bufio.NewScanner(response.Body)
-	scanner.Buffer(make([]byte, 64*1024), maxStreamLineBytes)
+	scanner := modelutil.NewSSEDecoder(response.Body, maxStreamLineBytes)
 	return &stream{body: response.Body, scanner: scanner, providerNames: providerNames, blocks: map[int]*blockAccumulator{}, completed: map[int]struct{}{}}, nil
 }
 
@@ -563,7 +561,7 @@ type blockAccumulator struct {
 }
 type stream struct {
 	body          io.ReadCloser
-	scanner       *bufio.Scanner
+	scanner       *modelutil.SSEDecoder
 	providerNames map[string]string
 	blocks        map[int]*blockAccumulator
 	completed     map[int]struct{}
@@ -681,14 +679,10 @@ func (s *stream) Recv() (model.Event, error) {
 		return model.Event{}, io.EOF
 	}
 	for s.scanner.Scan() {
-		line := strings.TrimSpace(s.scanner.Text())
-		if line == "" || strings.HasPrefix(line, ":") || !strings.HasPrefix(line, "data:") {
-			continue
-		}
-		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		data := s.scanner.Text()
 		var e event
 		if err := json.Unmarshal([]byte(data), &e); err != nil {
-			return model.Event{}, modelutil.ErrorWithDetails("MODEL_STREAM_INVALID", "模型返回了无法解析的 Anthropic 流数据。", modelutil.ProviderErrorDetails("Anthropic stream event", 0, []byte(data)), false, err)
+			return model.Event{}, modelutil.ClassifySSEJSONError("Anthropic stream event", "模型返回了无法解析的 Anthropic 流数据。", []byte(data), err)
 		}
 		switch e.Type {
 		case "message_start":
@@ -807,22 +801,14 @@ func (s *stream) Recv() (model.Event, error) {
 			if message == "" {
 				message = "Anthropic 请求未完成。"
 			}
-			retryable := modelutil.StreamErrorRetryable(e.Error.Type, e.Error.Code)
-			code := "MODEL_REQUEST_REJECTED"
-			if retryable {
-				code = "MODEL_UNAVAILABLE"
-			}
-			return model.Event{}, modelutil.ErrorWithDetails(code, message, modelutil.ProviderErrorDetails("Anthropic stream event", 0, []byte(data)), retryable, nil)
+			return model.Event{}, modelutil.ClassifyStreamError(e.Error.Type, e.Error.Code, message, modelutil.ProviderErrorDetails("Anthropic stream event", 0, []byte(data)))
 		}
 		if len(s.queue) > 0 {
 			return s.pop(), nil
 		}
 	}
 	if err := s.scanner.Err(); err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return model.Event{}, err
-		}
-		return model.Event{}, modelutil.Error("MODEL_UNAVAILABLE", "模型连接意外中断，SciAide 将自动重连。", true, err)
+		return model.Event{}, modelutil.ClassifySSEReadError(err)
 	}
 	return model.Event{}, modelutil.Error("MODEL_STREAM_INTERRUPTED", "Anthropic 流在完成事件前中断，SciAide 将自动重连。", true, io.ErrUnexpectedEOF)
 }

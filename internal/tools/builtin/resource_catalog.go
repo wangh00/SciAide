@@ -47,7 +47,7 @@ func (r *ResourceActions) initial(ctx context.Context, scope resource.Scope) ([]
 		}
 		facts["workspaceMetadataOnly"] = unsupported
 	}
-	if scope.ToolContracts[ListAttachmentsName] != "" || scope.ToolContracts[InspectDocumentName] != "" || scope.ToolContracts[ReadDocumentName] != "" || scope.ToolContracts[SearchDocumentName] != "" {
+	if scope.ToolContracts[ListAttachmentsName] != "" || scope.ToolContracts[InspectDocumentName] != "" || scope.ToolContracts[ReadDocumentName] != "" || scope.ToolContracts[SearchDocumentName] != "" || scope.ToolContracts[ReadKnowledgeName] != "" {
 		result, err := r.metadata(ctx, scope, inv, ListAttachmentsName, json.RawMessage(`{}`))
 		if err != nil {
 			return nil, nil, err
@@ -63,25 +63,40 @@ func (r *ResourceActions) initial(ctx context.Context, scope resource.Scope) ([]
 		if err = json.Unmarshal(result.Structured, &data); err != nil {
 			return nil, nil, err
 		}
-		facts["attachmentCount"] = len(data.Attachments)
+		visibleCount := 0
 		inspected = true
 		unavailable := []any{}
 		for _, a := range data.Attachments {
+			if scope.SelectedOnly {
+				selected := false
+				for _, id := range scope.SelectedAttachmentIDs {
+					selected = selected || id == a.ID
+				}
+				if !selected {
+					continue
+				}
+			}
 			if a.Status != "ready" || a.Format == "image" {
+				visibleCount++
 				unavailable = append(unavailable, map[string]string{"name": a.Name, "status": a.Status, "format": a.Format})
 				continue
 			}
+			visibleCount++
 			if scope.ToolContracts[InspectDocumentName] != "" {
 				files = append(files, resource.Seed{Kind: "document", Label: "查看资料结构 · " + a.Name, ToolName: InspectDocumentName, Arguments: resourceArgs(map[string]any{"attachmentId": a.ID})})
 			}
 			if scope.ToolContracts[ReadDocumentName] != "" {
 				files = append(files, resource.Seed{Kind: "document_read", Label: "读取资料 · " + a.Name, ToolName: ReadDocumentName, Arguments: resourceArgs(map[string]any{"attachmentId": a.ID, "maxChars": 6000})})
 			}
+			if scope.ToolContracts[ReadKnowledgeName] != "" {
+				files = append(files, resource.Seed{Kind: "document_evidence", Label: "核读可引用原文 · " + a.Name, ToolName: ReadKnowledgeName, Arguments: resourceArgs(map[string]any{"attachmentId": a.ID})})
+			}
 			if scope.ToolContracts[SearchDocumentName] != "" {
 				files = append(files, resource.Seed{Kind: "document_search", Label: "检索资料 · " + a.Name, ToolName: SearchDocumentName, Arguments: resourceArgs(map[string]any{"attachmentId": a.ID, "limit": 8}), Search: true})
 			}
 		}
 		facts["unavailableDocuments"] = unavailable
+		facts["attachmentCount"] = visibleCount
 	}
 	if inspected {
 		facts["inputState"] = "no_supplied_resources"
@@ -242,7 +257,28 @@ func (r *ResourceActions) followups(scope resource.Scope, parent resource.Seed, 
 				seeds = append(seeds, resource.Seed{Kind: "document_read", Label: "读取资料片段 · " + u.Locator + " " + u.Title, ToolName: ReadDocumentName, Arguments: resourceArgs(map[string]any{"attachmentId": args["attachmentId"], "locator": u.Locator, "maxChars": 6000})})
 			}
 		}
+		if scope.ToolContracts[ReadKnowledgeName] != "" {
+			for _, u := range data.Units {
+				seeds = append(seeds, resource.Seed{Kind: "document_evidence", Label: "核读可引用原文 · " + u.Locator + " " + u.Title, ToolName: ReadKnowledgeName, Arguments: resourceArgs(map[string]any{"attachmentId": args["attachmentId"], "locator": u.Locator})})
+			}
+		}
 		return menuPage(seeds, parent.Label), nil
+	case ReadKnowledgeName:
+		var page struct {
+			More bool `json:"hasMore"`
+			Next int  `json:"nextOffset"`
+		}
+		if err := json.Unmarshal(result.Structured, &page); err != nil {
+			return nil, err
+		}
+		if page.More {
+			args["offset"] = page.Next
+			child := parent
+			child.Label = "继续核读原文 · " + fmt.Sprint(args["locator"])
+			child.Arguments = resourceArgs(args)
+			seeds = append(seeds, child)
+		}
+		return seeds, nil
 	case SkillLoadName:
 		var data skillLoadResult
 		if err := json.Unmarshal(result.Structured, &data); err != nil {

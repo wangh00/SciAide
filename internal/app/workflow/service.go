@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/wangh00/SciAide/internal/app/project"
 	"github.com/wangh00/SciAide/internal/id"
@@ -180,6 +181,9 @@ func (s *Service) StageInputFileForTask(ctx context.Context, projectID, sourcePa
 }
 
 func (s *Service) stageInputFile(ctx context.Context, projectID, sourcePath, kind, taskID string) (InputFile, error) {
+	if strings.EqualFold(strings.TrimSpace(kind), "python_source") {
+		return InputFile{}, fmt.Errorf("source references must be explicitly selected from user-sent conversation attachments")
+	}
 	selected, err := s.projects.Get(ctx, strings.TrimSpace(projectID))
 	if err != nil {
 		return InputFile{}, err
@@ -202,21 +206,28 @@ func (s *Service) stageInputFile(ctx context.Context, projectID, sourcePath, kin
 		return InputFile{}, fmt.Errorf("open input file: %w", err)
 	}
 	defer source.Close()
+	return s.stageOpenedInputFile(selected, source, sourcePath, filepath.Base(absSource), kind, taskID, "")
+}
+
+// A trusted attachment adapter supplies an already ownership-checked handle,
+// never a caller-selected path inside private project storage. Both paths use
+// the same format checks, content-addressed copy and post-copy verification.
+func (s *Service) stageOpenedInputFile(selected project.Project, source *os.File, sourcePath, name, kind, taskID, expectedSHA string) (InputFile, error) {
 	info, err := source.Stat()
 	if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > maxWorkflowInputFileBytes {
-		return InputFile{}, fmt.Errorf("input must be a non-empty regular CSV, TSV, or XLSX file no larger than 256 MiB")
+		return InputFile{}, fmt.Errorf("input must be a non-empty regular file no larger than 256 MiB")
 	}
-	extension := strings.ToLower(filepath.Ext(info.Name()))
+	extension := strings.ToLower(filepath.Ext(name))
 	kind = strings.ToLower(strings.TrimSpace(kind))
-	if kind != "delimited" && kind != "xlsx" && kind != "tabular" {
+	if kind != "delimited" && kind != "xlsx" && kind != "tabular" && kind != "python_source" {
 		return InputFile{}, fmt.Errorf("unsupported Workflow input file kind")
 	}
-	allowed := kind == "tabular" && (extension == ".csv" || extension == ".tsv" || extension == ".xlsx") || kind == "delimited" && (extension == ".csv" || extension == ".tsv") || kind == "xlsx" && extension == ".xlsx"
+	allowed := kind == "tabular" && (extension == ".csv" || extension == ".tsv" || extension == ".xlsx") || kind == "delimited" && (extension == ".csv" || extension == ".tsv") || kind == "xlsx" && extension == ".xlsx" || kind == "python_source" && extension == ".py"
 	if !allowed {
 		return InputFile{}, fmt.Errorf("selected file does not match the required %s data format", kind)
 	}
 	if extension != ".xlsx" && info.Size() > maxDelimitedInputFileBytes {
-		return InputFile{}, fmt.Errorf("CSV/TSV input cannot exceed 64 MiB")
+		return InputFile{}, fmt.Errorf("text input cannot exceed 64 MiB")
 	}
 	header := make([]byte, 4096)
 	read, readErr := source.Read(header)
@@ -242,12 +253,22 @@ func (s *Service) stageInputFile(ctx context.Context, projectID, sourcePath, kin
 		return InputFile{}, fmt.Errorf("hash input file: %w", err)
 	}
 	sha := hex.EncodeToString(digest.Sum(nil))
+	if expectedSHA != "" && sha != expectedSHA {
+		return InputFile{}, fmt.Errorf("补充材料原件已变化，请重新上传并生成方案")
+	}
+	absSource := sourcePath
+	if sourcePath != "" {
+		absSource, err = filepath.Abs(sourcePath)
+		if err != nil {
+			return InputFile{}, err
+		}
+	}
 	projectGuard, err := pathguard.Open(selected.WorkspacePath)
 	if err != nil {
 		return InputFile{}, err
 	}
 	defer projectGuard.Close()
-	if relative, relErr := filepath.Rel(selected.WorkspacePath, absSource); relErr == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+	if relative, relErr := filepath.Rel(selected.WorkspacePath, absSource); sourcePath != "" && relErr == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
 		clean, cleanErr := projectGuard.Relative(relative)
 		if cleanErr != nil || clean == "." || workflowPrivatePath(clean) {
 			return InputFile{}, fmt.Errorf("Workspace input must be a regular project file outside .sciaide")
@@ -284,7 +305,7 @@ func (s *Service) stageInputFile(ctx context.Context, projectID, sourcePath, kin
 	if _, err := guard.MkdirAll("research-inputs", 0o700); err != nil {
 		return InputFile{}, err
 	}
-	base := workflowSnapshotBase(info.Name(), extension)
+	base := workflowSnapshotBase(name, extension)
 	target := filepath.Join("research-inputs", base+"-"+sha+extension)
 	if existing, _, openErr := guard.OpenFile(target); openErr == nil {
 		existingInfo, statErr := existing.Stat()
@@ -295,7 +316,7 @@ func (s *Service) stageInputFile(ctx context.Context, projectID, sourcePath, kin
 			if err := validateStagedWorkflowInput(guard, target, kind); err != nil {
 				return InputFile{}, err
 			}
-			return InputFile{RelativePath: filepath.ToSlash(target), Name: info.Name(), SizeBytes: info.Size(), SHA256: sha, Staged: true}, nil
+			return InputFile{RelativePath: filepath.ToSlash(target), Name: name, SizeBytes: info.Size(), SHA256: sha, Staged: true}, nil
 		}
 		return InputFile{}, fmt.Errorf("staged input path already exists with different content")
 	}
@@ -325,7 +346,7 @@ func (s *Service) stageInputFile(ctx context.Context, projectID, sourcePath, kin
 		_ = guard.Remove(cleanTarget)
 		return InputFile{}, err
 	}
-	return InputFile{RelativePath: filepath.ToSlash(target), Name: info.Name(), SizeBytes: info.Size(), SHA256: sha, Staged: true}, nil
+	return InputFile{RelativePath: filepath.ToSlash(target), Name: name, SizeBytes: info.Size(), SHA256: sha, Staged: true}, nil
 }
 
 func validateStagedWorkflowInput(guard *pathguard.Guard, relative, kind string) error {
@@ -340,6 +361,16 @@ func validateStagedWorkflowInput(guard *pathguard.Guard, relative, kind string) 
 	}
 	if kind == "xlsx" || kind == "tabular" && strings.EqualFold(filepath.Ext(relative), ".xlsx") {
 		return validateXLSXArchive(file, info.Size())
+	}
+	if kind == "python_source" {
+		content, err := io.ReadAll(io.LimitReader(file, maxDelimitedInputFileBytes+1))
+		if err != nil {
+			return err
+		}
+		if len(content) == 0 || int64(len(content)) > maxDelimitedInputFileBytes || !utf8.Valid(content) || bytes.IndexByte(content, 0) >= 0 {
+			return fmt.Errorf("source reference must be non-empty UTF-8 text without binary NUL bytes, no larger than 64 MiB")
+		}
+		return nil
 	}
 	buffer := make([]byte, 64*1024)
 	for {

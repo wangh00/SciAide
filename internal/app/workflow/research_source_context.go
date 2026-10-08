@@ -10,6 +10,12 @@ func researchSourceContext(detail RunDetail) map[string]any {
 	queries, rounds := supplementaryEvidenceQueries(detail)
 	result["localEvidenceFollowup"] = map[string]any{"roundsUsed": rounds, "roundsRemaining": max(0, 2-rounds), "queries": queries, "absenceProven": false}
 	result["interpretation"] = "检索日志是已执行操作的来源记录，不证明系统综述穷尽；书目信息用于题录追溯，不是研究结果证据。selectionAudit的distinctDocumentCount仅为文档数，independentStudyCountVerified=false时不能把兼容字段independentStudyCount当成独立试验数。PDF可用不等于全文已读。indexedMaterials 是本轮实际已导入且就绪的索引，覆盖前期尚未导入的假设；未检索到不等于原文未报告，不得要求重复上传已存在的全文。"
+	// Source identity and exact read ranges are observable, not evidence that
+	// the model understood every passage or that absence is universally proven.
+	reads := indexedReadRanges(detail)
+	if len(reads) > 0 {
+		result["indexedReadRanges"] = reads
+	}
 	for _, s := range detail.Steps {
 		if s.Status != StepCompleted {
 			continue
@@ -40,5 +46,11 @@ func addResearchSourceContext(detail RunDetail, node CompiledNode, input json.Ra
 	}
 	args := decodeObject(input)
 	args["researchSourceContext"] = researchSourceContext(detail)
+	// Keep this new advisory projection separate from the source-context
+	// identity used by already frozen legacy reviews and deliveries.
+	if availability := evidenceSelectionAvailability(detail); availability != nil {
+		args["citationSelectionAvailability"] = availability
+		args["selectionInterpretation"] = "previouslyUnofferedCount 记录推荐项未出现在当时选择列表的数量，不能归因于用户主动排除；只描述程序可选范围，不代表论文质量、独立研究数量或科学置信度。已接受综合候选不等于全部已确认引用，最终仍使用 evidenceContext。"
+	}
 	return mustJSON(args)
 }

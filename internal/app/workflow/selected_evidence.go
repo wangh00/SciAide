@@ -179,12 +179,19 @@ func selectedEvidencePhaseNode(node CompiledNode, input json.RawMessage) Compile
 	} else {
 		delete(p, "documentAnalyses")
 	}
-	node.Prompt = selectedEvidenceOverviewInstruction
+	node.Prompt = strings.Replace(selectedEvidenceOverviewInstruction, "不得引用当前candidates之外的标记；工具读取用于核验，无法由当前签发依据支持的结论记为待核验而非伪造引用。", "引用只能来自当前candidates或同一轮成功原文核读工具新签发的标记；新工具结果已实际读取，可直接用于本轮完整综合，宿主将验证并冻结其来源。无法由这些实际签发依据支持的结论记为待核验而非伪造引用。", 1)
 	node.Prompt += "\n对于已经索引的本地全文，当前检索片段未出现不代表原文未报告。关键结果、方法、适用人群或可信度缺失时，提供 supplementalQueries（1至4个简短学术检索式，针对缺项且保留研究主题）；宿主最多两轮在同一批所选文档中补查并重新签发引用，再进入人工确认。不要请求重新上传已存在的文件。补查额度耗尽后明确尚未核验和具体缺口，不得编造数据或声称已完成原始任务。单篇文献任务不以文献篇数不足判定失败，按要求的字段覆盖判断。"
 	if in.Info.Phase != "batch" && schemaDeclaresProperty(node.OutputSchema, "evidenceGaps") {
-		node.Prompt += "\n" + evidenceGapInstruction
+		gapInstruction := evidenceGapInstruction
+		if strings.Contains(string(node.OutputSchema), `"not_discussed_in_checked_scope"`) {
+			gapInstruction = strings.Replace(gapInstruction, "或 explicitly_not_reported（原文明确说未报告）", "、explicitly_not_reported（原文明确说未报告）或 not_discussed_in_checked_scope（实际核读块范围内未讨论）", 1)
+			gapInstruction = strings.Replace(gapInstruction, "补查后仍缺少核心字段时 coverage 必须不足", "核心字段尚未核验时 coverage 必须不足；比较维度在核读范围内未讨论不等于任务必然失败，是否满足原始要求由有边界结论和独立审查判定", 1)
+		}
+		node.Prompt += "\n" + gapInstruction
+		node.Prompt += "\n本次输出schema若支持not_discussed_in_checked_scope，可对已核读的明确页章范围填写checkedScope（documentId、locators）和assessment（该维度为何在范围内未讨论及核查限制）。这不是作者明示缺失，不需要编造‘我们未报告’原句；不可据零命中、旧摘录或补查额度耗尽使用该状态。比较维度不等于要求每篇都有该机制；对不适用/未讨论的维度给有边界结论，由独立审查核对实际核读记录，不假装通读全文。旧schema不支持该状态时仍按其契约提交，不扩大旧任务权限。"
 	}
-	node.Prompt += "\nmaterialOrigin=user_selected 表示用户指定的资料，不代表相关、可信或已获得全文。按原文判断采用、背景或排除，并在documentAnalyses中说明。没有candidateId的资料不能调用builtin.research.full_text.read；仅使用当前索引签发的引用，不能凭文件名编造题录。"
+	node.Prompt += "\nindexedReadRanges是宿主记录的实际原文块范围，checkedScope仅涵盖这些已返回块，不代表整页或整章全部读完。每个documentId/locator都应能在该记录中找到；若需整页核查，继续hasMore提供的操作直到相应页章读取结束。工作集有预算时完整核读记录仍保留，不以候选省略或关键词零命中证明全文缺失。"
+	node.Prompt += "\nmaterialOrigin=user_selected 表示用户指定的资料，不代表相关、可信或已获得全文。缺项时优先从资源菜单查看已选资料结构，核读相关页章及上下文；本轮成功核读签发的引用可直接与当前候选一起支持完整综合，宿主一同冻结证据与结果，不因候选预算淘汰后重读而重复整阶段。只有不完整采证草稿且确有此前未核读的新块才继续采证。只读相关范围，不机械通读所有附件；两轮关键词补查额度不限制已授权页章核读。没有candidateId的资料不能请求重新下载。不能凭文件名编造题录。"
 	node.Prompt += "\n初始材料可能是摘要，也可能是已经上传的全文；按材料来源与实际原文判断，不预设只有摘要。仅关键结论、冲突或缺失方法/结果需要时调用builtin.research.full_text.read，candidateId从importedMaterials逐字取，query指定要核验的具体结果词。fullTextAvailability=unavailable的材料不要调用；requestable_not_verified仅表示存在可尝试入口，不表示已获得全文。单篇一次，返回status=unavailable时核验未完成，保留原证据限制并继续其他材料，不重复请求。来源失败后继续其他材料并披露限制，不循环下载。全文成功后保存为本任务新材料，旧附件和冻结引用不覆盖。宿主会自动从材料同步与引用检索重新进入综合，不重新检索候选。当前工具片段尚未签发新[K]引用，不用旧摘要引用支持全文新增结论；等待更新后提供的新引用。importKind=full_text表示已经保存全文，改用当前资源读取，不重复下载。"
 	node.Prompt += "\n每条推荐引用的supportingQuote必须逐字摘录当前candidate.quote中直接支持reason的连续原句，不能用同文档其他块替代。仅题名作者DOI等题录不得推荐为效果依据。缺关键统计先核查已提供的完整块，不把界面短片段的截断当来源缺失。sourceLevel按当前片段实际内容判断，不按PDF扩展名。独立研究数需要跨文档试验身份核对；文档数不是独立试验数。"
 	node.Prompt += "\n最终citationAssessments只评估实际推荐的引用及需要指出问题的引用，不逐条重写全部检索摘录。推荐标记必须有对应非exclude判定。无引用的文档记录明确说明未用于结论的原因。"
@@ -254,6 +261,7 @@ func validateSelectedEvidence(output, input json.RawMessage) error {
 		for _, c := range in.Candidates {
 			byRef[c.Reference] = c
 		}
+		quoteIssues := []CitationQuoteError{}
 		for _, a := range result.Assessments {
 			if !offered[a.Reference] || assessed[a.Reference] != "" {
 				return fmt.Errorf("unknown or duplicate citation assessment")
@@ -263,7 +271,8 @@ func validateSelectedEvidence(output, input json.RawMessage) error {
 				q := strings.TrimSpace(a.SupportingQuote)
 				c := byRef[a.Reference]
 				if q == "" || !strings.Contains(c.Quote, q) {
-					return &CitationQuoteError{Reference: a.Reference, SupportingQuote: a.SupportingQuote, CandidateQuote: c.Quote}
+					quoteIssues = append(quoteIssues, CitationQuoteError{Reference: a.Reference, SupportingQuote: a.SupportingQuote, CandidateQuote: c.Quote})
+					continue
 				}
 				if strings.Contains(c.Quote, "## Bibliographic metadata") && !strings.Contains(c.Quote, "## Abstract") {
 					return fmt.Errorf("citation %s contains bibliographic metadata, not result evidence", a.Reference)
@@ -275,6 +284,12 @@ func validateSelectedEvidence(output, input json.RawMessage) error {
 					return fmt.Errorf("supporting quote is bibliographic, not abstract content")
 				}
 			}
+		}
+		if len(quoteIssues) == 1 {
+			return &quoteIssues[0]
+		}
+		if len(quoteIssues) > 1 {
+			return &CitationQuoteErrors{Issues: quoteIssues}
 		}
 		seen := map[string]bool{}
 		for _, r := range result.References {
@@ -323,6 +338,10 @@ func validateSelectedEvidence(output, input json.RawMessage) error {
 }
 
 func (s *RuntimeService) completeSelectedEvidenceBatch(ctx context.Context, detail RunDetail, step Step, e AIExecution) error {
+	return s.completeSelectedEvidenceBatchWithEvidence(ctx, detail, step, e, nil)
+}
+
+func (s *RuntimeService) completeSelectedEvidenceBatchWithEvidence(ctx context.Context, detail RunDetail, step Step, e AIExecution, evidence any) error {
 	var in struct {
 		Key string `json:"sourceKey"`
 	}
@@ -331,7 +350,11 @@ func (s *RuntimeService) completeSelectedEvidenceBatch(ctx context.Context, deta
 	if !ok {
 		return fmt.Errorf("continuation unavailable")
 	}
-	event, err := s.event(detail.Run.ID, "workflow.selected_evidence_batch", map[string]any{"stepId": step.ID, "executionId": e.ID, "sourceKey": in.Key}, s.now())
+	payload := map[string]any{"stepId": step.ID, "executionId": e.ID, "sourceKey": in.Key}
+	if evidence != nil {
+		payload["indexedEvidence"] = evidence
+	}
+	event, err := s.event(detail.Run.ID, "workflow.selected_evidence_batch", payload, s.now())
 	if err != nil {
 		return err
 	}

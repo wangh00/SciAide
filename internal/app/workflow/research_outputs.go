@@ -14,7 +14,7 @@ func withResearchOutputs(schema json.RawMessage) json.RawMessage {
 			"type": "object", "additionalProperties": false, "required": []string{"name", "format"},
 			"properties": map[string]any{
 				"name":   map[string]any{"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,47}$"},
-				"format": map[string]any{"type": "string", "enum": []string{"csv", "tsv", "xlsx", "json", "md", "png", "svg", "pdf"}},
+				"format": map[string]any{"type": "string", "enum": []string{"csv", "tsv", "xlsx", "json", "md", "png", "svg", "pdf", "py", "txt"}},
 			},
 		},
 	}

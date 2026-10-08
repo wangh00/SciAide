@@ -3,6 +3,7 @@ package workflow
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/wangh00/SciAide/internal/app/tool"
 )
@@ -14,6 +15,16 @@ type ResearchDeliveryAssessment struct {
 	Summary     string                    `json:"summary"`
 	Checks      []ResearchAcceptanceCheck `json:"checks,omitempty"`
 	Limitations []string                  `json:"limitations,omitempty"`
+	Report      *ResearchReportAssessment `json:"report,omitempty"`
+}
+
+// A read-only presentation of recorded decisions, never a recalculated score.
+type ResearchReportAssessment struct {
+	Coverage         string `json:"coverage"`
+	LimitedDraft     bool   `json:"limitedDraft"`
+	SelectedExcerpts int    `json:"selectedExcerpts"`
+	Unselected       int    `json:"unselectedRecommended"`
+	ConfidencePolicy string `json:"confidencePolicy"`
 }
 
 // ValidateReviewedOutput prevents a completed flag or an unrelated approved
@@ -223,5 +234,62 @@ func assessResearchDelivery(detail RunDetail) *ResearchDeliveryAssessment {
 	}
 	_ = json.Unmarshal(outputs["independent_review"], &review)
 	assessment.Checks, assessment.Limitations = review.Checks, review.Limitations
+	if name == "report_draft" {
+		assessment.Report = recordedReportAssessment(detail)
+	}
 	return assessment
+}
+
+func recordedReportAssessment(detail RunDetail) *ResearchReportAssessment {
+	result := &ResearchReportAssessment{Coverage: "unknown", ConfidencePolicy: "unknown"}
+	gateDeclaration, ok := researchOutputDeclaration(detail.Run.Compilation, "delivery_gate")
+	if !ok {
+		return result
+	}
+	var reviewed *Step
+	for _, edge := range detail.Run.Compilation.Edges {
+		if edge.ToNode == gateDeclaration.FromNode && edge.ToPort == "review" {
+			reviewed = findStepByNode(detail.Steps, edge.FromNode)
+			break
+		}
+	}
+	if reviewed == nil {
+		return result
+	}
+	var input struct {
+		Audit *citationSelectionAuditSnapshot `json:"evidenceSelectionAudit"`
+	}
+	_ = json.Unmarshal(reviewed.Input, &input)
+	if audit := input.Audit; audit != nil {
+		result.SelectedExcerpts, result.Unselected = audit.SelectedExcerptCount, len(audit.MissingRecommendedReferences)
+		result.LimitedDraft = audit.RequiresLimitedAcceptance && audit.LimitedEvidenceAccepted
+		result.Coverage = audit.ScreeningStrength
+		if result.Coverage != "limited" && result.Coverage != "adequate" && result.Coverage != "insufficient" {
+			result.Coverage = "unknown"
+		}
+		if result.LimitedDraft && result.Coverage == "adequate" {
+			result.Coverage = "selection_limited"
+		}
+	}
+	declaration, ok := researchOutputDeclaration(detail.Run.Compilation, "report_draft")
+	if !ok {
+		return result
+	}
+	producer := findStepByNode(detail.Steps, declaration.FromNode)
+	if producer == nil {
+		return result
+	}
+	node := compilationNodeMap(detail.Run.Compilation)[producer.NodeID]
+	produced, err := outputPort(producer.Output, declaration.FromPort)
+	for _, execution := range detail.AIExecutions {
+		if err != nil || execution.WorkflowStepID != producer.ID || execution.Attempt != producer.Attempt || execution.Status != "completed" || execution.InputSHA256 != producer.InputSHA256 || execution.OutputSHA256 == "" || hashJSON(execution.Output) != execution.OutputSHA256 || !rawJSONEqual(execution.Output, produced) {
+			continue
+		}
+		if usesReportProvenance(node) && strings.HasSuffix(execution.PromptVersion, "-"+claimAssessmentVersion) {
+			result.ConfidencePolicy = "claim_based"
+		} else if result.LimitedDraft && execution.PromptVersion == node.PromptVersion && strings.HasPrefix(execution.PromptVersion, "dynamic-report-v5") && strings.Contains(node.Prompt, "对已接受的有限证据，必须保持低置信并将交付物定位为范围受限的初稿。") {
+			result.ConfidencePolicy = "legacy_limited"
+		}
+	}
+	return result
 }

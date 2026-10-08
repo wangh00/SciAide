@@ -11,7 +11,11 @@ func resolveWorkflowEdgeValue(detail RunDetail, edge Edge) (json.RawMessage, err
 	var value json.RawMessage
 	if edge.FromNode == "$input" {
 		var inputs map[string]json.RawMessage
-		if err := json.Unmarshal(detail.Run.Inputs, &inputs); err != nil {
+		effective, err := ResearchEffectiveInputs(detail)
+		if err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(effective, &inputs); err != nil {
 			return nil, fmt.Errorf("invalid workflow inputs: %w", err)
 		}
 		value = inputs[edge.FromPort]
@@ -31,7 +35,7 @@ func resolveWorkflowEdgeValue(detail RunDetail, edge Edge) (json.RawMessage, err
 				if execution.WorkflowStepID != step.ID || execution.Attempt != step.Attempt {
 					continue
 				}
-				citations := workflowCitationSeedsFromSteps(detail.Run.Compilation, detail.Steps, *step)
+				citations := workflowCitationSeeds(detail, *step)
 				value = restoreWorkflowCitationMarkers(value, citations, workflowAIOutputChatRunID(step.Output, execution.ChatRunID))
 				break
 			}

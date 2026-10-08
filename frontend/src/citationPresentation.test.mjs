@@ -6,6 +6,7 @@ import vm from "node:vm";
 import ts from "typescript";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import {loadTsx} from './testTsxLoader.mjs';
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {markdownRemarkPlugins, markdownRehypePlugins} from "./markdownPlugins.js";
@@ -59,6 +60,11 @@ test("source links use frozen bibliography and exclude active, local and credent
   assert.equal(citationSourceURL(first), "");
 });
 
+async function componentExports(file) {
+  return loadTsx(new URL(file, import.meta.url));
+}
+const {ResearchReportCard} = await componentExports('./ResearchReportCard.tsx');
+const {ResearchReportReader} = await componentExports('./ResearchReportReader.tsx');
 const source = await readFile(new URL("./App.tsx", import.meta.url), "utf8");
 function segment(start, end) {
   const from = source.indexOf(start), to = source.indexOf(end, from);
@@ -76,7 +82,7 @@ const exports = {};
 vm.runInNewContext(compiled, {
   exports, require: createRequire(import.meta.url), MarkdownCodeBlock: ({children}) => React.createElement("pre",null,children), copyToClipboard: async()=>{}, ReactMarkdown, markdownRemarkPlugins, markdownRehypePlugins, remarkGfm, citationDisplayMap, citationTextSegments,
   reportCitationSnapshot, citationSourceURL, citationReferenceFromURL, remarkSciAideCitations, safeMarkdownURL,
-  Icon: () => null, ResearchAcceptanceDetails: () => null,
+  Icon: () => null, ResearchAcceptanceDetails: () => null, ResearchReportCard, ResearchReportReader,
 });
 const render = (component, props) => renderToStaticMarkup(React.createElement(component, props));
 const report = { markdown: `## Results\n\nFinding ${first.reference}.`, methodSummary: "Method", confidence: "medium", claimSummary: ["Finding"], limitations: [] };

@@ -49,7 +49,7 @@ func evidenceReviewRevision(detail RunDetail, nodeID string) (reviewRevision, bo
 					var batch struct {
 						ExecutionID string `json:"executionId"`
 					}
-					if e.Type == "workflow.selected_evidence_batch" && json.Unmarshal(e.Payload, &batch) == nil && batch.ExecutionID == execution.ID {
+					if (e.Type == "workflow.selected_evidence_batch" || e.Type == "workflow.indexed_evidence_read") && json.Unmarshal(e.Payload, &batch) == nil && batch.ExecutionID == execution.ID {
 						found = true
 						break
 					}

@@ -2,9 +2,9 @@
 
 面向科研工作者的本地优先桌面 AI 助手。从研究问题出发，辅助完成文献检索、证据整理、数据分析、报告审查与返修，让结论能回到证据、结果能回到代码。
 
-**当前版本：v1.0.2 · Windows x64**
+**当前版本：v1.0.3 · Windows x64**
 
-[下载程序](https://github.com/wangh00/SciAide/releases/tag/v1.0.2) · [更新记录](CHANGELOG.md) · [开发状态](docs/CURRENT_STATE.md) · [开发指南](docs/development.md)
+[下载程序](https://github.com/wangh00/SciAide/releases/tag/v1.0.3) · [更新记录](CHANGELOG.md) · [科研开发计划](docs/RESEARCH_DEVELOPMENT.md) · [开发指南](docs/development.md)
 
 ## 自由对话与项目工作区
 
@@ -20,6 +20,12 @@
 ## 科研路线与文献研究
 
 用自然语言描述课题，AI 在信息不足且影响研究方向时澄清，随后设计路线，由用户确认后执行。文献研究和数据分析采用不同路线，不要求每个任务都运行 Python。
+
+**入口：选择项目 → 顶部「科研模式」→「研究方案」。** 原问题输入区提供「文献比较 / 数据分析 / 研究设计」示例，只填入草稿，不直接执行，也不限制你自由描述或组合需求。文献在规划前用「添加本地文献」选择；CSV/TSV/XLSX 数据在采用计算路线后用「添加数据文件」绑定。路线、确认、结果及后续讨论继续使用原聊天瀑布流。
+
+想检验同一任务换数据、保留旧结果及确认后再计算，可按 [连续研究界面测试步骤](examples/research-continuity/README.md) 使用附带演示 CSV；这些人工数据不是真实科研验证。任务交付后、登记前可在原聊天框继续补证、比较方法或更新数据，示例仅辅助表达，实际重算仍需确认方案。
+
+真实材料已另备 [科研案例包](examples/research-cases/README.md)：RF/XGBoost 全文比较后补 CatBoost，以及 UCI Wine Quality 数据分析、上传单文件 Ridge 方法参考、替换全量数据。附材料、可复制输入、界面顺序和分离的人工核对答案；已验证材料解析及本地参考计算，尚未完成真实模型/原生 EXE 端到端验收，不把材料准备等同于程序通过案例。
 
 ### 文献发现与可信证据
 
@@ -60,7 +66,7 @@
 
 ## 下载与开始使用
 
-1. 从 [v1.0.2 Release](https://github.com/wangh00/SciAide/releases/tag/v1.0.2) 下载 `SciAide.exe`，在 Windows x64 上运行。需要 Microsoft Edge WebView2 Runtime。
+1. 从 [v1.0.3 Release](https://github.com/wangh00/SciAide/releases/tag/v1.0.3) 下载 `SciAide.exe`，在 Windows x64 上运行。需要 Microsoft Edge WebView2 Runtime。
 2. 在“模型与 API”中配置自己的服务地址、模型和密钥，先测试连接。
 3. 新建项目，选择工作区。自由对话可以直接提问；科研模式输入研究问题后确认路线，有数据时按流程上传。
 4. 数据分析按任务需要配置 Python 环境和依赖。文献研究不要求先准备 Python。
@@ -86,6 +92,6 @@ Get-FileHash .\SciAide.exe -Algorithm SHA256
 
 技术栈：**Go + Wails + React + TypeScript + SQLite**。
 
-接手开发先读 [当前状态](docs/CURRENT_STATE.md)，环境与构建命令见 [开发指南](docs/development.md)，安全边界见 [威胁模型](docs/threat-model.md)。
+接手开发先读 [科研开发计划](docs/RESEARCH_DEVELOPMENT.md)，环境与构建命令见 [开发指南](docs/development.md)，安全边界见 [威胁模型](docs/threat-model.md)。
 
 项目许可见 [LICENSE](LICENSE)；内置第三方 Skill 保留各自的许可与归属说明。

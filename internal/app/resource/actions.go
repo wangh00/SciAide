@@ -25,19 +25,23 @@ const MaxSessionActions = 8192
 // Scope is supplied by the host after resolving the persisted Chat/Workflow
 // binding. It is not part of any model-facing JSON schema.
 type Scope struct {
-	RunID          string            `json:"runId"`
-	ProjectID      string            `json:"projectId"`
-	TaskID         string            `json:"taskId"`
-	WorkspaceRoot  string            `json:"workspaceRoot"`
-	WorkflowStepID string            `json:"workflowStepId"`
-	ToolContracts  map[string]string `json:"toolContracts"`
-	SkillNames     []string          `json:"skillNames"`
-	SkillDiscovery bool              `json:"skillDiscovery"`
+	RunID                 string            `json:"runId"`
+	ProjectID             string            `json:"projectId"`
+	TaskID                string            `json:"taskId"`
+	WorkspaceRoot         string            `json:"workspaceRoot"`
+	WorkflowStepID        string            `json:"workflowStepId"`
+	ToolContracts         map[string]string `json:"toolContracts"`
+	SkillNames            []string          `json:"skillNames"`
+	SkillDiscovery        bool              `json:"skillDiscovery"`
+	SelectedAttachmentIDs []string          `json:"selectedAttachmentIds,omitempty"`
+	SelectedOnly          bool              `json:"selectedOnly,omitempty"`
 }
 
 func (s Scope) Hash() string {
 	s.SkillNames = append([]string(nil), s.SkillNames...)
 	sort.Strings(s.SkillNames)
+	s.SelectedAttachmentIDs = append([]string(nil), s.SelectedAttachmentIDs...)
+	sort.Strings(s.SelectedAttachmentIDs)
 	return Hash(s)
 }
 func Hash(v any) string {
@@ -129,12 +133,14 @@ type Repository interface {
 }
 
 type Request struct {
-	RunID          string
-	ProjectID      string
-	WorkflowStepID string
-	Definitions    []tool.Definition
-	SkillNames     []string
-	SkillDiscovery bool
+	RunID                 string
+	ProjectID             string
+	WorkflowStepID        string
+	Definitions           []tool.Definition
+	SkillNames            []string
+	SkillDiscovery        bool
+	SelectedAttachmentIDs []string
+	SelectedOnly          bool
 }
 
 type View struct {
@@ -165,6 +171,23 @@ func (v View) Allows(name string, args json.RawMessage) bool {
 	return false
 }
 
+// Give the model a specific, safe recovery instruction, never a guessed ID or
+// permission expansion. The exact same-run menu remains authoritative.
+func (v View) RejectionMessage(name string, args json.RawMessage) string {
+	var a struct {
+		ActionID string `json:"actionId"`
+	}
+	if json.Unmarshal(args, &a) == nil {
+		if name == SearchTool && v.OpenIDs[a.ActionID] {
+			return fmt.Sprintf("资源操作类型不匹配：actionId %s 是核读/打开操作，请调用 builtin.resource.open，仅传 actionId，不传 query。当前未提供该资源的搜索操作；不要重复用此 ID 调用 search。", a.ActionID)
+		}
+		if name == OpenTool && v.SearchIDs[a.ActionID] {
+			return fmt.Sprintf("资源操作类型不匹配：actionId %s 是搜索操作，请调用 builtin.resource.search 并提供 query。", a.ActionID)
+		}
+	}
+	return "当前阶段只接受本轮资源菜单签发的操作；请选择菜单标明的 tool 和 actionId，不填写路径、Skill 名称或附件 ID，不沿用其他运行的 ID。"
+}
+
 type Provider interface {
 	Prepare(context.Context, Request) (View, error)
 }
@@ -173,7 +196,7 @@ type Provider interface {
 // immutable historical contracts, but are not advertised to resource-mode AI.
 func WrappedTool(name string) bool {
 	switch name {
-	case "builtin.workspace.list", "builtin.workspace.read_text", "builtin.attachment.list", "builtin.document.inspect", "builtin.document.read", "builtin.document.search", "builtin.skill.load", "builtin.skill.resource.list", "builtin.skill.resource.read_text":
+	case "builtin.workspace.list", "builtin.workspace.read_text", "builtin.attachment.list", "builtin.document.inspect", "builtin.document.read", "builtin.document.search", "builtin.knowledge.read", "builtin.skill.load", "builtin.skill.resource.list", "builtin.skill.resource.read_text":
 		return true
 	}
 	return false

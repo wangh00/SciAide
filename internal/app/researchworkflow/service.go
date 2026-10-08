@@ -78,6 +78,15 @@ type Service struct {
 	materials    interface {
 		ReferenceMaterials(context.Context, string, string, []string) ([]attachment.Attachment, error)
 	}
+	indexedSources interface {
+		IndexedEvidenceSources(context.Context, string, string) ([]tool.Call, error)
+	}
+}
+
+func (s *Service) SetIndexedEvidenceSources(reader interface {
+	IndexedEvidenceSources(context.Context, string, string) ([]tool.Call, error)
+}) {
+	s.indexedSources = reader
 }
 
 func (s *Service) SetMaterialLoader(loader interface {
@@ -507,6 +516,25 @@ func (s *Service) PublishReport(ctx context.Context, request ReportRequest) (art
 	if len(completed) == 0 {
 		return artifact.WorkflowReportResult{}, fmt.Errorf("research Workflow report has no completed upstream ToolCalls")
 	}
+	if s.indexedSources != nil {
+		indexed, err := s.indexedSources.IndexedEvidenceSources(ctx, request.ProjectID, request.WorkflowRunID)
+		if err != nil {
+			return artifact.WorkflowReportResult{}, err
+		}
+		for _, call := range indexed {
+			if call.ID == "" || call.Status != tool.CallCompleted || call.Result == nil || call.Result.Status != tool.ResultSuccess {
+				return artifact.WorkflowReportResult{}, fmt.Errorf("invalid indexed source projection")
+			}
+			searchCalls[call.ID] = call
+			for _, ref := range call.Result.Citations {
+				key, err := snapshotKey(ref)
+				if err != nil {
+					return artifact.WorkflowReportResult{}, err
+				}
+				offered[key] = append(offered[key], call.ID)
+			}
+		}
+	}
 	if len(request.ReviewGate) == 0 || !json.Valid(request.ReviewGate) {
 		return artifact.WorkflowReportResult{}, fmt.Errorf("research Workflow report requires a valid independent review gate")
 	}
@@ -528,7 +556,7 @@ func (s *Service) PublishReport(ctx context.Context, request ReportRequest) (art
 	for _, selected := range request.Citations {
 		key, err := snapshotKey(selected)
 		if err != nil || len(offered[key]) == 0 {
-			return artifact.WorkflowReportResult{}, fmt.Errorf("report citation was not returned by a completed knowledge search in this Workflow Run")
+			return artifact.WorkflowReportResult{}, fmt.Errorf("report citation was not returned by a verified search or indexed read in this Workflow Run")
 		}
 		value, err := s.verifyCitation(ctx, request.ProjectID, request.WorkflowRunID, request.ResearchTaskID, searchCalls[offered[key][0]], selected, userMaterials)
 		if err != nil {
@@ -639,7 +667,7 @@ func (s *Service) verifyCitation(ctx context.Context, projectID, runID, research
 	}
 	return artifact.Citation{
 		Reference:           citation.KnowledgeReference(runID, selected.IndexVersionID, selected.ChunkID, selected.QuoteSHA256),
-		SourceRunIDSnapshot: runID, SourceToolCallIDSnapshot: sourceCall.ID,
+		SourceRunIDSnapshot: sourceCall.RunID, SourceToolCallIDSnapshot: sourceCall.ID,
 		IndexVersionID: selected.IndexVersionID, DocumentID: selected.DocumentID, AttachmentID: selected.AttachmentID, ChunkID: selected.ChunkID,
 		SourceName: selected.SourceName, MIMEType: selected.MIMEType, Locator: selected.Locator, Title: selected.Title,
 		Quote: selected.Quote, QuoteSHA256: selected.QuoteSHA256, SourceStart: selected.SourceStart, SourceEnd: selected.SourceEnd,

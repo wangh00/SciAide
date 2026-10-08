@@ -1,6 +1,6 @@
 # SciAide 开发环境
 
-> 本文只记录开发操作；当前进度、验证和构建信息见 [`CURRENT_STATE.md`](CURRENT_STATE.md)，不在此重复维护。
+> 本文只记录开发操作；本次科研开发方向与验收进度见 [`RESEARCH_DEVELOPMENT.md`](RESEARCH_DEVELOPMENT.md)，不在此重复维护。
 
 前端不得直接导入被忽略的 `frontend/wailsjs`。Wails 运行时调用通过已提交的 `frontend/src/lib/wailsRuntime.ts` Bridge，后端 Facade 通过 `window.go` 动态边界访问，从而保证 GitHub Actions 的干净检出也能独立完成 TypeScript/Vite 构建。
 
@@ -92,5 +92,5 @@ $env:SCIAIDE_HOME = Join-Path $PWD ".sciaide-dev"
 
 1. `go.mod`、`go.sum`、`frontend/package.json`、`frontend/package-lock.json` 同步提交。
 2. 不提交 `node_modules`、构建产物、运行数据库和日志。
-3. Schema、权限或外部协议变化同时更新测试、`start.md` 和 ADR。
+3. Schema、权限或外部协议变化同时更新测试、相关开发文档和 ADR。
 4. 不把 Wails 基础设施对象直接绑定给前端，只绑定 `internal/transport/wails` 中的 Facade。

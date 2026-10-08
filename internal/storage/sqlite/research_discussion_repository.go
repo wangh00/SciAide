@@ -9,6 +9,12 @@ import (
 	"github.com/wangh00/SciAide/internal/app/workflow"
 )
 
+// The service verifies the actual frozen review. Recheck the terminal state
+// inside every proposal transaction, without allowing generic failed tasks.
+const discussionRevisionRunStateSQL = `(wr.status='completed' OR (wr.status='failed' AND EXISTS(
+	SELECT 1 FROM workflow_steps gate WHERE gate.workflow_run_id=wr.id AND gate.ordinal=wr.current_step_ordinal
+	AND gate.status='failed' AND gate.error_code='RESEARCH_REVIEW_NOT_APPROVED')))`
+
 func (r *WorkflowRuntimeRepository) ResolveResearchDiscussion(ctx context.Context, chatRunID string) (workflow.ResearchDiscussionBinding, error) {
 	var binding workflow.ResearchDiscussionBinding
 	err := r.db.QueryRowContext(ctx, `SELECT wr.project_id,wr.id,cr.user_message_id
@@ -20,6 +26,26 @@ func (r *WorkflowRuntimeRepository) ResolveResearchDiscussion(ctx context.Contex
 		return binding, fmt.Errorf("该工具仅用于当前科研任务的用户对话")
 	}
 	return binding, nil
+}
+
+// Resolve only an active, durably bound AI attempt. A model cannot provide a
+// workflow/project ID, borrow a user chat binding or revive a prior attempt.
+func (r *WorkflowRuntimeRepository) ResolveResearchStageRead(ctx context.Context, chatRunID string) (workflow.ResearchStageReadBinding, error) {
+	var binding workflow.ResearchStageReadBinding
+	err := r.db.QueryRowContext(ctx, `SELECT wr.project_id,wr.id,ws.id,e.attempt
+		FROM workflow_ai_chat_runs b JOIN workflow_ai_executions e ON e.id=b.execution_id
+		JOIN runs cr ON cr.id=b.chat_run_id JOIN workflow_runs wr ON wr.id=e.workflow_run_id
+		JOIN workflow_steps ws ON ws.id=e.workflow_step_id AND ws.workflow_run_id=wr.id
+		JOIN workflow_conversations wc ON wc.workflow_run_id=wr.id AND wc.conversation_id=cr.conversation_id
+		WHERE cr.id=? AND cr.status='running' AND e.status='running'
+		AND ws.status='running' AND ws.attempt=e.attempt AND ws.ordinal=wr.current_step_ordinal
+		AND wr.status IN ('running','waiting_approval')
+		AND EXISTS(SELECT 1 FROM json_each(e.allowed_tools_json) WHERE value=?)`, chatRunID, workflow.ResearchTaskReadTool).
+		Scan(&binding.ProjectID, &binding.WorkflowRunID, &binding.WorkflowStepID, &binding.Attempt)
+	if err == sql.ErrNoRows {
+		return binding, fmt.Errorf("当前 AI 尝试没有已授权的科研任务读取绑定")
+	}
+	return binding, err
 }
 
 // Only attachments actually sent by the user in this discussion are eligible;
@@ -53,7 +79,7 @@ func validateDiscussionProposalState(ctx context.Context, tx *sql.Tx, proposal w
 	err := tx.QueryRowContext(ctx, `SELECT EXISTS(
 		SELECT 1 FROM runs cr JOIN workflow_conversations wc ON wc.conversation_id=cr.conversation_id
 		JOIN workflow_runs wr ON wr.id=wc.workflow_run_id
-		WHERE cr.id=? AND wr.id=? AND cr.user_message_id=? AND wr.status='completed' AND wr.workflow_purpose='user_plan'
+		WHERE cr.id=? AND wr.id=? AND cr.user_message_id=? AND `+discussionRevisionRunStateSQL+` AND wr.workflow_purpose='user_plan'
 		AND cr.status IN ('running','completed') AND (?=0 OR cr.status='completed')
 		AND NOT EXISTS(SELECT 1 FROM workflow_ai_chat_runs WHERE chat_run_id=cr.id)
 		AND EXISTS(SELECT 1 FROM research_tasks task WHERE task.id=wr.research_task_id AND task.project_id=wr.project_id AND task.status<>'archived')
@@ -114,7 +140,7 @@ func (r *WorkflowRuntimeRepository) SaveResearchRevisionProposal(ctx context.Con
 
 func (r *WorkflowRuntimeRepository) ListResearchRevisionProposals(ctx context.Context, runID string) ([]workflow.ResearchRevisionProposal, error) {
 	rows, err := r.db.QueryContext(ctx, `SELECT p.proposal_json,p.status,cr.status,
-		p.status='pending' AND cr.status='completed' AND wr.status='completed'
+		p.status='pending' AND cr.status='completed' AND `+discussionRevisionRunStateSQL+`
 		AND EXISTS(SELECT 1 FROM tool_calls tc WHERE tc.id=p.source_call_id AND tc.status='completed')
 		AND cr.user_message_id=(SELECT id FROM messages WHERE conversation_id=cr.conversation_id AND role='user' ORDER BY rowid DESC LIMIT 1)
 		AND NOT EXISTS(SELECT 1 FROM runs active WHERE active.conversation_id=cr.conversation_id AND active.status IN ('queued','running','waiting_approval'))
@@ -201,7 +227,15 @@ func (r *WorkflowRuntimeRepository) ConfirmResearchRevision(ctx context.Context,
 		if ordinal < 0 {
 			return fmt.Errorf("返修起点已失效")
 		}
-		snapshot, err := json.Marshal(map[string]any{"run": run, "steps": steps})
+		effectiveInputs, err := workflow.ResearchEffectiveInputs(expected)
+		if err != nil {
+			return err
+		}
+		sourceVersion, err := workflow.CurrentResearchSourceVersion(expected)
+		if err != nil {
+			return err
+		}
+		snapshot, err := json.Marshal(map[string]any{"run": run, "steps": steps, "effectiveInputs": effectiveInputs, "sourceVersion": sourceVersion})
 		if err != nil {
 			return err
 		}
@@ -213,7 +247,7 @@ func (r *WorkflowRuntimeRepository) ConfirmResearchRevision(ctx context.Context,
 		if err != nil {
 			return err
 		}
-		result, err = tx.ExecContext(ctx, `UPDATE workflow_runs SET status='queued',outputs_json='{}',current_step_ordinal=?,error_code='',error_message='',completed_at=NULL,cancel_requested=0,resume_status='',updated_at=? WHERE id=? AND status='completed'`, ordinal, formatTime(event.CreatedAt), proposal.RunID)
+		result, err = tx.ExecContext(ctx, `UPDATE workflow_runs SET status='queued',outputs_json='{}',current_step_ordinal=?,error_code='',error_message='',completed_at=NULL,cancel_requested=0,resume_status='',updated_at=? WHERE id=? AND status=?`, ordinal, formatTime(event.CreatedAt), proposal.RunID, string(expected.Run.Status))
 		return expectOne(result, err, "queue user research revision")
 	}, event)
 }
@@ -234,7 +268,8 @@ func (r *WorkflowRuntimeRepository) ReadResearchDiscussionRecords(ctx context.Co
 			LEFT JOIN workflow_ai_chat_runs b ON b.chat_run_id=tc.run_id LEFT JOIN workflow_ai_executions e ON e.id=b.execution_id
 			LEFT JOIN workflow_steps ws ON ws.id=e.workflow_step_id OR ws.tool_call_id=tc.id
 			WHERE (tc.workflow_run_id=? OR e.workflow_run_id=?) AND (?='' OR ws.node_id=?) ORDER BY tc.created_at,tc.id`,
-		"revisions": `SELECT proposal_json,status,previous_snapshot_json FROM research_revision_proposals WHERE workflow_run_id=? ORDER BY rowid`,
+		"revisions":      `SELECT proposal_json,status,previous_snapshot_json FROM research_revision_proposals WHERE workflow_run_id=? ORDER BY rowid`,
+		"revision_index": `SELECT id AS revisionId,confirmed_at AS confirmedAt,json_extract(proposal_json,'$.summary') AS summary,json_extract(proposal_json,'$.nodeId') AS startNodeId FROM research_revision_proposals WHERE workflow_run_id=? AND status='confirmed' ORDER BY rowid`,
 	}
 	query := queries[section]
 	if query == "" {
@@ -244,7 +279,7 @@ func (r *WorkflowRuntimeRepository) ReadResearchDiscussionRecords(ctx context.Co
 	if section == "tool_calls" {
 		args = []any{runID, runID, nodeID, nodeID}
 	}
-	if section == "revisions" {
+	if section == "revisions" || section == "revision_index" {
 		args = []any{runID}
 	}
 	rows, err := r.db.QueryContext(ctx, query, args...)
@@ -276,4 +311,17 @@ func (r *WorkflowRuntimeRepository) ReadResearchDiscussionRecords(ctx context.Co
 		return nil, err
 	}
 	return json.Marshal(result)
+}
+
+// Resolve by both task-bound run and revision identity, never revision alone.
+func (r *WorkflowRuntimeRepository) ReadResearchRevisionSnapshot(ctx context.Context, runID, revisionID string) (json.RawMessage, error) {
+	var snapshot string
+	err := r.db.QueryRowContext(ctx, `SELECT previous_snapshot_json FROM research_revision_proposals WHERE workflow_run_id=? AND id=? AND status='confirmed'`, runID, revisionID).Scan(&snapshot)
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("当前科研任务不存在该已确认历史版本")
+	}
+	if err != nil {
+		return nil, err
+	}
+	return json.RawMessage(snapshot), nil
 }

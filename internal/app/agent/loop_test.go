@@ -111,6 +111,12 @@ type completionListFailureTools struct {
 	listCalls int
 }
 
+type completionFailureRuns struct{ *loopState }
+
+func (s *completionFailureRuns) Complete(context.Context, chat.Run, string, []conversation.Citation) error {
+	return fmt.Errorf("injected completion transaction failure")
+}
+
 func (s *completionListFailureTools) ListByRun(ctx context.Context, runID string) ([]tool.Call, error) {
 	s.listCalls++
 	if s.listCalls == s.failAt {
@@ -897,8 +903,49 @@ func TestAgentLoopCompletesWithoutPrewritingFinalTextOrLoadingCitations(t *testi
 	}
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	if tools.listCalls != 3 || state.run.Status != chat.RunCompleted || state.messages[1].Status != conversation.MessageComplete || state.messages[1].Parts[0].Text != "final answer" {
+	if tools.listCalls != 2 || state.run.Status != chat.RunCompleted || state.messages[1].Status != conversation.MessageComplete || state.messages[1].Parts[0].Text != "final answer" {
 		t.Fatalf("list calls=%d run=%#v assistant=%#v", tools.listCalls, state.run, state.messages[1])
+	}
+}
+
+func TestCompletionFailureKeepsRunNonTerminalUntilFailedAndPreservesDraft(t *testing.T) {
+	final := []fake.Step{{Event: model.Event{Type: model.EventTextDelta, Text: "generated final answer"}}, {Event: model.Event{Type: model.EventDone, FinishReason: "stop"}}}
+	loop, state, provider := newLoopFixture(t, nil, final)
+	loop.runs = &completionFailureRuns{loopState: state}
+	if outcome := loop.Run(context.Background(), "run"); outcome != OutcomeFailed {
+		t.Fatal(outcome)
+	}
+	if state.run.Status != chat.RunFailed || state.run.ErrorCode != "RUN_COMPLETION_SAVE_FAILED" || !strings.Contains(state.run.ErrorDetails, "injected completion transaction failure") {
+		t.Fatalf("completion failure was lost or persisted as success: %#v", state.run)
+	}
+	if len(provider.Requests()) != 1 || len(state.journalDrafts) != 1 || state.journalDrafts[1] != "generated final answer" || state.messages[1].Status == conversation.MessageComplete {
+		t.Fatal("failed save repeated generation, lost raw draft, or completed message")
+	}
+}
+
+func TestAtomicCompletionFailureDoesNotMutateCallerRun(t *testing.T) {
+	loop, state, _ := newLoopFixture(t, nil)
+	state.run.Status = chat.RunRunning
+	loop.runs = &completionFailureRuns{loopState: state}
+	run := state.run
+	before := run
+	if outcome, err := loop.complete(&run, "generated answer", "stop"); outcome != OutcomeFailed || err == nil {
+		t.Fatal(outcome, err)
+	}
+	if !reflect.DeepEqual(run, before) || state.run.Status != chat.RunRunning {
+		t.Fatal("rolled-back completion mutated caller or persisted terminal state", run)
+	}
+}
+
+func TestCitationLoadFailureDoesNotSilentlyCompleteCitedAnswer(t *testing.T) {
+	final := []fake.Step{{Event: model.Event{Type: model.EventTextDelta, Text: "generated cited answer [K-0123456789AB]"}}, {Event: model.Event{Type: model.EventDone, FinishReason: "stop"}}}
+	loop, state, provider := newLoopFixture(t, nil, final)
+	loop.tools = &completionListFailureTools{ToolCalls: loop.tools, failAt: 3}
+	if outcome := loop.Run(context.Background(), "run"); outcome != OutcomeFailed {
+		t.Fatal("citation loading failure was ignored", outcome)
+	}
+	if state.run.Status != chat.RunFailed || !strings.Contains(state.run.ErrorDetails, "injected completion citation load failure") || len(provider.Requests()) != 1 {
+		t.Fatalf("lost diagnostics or repeated generation: %#v", state.run)
 	}
 }
 
@@ -1491,6 +1538,25 @@ func TestWorkflowAIStageKeepsContinuationAfterRepeatedToolProgress(t *testing.T)
 	}
 	if len(provider.Requests()) != 3 || state.messages[1].Parts[0].Text != `{"summary":"done"}` {
 		t.Fatalf("requests=%d assistant=%q", len(provider.Requests()), state.messages[1].Parts[0].Text)
+	}
+}
+
+func TestResearchStageCanFollowUpWithAnotherToolCall(t *testing.T) {
+	turn := func(id, query string) []fake.Step {
+		return []fake.Step{
+			{Event: model.Event{Type: model.EventToolCall, ToolCall: &model.ToolCall{ID: id, Name: "builtin.fixture", Arguments: json.RawMessage(`{"query":"` + query + `"}`)}}},
+			{Event: model.Event{Type: model.EventDone, FinishReason: "tool_calls"}},
+		}
+	}
+	final := []fake.Step{{Event: model.Event{Type: model.EventTextDelta, Text: `{"summary":"compared evidence"}`}}, {Event: model.Event{Type: model.EventDone, FinishReason: "stop"}}}
+	loop, state, provider := newLoopFixture(t, nil, turn("read-first", "paper"), turn("read-followup", "limitations"), final)
+	state.workflowAI = true
+	loop.research = &staticResearchGuidance{bound: true, value: workflow.ResearchGuidance{StructuredOutputRequired: true, AllowedToolNames: []string{"builtin.fixture"}}}
+	if outcome := loop.Run(context.Background(), state.run.ID); outcome != OutcomeCompleted {
+		t.Fatalf("outcome=%s", outcome)
+	}
+	if len(provider.Requests()) != 3 {
+		t.Fatal("stage stopped before follow-up evidence was read")
 	}
 }
 

@@ -1,0 +1,77 @@
+/* One frame for research deliverables and checkpoints; business content stays local. */
+/* Doubled frame specificity isolates presentation from legacy compound content styles. */
+.research-card.research-card {
+  --research-card-border: #dce5df;
+  --research-card-muted: #76857c;
+  --research-card-accent: #426c56;
+  min-width: 0; overflow: hidden; padding: 0; margin: 0;
+  border: 1px solid var(--research-card-border); border-radius: 14px;
+  background: #fff; box-shadow: 0 5px 20px rgba(29,53,45,.04);
+  color: #3d4941; font-family: inherit; font-size: 13px; line-height: 1.75;
+  letter-spacing: 0; overflow-wrap: anywhere;
+  container-type: inline-size; container-name: research-card;
+}
+.research-card.research-card--pending { --research-card-accent: #89672d; }
+.research-card.research-card--success { --research-card-accent: #387559; }
+.research-card.research-card--danger { --research-card-accent: #a6535b; }
+.research-card.research-card > .research-card-heading {
+  display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between;
+  gap: 12px; min-height: 0; padding: 18px; border-bottom: 1px solid #e4ebe6;
+  background: linear-gradient(120deg,#f5f8f6,#fff);
+}
+.research-card-heading > .research-card-heading-copy { display: grid; flex: 1 1 200px; min-width: 0; gap: 4px; }
+.research-card .research-card-heading h2,.research-card .research-card-heading h3 { margin: 0; color: #2d4034; font-size: 16px; line-height: 1.5; font-weight: 650; white-space: normal; overflow: visible; letter-spacing: 0; }
+.research-card .research-card-heading .research-card-eyebrow { margin: 0; color: #6f887a; font-size: 11px; font-weight: 500; }
+.research-card .research-card-description { color: var(--research-card-muted); font-size: 11px; line-height: 1.65; font-weight: 400; }
+.research-card .research-card-badge { display: inline-flex; flex: 0 0 auto; width: auto; height: auto; align-items: center; padding: 4px 9px; border: 1px solid #dbe6df; border-radius: 20px; color: var(--research-card-accent); background: #f3f8f5; box-shadow: none; font-size: 11px; font-weight: 550; line-height: 1.6; white-space: normal; }
+.research-card--pending .research-card-badge { border-color: #ebdfc7; background: #fbf7ee; }
+.research-card--danger .research-card-badge { border-color: #ecd7da; background: #fcf3f4; }
+.research-card.research-card > .research-card-heading > .research-card-icon { display: grid; flex: 0 0 32px; width: 32px; height: 32px; place-items: center; border-radius: 9px; color: var(--research-card-accent); background: #eef4f0; box-shadow: none; }
+.research-card.research-card .research-card-body { display: grid; min-width: 0; gap: 14px; padding: 18px; }
+.research-card-body > p { margin: 0; }
+.research-card.research-card > footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; min-height: 0; margin: 0; padding: 14px 18px; border-top: 1px solid #e4ebe6; background: #fafcfb; }
+.research-card.research-card > footer > p,.research-card.research-card > footer > span { flex: 1 1 220px; margin: 0; color: var(--research-card-muted); font-size: 11px; line-height: 1.7; }
+.research-card.research-card > footer > div { display: flex; flex-wrap: wrap; gap: 8px; }
+.research-card.research-card > footer button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 38px; max-width: 100%; padding: 8px 13px; border: 1px solid #d1ded6; border-radius: 7px; color: #476d57; background: #fff; font-size: 12px; font-weight: 600; line-height: 1.5; white-space: normal; }
+.research-card.research-card > footer button.primary { color: #fff; border-color: #34745d; background: #34745d; }
+.research-card.research-card > footer button.primary:hover:not(:disabled) { background: #28604c; }
+.research-card button:focus-visible,.research-card summary:focus-visible { outline: 2px solid #6eaa89; outline-offset: 3px; }
+.research-card button:disabled { opacity: .5; cursor: not-allowed; }
+.research-card .research-card-history > summary { display: flex; align-items: flex-start; gap: 10px; padding: 14px 18px; color: #63746a; font-size: 12px; cursor: pointer; }
+.research-card .research-card-history > summary::before { content: '›'; color: #7e9387; font-size: 18px; line-height: 1.4; }
+.research-card .research-card-history[open] > summary::before { transform: rotate(90deg); }
+.research-card-history > summary > span:last-child { min-width: 0; }
+.research-card .research-card-history > summary > .research-card-badge { flex: 0 0 auto; font-size: 10px; }
+.research-card.historical { box-shadow: none; }
+
+/* Revision content, not a second frame. Preserve the complete agreed text. */
+.research-revision-goal { font-weight: 400; line-height: 1.85; white-space: pre-wrap; }
+.research-revision-scope-summary { display: grid; gap: 12px; padding: 14px; border: 1px solid #e4ebe6; border-radius: 10px; background: #f9fbfa; }
+.research-revision-scope-summary > div { display: grid; min-width: 0; gap: 5px; }
+.research-revision-scope-summary > div > span { color: #7a897f; font-size: 11px; }
+.research-revision-scope-summary strong { color: #405d4c; font-size: 13px; font-weight: 600; }
+.research-revision-scope-summary p { margin: 0; color: #5f7266; font-size: 12px; }
+.research-revision-changes,.research-revision-reason { min-width: 0; border: 1px solid #e3eae5; border-radius: 10px; background: #fff; }
+.research-revision-changes > summary,.research-revision-reason > summary { display: flex; align-items: center; gap: 10px; padding: 11px 12px; color: #4b6856; font-size: 12px; cursor: pointer; }
+.research-revision-changes > summary::before,.research-revision-reason > summary::before { content: '›'; font-size: 16px; color: #8b9f91; }
+.research-revision-changes[open] > summary::before,.research-revision-reason[open] > summary::before { transform: rotate(90deg); }
+.research-revision-changes summary small { margin-left: auto; color: #88988d; font-size: 10px; font-weight: 400; }
+.research-revision-changes > ol { display: grid; gap: 12px; margin: 0; padding: 0 16px 15px 34px; color: #56685c; font-size: 12px; line-height: 1.85; }
+.research-revision-changes li { white-space: pre-wrap; overflow-wrap: anywhere; }
+.research-revision-reason > p { margin: 0; padding: 0 14px 14px; color: #65776b; font-size: 12px; white-space: pre-wrap; }
+.research-revision-materials { display: grid; gap: 9px; min-width: 0; padding: 14px; border: 1px solid #e3eae5; border-radius: 10px; background: #fafcfb; }
+.research-revision-materials h4 { margin: 0; color: #486653; font-size: 12px; font-weight: 600; }
+.research-revision-materials > ul { display: grid; gap: 8px; list-style: none; margin: 0; padding: 0; }
+.research-revision-materials > ul > li { min-width: 0; padding: 10px 12px; border: 1px solid #e4ece6; border-radius: 7px; background: #fff; font-size: 12px; }
+.research-revision-materials b { font-weight: 550; }
+.research-revision-materials > p { margin: 0; color: #788b7e; font-size: 11px; line-height: 1.75; }
+.research-revision-identity { min-width: 0; color: #71877a; font-size: 11px; }
+.research-revision-identity > summary { padding: 4px 0; cursor: pointer; }
+.research-revision-identity p { margin: 4px 0; overflow-wrap: anywhere; }
+.research-revision-identity code { display: block; font: 10px/1.7 Consolas,monospace; overflow-wrap: anywhere; }
+.research-revision-proposal .research-card-body > p[role="status"] { padding: 10px 12px; border-left: 3px solid #c8d8cc; color: #6b7e71; background: #f7faf8; font-size: 11px; }
+.research-analysis-result h4 { margin: 0; font-size: 12px; }
+.research-analysis-result ul { margin: 6px 0 0; padding-left: 19px; }
+.research-analysis-result li,.research-analysis-summary { white-space: pre-wrap; overflow-wrap: anywhere; }
+@container research-card (max-width: 450px) { .research-card.research-card > .research-card-heading,.research-card.research-card > footer { padding: 14px; } .research-card.research-card .research-card-body { padding: 14px; } .research-card.research-card > footer > button.primary { width: 100%; } .research-revision-changes > summary { flex-wrap: wrap; } }
+@media (prefers-reduced-motion: reduce) { .research-card.research-card { animation: none; } }

@@ -460,6 +460,21 @@ func (r *WorkflowRuntimeRepository) RejectDecision(ctx context.Context, decision
 
 func (r *WorkflowRuntimeRepository) ResetStepForRetry(ctx context.Context, runID, stepID string, decision *workflow.HumanDecision, at time.Time, event workflow.RuntimeEvent) error {
 	return r.transition(ctx, runID, func(tx *sql.Tx) error {
+		var runStatus, stepStatus, stepKind string
+		var currentOrdinal, ordinal int
+		if err := tx.QueryRowContext(ctx, `SELECT r.status,r.current_step_ordinal,s.status,s.node_kind,s.ordinal FROM workflow_runs r JOIN workflow_steps s ON s.workflow_run_id=r.id WHERE r.id=? AND s.id=?`, runID, stepID).Scan(&runStatus, &currentOrdinal, &stepStatus, &stepKind, &ordinal); err != nil {
+			return err
+		}
+		if runStatus == string(workflow.RunCancelled) {
+			if stepStatus != string(workflow.StepCancelled) || ordinal != currentOrdinal || (stepKind != string(workflow.NodeAgentStage) && stepKind != string(workflow.NodeAIAnalysis)) {
+				return fmt.Errorf("cancelled Workflow retry must target the current AI step")
+			}
+			// Cancellation also marks never-started downstream nodes cancelled.
+			// Restore only those untouched nodes; retain all prior results/attempts.
+			if _, err := tx.ExecContext(ctx, `UPDATE workflow_steps SET status='queued',error_code='',error_message='',completed_at=NULL,updated_at=? WHERE workflow_run_id=? AND ordinal>? AND status='cancelled' AND attempt=0 AND tool_call_id IS NULL`, formatTime(at), runID, ordinal); err != nil {
+				return err
+			}
+		}
 		if decision != nil {
 			if _, err := tx.ExecContext(ctx, `INSERT INTO workflow_human_decisions(id,workflow_run_id,workflow_step_id,decision_kind,attempt,approved,note,context_json,created_at) VALUES (?,?,?,?,?,?,?,?,?)`, decision.ID, decision.WorkflowRunID, decision.WorkflowStepID, decision.Kind, decision.Attempt, decision.Approved, decision.Note, string(decision.Context), formatTime(decision.CreatedAt)); err != nil {
 				return err
@@ -472,11 +487,11 @@ func (r *WorkflowRuntimeRepository) ResetStepForRetry(ctx context.Context, runID
 			WHERE workflow_step_id=? AND status IN ('prepared','running')`, formatTime(at), formatTime(at), stepID); err != nil {
 			return fmt.Errorf("finish superseded Workflow AI execution: %w", err)
 		}
-		result, err := tx.ExecContext(ctx, `UPDATE workflow_steps SET status='queued',input_json='{}',input_sha256='',output_json='{}',tool_call_id=NULL,idempotency_key='',error_code='',error_message='',started_at=NULL,completed_at=NULL,updated_at=? WHERE id=? AND workflow_run_id=? AND status IN ('failed','interrupted','outcome_unknown','running','waiting_approval')`, formatTime(at), stepID, runID)
+		result, err := tx.ExecContext(ctx, `UPDATE workflow_steps SET status='queued',input_json='{}',input_sha256='',output_json='{}',tool_call_id=NULL,idempotency_key='',error_code='',error_message='',started_at=NULL,completed_at=NULL,updated_at=? WHERE id=? AND workflow_run_id=? AND status IN ('failed','interrupted','outcome_unknown','running','waiting_approval','cancelled')`, formatTime(at), stepID, runID)
 		if err := expectOne(result, err, "reset Workflow step"); err != nil {
 			return err
 		}
-		result, err = tx.ExecContext(ctx, `UPDATE workflow_runs SET status='queued',error_code='',error_message='',completed_at=NULL,cancel_requested=0,resume_status='',updated_at=? WHERE id=? AND status IN ('failed','interrupted','running','waiting_approval','queued')`, formatTime(at), runID)
+		result, err = tx.ExecContext(ctx, `UPDATE workflow_runs SET status='queued',error_code='',error_message='',completed_at=NULL,cancel_requested=0,resume_status='',updated_at=? WHERE id=? AND status IN ('failed','interrupted','running','waiting_approval','queued','cancelled')`, formatTime(at), runID)
 		return expectOne(result, err, "reset Workflow Run")
 	}, event)
 }

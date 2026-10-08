@@ -18,8 +18,8 @@ func (f *AttachmentFacade) ChooseAndImportDocuments(projectID string) (attachmen
 	paths, err := runtime.OpenMultipleFilesDialog(f.lifecycle.Context(), runtime.OpenDialogOptions{
 		Title: "选择科研文档或图片",
 		Filters: []runtime.FileFilter{{
-			DisplayName: "科研文档与图片 (*.pdf;*.docx;*.xlsx;*.txt;*.md;*.csv;*.tsv;*.jpg;*.png;*.webp)",
-			Pattern:     "*.pdf;*.docx;*.xlsx;*.txt;*.md;*.markdown;*.csv;*.tsv;*.jpg;*.jpeg;*.png;*.webp",
+			DisplayName: "科研文档、源码与图片 (*.py;*.r;*.jl;*.m;*.sql;*.pdf;*.docx;*.xlsx;*.txt;*.md;*.csv;*.tsv;*.jpg;*.png;*.webp)",
+			Pattern:     "*.py;*.r;*.jl;*.m;*.sql;*.pdf;*.docx;*.xlsx;*.txt;*.md;*.markdown;*.csv;*.tsv;*.jpg;*.jpeg;*.png;*.webp",
 		}},
 	})
 	if err != nil || len(paths) == 0 {
@@ -47,7 +47,7 @@ func (f *AttachmentFacade) ImportTaskDocumentPaths(projectID, taskID string, pat
 func (f *AttachmentFacade) ChooseAndImportConversationDocuments(projectID, conversationID string) (attachment.ImportBatch, error) {
 	paths, err := runtime.OpenMultipleFilesDialog(f.lifecycle.Context(), runtime.OpenDialogOptions{
 		Title:   "添加到当前对话",
-		Filters: []runtime.FileFilter{{DisplayName: "科研文档与图片 (*.pdf;*.docx;*.xlsx;*.txt;*.md;*.csv;*.tsv;*.jpg;*.png;*.webp)", Pattern: "*.pdf;*.docx;*.xlsx;*.txt;*.md;*.markdown;*.csv;*.tsv;*.jpg;*.jpeg;*.png;*.webp"}},
+		Filters: []runtime.FileFilter{{DisplayName: "科研文档、源码与图片 (*.py;*.r;*.jl;*.m;*.sql;*.pdf;*.docx;*.xlsx;*.txt;*.md;*.csv;*.tsv;*.jpg;*.png;*.webp)", Pattern: "*.py;*.r;*.jl;*.m;*.sql;*.pdf;*.docx;*.xlsx;*.txt;*.md;*.markdown;*.csv;*.tsv;*.jpg;*.jpeg;*.png;*.webp"}},
 	})
 	if err != nil || len(paths) == 0 {
 		return attachment.ImportBatch{Attachments: []attachment.Attachment{}, Errors: []attachment.ImportError{}}, err

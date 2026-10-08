@@ -15,6 +15,7 @@ import (
 func TestReferenceTemplatesCompileAgainstResearchToolContracts(t *testing.T) {
 	registry := tool.NewRegistry()
 	definitions := []tool.Definition{
+		{QualifiedName: ResearchTaskReadTool, Version: "6", Risk: tool.RiskLow, Idempotent: true, InputSchema: raw(`{"type":"object"}`), OutputSchema: raw(`{"type":"object"}`)},
 		fullTextReadFixtureDefinition(),
 		{QualifiedName: "builtin.resource.open", Version: "1", Risk: tool.RiskLow, Idempotent: true, InputSchema: json.RawMessage(`{"type":"object","required":["actionId"],"properties":{"actionId":{"type":"string"}}}`), OutputSchema: json.RawMessage(`{"type":"object"}`)},
 		{QualifiedName: "builtin.resource.search", Version: "1", Risk: tool.RiskLow, Idempotent: true, InputSchema: json.RawMessage(`{"type":"object","required":["actionId","query"],"properties":{"actionId":{"type":"string"},"query":{"type":"string"}}}`), OutputSchema: json.RawMessage(`{"type":"object"}`)},
@@ -114,6 +115,12 @@ func TestDynamicResearchRoutesCompileFromTrustedStageCombinations(t *testing.T) 
 			}
 			actual := make([]string, 0, len(route.StageIDs))
 			for _, node := range template.Definition.Nodes {
+				if node.Kind == NodeAgentStage && !slices.Contains(node.AllowedTools, ResearchTaskReadTool) {
+					t.Fatalf("new stage %s did not freeze read-only task memory", node.ID)
+				}
+				if slices.Contains(node.AllowedTools, ResearchRevisionProposeTool) {
+					t.Fatalf("execution stage %s can propose a user revision", node.ID)
+				}
 				if trusted[node.ID] {
 					actual = append(actual, node.ID)
 				}
@@ -144,6 +151,7 @@ func TestDynamicResearchRouteCarriesResearchDesignIntoEmpiricalDelivery(t *testi
 		t.Fatal(err)
 	}
 	for _, expected := range []Edge{
+		{FromNode: "research_design", FromPort: "analysis", ToNode: "data_preflight", ToPort: "inputData"},
 		{FromNode: "research_design", FromPort: "analysis", ToNode: "method_implementation", ToPort: "designContext"},
 		{FromNode: "research_design", FromPort: "analysis", ToNode: "result_interpretation", ToPort: "designContext"},
 		{FromNode: "research_design", FromPort: "analysis", ToNode: "report_drafting", ToPort: "designContext"},
@@ -159,6 +167,9 @@ func TestDynamicResearchRouteCarriesResearchDesignIntoEmpiricalDelivery(t *testi
 	}
 	if slices.Index(compiled.Order, "research_design") >= slices.Index(compiled.Order, "method_implementation") {
 		t.Fatalf("research design must execute before method implementation: %v", compiled.Order)
+	}
+	if slices.Index(compiled.Order, "research_design") >= slices.Index(compiled.Order, "data_preflight") {
+		t.Fatalf("data-only revision must reuse design: %v", compiled.Order)
 	}
 }
 
@@ -381,6 +392,10 @@ func referenceTemplateRegistry(t *testing.T) *tool.MemoryRegistry {
 		}
 	}
 	definitions := []tool.Definition{
+		{QualifiedName: "builtin.attachment.list", Version: "1", Risk: tool.RiskLow, Idempotent: true, InputSchema: raw(`{"type":"object"}`), OutputSchema: raw(`{"type":"object"}`)},
+		{QualifiedName: "builtin.document.inspect", Version: "1", Risk: tool.RiskLow, Idempotent: true, InputSchema: raw(`{"type":"object"}`), OutputSchema: raw(`{"type":"object"}`)},
+		{QualifiedName: "builtin.knowledge.read", Version: "1", Risk: tool.RiskLow, Idempotent: true, InputSchema: raw(`{"type":"object"}`), OutputSchema: raw(`{"type":"object"}`)},
+		{QualifiedName: ResearchTaskReadTool, Version: "6", Risk: tool.RiskLow, Idempotent: true, InputSchema: raw(`{"type":"object"}`), OutputSchema: raw(`{"type":"object"}`)},
 		fullTextReadFixtureDefinition(),
 		{QualifiedName: "builtin.resource.open", Version: "1", Risk: tool.RiskLow, Idempotent: true, InputSchema: json.RawMessage(`{"type":"object","required":["actionId"],"properties":{"actionId":{"type":"string"}}}`), OutputSchema: json.RawMessage(`{"type":"object"}`)},
 		{QualifiedName: "builtin.resource.search", Version: "1", Risk: tool.RiskLow, Idempotent: true, InputSchema: json.RawMessage(`{"type":"object","required":["actionId","query"],"properties":{"actionId":{"type":"string"},"query":{"type":"string"}}}`), OutputSchema: json.RawMessage(`{"type":"object"}`)},

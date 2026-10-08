@@ -1,11 +1,55 @@
 package citation
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
 	"github.com/wangh00/SciAide/internal/app/tool"
 )
+
+func TestIndexedResourceCitationIsTrustedOnlyForActualReader(t *testing.T) {
+	ref := tool.CitationRef{Kind: KindKnowledgeChunk, ProjectID: "p", IndexVersionID: "i", DocumentID: "d", AttachmentID: "a", ChunkID: "c", SourceName: "paper.pdf", Locator: "page:1", Quote: "original", QuoteSHA256: QuoteSHA256("original"), SourceEnd: 8}
+	ref.Reference = KnowledgeReference("chat", ref.IndexVersionID, ref.ChunkID, ref.QuoteSHA256)
+	for _, source := range []string{"builtin.knowledge.read", "builtin.document.read", "builtin.workspace.read_text"} {
+		body, _ := json.Marshal(map[string]string{"sourceTool": source})
+		call := tool.Call{ID: "read", RunID: "chat", ToolName: "builtin.resource.open", Status: tool.CallCompleted, Result: &tool.Result{Status: tool.ResultSuccess, Structured: body, Citations: []tool.CitationRef{ref}}}
+		resolved := Resolve("chat", "message", ref.Reference, []tool.Call{call}, time.Now())
+		if (len(resolved) == 1) != (source == "builtin.knowledge.read") {
+			t.Fatal(source, resolved)
+		}
+	}
+}
+
+func TestSharedKnowledgeCallPolicyRejectsIncompleteAndWrongResourceResults(t *testing.T) {
+	for _, name := range []string{KnowledgeToolName, WorkflowSeedToolName, "builtin.knowledge.read", "builtin.resource.open"} {
+		call := tool.Call{ToolName: name, Status: tool.CallCompleted, Result: &tool.Result{Status: tool.ResultSuccess, Structured: json.RawMessage(`{"sourceTool":"builtin.knowledge.read"}`)}}
+		if !IsTrustedKnowledgeCall(call) {
+			t.Fatal("reader not accepted", name)
+		}
+		for _, status := range []tool.CallStatus{tool.CallRunning, tool.CallFailed} {
+			changed := call
+			changed.Status = status
+			if IsTrustedKnowledgeCall(changed) {
+				t.Fatal("incomplete call accepted", name, status)
+			}
+		}
+		changed := call
+		changed.Result = nil
+		if IsTrustedKnowledgeCall(changed) {
+			t.Fatal("missing result accepted", name)
+		}
+		changed.Result = &tool.Result{Status: tool.ResultError}
+		if IsTrustedKnowledgeCall(changed) {
+			t.Fatal("failed result accepted", name)
+		}
+	}
+	for _, payload := range []string{`{`, `{}`, `{"sourceTool":42}`, `{"sourceTool":"builtin.document.read"}`} {
+		if IsTrustedKnowledgeCall(tool.Call{ToolName: "builtin.resource.open", Status: tool.CallCompleted, Result: &tool.Result{Status: tool.ResultSuccess, Structured: json.RawMessage(payload)}}) {
+			t.Fatal("wrong resource accepted", payload)
+		}
+	}
+}
 
 func TestResolveAcceptsOnlyExactRunBoundEvidence(t *testing.T) {
 	runID, messageID := "run-a", "assistant-a"

@@ -1,0 +1,133 @@
+{
+  "verification_scope": "Local independent calculations only; SciAide E2E not run",
+  "python": "3.12.14",
+  "numpy": "2.3.5",
+  "method_reference_sha256": "87f8e621fb58a89b8a5403b92bfd7c2e7349c502c4eb9cccefec45fdf50bf2df",
+  "initial": {
+    "rows": 1000,
+    "feature_count": 11,
+    "train_rows": 803,
+    "test_rows": 197,
+    "missing_cells": 0,
+    "duplicate_full_rows_excluding_sample_id_and_split": 149,
+    "distinct_feature_profiles": 851,
+    "train_test_feature_overlap": 0,
+    "quality_distribution": {
+      "3": 5,
+      "4": 32,
+      "5": 468,
+      "6": 364,
+      "7": 121,
+      "8": 10
+    },
+    "quality_mean": 5.594,
+    "alcohol_mean": 10.2407,
+    "pearson_alcohol_quality": 0.4842078708192075,
+    "test_prediction_rules": "continuous; no clipping/rounding; all rows retained",
+    "metrics": {
+      "train_mean": {
+        "mae": 0.6583686808984076,
+        "rmse": 0.7633915411551738,
+        "r2": -0.0010884706961800106
+      },
+      "ols": {
+        "mae": 0.5169376078244121,
+        "rmse": 0.652863611200509,
+        "r2": 0.2678118450137874
+      },
+      "ridge_alpha10": {
+        "mae": 0.515694309853915,
+        "rmse": 0.6509875494207168,
+        "r2": 0.27201381481337794
+      }
+    },
+    "ridge_minus_ols_rmse": -0.0018760617797921597,
+    "standardized_ols_coefficients": {
+      "fixed_acidity": -0.0019569569362624297,
+      "volatile_acidity": -0.19880586581865411,
+      "citric_acid": -0.04161133711809338,
+      "residual_sugar": 0.018027738279898536,
+      "chlorides": -0.094426528043765,
+      "free_sulfur_dioxide": 0.014404612196451543,
+      "total_sulfur_dioxide": -0.12849601166371466,
+      "density": 0.01616017664246156,
+      "pH": -0.06876539312928888,
+      "sulphates": 0.12722526127450284,
+      "alcohol": 0.32954118191066595
+    }
+  },
+  "full": {
+    "rows": 1599,
+    "feature_count": 11,
+    "train_rows": 1292,
+    "test_rows": 307,
+    "missing_cells": 0,
+    "duplicate_full_rows_excluding_sample_id_and_split": 240,
+    "distinct_feature_profiles": 1359,
+    "train_test_feature_overlap": 0,
+    "quality_distribution": {
+      "3": 10,
+      "4": 53,
+      "5": 681,
+      "6": 638,
+      "7": 199,
+      "8": 18
+    },
+    "quality_mean": 5.6360225140712945,
+    "alcohol_mean": 10.422983114446529,
+    "pearson_alcohol_quality": 0.4761663240011362,
+    "test_prediction_rules": "continuous; no clipping/rounding; all rows retained",
+    "metrics": {
+      "train_mean": {
+        "mae": 0.6722098405623178,
+        "rmse": 0.8062562717538223,
+        "r2": -0.0008246988457745186
+      },
+      "ols": {
+        "mae": 0.5273314099962241,
+        "rmse": 0.6757459161152906,
+        "r2": 0.29696222296435826
+      },
+      "ridge_alpha10": {
+        "mae": 0.5267040235187748,
+        "rmse": 0.6747646453513321,
+        "r2": 0.29900254465757903
+      }
+    },
+    "ridge_minus_ols_rmse": -0.0009812707639584861,
+    "standardized_ols_coefficients": {
+      "fixed_acidity": -0.015133541796233965,
+      "volatile_acidity": -0.210333978611005,
+      "citric_acid": -0.04016621536845613,
+      "residual_sugar": 0.017191314101741777,
+      "chlorides": -0.10508383365495638,
+      "free_sulfur_dioxide": 0.021461403620532768,
+      "total_sulfur_dioxide": -0.09218967395208374,
+      "density": 0.029715165441814562,
+      "pH": -0.09620136368042999,
+      "sulphates": 0.16036673391321932,
+      "alcohol": 0.3229859497651028
+    }
+  },
+  "full_refit_on_initial_test": {
+    "test_rows": 197,
+    "test_ids_unchanged": true,
+    "metrics": {
+      "train_mean": {
+        "mae": 0.6564253272775848,
+        "rmse": 0.7631740166150666,
+        "r2": -0.0005180418337478176
+      },
+      "ols": {
+        "mae": 0.5191152014716649,
+        "rmse": 0.6592334811121999,
+        "r2": 0.2534544943044984
+      },
+      "ridge_alpha10": {
+        "mae": 0.5181502061904817,
+        "rmse": 0.6578052444545813,
+        "r2": 0.2566857884482824
+      }
+    }
+  }
+}

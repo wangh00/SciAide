@@ -233,7 +233,7 @@ test("research runs bind the existing chat loop and restore the selected task", 
   assert.match(css, /\.research-task-question p\s*\{[^}]*-webkit-line-clamp:\s*3/s);
   assert.doesNotMatch(source, /className=\{`conversation-row[^\n]*research-bound/);
   assert.match(source, /科研流程正在自主推进，任务结束后可继续提问/);
-  assert.match(source, /流程与 AI 正在完成闭环；可在左侧暂停或取消任务/);
+  assert.match(source, /流程与 AI 正在完成闭环；可在左侧取消任务/);
   assert.match(source, /busy && !activeRunIsWorkflowAI && !researchConversationLocked \? <button type="button" className="send is-stop"/);
   assert.match(css, /\.workspace:has\(\.research-route-panel\)\s*\{[^}]*grid-template-areas:\s*[^}]*"route chat evidence"[^}]*"route compose evidence"/s);
   assert.match(css, /\.workspace:has\(\.research-route-panel\) > \.workspace-content\s*\{[^}]*display:\s*contents/s);
@@ -275,7 +275,7 @@ test("research run workspace separates route, decisions, and verifiable results"
   assert.doesNotMatch(source, /className="research-stage-details"/);
   assert.doesNotMatch(source, /<h3>阶段记录<\/h3>/);
   assert.doesNotMatch(css, /\.workflow-(?:runtime|run-panel|run-inputs|run-history|run-detail|run-summary|runtime-approvals|step-timeline|step-main|step-retry|step-technical)\b/);
-  assert.match(css, /\.research-interaction-card\s*\{/);
+  assert.match(await readFile(new URL('./researchCard.css',import.meta.url),'utf8'), /\.research-card\.research-card\s*\{/);
   assert.match(css, /@keyframes research-decision-in/);
 });
 
@@ -547,14 +547,18 @@ test("completed empirical routes show the reviewed Markdown report before a desi
   const source = await readFile(new URL("./App.tsx", import.meta.url), "utf8");
   assert.match(source, /function workflowResearchReport\(detail: WorkflowRunDetail\)/);
   assert.match(source, /const report = workflowResearchReport\(runDetail\), design = workflowResearchDesign\(runDetail\)/);
-  assert.ok(source.indexOf("if (report) return <WorkflowResearchReportCard") < source.indexOf("if (design) return <WorkflowResearchDesignCard"));
+  const renderer = source.slice(source.indexOf("  renderTimelineRef.current ="), source.indexOf("  const timelineTaskId ="));
+  const report = renderer.indexOf("if (report) return"), design = renderer.indexOf("if (design) return");
+  assert.ok(report >= 0 && design > report);
+  assert.match(renderer, /if \(report\) return [^\n]*<WorkflowResearchReportCard/);
+  assert.match(renderer, /if \(design\) return [^\n]*<WorkflowResearchDesignCard/);
   assert.match(source, /function WorkflowResearchReportCard/);
   assert.match(source, /<CitedMarkdown text=\{report\.markdown\} citations=\{citations\}/);
   assert.match(source, /outputName === "report_draft"/);
   assert.match(source, /outputName \}/);
   assert.match(source, /runDetail\.deliveryAssessment\?\.label/);
   assert.doesNotMatch(source, /实证研究报告已完成/);
-  assert.match(source, /登记报告为科研产物/);
+  assert.match(source, /登记本轮报告/);
 });
 
 test("research evidence keeps the reproduction snapshot collapsed and registration feedback prominent", async () => {
@@ -586,7 +590,10 @@ test("failed independent review enters a visible revision loop instead of retryi
   assert.match(source, /报告需要修改/);
   assert.match(source, /<ResearchReviewFeedback/);
   assert.match(source, /<ResearchRevisionControls/);
-  assert.match(source, /接下来会发生什么/);
+  const controls = await readFile(new URL("./ResearchRevisionControls.tsx", import.meta.url), "utf8");
+  assert.match(controls, /原始资料和旧版本保留/);
+  assert.match(controls, /重新审查通过后才会交付/);
+  assert.doesNotMatch(source, /reviewGateFailure && <div className="research-review-recovery"/);
   assert.match(source, /已进入修订回路/);
   assert.match(css, /\.research-review-issues\s*\{/);
   assert.match(css, /\.research-review-recovery\s*\{/);

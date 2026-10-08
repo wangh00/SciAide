@@ -1,7 +1,6 @@
 package openai
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -267,8 +266,7 @@ func (c *Client) open(ctx context.Context, request model.ChatRequest) (model.Str
 		stream, err := openBufferedResponse(response, providerNames)
 		return stream, 0, err
 	}
-	scanner := bufio.NewScanner(response.Body)
-	scanner.Buffer(make([]byte, 64*1024), maxStreamLineBytes)
+	scanner := modelutil.NewSSEDecoder(response.Body, maxStreamLineBytes)
 	return &stream{body: response.Body, scanner: scanner, toolCalls: make(map[int]*toolCallAccumulator), providerNames: providerNames}, 0, nil
 }
 
@@ -290,12 +288,7 @@ func openBufferedResponse(response *http.Response, providerNames map[string]stri
 		if message == "" {
 			message = "Chat Completions 请求未完成。"
 		}
-		retryable := modelutil.StreamErrorRetryable(payload.Error.Type, payload.Error.Code)
-		code := "MODEL_REQUEST_REJECTED"
-		if retryable {
-			code = "MODEL_UNAVAILABLE"
-		}
-		return nil, modelutil.ErrorWithDetails(code, message, modelutil.ProviderErrorDetails("Chat Completions response", response.StatusCode, body), retryable, nil)
+		return nil, modelutil.ClassifyStreamError(payload.Error.Type, payload.Error.Code, message, modelutil.ProviderErrorDetails("Chat Completions response", response.StatusCode, body))
 	}
 
 	events := make([]model.Event, 0, len(payload.Choices)+2)
@@ -498,7 +491,7 @@ type toolCallAccumulator struct {
 
 type stream struct {
 	body          io.ReadCloser
-	scanner       *bufio.Scanner
+	scanner       *modelutil.SSEDecoder
 	queue         []model.Event
 	done          bool
 	finishReason  string
@@ -536,15 +529,8 @@ func (s *stream) Recv() (model.Event, error) {
 		return model.Event{}, io.EOF
 	}
 	for s.scanner.Scan() {
-		line := strings.TrimSpace(s.scanner.Text())
-		if line == "" || strings.HasPrefix(line, ":") {
-			continue
-		}
-		if !strings.HasPrefix(line, "data:") {
-			continue
-		}
-		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-		if data == "[DONE]" {
+		data := s.scanner.Text()
+		if strings.TrimSpace(data) == "[DONE]" {
 			if s.finishReason == "" {
 				switch {
 				case len(s.toolCalls) > 0:
@@ -571,19 +557,14 @@ func (s *stream) Recv() (model.Event, error) {
 		}
 		var chunk responseChunk
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-			return model.Event{}, modelutil.ErrorWithDetails("MODEL_STREAM_INVALID", "模型返回了无法解析的流数据。", modelutil.ProviderErrorDetails("Chat Completions stream event", 0, []byte(data)), false, err)
+			return model.Event{}, modelutil.ClassifySSEJSONError("Chat Completions stream event", "模型返回了无法解析的流数据。", []byte(data), err)
 		}
 		if chunk.Error != nil {
 			message := strings.TrimSpace(chunk.Error.Message)
 			if message == "" {
 				message = "Chat Completions 请求未完成。"
 			}
-			retryable := modelutil.StreamErrorRetryable(chunk.Error.Type, chunk.Error.Code)
-			code := "MODEL_REQUEST_REJECTED"
-			if retryable {
-				code = "MODEL_UNAVAILABLE"
-			}
-			return model.Event{}, modelutil.ErrorWithDetails(code, message, modelutil.ProviderErrorDetails("Chat Completions stream event", 0, []byte(data)), retryable, nil)
+			return model.Event{}, modelutil.ClassifyStreamError(chunk.Error.Type, chunk.Error.Code, message, modelutil.ProviderErrorDetails("Chat Completions stream event", 0, []byte(data)))
 		}
 		for _, choice := range chunk.Choices {
 			if choice.Delta.Content != "" {
@@ -614,7 +595,7 @@ func (s *stream) Recv() (model.Event, error) {
 		}
 	}
 	if err := s.scanner.Err(); err != nil {
-		return model.Event{}, modelutil.Error("MODEL_UNAVAILABLE", "模型连接意外中断，SciAide 将自动重连。", true, err)
+		return model.Event{}, modelutil.ClassifySSEReadError(err)
 	}
 	if s.finishReason != "" {
 		if err := s.finalizeToolCalls(); err != nil {

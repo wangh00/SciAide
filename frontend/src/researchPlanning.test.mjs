@@ -127,7 +127,7 @@ test("discovery navigation and history have separate bounded layouts", async () 
 
 test("replanning has a labelled stateful card and separate consent/action area", () => {
   assert.match(source, /research-replan-card" aria-label="更新研究路线" aria-busy=/);
-  assert.match(source, /<em role="status">/);
+  assert.match(source, /status=\{<span role="status">/);
   assert.match(source, /research-replan-body/);
   assert.match(source, /research-replan-consent/);
   assert.match(source, /确认再次调用 AI 模型/);

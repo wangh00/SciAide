@@ -396,7 +396,7 @@ func workflowCitationPrompt(values []tool.CitationRef) string {
 		return ""
 	}
 	var text strings.Builder
-	text.WriteString("\n\n<trusted_workflow_citations>\nThe host reissued the following exact knowledge markers for this Chat Run. Cite only the markers listed below; knowledge markers elsewhere in Workflow state belong to another Run and will not validate here. Full excerpts and provenance are available in the host-generated builtin.workflow.citation.seed result.\n")
+	text.WriteString("\n\n<trusted_workflow_citations>\nThe host reissued the following exact knowledge markers for this Chat Run. Cite these markers and any additional markers actually issued by successful knowledge-read tools in this same Chat Run. Knowledge markers elsewhere in Workflow state belong to another Run and will not validate here. Full seed excerpts and provenance are available in the host-generated builtin.workflow.citation.seed result. Newly read evidence can support this stage's complete synthesis directly; never invent, alter or borrow a marker from an older run.\n")
 	for index, value := range values {
 		fmt.Fprintf(&text, "- %d: %s\n", index+1, value.Reference)
 	}

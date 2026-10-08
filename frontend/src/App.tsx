@@ -1,12 +1,20 @@
+import { ResearchOutputFiles } from "./ResearchOutputFiles";
+import { appendResearchExample, ResearchGettingStarted, ResearchFollowupGuide } from "./ResearchConversationGuide";
+import { ResearchAnalysisResult, type ResearchInterpretation } from "./ResearchAnalysisResult";
 import {RevisionLibraryPicker} from "./RevisionLibraryPicker";
 import {ModalBackdrop, ModalDialog, useDialogGuard} from "./Modal";
 import { NetworkSettings, BrowserEnvironment, SearchNetworkStatus, SettingsPage, SettingsDialog } from "./ApplicationSettings";
-import { retryStatusLabel, applyRetryEvent, RetryDisplayStatus } from "./retryPresentation.js";
-import { ResearchRevisionControls, RevisionRecommendation } from "./ResearchRevisionControls";
+import { retryStatusLabel, applyRetryEvent, RetryDisplayStatus, toolDecisionLabel } from "./retryPresentation.js";
+import { ResearchRevisionControls, RevisionRecommendation, EvidenceReselection } from "./ResearchRevisionControls";
 import { ReferenceMaterials } from "./ReferenceMaterials";
 import { ResearchMaterialsLibrary, type ResearchMaterial } from "./ResearchMaterialsLibrary";
 import { ResearchRevisionCards, ResearchRevisionProposal } from "./ResearchRevisionCards";
 import { ResearchReviewFeedback } from "./ResearchReviewFeedback";
+import { ResearchReportCard, type ReportAssessment } from "./ResearchReportCard";
+import { ResearchCard } from "./ResearchCard";
+import { ResearchReportReader } from "./ResearchReportReader";
+import { ResearchCitationRepair, ResearchCitationRepairActions, ResearchCitationRepairStatus } from "./ResearchCitationRepair";
+import { citationRepairModel } from "./citationRepairPresentation.js";
 import { reviewTrackingModel, ReviewIssues } from "./researchReviewPresentation.js";
 import { ResearchTaskTimeline } from "./ResearchTaskTimeline";
 import { compareRunCreatedAt } from "./researchTimelineState.js";
@@ -105,7 +113,7 @@ type RequestUsage = { id: string; runId: string; turnIndex: number; requestKind:
 type UsageRequestPage = { items: RequestUsage[]; total: number; offset: number; limit: number; query: UsageQuery & { statusCode?: number; offset: number; limit: number } };
 type PermissionRequirement = { kind: string; resource: string };
 type ToolResult = { status: string; text: string; truncated: boolean; meta: { durationMillis?: number; originalBytes?: number } };
-type ToolCall = { id: string; runId: string; toolName: string; toolVersion: string; arguments: unknown; status: string; risk: string; permissions: PermissionRequirement[]; errorMessage?: string; result?: ToolResult; createdAt: string; startedAt?: string; completedAt?: string };
+type ToolCall = { id: string; runId: string; toolName: string; toolVersion: string; arguments: unknown; status: string; risk: string; permissions: PermissionRequirement[]; errorCode?: string; errorMessage?: string; result?: ToolResult; createdAt: string; startedAt?: string; completedAt?: string };
 type Approval = { id: string; runId: string; toolCallId: string; toolName: string; toolVersion: string; permissionKind: string; resource: string; risk: string; status: string; reason: string };
 type RunSnapshot = { sequence: number; run: Run; workflowAI: boolean; messages: Message[]; toolCalls: ToolCall[]; runSteps: RunStep[]; pendingApprovals: Approval[] };
 type MCPTransport = "stdio" | "streamable_http";
@@ -163,7 +171,7 @@ type WorkflowStep = { id: string; workflowRunId: string; nodeId: string; ordinal
 type WorkflowRuntimeEvent = { id: string; workflowRunId: string; sequence: number; type: string; payload: Record<string, unknown>; createdAt: string };
 type WorkflowAIExecution = { id: string; workflowRunId: string; workflowStepId: string; chatRunId?: string; attempt: number; nodeKind: "ai_analysis" | "agent_stage"; modelProfileId: string; modelId: string; reasoningLevel: ReasoningLevel; promptVersion: string; promptSha256: string; inputSha256: string; allowedTools: string[]; outputSchema: Record<string, unknown>; outputSchemaSha256: string; status: "prepared" | "running" | "completed" | "failed" | "cancelled" | "interrupted"; outputText?: string; output: Record<string, unknown>; outputSha256?: string; inputTokens: number; outputTokens: number; reasoningTokens: number; modelTurns: number; errorCode?: string; errorMessage?: string; createdAt: string; startedAt?: string; completedAt?: string; updatedAt: string };
 type AIStageToolActivity = { id: string; toolName: string; status: string; risk: string; summary: string; arguments?: unknown; permissions?: PermissionRequirement[]; outputSummary?: string; stdoutTail?: string; stderrTail?: string; stdoutBytes?: number; stderrBytes?: number; processId?: number; liveUpdatedAt?: string; errorCode?: string; errorMessage?: string; durationMillis?: number; truncated?: boolean; createdAt: string; startedAt?: string; completedAt?: string };
-type WorkflowToolActivity = { id: string; stepId?: string; toolName: string; status: string; risk: string; summary: string; arguments?: unknown; permissions?: PermissionRequirement[]; outputSummary?: string; errorMessage?: string; durationMillis?: number; truncated?: boolean; createdAt: string; startedAt?: string; completedAt?: string };
+type WorkflowToolActivity = { id: string; stepId?: string; toolName: string; status: string; risk: string; summary: string; arguments?: unknown; permissions?: PermissionRequirement[]; outputSummary?: string; errorCode?: string; errorMessage?: string; durationMillis?: number; truncated?: boolean; createdAt: string; startedAt?: string; completedAt?: string };
 type AIStageActivity = { executionId: string; workflowStepId: string; chatRunId: string; status: string; chatStatus?: string; modelId?: string; modelTurns: number; inputTokens: number; outputTokens: number; reasoningTokens: number; currentAction?: string; currentDraft?: string; elapsedSeconds: number; toolCalls: AIStageToolActivity[]; pendingApprovals?: Approval[]; lastError?: string; startedAt?: string; updatedAt: string };
 type WorkflowMessageActivity = {
   stageLabel?: string;
@@ -190,8 +198,8 @@ export type ResearchTimelineEntry = {
 export type ResearchTimelinePage = {taskId: string; latestRunId: string; conversationId: string; entries: ResearchTimelineEntry[]; nextBefore?: string; hasMore: boolean};
 type ResearchTimelineView = {projectId: string; taskId: string; render: (entry: ResearchTimelineEntry) => ReactNode};
 const readResearchTimeline = (query: {projectId: string; taskId: string; before?: string; after?: string; limit: number}) => backend<ResearchTimelinePage>("WorkflowFacade", "ResearchTimeline", query);
-type ResearchDeliveryAssessment = { status: "pending" | "blocked" | "revision_required" | "reviewed" | "unverified"; kind: string; label: string; summary: string; checks?: Array<{ criterionId: string; status: "met" | "not_met"; basis: string }>; limitations?: string[] };
-type WorkflowRunDetail = { run: WorkflowRun; steps: WorkflowStep[]; events: WorkflowRuntimeEvent[]; pendingApprovals: Approval[]; aiExecutions: WorkflowAIExecution[]; aiActivities?: AIStageActivity[]; toolActivities?: WorkflowToolActivity[]; artifactCount: number; registeredDeliverables?: string[]; deliveryAssessment?: ResearchDeliveryAssessment; revisionProposals?: ResearchRevisionProposal[]; reviewRevisionRecommendation?: RevisionRecommendation; reviewRevisionTargets?: Array<{ nodeId: string; label: string; repeatsSideEffects: boolean }> };
+type ResearchDeliveryAssessment = { status: "pending" | "blocked" | "revision_required" | "reviewed" | "unverified"; kind: string; label: string; summary: string; checks?: Array<{ criterionId: string; status: "met" | "not_met"; basis: string }>; limitations?: string[]; report?: ReportAssessment };
+type WorkflowRunDetail = { run: WorkflowRun; steps: WorkflowStep[]; events: WorkflowRuntimeEvent[]; pendingApprovals: Approval[]; aiExecutions: WorkflowAIExecution[]; aiActivities?: AIStageActivity[]; toolActivities?: WorkflowToolActivity[]; artifactCount: number; registeredDeliverables?: string[]; deliveryAssessment?: ResearchDeliveryAssessment; revisionProposals?: ResearchRevisionProposal[]; discussionRevisionAvailable?: boolean; evidenceReselection?: EvidenceReselection; reviewRevisionRecommendation?: RevisionRecommendation; reviewRevisionTargets?: Array<{ nodeId: string; label: string; repeatsSideEffects: boolean }> };
 type WorkflowConversationLookup = { found: boolean; run?: WorkflowRunDetail };
 type ResearchStageTask = { chatRunId: string; nodeName: string; nodeKind: "ai_analysis" | "agent_stage"; promptVersion: string; status: WorkflowAIExecution["status"]; skillRouting: boolean; reviewPolicy: "human" | "auto"; workflowStatus?: WorkflowRunStatus };
 type ResearchRouteStage = { stageId: string; objective: string; methods: string[]; skillNames: string[]; inputs: string[]; outputs: string[]; humanCheckpoint: boolean };
@@ -1210,8 +1218,8 @@ export default function App() {
     if (!busy || activeRun?.id !== cancellationRef.current) { cancellationRef.current = ""; setCancellingRunId(""); }
   }, [busy, activeRun?.id, conversationId]);
 
-  async function send(event: FormEvent) {
-    event.preventDefault(); const text = input.trim();
+  async function send(event?: FormEvent) {
+    event?.preventDefault(); const text = input.trim();
     if (sendingRef.current || busy || researchConversationLocked) return;
     const localCommand = slashCommands.find((item) => `/${item.name}` === text.toLowerCase());
     if (localCommand) {
@@ -1635,6 +1643,10 @@ export default function App() {
 
   const researchConversationLocked = workspaceMode === "research" && conversationId === researchConversationId && researchComposerLocked;
   const researchRevisionReady = workspaceMode === "research" && Boolean(conversationId) && conversationId === researchConversationId && conversationId === researchRevisionConversationId;
+  const fillResearchDraft = useCallback((prompt: string) => {
+    setInput(current => appendResearchExample(current, prompt));
+    window.requestAnimationFrame(() => composerInputRef.current?.focus());
+  }, []);
   const openArtifactsForTask = useCallback((taskId = "") => { setResourceTaskId(taskId.trim()); setArtifactsOpen(true); }, []);
   const openKnowledgeForTask = useCallback((taskId = "") => { setResourceTaskId(taskId.trim()); setKnowledgeOpen(true); }, []);
 
@@ -1679,6 +1691,7 @@ export default function App() {
           publishTaskTimeline={setResearchTaskTimeline}
           publishComposerLocked={setResearchComposerLocked}
           publishRevisionConversationId={setResearchRevisionConversationId}
+          onDraft={fillResearchDraft}
         />
         </Fragment>
       </WorkflowStudioBoundary>}
@@ -1736,8 +1749,8 @@ export default function App() {
               if (event.key === "Escape") { event.preventDefault(); setInput(""); return; }
             }
             if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); }
-          }} placeholder={!conversationId ? "输入 / 打开功能，或先创建研究会话" : researchConversationLocked ? "科研流程正在自主推进，任务结束后可继续提问…" : busy && activeRunIsWorkflowAI ? "当前科研阶段由 AI 自主执行，完成后可继续提问…" : busy ? "正在回答，可先编辑下一条消息…" : researchRevisionReady ? "结论不对？向AI提出疑问并令其返修..." : "向 SciAide 描述研究问题，或输入 / 使用命令…"}/>
-          <div className="composer-actions"><span>{researchConversationLocked ? "流程与 AI 正在完成闭环；可在左侧暂停或取消任务" : busy && activeRunIsWorkflowAI ? "当前阶段会自动推进；可在左侧暂停或取消科研任务" : busy ? "可先编辑下一条消息；点击右侧停止生成" : <><kbd>Enter</kbd> 发送 · <kbd>Shift Enter</kbd> 换行</>}</span><div className="composer-buttons">{researchRevisionReady && <button type="button" className="attach" title="从资料库补充文献，确认返修后纳入研究" aria-label="从资料库补充文献" disabled={busy || sending || importingAttachments} onClick={()=>setRevisionLibraryOpen(true)}><Icon name="archive" size={17}/></button>}<button type="button" className={`web-search-toggle ${webSearchEnabled ? "enabled" : ""}`} aria-label="联网搜索" aria-pressed={webSearchEnabled} disabled={busy || sending || researchConversationLocked} title={webSearchEnabled ? "已开启：AI 可按需搜索和读取网页，不会强制搜索" : "已关闭：不向本次对话提供联网搜索与网页工具；不改变科研自动路线"} onClick={() => setWebSearchEnabled(value => !value)}><Icon name="search" size={14}/><span>联网</span></button><div className={`reasoning-picker ${reasoning.kind}`} title={`思考强度：${effectiveReasoningLevel} · ${reasoning.text}。参数已接受只代表服务端接受档位；收到 thinking/reasoning 块或 reasoning token 后才显示已验证。明确拒绝时逐级回退，不发送后台探测。`}><Icon name="spark" size={13}/><select aria-label="思考强度" value={effectiveReasoningLevel} disabled={!selectableModels.length || busy || researchConversationLocked} onChange={(event) => void changeReasoningLevel(event.target.value as ReasoningLevel)}>{reasoningLevels.map((level) => <option value={level} key={level}>{level}</option>)}</select><span className="reasoning-state">{reasoning.text.replace(`${effectiveReasoningLevel} · `, "").replace(`${effectiveReasoningLevel} `, "")}</span></div><button type="button" className="attach" aria-label="添加当前对话附件" title={researchRevisionReady ? "添加文献供 AI 核对；确认返修方案后才纳入研究" : "仅添加到当前对话，不会保存研究材料"} disabled={!conversationId || !projectId || importingAttachments || researchConversationLocked || Boolean(busy && activeRunIsWorkflowAI)} onClick={() => void attachDocuments()}><Icon name={importingAttachments ? "refresh" : "paperclip"} size={17}/></button>{busy && !activeRunIsWorkflowAI && !researchConversationLocked ? <button type="button" className="send is-stop" aria-label={cancellingRunId === activeRun?.id ? "正在停止" : "停止生成"} title={cancellingRunId === activeRun?.id ? "正在停止…" : "停止生成"} disabled={sending || !activeRun || activeRun.conversationId !== conversationId || cancellingRunId === activeRun.id} onClick={() => void stopConversationRun()}><Icon name={cancellingRunId === activeRun?.id ? "refresh" : "stop"} size={17}/></button> : <button type="submit" className="send" aria-label={researchConversationLocked || busy && activeRunIsWorkflowAI ? "科研流程执行中" : "发送"} disabled={researchConversationLocked || busy || sending || importingAttachments || !exactSlashCommand && ((!input.trim() && pendingAttachments.length === 0) || !conversationId || !profileId || !modelId)}><Icon name="send" size={17}/></button>}</div></div>
+          }} placeholder={!conversationId ? "输入 / 打开功能，或先创建研究会话" : researchConversationLocked ? "科研流程正在自主推进，任务结束后可继续提问…" : busy && activeRunIsWorkflowAI ? "当前科研阶段由 AI 自主执行，完成后可继续提问…" : busy ? "正在回答，可先编辑下一条消息…" : researchRevisionReady ? "继续讨论、补充文献、比较方法或更新数据；确认方案后再执行…" : "向 SciAide 描述研究问题，或输入 / 使用命令…"}/>
+          <div className="composer-actions"><span>{researchConversationLocked ? "流程与 AI 正在完成闭环；可在左侧取消任务" : busy && activeRunIsWorkflowAI ? "当前阶段会自动推进；可在左侧取消科研任务" : busy ? "可先编辑下一条消息；点击右侧停止生成" : <><kbd>Enter</kbd> 发送 · <kbd>Shift Enter</kbd> 换行</>}</span><div className="composer-buttons">{researchRevisionReady && <button type="button" className="attach" title="从资料库补充文献，确认返修后纳入研究" aria-label="从资料库补充文献" disabled={busy || sending || importingAttachments} onClick={()=>setRevisionLibraryOpen(true)}><Icon name="archive" size={17}/></button>}<button type="button" className={`web-search-toggle ${webSearchEnabled ? "enabled" : ""}`} aria-label="联网搜索" aria-pressed={webSearchEnabled} disabled={busy || sending || researchConversationLocked} title={webSearchEnabled ? "已开启：AI 可按需搜索和读取网页，不会强制搜索" : "已关闭：不向本次对话提供联网搜索与网页工具；不改变科研自动路线"} onClick={() => setWebSearchEnabled(value => !value)}><Icon name="search" size={14}/><span>联网</span></button><div className={`reasoning-picker ${reasoning.kind}`} title={`思考强度：${effectiveReasoningLevel} · ${reasoning.text}。参数已接受只代表服务端接受档位；收到 thinking/reasoning 块或 reasoning token 后才显示已验证。明确拒绝时逐级回退，不发送后台探测。`}><Icon name="spark" size={13}/><select aria-label="思考强度" value={effectiveReasoningLevel} disabled={!selectableModels.length || busy || researchConversationLocked} onChange={(event) => void changeReasoningLevel(event.target.value as ReasoningLevel)}>{reasoningLevels.map((level) => <option value={level} key={level}>{level}</option>)}</select><span className="reasoning-state">{reasoning.text.replace(`${effectiveReasoningLevel} · `, "").replace(`${effectiveReasoningLevel} `, "")}</span></div><button type="button" className="attach" aria-label="添加当前对话附件" title={researchRevisionReady ? "添加补充文献、CSV/TSV/XLSX 数据或 .py 方法参考；发送后先讨论，确认方案才采用" : "仅添加到当前对话，不会保存研究材料"} disabled={!conversationId || !projectId || importingAttachments || researchConversationLocked || Boolean(busy && activeRunIsWorkflowAI)} onClick={() => void attachDocuments()}><Icon name={importingAttachments ? "refresh" : "paperclip"} size={17}/></button>{busy && !activeRunIsWorkflowAI && !researchConversationLocked ? <button type="button" className="send is-stop" aria-label={cancellingRunId === activeRun?.id ? "正在停止" : "停止生成"} title={cancellingRunId === activeRun?.id ? "正在停止…" : "停止生成"} disabled={sending || !activeRun || activeRun.conversationId !== conversationId || cancellingRunId === activeRun.id} onClick={() => void stopConversationRun()}><Icon name={cancellingRunId === activeRun?.id ? "refresh" : "stop"} size={17}/></button> : <button type="submit" className="send" aria-label={researchConversationLocked || busy && activeRunIsWorkflowAI ? "科研流程执行中" : "发送"} disabled={researchConversationLocked || busy || sending || importingAttachments || !exactSlashCommand && ((!input.trim() && pendingAttachments.length === 0) || !conversationId || !profileId || !modelId)}><Icon name="send" size={17}/></button>}</div></div>
         </form>
         <p className="composer-hint">AI 可能会出错，重要科研结论请核验原始来源。</p>
       </footer>
@@ -2216,6 +2229,7 @@ type UnifiedToolActivity = {
   summary?: string;
   outputSummary?: string;
   errorMessage?: string;
+  errorCode?: string;
   arguments?: unknown;
   permissions?: PermissionRequirement[];
   result?: ToolResult;
@@ -2256,7 +2270,7 @@ function UnifiedToolActivityCard({ activity }: { activity: UnifiedToolActivity }
   return <article className={["tool-card", "unified-tool-card", activity.status, activity.source || ""].join(" ")}>
     <button type="button" className="tool-card-toggle" aria-expanded={open} onClick={() => setOpen((value) => !value)}>
       <span className={["tool-icon", presentation.kind.toLowerCase(), running ? "spinning" : ""].join(" ")}>{running ? <span/> : <Icon name={presentation.icon} size={14}/>}</span>
-      <span className="tool-card-heading"><span><b><em>{presentation.kind}</em><strong>{normalizeDisplayText(activity.summary || presentation.title)}</strong></b></span><span className="tool-card-state">{activity.truncated && <i>{activityTruncationLabel(activity.toolName)}</i>}{(running || failed || activity.status === "awaiting_approval") && <i className={activity.status}>{toolStatusText[activity.status] ?? activity.status}</i>}{duration && <small>{duration}</small>}</span></span>
+      <span className="tool-card-heading"><span><b><em>{presentation.kind}</em><strong>{normalizeDisplayText(activity.summary || presentation.title)}</strong></b></span><span className="tool-card-state">{activity.truncated && <i>{activityTruncationLabel(activity.toolName)}</i>}{(running || failed || activity.status === "awaiting_approval") && <i className={activity.status}>{toolDecisionLabel(activity) || toolStatusText[activity.status] || activity.status}</i>}{duration && <small>{duration}</small>}</span></span>
       <Icon name={open ? "back" : "plus"} size={12}/>
     </button>
     {open && <div className="tool-card-body">
@@ -2768,7 +2782,8 @@ function ResearchDiscovery({ project, taskId = "", close, openKnowledge }: { pro
 function ArtifactDocumentPreview({ document, citations }: { document: ArtifactStructuredPreview; citations: unknown }) {
   return <CitedDocument citations={citations}>{(map, select) => {
     const inline = (text?: string) => <CitationText text={text} citations={map} selectReference={select}/>;
-    return <div className="artifact-structured-preview">
+    const readableDocument = ["markdown", "docx", "pdf"].includes(document.format);
+    const content = <div className={`artifact-structured-preview${readableDocument ? " report-document" : ""}`}>
     {document.blocks.map((block, index) => {
       if (block.kind === "heading") {
         const level = Math.min(3, Math.max(1, block.level ?? 1));
@@ -2784,6 +2799,7 @@ function ArtifactDocumentPreview({ document, citations }: { document: ArtifactSt
       return null;
     })}
   </div>;
+    return readableDocument ? <ResearchReportReader resetKey={JSON.stringify(document)}>{content}</ResearchReportReader> : content;
   }}</CitedDocument>;
 }
 
@@ -2880,12 +2896,16 @@ function ArtifactLibrary({ project, taskId = "", close }: { project: Project; ta
   ];
 
   useEffect(() => {
+    // Keep the requested task scope while its resources are still loading.
+    // Otherwise an initially empty response switches to project_shared and
+    // hides the report opened from this task's completion card.
+    if (loading) return;
     if (!scopeEntries.some((entry) => entry.key === selectedScopeKey)) {
       setSelectedScopeKey(scopeEntries.find((entry) => entry.count > 0)?.key ?? scopeEntries[0]?.key ?? "");
       return;
     }
     if (!scopedArtifacts.some((item) => item.id === selectedId)) setSelectedId("");
-  }, [artifacts, researchTasks, selectedId, selectedScopeKey, taskId]);
+  }, [artifacts, researchTasks, selectedId, selectedScopeKey, taskId, loading]);
   useEffect(() => {
     const selectableIds = new Set(selectableArtifacts.map((item) => item.id));
     setSelectedArtifactIds((current) => current.filter((id) => selectableIds.has(id)));
@@ -5577,8 +5597,25 @@ function workflowDeliverableRegistered(detail: WorkflowRunDetail, outputName: "r
   return detail.registeredDeliverables?.includes(outputName) === true;
 }
 
+function workflowResearchInterpretation(detail: WorkflowRunDetail): ResearchInterpretation | null {
+  if (detail.run.status !== "completed" || detail.deliveryAssessment?.status !== "reviewed") return null;
+  const value = detail.run.outputs?.interpretation;
+  const gate = detail.run.outputs?.delivery_gate;
+  if (!value || typeof value !== "object" || Array.isArray(value) || !gate || typeof gate !== "object" || Array.isArray(gate) || (gate as Record<string, unknown>).approved !== true) return null;
+  const result = value as Partial<ResearchInterpretation>;
+  if (typeof result.summary !== "string" || !result.summary.trim() || !["low", "medium", "high"].includes(String(result.confidence))) return null;
+  const list = (input: unknown) => Array.isArray(input) ? input.filter((item): item is string => typeof item === "string" && Boolean(item.trim())) : [];
+  return {summary: result.summary.trim(), computedFacts: list(result.computedFacts), inferences: list(result.inferences), alternativeExplanations: list(result.alternativeExplanations), methodChecks: list(result.methodChecks), limitations: list(result.limitations), confidence: result.confidence as ResearchInterpretation["confidence"]};
+}
+
 function workflowRevisionConversationId(detail: WorkflowRunDetail | null): string {
-  if (!detail || detail.run.workflowPurpose === "research_starter" || workflowDeliverableRegistered(detail, "report_draft") || !workflowResearchReport(detail)) return "";
+  if (!detail || detail.run.workflowPurpose === "research_starter" || (detail.registeredDeliverables?.length ?? 0) > 0) return "";
+  if (detail.run.status === "failed" && detail.discussionRevisionAvailable) return detail.run.conversationId ?? "";
+  // Match the host's report -> design -> interpretation delivery priority.
+  // Do not fall back to an unrelated output when the selected one is invalid.
+  const outputs = detail.run.outputs ?? {};
+  const delivery = "report_draft" in outputs ? workflowResearchReport(detail) : "research_design" in outputs ? workflowResearchDesign(detail) : workflowResearchInterpretation(detail);
+  if (!delivery) return "";
   return detail.run.conversationId ?? "";
 }
 
@@ -5691,8 +5728,9 @@ function WorkflowHumanDecision({ projectId = "", taskId = "", supportsMaterials 
   const citationAssessment = new Map(evidenceScreening?.citationAssessments.map((value) => [value.reference, value]) ?? []);
   const recommendedCandidates = new Set(candidateScreening?.recommendedCandidateIds ?? []);
   const recommendedReferences = new Set(evidenceScreening?.recommendedReferences ?? []);
+  const citationRepair = citationRepairModel(step, selectedCitationKeys);
   const visibleCandidates = [...candidates].sort((left, right) => Number(recommendedCandidates.has(right.id)) - Number(recommendedCandidates.has(left.id)));
-  const visibleCitations = [...citations].sort((left, right) => Number(recommendedReferences.has(right.reference ?? "")) - Number(recommendedReferences.has(left.reference ?? "")));
+  const visibleCitations = [...citations].sort((left, right) => Number(citationRepair?.mentioned.has(right.reference ?? "")) - Number(citationRepair?.mentioned.has(left.reference ?? "")) || Number(recommendedReferences.has(right.reference ?? "")) - Number(recommendedReferences.has(left.reference ?? "")));
   const selection = step.nodeKind === "candidate_selection" || step.nodeKind === "citation_selection";
   const agentReview = step.nodeKind === "agent_stage";
   const implementationReview = agentReview && step.nodeId === "method_implementation" ? step.output?.implementationReview as {changes?: Array<{before: string; after: string; reason: string; impact: string}>} | undefined : undefined;
@@ -5708,9 +5746,10 @@ function WorkflowHumanDecision({ projectId = "", taskId = "", supportsMaterials 
   return <div className="workflow-human-decision">
     {supportsMaterials && step.nodeKind === "candidate_selection" && <ReferenceMaterials key={step.id} projectId={projectId} taskId={taskId} selected={selectedAttachmentIds} onChange={setSelectedAttachmentIds} disabled={Boolean(busy)} service={backend} onBusyChange={setMaterialBusy}/>}
     {Boolean(implementationReview?.changes?.length) && <section className="implementation-change-review"><h3>需要确认研究约定变化</h3>{implementationReview!.changes!.map((change, index) => <div key={index}><p><b>原约定：</b>{change.before}</p><p><b>拟调整：</b>{change.after}</p><p><b>原因：</b>{change.reason}</p><p><b>影响：</b>{change.impact}</p></div>)}</section>}
-    <p>{implementationReview ? "本次修订涉及上述研究约定变化。确认后才会执行；这不是代码正确性的保证，执行后仍需独立审查。若不同意，请拒绝本次结果。" : agentReview ? "AI 已生成本阶段初稿。你可以在中间科研协作区追问、纠正或要求重写；确认时会采用该会话最新一条通过结构化校验的回答。" : prompt || (step.nodeKind === "candidate_selection" ? "请选择需要导入本地的文献候选。" : step.nodeKind === "citation_selection" ? "请选择报告使用的可信本地证据。" : "请确认后继续。")}</p>
+    <p>{implementationReview ? "本次修订涉及上述研究约定变化。确认后才会执行；这不是代码正确性的保证，执行后仍需独立审查。若不同意，请拒绝本次结果。" : agentReview ? "AI 已生成本阶段初稿。你可以在中间科研协作区追问、纠正或要求重写；确认时会采用该会话最新一条通过结构化校验的回答。" : citationRepair ? "这是返修引用选择，已保留上轮勾选。请对照本轮审查要求补选或调整，不是已经完成补证。" : prompt || (step.nodeKind === "candidate_selection" ? "请选择需要导入本地的文献候选。" : step.nodeKind === "citation_selection" ? "请选择报告使用的可信本地证据。" : "请确认后继续。")}</p>
+    {citationRepair && <ResearchCitationRepair model={citationRepair}/>}
     {screeningSummary && <section className={`workflow-ai-screening ${coverage?.strength ?? ""}`}><header><span><Icon name="spark" size={14}/><b>AI 筛选建议</b></span>{coverageLabel && <em>{coverageLabel}</em>}</header><p>{screeningSummary}</p>{screeningGaps.length > 0 && <details><summary>查看 {screeningGaps.length} 项证据缺口</summary><ul>{screeningGaps.map((gap, index) => <li key={`${gap}:${index}`}>{gap}</li>)}</ul></details>}</section>}
-    {selection && <div className="workflow-selection-toolbar"><span>已选 {selectedCount} / {totalCount}</span><nav>{step.nodeKind === "candidate_selection" && candidateScreening && <button type="button" className="recommended" onClick={() => setSelectedCandidateIds(candidateScreening.recommendedCandidateIds.filter((id) => candidates.some((value) => value.id === id)))}>采用 AI 推荐</button>}{step.nodeKind === "citation_selection" && evidenceScreening && <button type="button" className="recommended" onClick={() => setSelectedCitationKeys(citations.filter((value) => recommendedReferences.has(value.reference ?? "")).map(citationKey))}>采用 AI 推荐</button>}<button type="button" onClick={() => step.nodeKind === "candidate_selection" ? setSelectedCandidateIds(candidates.map((value) => value.id)) : setSelectedCitationKeys(citations.map(citationKey))}>全选</button><button type="button" onClick={() => step.nodeKind === "candidate_selection" ? setSelectedCandidateIds([]) : setSelectedCitationKeys([])}>清空</button></nav></div>}
+    {selection && <div className={`workflow-selection-toolbar${citationRepair ? " citation-repair-toolbar" : ""}`}><span>已选 {selectedCount} / {totalCount}</span><nav>{citationRepair && <ResearchCitationRepairActions model={citationRepair} selectedKeys={selectedCitationKeys} update={setSelectedCitationKeys} busy={Boolean(busy)}/>}{step.nodeKind === "candidate_selection" && candidateScreening && <button type="button" className="recommended" disabled={Boolean(busy)} onClick={() => setSelectedCandidateIds(candidateScreening.recommendedCandidateIds.filter((id) => candidates.some((value) => value.id === id)))}>采用 AI 推荐</button>}{step.nodeKind === "citation_selection" && evidenceScreening && <button type="button" className="recommended" disabled={Boolean(busy)} title="用 AI 推荐替换当前选择；非推荐引用会取消勾选。" onClick={() => setSelectedCitationKeys(citations.filter((value) => recommendedReferences.has(value.reference ?? "")).map(citationKey))}>{citationRepair ? "替换为 AI 推荐" : "采用 AI 推荐"}</button>}<button type="button" disabled={Boolean(busy)} onClick={() => step.nodeKind === "candidate_selection" ? setSelectedCandidateIds(candidates.map((value) => value.id)) : setSelectedCitationKeys(citations.map(citationKey))}>全选</button><button type="button" disabled={Boolean(busy)} onClick={() => step.nodeKind === "candidate_selection" ? setSelectedCandidateIds([]) : setSelectedCitationKeys([])}>清空</button></nav>{citationRepair && <small>{citationRepair.missingMentioned.length ? `审查提及 ${citationRepair.missingMentioned.length} 条仍未采用；点“补入”才会改变选择，点“继续”不会自动补入。` : "可继续核对原文；已选入审查提及引用不代表审查一定通过。"}</small>}</div>}
     {step.nodeKind === "candidate_selection" && <div className="workflow-selection-list">{candidates.length ? visibleCandidates.map((value) => {
       const checked = selectedCandidateIds.includes(value.id);
       const authors = (value.authors ?? []).map((author) => author.name).filter(Boolean).slice(0, 5).join("、");
@@ -5725,12 +5764,14 @@ function WorkflowHumanDecision({ projectId = "", taskId = "", supportsMaterials 
       const assessment = citationAssessment.get(value.reference ?? "");
       const decision = assessment?.decision === "core" ? "核心摘录" : assessment?.decision === "support" ? "补充摘录" : assessment?.decision === "exclude" ? "AI 建议排除" : "";
       const sourceLevel = assessment?.sourceLevel === "full_text" ? "全文" : assessment?.sourceLevel === "abstract" ? "摘要" : assessment?.sourceLevel === "metadata" ? "仅元数据" : assessment?.sourceLevel === "mixed" ? "混合材料" : "";
-      return <label key={`${value.reference || value.id}:${index}`} className={`${checked ? "selected" : ""}${assessment?.decision === "exclude" ? " excluded" : ""}`}><input type="checkbox" checked={checked} onChange={() => toggle(selectedCitationKeys, key, setSelectedCitationKeys)}/><span><span className="workflow-selection-title"><b>{value.title || value.sourceName || "本地证据"}</b>{decision && <i className={assessment?.decision}>{decision}</i>}</span><small>{[value.sourceName, value.locator, value.reference, sourceLevel].filter(Boolean).join(" · ")}</small>{assessment?.reason && <p className="workflow-screening-reason">{assessment.reason}</p>}<details><summary>查看原文摘录</summary><p>{value.quote || "无摘录"}</p></details></span></label>;
+      const reviewMentioned = citationRepair?.mentioned.has(value.reference ?? "");
+      return <label key={`${value.reference || value.id}:${index}`} className={`${checked ? "selected" : ""}${assessment?.decision === "exclude" ? " excluded" : ""}${reviewMentioned ? " review-mentioned" : ""}`}><input type="checkbox" checked={checked} disabled={Boolean(busy)} onChange={() => toggle(selectedCitationKeys, key, setSelectedCitationKeys)}/><span><span className="workflow-selection-title"><b>{value.title || value.sourceName || "本地证据"}</b>{reviewMentioned && <i className="review-mentioned-tag">{checked ? "审查提及 · 已选" : "审查提及 · 未选"}</i>}{decision && <i className={assessment?.decision}>{decision}</i>}</span><small>{[value.sourceName, value.locator, value.reference, sourceLevel].filter(Boolean).join(" · ")}</small>{assessment?.reason && <p className="workflow-screening-reason">{assessment.reason}</p>}<details><summary>查看原文摘录</summary><p>{value.quote || "无摘录"}</p></details></span></label>;
 	}) : <div className={`workflow-selection-empty${emptyCitationRecovery ? " recoverable" : ""}`}>{emptyCitationRecovery ? <><b>本轮没有形成可引用的文献摘录</b><span>可以继续数据分析，但报告会明确记录“未建立外部证据链”，且不会生成任何文献引用。</span></> : "本地检索没有返回可引用证据；这条路线以文献证据为核心，不能空着继续。"}</div>}</div>}
-    {limitedEvidenceAcceptanceRequired && <label className="workflow-limited-evidence"><input type="checkbox" checked={acceptLimitedEvidence} onChange={(event) => setAcceptLimitedEvidence(event.target.checked)}/><span><b>以有限证据继续</b><small>当前证据不足以完整覆盖原研究范围。继续后只能生成低置信、范围受限的初稿，不代表证据已充足。</small></span></label>}
+    {limitedEvidenceAcceptanceRequired && <label className="workflow-limited-evidence"><input type="checkbox" checked={acceptLimitedEvidence} onChange={(event) => setAcceptLimitedEvidence(event.target.checked)}/><span><b>以有限证据继续</b><small>允许先形成有限证据初稿，供讨论与补证；不会自动缩小原研究目标，也不等于最终审查通过。若核心要求仍缺失，交付前仍需补齐。</small></span></label>}
     <label>备注<input value={note} onChange={(event) => setNote(event.target.value)} placeholder={selection ? "可选：记录选择依据" : "可选"}/></label>
+    {citationRepair && <ResearchCitationRepairStatus model={citationRepair}/>}
     {step.nodeKind === "human_confirmation" && <label>决定上下文（JSON）<textarea rows={3} value={context} onChange={(event) => setContext(event.target.value)} /></label>}
-	<footer><button type="button" onClick={() => decide(false)} disabled={Boolean(busy) || materialBusy}>{agentReview ? "拒绝阶段结果" : "拒绝"}</button><button type="button" className="accept" onClick={() => decide(true, emptyCitationRecovery, acceptLimitedEvidence)} disabled={Boolean(busy) || materialBusy || (step.nodeKind === "candidate_selection" && selectedCount > 100) || Boolean(selection && selectedCount === 0 && !emptyCitationRecovery) || Boolean(limitedEvidenceAcceptanceRequired && !acceptLimitedEvidence)}>{busy === `decide:${step.id}` ? "处理中…" : step.nodeKind === "candidate_selection" ? "导入所选研究材料" : emptyCitationRecovery ? "无文献证据，继续数据分析" : step.nodeKind === "citation_selection" ? limitedEvidenceAcceptanceRequired ? "确认限制并继续" : "确认 AI 推荐引用" : agentReview ? "确认并继续" : "确认继续"}</button></footer>
+	<footer><button type="button" onClick={() => decide(false)} disabled={Boolean(busy) || materialBusy}>{agentReview ? "拒绝阶段结果" : "拒绝"}</button><button type="button" className="accept" onClick={() => decide(true, emptyCitationRecovery, acceptLimitedEvidence)} disabled={Boolean(busy) || materialBusy || (step.nodeKind === "candidate_selection" && selectedCount > 100) || Boolean(selection && selectedCount === 0 && !emptyCitationRecovery) || Boolean(limitedEvidenceAcceptanceRequired && !acceptLimitedEvidence)}>{busy === `decide:${step.id}` ? "处理中…" : step.nodeKind === "candidate_selection" ? "导入所选研究材料" : emptyCitationRecovery ? "无文献证据，继续数据分析" : step.nodeKind === "citation_selection" ? citationRepair ? citationRepair.unchanged ? `仍按原 ${selectedCount} 条引用${limitedEvidenceAcceptanceRequired ? "，以有限证据继续" : "继续"}` : `确认所选 ${selectedCount} 条引用${limitedEvidenceAcceptanceRequired ? "，以有限证据继续" : "并继续"}` : limitedEvidenceAcceptanceRequired ? "确认所选引用，以有限证据继续" : "确认所选引用并继续" : agentReview ? "确认并继续" : "确认继续"}</button></footer>
   </div>;
 }
 
@@ -5995,10 +6036,9 @@ function workflowMessageActivities(detail: WorkflowRunDetail, resolveApproval?: 
 function ResearchDeliveryStatus({ assessment, runStatus, recoveryVisible = false }: { assessment?: ResearchDeliveryAssessment; runStatus: string; recoveryVisible?: boolean }) {
   if (!assessment || !["completed", "failed", "interrupted"].includes(runStatus) || !["unverified", "blocked", "revision_required"].includes(assessment.status) || recoveryVisible) return null;
   const label = assessment.status === "reviewed" ? "交付检查已通过" : assessment.status === "revision_required" ? "需要返修" : assessment.status === "unverified" ? "交付尚未验证" : assessment.status === "blocked" ? "交付被阻断" : "等待交付验收";
-  return <section className="research-interaction-card research-delivery-assessment" aria-label="科研交付验收">
-    <header><div><h3>{assessment.label} · {label}</h3><p>{assessment.summary}</p></div></header>
+  return <ResearchCard className="research-interaction-card research-delivery-assessment" aria-label="科研交付验收" title={assessment.label} status={label} description={assessment.summary} tone={assessment.status === "blocked" ? "danger" : "pending"}>
     <ResearchAcceptanceDetails assessment={assessment}/>
-  </section>;
+  </ResearchCard>;
 }
 
 function ResearchAcceptanceDetails({ assessment }: { assessment?: ResearchDeliveryAssessment }) {
@@ -6042,7 +6082,9 @@ function WorkflowInteractionCards({ detail, selectedAttachmentIds, setSelectedAt
 	const [clarificationQuestion, setClarificationQuestion] = useState<ResearchClarificationQuestion | null>(null);
   const [clarificationDraft, setClarificationDraft] = useState<string[]>([]);
   const [confirmReplan, setConfirmReplan] = useState(false);
-  const retryableStep = detail.steps.find((step) => ["failed", "interrupted", "outcome_unknown"].includes(step.status) && ["failed", "interrupted"].includes(detail.run.status));
+  const retryableStep = detail.steps.find((step) => ["failed", "interrupted", "outcome_unknown"].includes(step.status) && ["failed", "interrupted"].includes(detail.run.status)
+    || detail.run.status === "cancelled" && step.status === "cancelled" && step.ordinal === detail.run.currentStep && ["agent_stage", "ai_analysis"].includes(step.nodeKind));
+  const cancelledAIRecovery = detail.run.status === "cancelled" && Boolean(retryableStep);
   const decisionNode = pendingDecisionStep ? detail.run.compilation.nodes.find((node) => node.id === pendingDecisionStep.nodeId) : undefined;
   const retryNode = retryableStep ? detail.run.compilation.nodes.find((node) => node.id === retryableStep.nodeId) : undefined;
 	const reviewGateFailure = Boolean(retryableStep && retryNode?.tool?.qualifiedName === "builtin.research.workflow.review.gate");
@@ -6062,13 +6104,11 @@ function WorkflowInteractionCards({ detail, selectedAttachmentIds, setSelectedAt
 	const clarificationComplete = Boolean(clarification && clarification.questions.filter((question) => question.required).every((question) => (clarificationAnswers[question.id] ?? []).length > 0));
   return <div className="research-interaction-cards">
     <ResearchDeliveryStatus assessment={detail.deliveryAssessment} runStatus={detail.run.status} recoveryVisible={Boolean(retryableStep)}/>
-    {detail.run.workflowPurpose === "research_starter" && detail.run.status === "completed" && <section className="research-interaction-card research-replan-card" aria-label="更新研究路线" aria-busy={busy === "replan-research-starter"}>
-      <header><span><Icon name="refresh" size={17}/></span><div><p>路线调整</p><h3>更新研究路线</h3></div><em role="status">{busy === "replan-research-starter" ? "正在重新规划" : starterPlanChecking ? "正在核验" : busy ? "请等待当前操作" : confirmReplan ? "可以开始" : "待确认"}</em></header>
+    {detail.run.workflowPurpose === "research_starter" && detail.run.status === "completed" && <ResearchCard className="research-interaction-card research-replan-card" aria-label="更新研究路线" aria-busy={busy === "replan-research-starter"} title="更新研究路线" eyebrow="路线调整" icon={<Icon name="refresh" size={17}/>} status={<span role="status">{busy === "replan-research-starter" ? "正在重新规划" : starterPlanChecking ? "正在核验" : busy ? "请等待当前操作" : confirmReplan ? "可以开始" : "待确认"}</span>} tone="pending" bodyMode="contents">
       <div className="research-replan-body"><p>补充了数据，或当前问题需要重新梳理？先将资料上传到当前任务，再让 AI 重新读取并规划。</p><div className="research-replan-notes"><span><Icon name="shield" size={13}/>保留原路线与历史记录</span><span>不会自动提交你的选择</span></div></div>
       <footer><label className="research-replan-consent"><input type="checkbox" checked={confirmReplan} disabled={Boolean(busy) || starterPlanChecking} onChange={(event) => setConfirmReplan(event.target.checked)}/><span><b>确认再次调用 AI 模型</b><small>会消耗模型额度，可能产生费用</small></span></label><button type="button" className="primary" disabled={!confirmReplan || Boolean(busy) || starterPlanChecking} onClick={replanResearchStarter}><Icon name="refresh" size={14}/>{busy === "replan-research-starter" ? "正在重新规划…" : "重新读取资料并规划"}</button></footer>
-    </section>}
-	{starterPlan && <section className="research-interaction-card research-route-choice">
-	  <header><span><Icon name="spark" size={15}/></span><div><p>AI 研究启动已完成</p><h3>{starterPlan.normalizedQuestion}</h3></div><em>{starterPlanChecking ? "正在核验" : starterPlanError ? "路线不可用" : starterPlan.confidence === "high" ? "高置信建议" : starterPlan.confidence === "medium" ? "中等置信建议" : "探索性建议"}</em></header>
+    </ResearchCard>}
+	{starterPlan && <ResearchCard className="research-interaction-card research-route-choice" title={starterPlan.normalizedQuestion} eyebrow="AI 研究启动已完成" icon={<Icon name="spark" size={15}/>} status={starterPlanChecking ? "正在核验" : starterPlanError ? "路线不可用" : starterPlan.confidence === "high" ? "高置信建议" : starterPlan.confidence === "medium" ? "中等置信建议" : "探索性建议"} bodyMode="contents">
 	  {starterPlanChecking && <div className="research-route-validation-checking"><Icon name="refresh" size={13}/>正在核对阶段顺序、资源条件和 Skill 快照；核验完成前不能启动路线。</div>}
 	  {starterPlanError && <div className="research-route-validation-error"><Icon name="close" size={13}/>宿主未能核验这份路线：{starterPlanError}</div>}
 	  <div className="research-route-recommendation"><b>推荐依据</b><p>{starterPlan.recommendationReason}</p></div>
@@ -6083,19 +6123,17 @@ function WorkflowInteractionCards({ detail, selectedAttachmentIds, setSelectedAt
 		<footer className="research-route-card-actions"><button type="button" disabled={Boolean(busy)} onClick={() => setRouteDetail(route)}>查看路线详情</button><button type="button" className={route.routeId === starterPlan.recommendedRouteId ? "primary" : ""} disabled={Boolean(busy) || !canAdopt} onClick={() => adoptResearchRoute(route)}>{busy === `adopt-route:${route.routeId}` ? availableNow ? "正在创建科研任务…" : "正在准备方案…" : availableNow ? "采用并开始任务" : canAdopt ? "采用并补充数据" : validation === "checking" ? "正在核验路线…" : "路线不可用"}</button></footer>
 	  </article>; })}</div>}
 	  {(starterPlan.missingInformation.length > 0 || starterPlan.limitations.length > 0) && <details><summary>信息缺口与局限</summary><ul>{[...starterPlan.missingInformation, ...starterPlan.limitations].map((value, index) => <li key={`${value}:${index}`}>{value}</li>)}</ul></details>}
-	</section>}
+	</ResearchCard>}
 	{clarificationQuestion && clarification && !starterPlanChecking && !starterPlanError && createPortal(<ResearchClarificationDialog question={clarificationQuestion} draft={clarificationDraft} setDraft={setClarificationDraft} close={() => setClarificationQuestion(null)} confirm={(selected) => { setClarificationAnswers((current) => ({ ...current, [clarificationQuestion.id]: selected })); setClarificationQuestion(null); }}/>, document.body)}
 	{routeDetail && starterPlan && <ResearchRouteDetailDialog route={routeDetail} plan={starterPlan} busy={busy === `adopt-route:${routeDetail.routeId}`} close={() => setRouteDetail(null)} adopt={(selectedRoute) => { setRouteDetail(null); if (researchRouteCanAdopt(selectedRoute)) adoptResearchRoute(selectedRoute); }}/>}
-    {pendingDecisionStep && <section className="research-interaction-card decision">
-      <header><span><Icon name={pendingDecisionStep.nodeKind === "candidate_selection" ? "search" : "check"} size={15}/></span><div><p>{pendingDecisionStep.nodeKind === "candidate_selection" ? "文献候选" : pendingDecisionStep.nodeKind === "citation_selection" ? "证据选择" : "人工检查点"}</p><h3>{decisionNode?.name ?? "需要你的决定"}</h3></div><em>{workflowStepLabels[pendingDecisionStep.status]}</em></header>
+    {pendingDecisionStep && <ResearchCard className="research-interaction-card decision" title={decisionNode?.name ?? "需要你的决定"} eyebrow={pendingDecisionStep.nodeKind === "candidate_selection" ? "文献候选" : pendingDecisionStep.nodeKind === "citation_selection" ? "证据选择" : "人工检查点"} icon={<Icon name={pendingDecisionStep.nodeKind === "candidate_selection" ? "search" : "check"} size={15}/>} status={workflowStepLabels[pendingDecisionStep.status]} tone="pending" bodyMode="contents">
 	  <WorkflowHumanDecision projectId={detail.run.projectId} taskId={detail.run.researchTaskId} supportsMaterials={detail.run.compilation.edges.some(edge => edge.fromNode === pendingDecisionStep.nodeId && edge.fromPort === "selectedAttachmentIds")} selectedAttachmentIds={selectedAttachmentIds} setSelectedAttachmentIds={setSelectedAttachmentIds} step={pendingDecisionStep} prompt={decisionNode?.prompt} note={note} context={context} selectedCandidateIds={selectedCandidateIds} selectedCitationKeys={selectedCitationKeys} acceptLimitedEvidence={acceptLimitedEvidence} busy={busy} setNote={setNote} setContext={setContext} setSelectedCandidateIds={setSelectedCandidateIds} setSelectedCitationKeys={setSelectedCitationKeys} setAcceptLimitedEvidence={setAcceptLimitedEvidence} allowEmptyCitations={allowEmptyCitations} decide={(approved, continueWithoutCitations, acceptLimited) => decide(pendingDecisionStep, approved, continueWithoutCitations, acceptLimited)}/>
-    </section>}
-    {retryableStep && <section className="research-interaction-card error">
-      <header><span><Icon name="refresh" size={15}/></span><div><p>{reviewGateFailure ? "报告需要修改" : "执行需要处理"}</p><h3>{retryNode?.name ?? `阶段 ${retryableStep.ordinal + 1}`}</h3></div><em>{workflowStepLabels[retryableStep.status]}</em></header>
+    </ResearchCard>}
+    {retryableStep && <ResearchCard className="research-interaction-card error" title={retryNode?.name ?? `阶段 ${retryableStep.ordinal + 1}`} eyebrow={reviewGateFailure ? "报告需要修改" : cancelledAIRecovery ? "任务已取消，可手动恢复" : "执行需要处理"} icon={<Icon name="refresh" size={15}/>} status={workflowStepLabels[retryableStep.status]} tone="danger" bodyMode="contents">
       {reviewGateFailure ? <ResearchReviewFeedback issues={reviewIssues} errorCode={retryableStep.errorCode || detail.run.errorCode} errorMessage={retryableStep.errorMessage || detail.run.errorMessage}/> : <div className="research-interaction-copy"><code>{retryableStep.errorCode || detail.run.errorCode || "WORKFLOW_STEP_FAILED"}</code><p>{retryableStep.errorMessage || detail.run.errorMessage || "当前阶段未能完成。已完成的阶段和产物不会被删除。"}</p></div>}
-      {reviewGateFailure && <div className="research-review-recovery"><b>接下来会发生什么</b><p>保留你的研究目标和原始资料，从选定步骤开始修改，随后重新检查结果。旧版本和处理记录仍会保留，检查通过前不会交付。</p></div>}
-      {reviewGateFailure ? <ResearchRevisionControls resetKey={`${detail.run.id}:${retryableStep.id}:${retryableStep.attempt}`} targets={detail.reviewRevisionTargets ?? []} recommendation={detail.reviewRevisionRecommendation} busy={Boolean(busy)} confirmed={confirmRetry} setConfirmed={setConfirmRetry} submit={(nodeId, recommended, reviewSha) => retryStep(retryableStep, nodeId, recommended, reviewSha)}/> : <footer className="research-retry-actions">{retryNeedsConfirmation && <label><input type="checkbox" checked={confirmRetry} onChange={(event) => setConfirmRetry(event.target.checked)}/>确认该动作可能已经产生副作用</label>}<button type="button" className="primary" onClick={() => retryStep(retryableStep)} disabled={Boolean(busy) || Boolean(retryNeedsConfirmation && !confirmRetry)}><Icon name="refresh" size={14}/><span>{busy === `retry:${retryableStep.id}` ? "正在重试…" : "重试当前阶段"}</span></button></footer>}
-    </section>}
+      {cancelledAIRecovery && <div className="research-review-recovery"><b>恢复范围</b><p>保留已完成阶段、原始资料和历史记录，重新执行当前 AI 阶段并继续尚未开始的后续阶段。不会自动恢复；点击后会再次调用模型，可能产生费用。</p></div>}
+      {reviewGateFailure ? <ResearchRevisionControls resetKey={`${detail.run.id}:${retryableStep.id}:${retryableStep.attempt}`} targets={detail.reviewRevisionTargets ?? []} recommendation={detail.reviewRevisionRecommendation} reselection={detail.evidenceReselection} busy={Boolean(busy)} confirmed={confirmRetry} setConfirmed={setConfirmRetry} submit={(nodeId, recommended, reviewSha) => retryStep(retryableStep, nodeId, recommended, reviewSha)}/> : <footer className="research-retry-actions">{retryNeedsConfirmation && <label><input type="checkbox" checked={confirmRetry} onChange={(event) => setConfirmRetry(event.target.checked)}/>确认该动作可能已经产生副作用</label>}<button type="button" className="primary" onClick={() => retryStep(retryableStep)} disabled={Boolean(busy) || Boolean(retryNeedsConfirmation && !confirmRetry)}><Icon name="refresh" size={14}/><span>{busy === `retry:${retryableStep.id}` ? cancelledAIRecovery ? "正在恢复…" : "正在重试…" : cancelledAIRecovery ? "恢复当前阶段" : "重试当前阶段"}</span></button></footer>}
+    </ResearchCard>}
   </div>;
 }
 
@@ -6158,33 +6196,24 @@ function ResearchTimelineJSON({ value, label }: {value: unknown; label: string})
 }
 
 function WorkflowResearchDesignCard({ assessment, design, registered, busy, taskId, saveDeliverable, openArtifacts }: { assessment?: ResearchDeliveryAssessment; design: WorkflowResearchDesign; registered: boolean; taskId?: string; busy: string; saveDeliverable: () => void; openArtifacts: (taskId?: string) => void }) {
-  return <section className="research-deliverable-card">
-    <header><span><Icon name="check" size={17}/></span><div><p>最终交付</p><h2>研究设计已完成并通过独立审查</h2><small>这是可执行研究方案，不是数据采集、模型训练或统计分析后的实证结论。</small></div><em>审查通过</em></header>
-    <div className="research-deliverable-body">
+  return <ResearchCard className="research-deliverable-card" title="研究设计已完成并通过独立审查" titleLevel={2} eyebrow="最终交付" status="审查通过" tone="success" icon={<Icon name="check" size={17}/>}
+    description="这是可执行研究方案，不是数据采集、模型训练或统计分析后的实证结论。" bodyClassName="research-deliverable-body"
+    footer={<><span><Icon name="shield" size={13}/>研究内容、引用和审查快照已冻结</span>{registered ? <button type="button" className="primary" onClick={() => openArtifacts(taskId)}><Icon name="check" size={13}/>已登记 · 查看科研产物</button> : <button type="button" className="primary" disabled={Boolean(busy)} onClick={saveDeliverable}><Icon name="archive" size={13}/>{busy === "save-deliverable" ? "正在登记…" : "登记为科研产物"}</button>}</>}>
       <ResearchAcceptanceDetails assessment={assessment}/>
       <h1>{design.title}</h1>
       <section className="research-deliverable-question"><b>研究问题</b><p>{design.researchQuestion}</p></section>
       <div className="research-deliverable-summary"><span><b>{design.objectives.length}</b><small>研究目标</small></span><span><b>{design.hypotheses.length}</b><small>研究假设</small></span><span><b>{design.milestones.length}</b><small>实施里程碑</small></span></div>
       <div className="research-deliverable-sections">{workflowResearchDesignSections(design).filter(([, values]) => values.length > 0).map(([title, values], index) => <details key={title} open={index < 2}><summary><span>{title}</span><em>{values.length} 项</em></summary><ol>{values.map((value, itemIndex) => <li key={`${title}:${itemIndex}`}>{value}</li>)}</ol></details>)}</div>
-    </div>
-    <footer><span><Icon name="shield" size={13}/>研究内容、引用和审查快照已冻结</span>{registered ? <button type="button" className="primary" onClick={() => openArtifacts(taskId)}><Icon name="check" size={13}/>已登记 · 查看科研产物</button> : <button type="button" className="primary" disabled={Boolean(busy)} onClick={saveDeliverable}><Icon name="archive" size={13}/>{busy === "save-deliverable" ? "正在登记…" : "登记为科研产物"}</button>}</footer>
-  </section>;
+  </ResearchCard>;
 }
 
-function WorkflowResearchReportCard({ assessment, deliveryLabel, report, citations, registered, artifactCount, busy, taskId, saveDeliverable, openArtifacts }: { assessment?: ResearchDeliveryAssessment; deliveryLabel: string; report: WorkflowResearchReport; citations: unknown; registered: boolean; artifactCount: number; taskId?: string; busy: string; saveDeliverable: () => void; openArtifacts: (taskId?: string) => void }) {
-  const confidence = report.confidence === "high" ? "高" : report.confidence === "medium" ? "中" : "低";
-  return <section className="research-deliverable-card research-report-card">
-    <header><span><Icon name="check" size={17}/></span><div><p>最终交付</p><h2>{deliveryLabel}已通过独立审查</h2><small>正文与本次审查快照一致；设计或综述不会仅因生成报告就升级为实证结论。</small></div><em>置信度 {confidence}</em></header>
-    <div className="research-deliverable-body">
-      <ResearchAcceptanceDetails assessment={assessment}/>
-      <section className="research-report-method"><b>方法摘要</b><p>{report.methodSummary}</p></section>
-      <div className="research-deliverable-summary"><span><b>{report.claimSummary.length}</b><small>主要结论</small></span><span><b>{report.limitations.length}</b><small>已披露局限</small></span><span><b>{confidence}</b><small>交付置信度</small></span></div>
-      <details className="research-report-document" open><summary>查看完整研究报告</summary><CitedMarkdown text={report.markdown} citations={citations}/></details>
-    </div>
-    <footer><span><Icon name="shield" size={13}/>分析结果、报告与独立审查快照已冻结</span><div>{artifactCount > 0 && <button type="button" onClick={() => openArtifacts(taskId)}><Icon name="archive" size={13}/>查看已有产物</button>}{registered ? <button type="button" className="primary" onClick={() => openArtifacts(taskId)}><Icon name="check" size={13}/>已登记 · 查看报告</button> : <button type="button" className="primary" disabled={Boolean(busy)} onClick={saveDeliverable}><Icon name="archive" size={13}/>{busy === "save-deliverable" ? "正在登记…" : "登记报告为科研产物"}</button>}</div></footer>
-  </section>;
+function WorkflowResearchReportCard({ assessment, deliveryLabel, report, citations, registered, artifactCount, busy, taskId, saveDeliverable, openArtifacts, files, computationOnly = false }: { assessment?: ResearchDeliveryAssessment; deliveryLabel: string; report: WorkflowResearchReport; citations: unknown; registered: boolean; artifactCount: number; taskId?: string; busy: string; saveDeliverable: () => void; openArtifacts: (taskId?: string) => void; files?: ReactNode; computationOnly?: boolean }) {
+  return <ResearchReportCard report={report} quality={assessment?.report} label={deliveryLabel} files={files} computationOnly={computationOnly}
+    acceptance={<ResearchAcceptanceDetails assessment={assessment}/>}
+    renderMarkdown={text => <CitedMarkdown text={text} citations={citations}/>}
+    document={<ResearchReportReader resetKey={report.markdown}><CitedMarkdown text={report.markdown} citations={citations}/></ResearchReportReader>}
+    actions={<>{artifactCount > 0 && <button type="button" onClick={() => openArtifacts(taskId)}><Icon name="archive" size={13}/>查看已有产物</button>}{registered ? <button type="button" className="primary" onClick={() => openArtifacts(taskId)}><Icon name="check" size={13}/>已登记 · 查看报告</button> : <button type="button" className="primary" disabled={Boolean(busy)} onClick={saveDeliverable}><Icon name="archive" size={13}/>{busy === "save-deliverable" ? "正在登记…" : "登记本轮报告"}</button>}</>}/>;
 }
-
 const workflowAnalysisMethods = [
   { value: "overview", label: "数据概览", description: "字段类型、缺失值、唯一值和数值摘要" },
   { value: "data_quality", label: "数据质量检查", description: "重点检查缺失值、空列和字段完整性" },
@@ -6403,7 +6432,7 @@ function WorkflowTemplateDialog({ template, disabled, close, useTemplate }: { te
   </ModalBackdrop>;
 }
 
-function WorkflowStudio({ project, initialConversationId, modelProfileId, modelId, reasoningLevel, pythonDialogOpen, openPython, openArtifacts, selectConversation, publishStageTasks, publishResearchActivities, publishTaskTimeline, publishComposerLocked, publishRevisionConversationId }: { project: Project; initialConversationId: string; modelProfileId: string; modelId: string; reasoningLevel: ReasoningLevel; pythonDialogOpen: boolean; openPython: () => void; openArtifacts: (taskId?: string) => void; selectConversation: (conversationId: string) => Promise<void>; publishStageTasks: (tasks: Record<string, ResearchStageTask>) => void; publishResearchActivities: (activities: Record<string, WorkflowMessageActivity>) => void; publishTaskTimeline: (value: ResearchTimelineView | null) => void; publishComposerLocked: (locked: boolean) => void; publishRevisionConversationId: (conversationId: string) => void }) {
+function WorkflowStudio({ project, initialConversationId, modelProfileId, modelId, reasoningLevel, pythonDialogOpen, openPython, openArtifacts, selectConversation, publishStageTasks, publishResearchActivities, publishTaskTimeline, publishComposerLocked, publishRevisionConversationId, onDraft }: { project: Project; initialConversationId: string; modelProfileId: string; modelId: string; reasoningLevel: ReasoningLevel; pythonDialogOpen: boolean; openPython: () => void; openArtifacts: (taskId?: string) => void; selectConversation: (conversationId: string) => Promise<void>; publishStageTasks: (tasks: Record<string, ResearchStageTask>) => void; publishResearchActivities: (activities: Record<string, WorkflowMessageActivity>) => void; publishTaskTimeline: (value: ResearchTimelineView | null) => void; publishComposerLocked: (locked: boolean) => void; publishRevisionConversationId: (conversationId: string) => void; onDraft: (prompt: string) => void }) {
   const [workflowTemplates, setWorkflowTemplates] = useState<WorkflowTemplate[]>([]);
   const [templateDetail, setTemplateDetail] = useState<WorkflowTemplate | null>(null);
   const [selectedTemplateId, setSelectedTemplateId] = useState("");
@@ -6544,7 +6573,8 @@ function WorkflowStudio({ project, initialConversationId, modelProfileId, modelI
     }
     if (pendingDecisionStep?.nodeKind === "citation_selection") {
       const screening = workflowEvidenceScreening(pendingDecisionStep);
-      const recommended = new Set(screening?.recommendedReferences ?? []);
+      const previous = pendingDecisionStep.input.previousSelectedReferences;
+      const recommended = new Set(Array.isArray(previous) ? previous.filter((ref): ref is string => typeof ref === "string") : screening?.recommendedReferences ?? []);
       setSelectedCandidateIds([]);
       setSelectedCitationKeys(workflowCitations(pendingDecisionStep).filter((value) => recommended.has(value.reference ?? "")).map((value) => JSON.stringify(value)));
       return;
@@ -6714,7 +6744,7 @@ function WorkflowStudio({ project, initialConversationId, modelProfileId, modelI
 	if (!quiet) setBusy("load-run");
 	try {
 	  const loaded = normalizeWorkflowRunDetail(await backend<WorkflowRunDetail>("WorkflowFacade", "GetRun", project.id, runId));
-	  if (request !== runRequestRef.current || !workflowId || activeWorkflowIdRef.current !== workflowId || loaded.run.workflowId !== workflowId) return;
+	  if (request !== runRequestRef.current || quiet && mutationRef.current || !workflowId || activeWorkflowIdRef.current !== workflowId || loaded.run.workflowId !== workflowId) return;
 	  setRunDetail(current => shareSnapshot(current, loaded));
 	  setProjectRuns((current) => shareSnapshot(current, current.map((value) => value.id === loaded.run.id ? loaded.run : value)));
       if (!quiet && loaded.run.conversationId) await selectConversation(loaded.run.conversationId);
@@ -6733,7 +6763,7 @@ function WorkflowStudio({ project, initialConversationId, modelProfileId, modelI
   }, [runDetail?.run.id, runDetail?.run.status, loadRun]);
 
   useEffect(() => {
-    if (!runDetail || runDetail.run.status !== "completed" || runDetail.run.workflowPurpose === "research_starter") return;
+    if (!runDetail || !(runDetail.run.status === "completed" || runDetail.run.status === "failed" && runDetail.discussionRevisionAvailable) || runDetail.run.workflowPurpose === "research_starter") return;
     const runId = runDetail.run.id;
     let disposed = false, inFlight = false;
     const refresh = async () => {
@@ -6741,13 +6771,13 @@ function WorkflowStudio({ project, initialConversationId, modelProfileId, modelI
       inFlight = true;
       try {
         const proposals = await backend<ResearchRevisionProposal[]>("WorkflowFacade", "ListResearchRevisionProposals", project.id, runId);
-        if (!disposed && !mutationRef.current) setRunDetail(current => current?.run.id === runId && current.run.status === "completed" ? shareSnapshot(current, { ...current, revisionProposals: proposals ?? [] }) : current);
+        if (!disposed && !mutationRef.current) setRunDetail(current => current?.run.id === runId && (current.run.status === "completed" || current.run.status === "failed" && current.discussionRevisionAvailable) ? shareSnapshot(current, { ...current, revisionProposals: proposals ?? [] }) : current);
       } catch { /* Keep the last snapshot; confirmation always revalidates on the host. */ }
       finally { inFlight = false; }
     };
     const timer = window.setInterval(() => { if (!document.hidden) void refresh(); }, 3000);
     return () => { disposed = true; window.clearInterval(timer); };
-  }, [project.id, runDetail?.run.id, runDetail?.run.status, runDetail?.run.workflowPurpose]);
+  }, [project.id, runDetail?.run.id, runDetail?.run.status, runDetail?.run.workflowPurpose, runDetail?.discussionRevisionAvailable]);
 
   async function selectWorkflow(value: ResearchWorkflow) {
 	if (busy || mutationRef.current) return;
@@ -7303,11 +7333,11 @@ function WorkflowStudio({ project, initialConversationId, modelProfileId, modelI
       await backend("PermissionFacade", "ResolveApproval", { approvalId: approval.id, allow, scope: "call" });
       // The approval belongs to the hidden Chat Run bound to this AI stage.
       // Refresh the Workflow projection after resuming that Chat Run; the
-      // normal 700 ms poll remains the source of truth if the model has not
+      // normal poll remains the source of truth if the model has not
       // started its next turn yet.
-      await loadRun(runDetail.run.id, true);
     } catch (error) { setFeedback(errorText(error)); }
     finally { if (mutationRef.current === operation) mutationRef.current = ""; setBusy(""); }
+    await loadRun(runDetail.run.id, true);
   }
 
   async function retryStep(step: WorkflowStep, revisionNodeId = "", useRecommendation = false, expectedReviewSha256 = "") {
@@ -7322,13 +7352,13 @@ function WorkflowStudio({ project, initialConversationId, modelProfileId, modelI
 	      const updated = normalizeWorkflowRunDetail(await backend<WorkflowRunDetail>("WorkflowFacade", "Retry", {
 		projectId: project.id, runId: runDetail.run.id, stepId: step.id, revisionNodeId, useRecommendation, expectedReviewSha256, confirmSideEffect: Boolean(repeatsSideEffects && confirmRetry), note: repeatsSideEffects ? "用户在科研模式中确认重新执行可能产生副作用的步骤" : "",
 	  }));
+	  ++runRequestRef.current; // Ignore polls started before this mutation.
 	  setRunDetail(updated); setConfirmRetry(false); await loadProjectRuns();
-	  // The backend queues the revision before its driver starts. Refresh the
-	  // authoritative detail so the interaction card changes immediately.
-	  await loadRun(updated.run.id, true);
-	  if (node?.tool?.qualifiedName === "builtin.research.workflow.review.gate") setFeedback("已进入修订回路：正在依据独立审查意见修订上一版结果，随后会自动重新审查。");
+	  if (node?.tool?.qualifiedName === "builtin.research.workflow.review.gate") setFeedback(revisionNodeId === "evidence_extraction" ? "已进入返修：先确认采用的引用，确认后继续后续修订与审查；原综合结果保持不变。" : "已进入修订回路：正在依据独立审查意见修订上一版结果，随后会自动重新审查。");
     } catch (error) { setFeedback(errorText(error)); }
 	finally { if (mutationRef.current === operation) mutationRef.current = ""; setBusy(""); }
+    // Quiet refreshes must wait for the mutation lock to be released.
+    await loadRun(runDetail.run.id, true);
   }
 
   async function confirmResearchRevision(proposalId: string) {
@@ -7357,6 +7387,18 @@ function WorkflowStudio({ project, initialConversationId, modelProfileId, modelI
 	  setFeedback(outputName === "report_draft" ? "研究交付稿已登记为不可变 Markdown 科研产物，可在科研产物中查看、校验和导出。" : "研究设计已登记为不可变 Markdown 科研产物，可在科研产物中查看、校验和导出。");
 	} catch (error) { setFeedback(errorText(error)); }
 	finally { if (mutationRef.current === operation) mutationRef.current = ""; setBusy(""); }
+  }
+
+  async function downloadExecutedCode(nodeId: string, attempt: number) {
+    if (!runDetail || busy || mutationRef.current) return;
+    const operation = "download-executed-code";
+    mutationRef.current = operation;
+    setBusy(operation); setFeedback("");
+    try {
+      const destination = await backend<string>("WorkflowFacade", "DownloadExecutedPythonCode", project.id, runDetail.run.id, nodeId, attempt);
+      if (destination) setFeedback(`实际执行代码已保存到 ${destination}。未重新执行或改变任务结果。`);
+    } catch (error) { setFeedback(errorText(error)); }
+    finally { if (mutationRef.current === operation) mutationRef.current = ""; setBusy(""); }
   }
 
   async function deleteRun(run: WorkflowRun) {
@@ -7399,9 +7441,14 @@ function WorkflowStudio({ project, initialConversationId, modelProfileId, modelI
       if (entry.eventType === "workflow.completed" && runDetail.run.status === "completed") {
         if (runDetail.run.workflowPurpose === "research_starter" && !runDetail.events.some(event => event.type === "research.route_adopted")) return interaction;
         const report = workflowResearchReport(runDetail), design = workflowResearchDesign(runDetail);
-        if (report) return <WorkflowResearchReportCard assessment={runDetail.deliveryAssessment} deliveryLabel={runDetail.deliveryAssessment?.label ?? "研究交付稿"} report={report} citations={reportCitationSnapshot(runDetail.run.outputs)} registered={workflowDeliverableRegistered(runDetail, "report_draft")} artifactCount={runDetail.artifactCount} taskId={runDetail.run.researchTaskId} busy={busy} saveDeliverable={() => void saveWorkflowDeliverable("report_draft")} openArtifacts={openArtifacts}/>;
-        if (design) return <WorkflowResearchDesignCard assessment={runDetail.deliveryAssessment} design={design} registered={workflowDeliverableRegistered(runDetail, "research_design")} taskId={runDetail.run.researchTaskId} busy={busy} saveDeliverable={() => void saveWorkflowDeliverable("research_design")} openArtifacts={openArtifacts}/>;
-        return <><ResearchTimelineHistory entry={entry}/><ResearchDeliveryStatus assessment={runDetail.deliveryAssessment} runStatus={runDetail.run.status}/></>;
+        const followup = workflowRevisionConversationId(runDetail) ? <ResearchFollowupGuide evidence={runDetail.run.compilation.nodes.some(node => node.id === "evidence_import")} computation={runDetail.run.compilation.nodes.some(node => node.id === "data_preflight")} disabled={Boolean(busy)} onDraft={onDraft}/> : null;
+        const files = <ResearchOutputFiles steps={runDetail.steps} openArtifacts={() => openArtifacts(runDetail.run.researchTaskId)} renderCode={code => <MarkdownCodeBlock copy={copyToClipboard}><code className="language-python">{code}</code></MarkdownCodeBlock>} downloadCode={(nodeId, attempt) => void downloadExecutedCode(nodeId, attempt)} downloading={Boolean(busy)}/>;
+        const computationOnly = runDetail.deliveryAssessment?.kind === "analysis_result" && runDetail.run.compilation.nodes.some(node => node.id === "python_analysis") && !runDetail.run.compilation.nodes.some(node => node.kind === "citation_selection" || ["evidence_search", "evidence_screening", "literature_discovery", "evidence_import", "evidence_sync"].includes(node.id)) && (!Array.isArray(runDetail.run.outputs.citations) || runDetail.run.outputs.citations.length === 0);
+        if (report) return <div className="research-completion-stack"><WorkflowResearchReportCard files={files} computationOnly={computationOnly} assessment={runDetail.deliveryAssessment} deliveryLabel={runDetail.deliveryAssessment?.label ?? "研究交付稿"} report={report} citations={reportCitationSnapshot(runDetail.run.outputs)} registered={workflowDeliverableRegistered(runDetail, "report_draft")} artifactCount={runDetail.artifactCount} taskId={runDetail.run.researchTaskId} busy={busy} saveDeliverable={() => void saveWorkflowDeliverable("report_draft")} openArtifacts={openArtifacts}/>{followup}</div>;
+        if (design) return <><WorkflowResearchDesignCard assessment={runDetail.deliveryAssessment} design={design} registered={workflowDeliverableRegistered(runDetail, "research_design")} taskId={runDetail.run.researchTaskId} busy={busy} saveDeliverable={() => void saveWorkflowDeliverable("research_design")} openArtifacts={openArtifacts}/>{followup}</>;
+        const interpretation = workflowResearchInterpretation(runDetail);
+        if (interpretation) return <div className="research-completion-stack"><ResearchAnalysisResult result={interpretation}/>{files}{followup}</div>;
+        return <div className="research-completion-stack"><ResearchTimelineHistory entry={entry}/>{files}<ResearchDeliveryStatus assessment={runDetail.deliveryAssessment} runStatus={runDetail.run.status}/></div>;
       }
       if (entry.step && runDetail.steps.some(step => step.id === entry.step!.id && step.attempt === entry.step!.attempt &&
         (["workflow.human_confirmation_requested", "workflow.agent_stage_review_requested"].includes(entry.eventType ?? "")
@@ -7438,7 +7485,7 @@ function WorkflowStudio({ project, initialConversationId, modelProfileId, modelI
       </aside>
       <aside className="research-evidence-panel" aria-label="科研任务核验与成果">
         <header><div><p>VERIFIABLE RESULTS</p><h2>核验与成果</h2></div><button type="button" aria-label="刷新当前任务" title="刷新" onClick={() => void loadRun(runDetail.run.id)}><Icon name="refresh" size={14}/></button></header>
-        {runDetail.run.status === "completed" && (researchStarter ? <section className="workflow-run-output starter"><header><div><h3>研究路线规划已完成</h3><small>请在中间协作区选择一条路线，建立正式研究方案。</small></div></header></section> : runDetail.deliveryAssessment?.status === "unverified" ? <section className="workflow-run-output"><header><div><h3>流程结束，交付尚未验证</h3><small>{runDetail.deliveryAssessment.summary}</small></div></header></section> : workflowResearchReport(runDetail) ? <section className="workflow-run-output deliverable"><header><div><h3>{runDetail.deliveryAssessment?.label ?? "研究交付稿"}已完成</h3><small>已通过独立审查；在中间协作区查看报告正文并登记科研产物。</small></div>{workflowDeliverableRegistered(runDetail, "report_draft") ? <button type="button" onClick={() => openArtifacts(runDetail.run.researchTaskId)}><Icon name="check" size={13}/>已登记 · 查看科研产物</button> : runDetail.artifactCount > 0 && <button type="button" onClick={() => openArtifacts(runDetail.run.researchTaskId)}><Icon name="archive" size={13}/>查看科研产物</button>}</header></section> : workflowResearchDesign(runDetail) ? <section className="workflow-run-output deliverable"><header><div><h3>研究设计已完成</h3><small>已通过独立审查；这是研究方案，尚不是实证结论。</small></div>{workflowDeliverableRegistered(runDetail, "research_design") ? <button type="button" onClick={() => openArtifacts(runDetail.run.researchTaskId)}><Icon name="check" size={13}/>已登记 · 查看科研产物</button> : <button type="button" disabled={Boolean(busy)} onClick={() => void saveWorkflowDeliverable("research_design")}>{busy === "save-deliverable" ? "正在登记…" : "登记科研产物"}</button>}</header></section> : <section className="workflow-run-output"><header><div><h3>科研流程已完成</h3><small>{runDetail.artifactCount > 0 ? `已登记 ${runDetail.artifactCount} 个科研产物。` : "结果已保存，本次流程未生成文件型科研产物。"}</small></div>{runDetail.artifactCount > 0 && <button type="button" onClick={() => openArtifacts(runDetail.run.researchTaskId)}><Icon name="archive" size={13}/>查看科研产物</button>}</header></section>)}
+        {runDetail.run.status === "completed" && (researchStarter ? <section className="workflow-run-output starter"><header><div><h3>研究路线规划已完成</h3><small>请在中间协作区选择一条路线，建立正式研究方案。</small></div></header></section> : runDetail.deliveryAssessment?.status === "unverified" ? <section className="workflow-run-output"><header><div><h3>流程结束，交付尚未验证</h3><small>{runDetail.deliveryAssessment.summary}</small></div></header></section> : workflowResearchReport(runDetail) ? <section className="workflow-run-output deliverable"><header><div><h3>{runDetail.deliveryAssessment?.report?.limitedDraft ? "范围受限初稿已保存" : "本轮报告已保存"}</h3><small>AI 审查已通过；查看正文、证据边界及未核验内容，审查通过不代表可发表。</small></div>{workflowDeliverableRegistered(runDetail, "report_draft") ? <button type="button" onClick={() => openArtifacts(runDetail.run.researchTaskId)}><Icon name="check" size={13}/>已登记 · 查看科研产物</button> : runDetail.artifactCount > 0 && <button type="button" onClick={() => openArtifacts(runDetail.run.researchTaskId)}><Icon name="archive" size={13}/>查看科研产物</button>}</header></section> : workflowResearchDesign(runDetail) ? <section className="workflow-run-output deliverable"><header><div><h3>研究设计已完成</h3><small>已通过独立审查；这是研究方案，尚不是实证结论。</small></div>{workflowDeliverableRegistered(runDetail, "research_design") ? <button type="button" onClick={() => openArtifacts(runDetail.run.researchTaskId)}><Icon name="check" size={13}/>已登记 · 查看科研产物</button> : <button type="button" disabled={Boolean(busy)} onClick={() => void saveWorkflowDeliverable("research_design")}>{busy === "save-deliverable" ? "正在登记…" : "登记科研产物"}</button>}</header></section> : <section className="workflow-run-output"><header><div><h3>科研流程已完成</h3><small>{runDetail.artifactCount > 0 ? `已登记 ${runDetail.artifactCount} 个科研产物。` : "结果已保存，本次流程未生成文件型科研产物。"}</small></div>{runDetail.artifactCount > 0 && <button type="button" onClick={() => openArtifacts(runDetail.run.researchTaskId)}><Icon name="archive" size={13}/>查看科研产物</button>}</header></section>)}
         <div className="research-task-connection"><i className={workflowTerminal(runDetail.run.status) ? "terminal" : "active"}/><span><b>{workflowTerminal(runDetail.run.status) ? "任务已结束" : "结果随任务实时更新"}</b><small>所有决定请在中间协作区完成；右侧只展示交付状态、来源与成果</small></span></div>
         {feedback && <div className="research-guide-feedback"><Icon name="shield" size={13}/><span>{feedback}</span></div>}
         {runDetail.run.errorMessage && <div className="workflow-run-error"><Icon name="stop" size={14}/><span><b>任务执行失败</b><small>{runDetail.steps.some((step) => step.status === "failed" && runDetail.run.compilation.nodes.some((node) => node.id === step.nodeId && node.tool?.qualifiedName === "builtin.research.workflow.review.gate")) ? "报告还需要修改，暂未交付。请在中间查看修改说明。" : runDetail.run.errorMessage}</small></span></div>}
@@ -7472,7 +7519,7 @@ function WorkflowStudio({ project, initialConversationId, modelProfileId, modelI
         <section><div className="workflow-task-home-icon"><Icon name="history" size={25}/></div><p>RESEARCH TASKS</p><h2>从左侧继续一项科研任务</h2><span>任务从路线规划到研究交付连续推进，点击即可查看当前进度、协作对话和结果。</span><div className="workflow-task-summary"><article><b>{projectRuns.length}</b><small>全部任务</small></article><article><b>{activeProjectRuns.length}</b><small>进行中</small></article><article><b>{projectRuns.filter((run) => run.status === "completed").length}</b><small>已完成</small></article></div><button type="button" onClick={openPlanHome}><Icon name="plus" size={15}/>创建新的科研任务</button></section>
       </main> : !detail && !selectedTemplateId ? <main className="workflow-plan-home">
         <header><div><p>新建研究</p><h2>从一个问题开始</h2></div><aside><b>{visibleWorkflows.length}</b><small>我的方案</small></aside></header>
-        <section className="workflow-plan-idea" ref={planIdeaRef}><div><span><Icon name="spark" size={18}/></span><div><b>输入研究问题</b></div></div><textarea rows={3} value={researchIdea} maxLength={8000} disabled={Boolean(busy)} placeholder="例如：我想研究夜间使用手机是否影响大学生睡眠，但目前还没有数据和文献。" onChange={(event) => { setResearchIdea(event.target.value); setFeedback(""); }}/><ReferenceMaterials key={project.id} projectId={project.id} selected={referenceAttachmentIds} onChange={setReferenceAttachmentIds} disabled={Boolean(busy)} service={backend} onBusyChange={setReferenceBusy}/><footer><small>{(!modelProfileId || !modelId) ? "请先在顶部选择协作模型" : researchIdea.trim() ? `${[...researchIdea.trim()].length}/8000` : ""}</small><button type="button" disabled={!researchIdea.trim() || !modelProfileId || !modelId || Boolean(busy) || referenceBusy} onClick={() => void startResearch()}>{busy === "start-research" ? <Icon name="refresh" size={15}/> : <Icon name="send" size={15}/>}<span>{busy === "start-research" ? "正在规划" : "生成研究路线"}</span></button></footer></section>
+        <section className="workflow-plan-idea" ref={planIdeaRef}><div><span><Icon name="spark" size={18}/></span><div><b>输入研究问题</b></div></div><textarea aria-label="研究问题" rows={3} value={researchIdea} maxLength={8000} disabled={Boolean(busy)} placeholder="描述你的研究问题：可比较文献、分析表格、设计研究，也可组合这些需求。" onChange={(event) => { setResearchIdea(event.target.value); setFeedback(""); }}/><ResearchGettingStarted disabled={Boolean(busy)} onDraft={prompt => { const next = appendResearchExample(researchIdea, prompt); if (next.length > 8000) { setFeedback("当前问题较长，无法追加完整示例；原内容保持不变，请自行编辑。"); return; } setResearchIdea(next); setFeedback(""); moveToPlanSection("idea"); }}/><ReferenceMaterials key={project.id} projectId={project.id} selected={referenceAttachmentIds} onChange={setReferenceAttachmentIds} disabled={Boolean(busy)} service={backend} onBusyChange={setReferenceBusy}/><footer><small>{(!modelProfileId || !modelId) ? "请先在顶部选择协作模型" : researchIdea.trim() ? `${[...researchIdea.trim()].length}/8000` : ""}</small><button type="button" disabled={!researchIdea.trim() || !modelProfileId || !modelId || Boolean(busy) || referenceBusy} onClick={() => void startResearch()}>{busy === "start-research" ? <Icon name="refresh" size={15}/> : <Icon name="send" size={15}/>}<span>{busy === "start-research" ? "正在规划" : "生成研究路线"}</span></button></footer></section>
         <section className="workflow-plan-home-section" ref={planTemplateRef}><header><h3>方案模板</h3><span>{workflowTemplates.length} 个模板</span></header><div className="workflow-template-gallery">{workflowTemplates.map((template, index) => <button type="button" key={template.id} disabled={Boolean(busy)} onClick={() => setTemplateDetail(template)}><i><Icon name={template.definition.nodes.some((node) => node.kind === "python") ? "chart" : index % 2 ? "shield" : "library"} size={19}/></i><span><b>{template.name}</b><small>{template.definition.nodes.length} 个阶段 · {template.definition.nodes.some((node) => node.kind === "python") ? "包含数据分析" : "研究设计与证据"}</small></span><em>查看详情</em></button>)}</div></section>
 <section className="workflow-plan-home-section saved" ref={savedPlanRef}><header><h3>我的方案</h3><div className="workflow-plan-batch">{selectingPlans && <><label><input type="checkbox" aria-label="全选研究方案" disabled={Boolean(busy) || loading} checked={visibleWorkflows.length>0 && visibleWorkflows.every(v=>planSelection.includes(v.id))} onChange={e=>setPlanSelection(e.target.checked ? visibleWorkflows.map(v=>v.id) : [])}/>全选</label><button type="button" disabled={Boolean(busy) || !visibleWorkflows.some(v=>planSelection.includes(v.id))} onClick={()=>void deleteSelectedPlans()}><Icon name="trash" size={14}/>删除所选（{visibleWorkflows.filter(v=>planSelection.includes(v.id)).length}）</button></>}<button type="button" disabled={Boolean(busy) || loading} onClick={()=>{setSelectingPlans(v=>!v);setPlanSelection([]);}}>{selectingPlans ? "取消多选" : "多选"}</button></div><button type="button" title="刷新我的方案" aria-label="刷新我的方案" disabled={Boolean(busy) || loading} onClick={() => void loadList()}><Icon name="refresh" size={14}/></button></header><div className="workflow-saved-plan-list">{loading ? <p>正在读取我的方案…</p> : visibleWorkflows.length ? visibleWorkflows.map((value) => <article key={value.id}>{selectingPlans && <input className="workflow-plan-checkbox" type="checkbox" aria-label={`选择研究方案 ${value.name}`} checked={planSelection.includes(value.id)} disabled={Boolean(busy)} onChange={e=>setPlanSelection(ids=>e.target.checked ? [...ids,value.id] : ids.filter(id=>id!==value.id))}/>}<button type="button" disabled={Boolean(busy)} onClick={() => void selectWorkflow(value)}><i><Icon name="library" size={15}/></i><span><b>{value.name}</b><small>{value.description || "未填写方案说明"}</small></span><em>v{value.version}</em></button><button type="button" className="workflow-delete" disabled={Boolean(busy)} aria-label={`删除研究方案 ${value.name}`} title="删除方案及任务历史" onClick={() => void deleteWorkflow(value)}><Icon name={busy === `delete:${value.id}` ? "refresh" : "trash"} size={13}/></button></article>) : <div className="workflow-plan-home-empty"><Icon name="library" size={19}/><span><b>暂无已保存方案</b><small>使用模板后会显示在这里。</small></span></div>}</div></section>
         {feedback && <div className="research-guide-feedback"><Icon name="shield" size={13}/><span>{feedback}</span></div>}

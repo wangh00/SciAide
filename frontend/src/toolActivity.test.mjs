@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { readFile } from "node:fs/promises";
 import ts from "typescript";
+import { toolDecisionLabel } from "./retryPresentation.js";
 import { activityDurationLabel, activityTruncationLabel, isSkillToolName, safeToolArguments, toolPresentation, toolResultSummary } from "./toolActivity.js";
 
 test("tool cards stay collapsed during execution and only a new approval opens them", async () => {
@@ -21,7 +22,7 @@ test("tool cards stay collapsed during execution and only a new approval opens t
     dependencies = next;
   };
   const React = { createElement: (type, props, ...children) => ({ type, props, children }) };
-  const deps = { React, useState, useEffect, safeToolArguments, toolPresentation, toolResultSummary,
+  const deps = { React, useState, useEffect, safeToolArguments, toolPresentation, toolResultSummary, toolDecisionLabel,
     activityDurationLabel, activityTruncationLabel, summarizeLocalExecution: () => "", normalizeDisplayText: value => value,
     toolStatusText: {}, Icon: "icon" };
   const Card = new Function(...Object.keys(deps), `${outputText}; return UnifiedToolActivityCard;`)(...Object.values(deps));
@@ -34,6 +35,8 @@ test("tool cards stay collapsed during execution and only a new approval opens t
   for (const status of ["pending", "running", "completed", "failed", "running"]) {
     assert.equal(render({ status }).props["aria-expanded"], false, status);
   }
+  assert.match(JSON.stringify(render({toolName:"builtin.research.workflow.review.gate",status:"failed",errorCode:"RESEARCH_REVIEW_NOT_APPROVED"})),/审查未通过 · 待修改/);
+  assert.doesNotMatch(JSON.stringify(render({toolName:"builtin.research.workflow.review.gate",status:"failed",errorCode:"TOOL_INVOCATION_FAILED",errorMessage:"independent review snapshot is invalid"})),/审查未通过 · 待修改/);
   render({ status: "running" }).props.onClick();
   assert.equal(render({ status: "completed" }).props["aria-expanded"], true);
   render({ status: "completed" }).props.onClick();

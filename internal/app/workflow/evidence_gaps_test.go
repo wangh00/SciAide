@@ -111,7 +111,7 @@ func TestEvidenceGapSchemaAndInstructionsSurvivePhaseProjection(t *testing.T) {
 	}
 }
 
-func TestReportAbsenceCannotBypassReviewByOmittingGapList(t *testing.T) {
+func TestReportAbsenceRemainsSemanticReviewWithoutKeywordHostVeto(t *testing.T) {
 	in, out := acceptanceFixture(t)
 	v := decodeObject(in)
 	criteria, _ := researchAcceptanceCriteria(mustJSON(v["researchContract"]))
@@ -119,8 +119,8 @@ func TestReportAbsenceCannotBypassReviewByOmittingGapList(t *testing.T) {
 	v["acceptanceCriteria"] = appendEvidenceGapCriterion(criteria)
 	v["context"] = map[string]any{"markdown": "| 脱落率 | 未报告 |"}
 	out["acceptanceChecks"] = []ResearchAcceptanceCheck{{"criterion-1", "met", "table"}, {"criterion-2", "met", "table"}, {"criterion-3", "met", "gaps empty"}}
-	if err := validateResearchAcceptance(mustJSON(out), mustJSON(v)); err == nil {
-		t.Fatal("absence escaped with no gap declaration")
+	if err := validateResearchAcceptance(mustJSON(out), mustJSON(v)); err != nil {
+		t.Fatal("host must not establish a scientific claim from a keyword", err)
 	}
 	out["approved"] = false
 	out["requiredCorrections"] = []string{"补查脱落率，不将未找到写成未报告"}
@@ -170,7 +170,7 @@ func TestNewReviewBindsIndependentAbsenceGuard(t *testing.T) {
 		t.Fatal(err)
 	}
 	v := decodeObject(bound)
-	if v["requireEvidenceGapCheck"] != true || v["requireOriginalDelivery"] != true || len(v["unsupportedAbsenceClaims"].([]any)) != 1 || len(v["acceptanceCriteria"].([]any)) != 3 {
+	if v["requireEvidenceGapCheck"] != true || v["requireOriginalDelivery"] != true || len(v["unsupportedAbsenceClaims"].([]any)) != 0 || len(v["absenceClaimCandidates"].([]any)) != 1 || len(v["acceptanceCriteria"].([]any)) != 3 {
 		t.Fatal(string(bound))
 	}
 }

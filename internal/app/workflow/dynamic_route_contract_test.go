@@ -48,6 +48,28 @@ func TestDynamicQuestionSchemaRemainsValidJSON(t *testing.T) {
 	}
 }
 
+func TestComputationOnlyRouteDoesNotSearchUnrelatedProjectLiterature(t *testing.T) {
+	template, _, _, err := dynamicResearchRouteTemplate(starterDataRoute(), ResearchStarterContext{ResearchIdea: "analysis only", StageCatalog: dynamicResearchStageCatalog()}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, node := range template.Definition.Nodes {
+		if node.Kind != NodeAgentStage {
+			continue
+		}
+		if slices.Contains(node.AllowedTools, "builtin.knowledge.search") {
+			t.Fatalf("data-only %s can search unrelated papers", node.ID)
+		}
+		if !strings.Contains(node.PromptVersion, "-ds1") || !strings.Contains(node.Prompt, "未检验假设") || !strings.Contains(node.Prompt, "不代表用户接受了有限证据初稿") {
+			t.Fatal(node.Prompt)
+		}
+		// Reading method resources and software documentation remains possible.
+		if !slices.Contains(node.AllowedTools, "builtin.resource.open") || !slices.Contains(node.AllowedTools, "builtin.web.open") {
+			t.Fatalf("lost method/documentation access: %s", node.ID)
+		}
+	}
+}
+
 func TestDataDeliveryReceivesActualImplementationAndResults(t *testing.T) {
 	route := starterDataRoute()
 	route.StageIDs = append(route.StageIDs[:len(route.StageIDs)-2], "report_drafting", "independent_review", "delivery_gate")
@@ -75,6 +97,20 @@ func TestDataDeliveryReceivesActualImplementationAndResults(t *testing.T) {
 			if !found {
 				t.Errorf("missing %s -> %s.%s", source.node, target, source.input)
 			}
+		}
+	}
+}
+
+func TestDataRouteScopeGuidanceDoesNotRelabelMixedResearchAsComputationOnly(t *testing.T) {
+	route := starterDataRoute()
+	starter := ResearchStarterContext{ResearchIdea: "mixed analysis", StageCatalog: dynamicResearchStageCatalog(), SelectedMaterials: []attachment.MessageReference{{AttachmentID: "paper", OriginalName: "paper.pdf"}}}
+	template, _, _, err := dynamicResearchRouteTemplate(route, starter, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, node := range template.Definition.Nodes {
+		if strings.Contains(node.PromptVersion, "-ds1") || strings.Contains(node.Prompt, "没有文献证据阶段") {
+			t.Fatalf("mixed material route mislabeled: %s", node.ID)
 		}
 	}
 }
@@ -191,12 +227,15 @@ func TestDynamicRouteWithOnlySelectedMaterialsSkipsDiscoveryButKeepsEvidenceChai
 	for _, node := range template.Definition.Nodes {
 		nodes = append(nodes, node.ID)
 		if node.ID == "independent_review" {
+			if !slices.Contains(node.AllowedTools, "builtin.knowledge.read") || !slices.Contains(node.AllowedTools, "builtin.document.inspect") || !slices.Contains(node.AllowedTools, "builtin.attachment.list") {
+				t.Fatal("new review lost selected-source read adapters")
+			}
 			for _, name := range node.AllowedTools {
 				if name == "builtin.knowledge.search" || name == "builtin.workspace.read_text" || name == "builtin.workspace.list" {
 					t.Fatal("local review gained unscoped material access", name)
 				}
 			}
-			if node.PromptVersion != dynamicResearchReviewVersion {
+			if node.PromptVersion != dynamicResearchReviewVersion+"-"+focusedReviewVersion {
 				t.Fatal("new review contract not frozen")
 			}
 		}

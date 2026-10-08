@@ -104,6 +104,7 @@ func (s *StarterService) startReplannedResearch(ctx context.Context, prior RunDe
 	}
 	inputs, err := json.Marshal(map[string]any{"starter_context": ResearchStarterContext{
 		SelectedMaterials: priorInput.Starter.SelectedMaterials,
+		Capabilities:      researchCapabilities(),
 		ResearchIdea:      idea, ResourceSnapshot: snapshot, StageCatalog: dynamicResearchStageCatalog(), PlannerVersion: dynamicResearchPlannerVersion,
 		ClarificationAnswers: answers, PriorStarterRunID: prior.Run.ID,
 	}})

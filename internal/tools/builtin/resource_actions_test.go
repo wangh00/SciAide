@@ -357,3 +357,53 @@ func TestIssuedResourceActionsSurviveDiscoveryWindow(t *testing.T) {
 		t.Fatal("discovery labels are unbounded")
 	}
 }
+
+func TestResourceInterfaceExposesOnlyExecutableOperationTypes(t *testing.T) {
+	ctx := context.Background()
+	r, repo, resolver, req := resourceFixture(t)
+	if err := os.WriteFile(filepath.Join(resolver.root, "data.txt"), []byte("fixture"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	view, err := r.Prepare(ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, def := range view.Definitions {
+		if def.QualifiedName == resource.SearchTool {
+			t.Fatal("no search resources, but search tool advertised")
+		}
+	}
+	if len(view.OpenIDs) == 0 || len(view.SearchIDs) != 0 || !strings.Contains(view.Context, "No search action is available") {
+		t.Fatal("missing usable-resource explanation")
+	}
+	open := resourceActionByLabel(t, repo, "读取文件")
+	_, err = r.SearchTool().Invoke(ctx, tool.Invocation{RunID: req.RunID, SubjectKind: tool.SubjectChatRun, ProjectID: req.ProjectID, ResearchTaskID: resolver.task, WorkspaceRoot: resolver.root, Arguments: resourceArgs(map[string]string{"actionId": open.ID, "query": "fixture"})})
+	if err == nil || !strings.Contains(err.Error(), resource.OpenTool) || !strings.Contains(err.Error(), "类型不匹配") {
+		t.Fatal("mismatch hidden", err)
+	}
+	// Search can be a child of a lazy menu. Opening discovery must not remove
+	// that capability just because no search action has been issued yet.
+	session, _, _ := repo.GetSession(ctx, req.RunID)
+	menu := resource.NewAction(session.Scope, resource.Seed{Kind: "menu", Label: "discover search", Children: []resource.Seed{{Kind: "document_search", Label: "search fixture", Search: true}}}, true, r.now())
+	if err := repo.PutActions(ctx, session.Scope, []resource.Action{menu}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := invokeResource(t, r, resolver, menu.ID); err != nil {
+		t.Fatal(err)
+	}
+	view, err = r.Prepare(ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	search := resourceActionByLabel(t, repo, "search fixture")
+	if !view.Allows(resource.SearchTool, resourceArgs(map[string]string{"actionId": search.ID, "query": "fixture"})) {
+		t.Fatal("new child search unavailable")
+	}
+	found := false
+	for _, def := range view.Definitions {
+		found = found || def.QualifiedName == resource.SearchTool
+	}
+	if !found {
+		t.Fatal("actual search tool omitted")
+	}
+}

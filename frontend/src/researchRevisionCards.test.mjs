@@ -1,13 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {readFile} from 'node:fs/promises';
-import {createRequire} from 'node:module';
-import vm from 'node:vm';
-import ts from 'typescript';
 import React from 'react';
 import {renderToStaticMarkup} from 'react-dom/server';
+import {loadTsx} from './testTsxLoader.mjs';
 const source=await readFile(new URL('./ResearchRevisionCards.tsx',import.meta.url),'utf8');
-const exports={};vm.runInNewContext(ts.transpileModule('import * as React from "react";\n'+source,{compilerOptions:{jsx:ts.JsxEmit.React,module:ts.ModuleKind.CommonJS}}).outputText,{exports,require:createRequire(import.meta.url)});
+const exports=loadTsx(new URL('./ResearchRevisionCards.tsx',import.meta.url));
 const proposal={id:'new',status:'pending',canConfirm:true,nodeId:'method_implementation',label:'实现分析方法',summary:'修复图中文字',changes:['保留统计方法','修复中文字体'],reason:'需要修改绘图代码',affectedStages:['实现分析方法','执行可复现分析','报告撰写','独立审查','交付门禁'],repeatsSideEffects:true};
 const render=(proposals=[proposal],busy=false)=>renderToStaticMarkup(React.createElement(exports.ResearchRevisionCards,{proposals,busy,conversationId:'conversation',confirm:()=>{}}));
 test('confirmation displays complete negotiated changes and host replay scope',()=>{
@@ -34,4 +32,33 @@ test('generation and local mutation block confirmation',()=>{
 });
 test('new natural-language turns immediately invalidate current cards',()=>{
  assert.match(source,/research-discussion-sent/);assert.match(source,/invalidated\.has\(proposal.id\)/);
+});
+
+ test('reused stages are visible without a separate workspace',()=>{
+ const html=render([{...proposal,reusedStages:['数据预检','证据整理']}]);
+ assert.match(html,/沿用已有结果/);assert.match(html,/数据预检、证据整理/);assert.match(html,/这些阶段不重新执行/);
+ assert.doesNotMatch(render(),/沿用已有结果/);
+ });
+
+test('data update names the complete confirmed set and preserves old versions',()=>{
+ const html=render([{...proposal,nodeId:'data_preflight',dataVersion:{previousPaths:['research-inputs/old.csv'],files:[{relativePath:'research-inputs/keep.csv',name:'keep.csv',sha256:'hash'},{relativePath:'research-inputs/new.csv',name:'new.csv',sha256:'new-hash',attachmentId:'sent'}]}}]);
+ for(const text of ['更新前的数据','research-inputs/old.csv','确认后使用的完整数据集合','keep.csv','new.csv','沿用','对话上传','旧数据及旧成果保留','不会自动拼接']) assert.ok(html.includes(text));
+ assert.match(render([{...proposal,nodeId:'data_preflight'}]),/沿用当前已确认的数据版本/);
+});
+
+test('source reference is named without claiming direct execution or data replacement',()=>{
+ const html=render([{...proposal,sourceVersion:{files:[{relativePath:'research-inputs/method.py',name:'method.py',sha256:'source-hash',attachmentId:'sent'}]}}]);
+ for(const text of ['源码参考更新','method.py','source-hash','不会直接运行上传文件','表格数据集合不因此改变','旧代码和旧结果保留']) assert.ok(html.includes(text));
+ assert.match(render([{...proposal,sourceVersion:{files:[]}}]),/取消当前源码参考/);
+});
+
+test('pending proposal shares the real frame and keeps full changes in a labelled disclosure',()=>{
+ const html=render([{...proposal,changes:['literal <script>not executable</script>','完整要求\nSHA-256: identity']}]);
+ assert.match(html,/research-card research-card--pending/);
+ assert.match(html,/完整修改要求/);assert.match(html,/2 项 · 确认前请核对/);
+ assert.doesNotMatch(html,/<details[^>]*class="research-revision-changes"[^>]*open/);
+ assert.match(html,/&lt;script&gt;not executable&lt;\/script&gt;/);
+ assert.match(html,/完整要求\nSHA-256: identity/);
+ assert.equal((html.match(/<button/g)||[]).length,1);
+ assert.ok(html.indexOf('返修执行范围') < html.indexOf('完整修改要求'));
 });

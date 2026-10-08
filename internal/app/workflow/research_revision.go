@@ -38,15 +38,21 @@ func researchRevisionCandidates(detail RunDetail, producer, gate Step) []Researc
 	if n := nodes["evidence_screening"]; n.Kind == NodeAgentStage && n.PromptVersion == selectedEvidenceVersion {
 		allowed[n.ID] = true
 	}
+	selection := evidenceReselectionStep(detail)
+	if selection != nil {
+		allowed[selection.NodeID] = true
+	}
 	result := []ResearchRevisionTarget{}
 	for index := len(detail.Steps) - 1; index >= 0; index-- {
 		step := detail.Steps[index]
 		node := nodes[step.NodeID]
-		if !allowed[step.NodeID] || step.Status != StepCompleted || step.Ordinal > producer.Ordinal || (node.Kind != NodeAIAnalysis && node.Kind != NodeAgentStage) || !workflowNodeReaches(detail.Run.Compilation, step.NodeID, gate.NodeID) {
+		if !allowed[step.NodeID] || step.Status != StepCompleted || step.Ordinal > producer.Ordinal || (node.Kind != NodeAIAnalysis && node.Kind != NodeAgentStage && (selection == nil || step.ID != selection.ID)) || !workflowNodeReaches(detail.Run.Compilation, step.NodeID, gate.NodeID) {
 			continue
 		}
 		target := ResearchRevisionTarget{NodeID: step.NodeID, Label: nonEmptyMessage(node.Name, step.NodeID)}
 		for _, later := range detail.Steps {
+			// Only this interval is reset. Queued publication after the failed
+			// gate will execute for the first time, not repeat a side effect.
 			if later.Ordinal >= step.Ordinal && later.Ordinal <= gate.Ordinal && nodes[later.NodeID].SideEffect {
 				target.RepeatsSideEffects = true
 			}
@@ -78,7 +84,11 @@ func reviewRevisionFromTarget(detail RunDetail, gate Step, targetID string) (*St
 		return producer, review, revision, nil
 	}
 	target := findStepByNode(detail.Steps, targetID)
-	prior, err := outputPort(target.Output, "analysis")
+	port := "analysis"
+	if compilationNodeMap(detail.Run.Compilation)[target.NodeID].Kind == NodeCitationSelection {
+		port = "citations"
+	}
+	prior, err := outputPort(target.Output, port)
 	if err != nil {
 		return nil, nil, reviewRevision{}, err
 	}
