@@ -19,7 +19,14 @@ import (
 	"github.com/wangh00/SciAide/internal/id"
 )
 
-type WorkflowRuntimeRepository struct{ db *sql.DB }
+type WorkflowRuntimeRepository struct {
+	db               *sql.DB
+	deletionObserver func(string, string, time.Duration)
+}
+
+func (r *WorkflowRuntimeRepository) SetDeletionObserver(observer func(string, string, time.Duration)) {
+	r.deletionObserver = observer
+}
 
 func NewWorkflowRuntimeRepository(db *sql.DB) *WorkflowRuntimeRepository {
 	return &WorkflowRuntimeRepository{db: db}
@@ -44,6 +51,14 @@ func (r *WorkflowRuntimeRepository) CreateResearchRun(ctx context.Context, run w
 		return err
 	}
 	defer tx.Rollback()
+	if strings.HasPrefix(run.CreationKey, "research-route:") {
+		parts := strings.SplitN(strings.TrimPrefix(run.CreationKey, "research-route:"), ":", 2)
+		if len(parts) == 2 {
+			if err := validateResearchDiscussionAdoption(ctx, tx, parts[0]); err != nil {
+				return err
+			}
+		}
+	}
 	if researchConversation.ID == "" || researchConversation.ID != run.ConversationID || researchConversation.ProjectID != run.ProjectID || researchConversation.PermissionMode != run.PermissionMode {
 		return fmt.Errorf("invalid research conversation binding")
 	}
@@ -98,6 +113,13 @@ func (r *WorkflowRuntimeRepository) GetRunByCreationKey(ctx context.Context, pro
 }
 
 func (r *WorkflowRuntimeRepository) GetRun(ctx context.Context, projectID, runID string) (workflow.RunDetail, error) {
+	// Read the fence BEFORE the run/steps. Never derive it from the later
+	// event list: a retry+cancel ABA during these reads could otherwise attach
+	// a fresh sequence to stale state and make an old retry look current.
+	var retryEventSequence int64
+	if err := r.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(e.sequence),0) FROM workflow_events e JOIN workflow_runs wr ON wr.id=e.workflow_run_id WHERE wr.project_id=? AND wr.id=?`, strings.TrimSpace(projectID), strings.TrimSpace(runID)).Scan(&retryEventSequence); err != nil {
+		return workflow.RunDetail{}, err
+	}
 	run, err := scanWorkflowRun(r.db.QueryRowContext(ctx, workflowRunSelect+` WHERE wr.project_id=? AND wr.id=?`, strings.TrimSpace(projectID), strings.TrimSpace(runID)))
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -117,6 +139,10 @@ func (r *WorkflowRuntimeRepository) GetRun(ctx context.Context, projectID, runID
 	if err != nil {
 		return workflow.RunDetail{}, err
 	}
+	decisions, err := r.listHumanDecisions(ctx, run.ID)
+	if err != nil {
+		return workflow.RunDetail{}, err
+	}
 	var artifactCount int
 	if err := r.db.QueryRowContext(ctx, `
 		SELECT COUNT(DISTINCT version.artifact_id)
@@ -130,11 +156,36 @@ func (r *WorkflowRuntimeRepository) GetRun(ctx context.Context, projectID, runID
 	if err != nil {
 		return workflow.RunDetail{}, err
 	}
-	proposals, err := r.ListResearchRevisionProposals(ctx, run.ID)
+	proposals, err := r.listResearchRevisionProposals(ctx, run.ID)
 	if err != nil {
 		return workflow.RunDetail{}, err
 	}
-	return workflow.RunDetail{Run: run, Steps: steps, Events: events, PendingApprovals: []permission.Approval{}, AIExecutions: aiExecutions, ArtifactCount: artifactCount, RegisteredDeliverables: registeredDeliverables, RevisionProposals: proposals}, nil
+	detail := workflow.RunDetail{RetryEventSequence: retryEventSequence, Run: run, Steps: steps, Events: events, HumanDecisions: decisions, PendingApprovals: []permission.Approval{}, AIExecutions: aiExecutions, ArtifactCount: artifactCount, RegisteredDeliverables: registeredDeliverables}
+	detail.RevisionProposals = workflow.ProjectResearchRevisionProposals(detail, proposals)
+	return detail, nil
+}
+
+func (r *WorkflowRuntimeRepository) listHumanDecisions(ctx context.Context, runID string) ([]workflow.HumanDecision, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT id,workflow_run_id,workflow_step_id,decision_kind,attempt,approved,note,context_json,created_at FROM workflow_human_decisions WHERE workflow_run_id=? ORDER BY created_at,id`, runID)
+	if err != nil {
+		return nil, fmt.Errorf("read Workflow human decisions: %w", err)
+	}
+	defer rows.Close()
+	decisions := []workflow.HumanDecision{}
+	for rows.Next() {
+		var decision workflow.HumanDecision
+		var contextText, createdAt string
+		if err := rows.Scan(&decision.ID, &decision.WorkflowRunID, &decision.WorkflowStepID, &decision.Kind, &decision.Attempt, &decision.Approved, &decision.Note, &contextText, &createdAt); err != nil {
+			return nil, err
+		}
+		decision.Context = json.RawMessage(contextText)
+		decision.CreatedAt, err = parseTime(createdAt)
+		if err != nil {
+			return nil, err
+		}
+		decisions = append(decisions, decision)
+	}
+	return decisions, rows.Err()
 }
 
 func (r *WorkflowRuntimeRepository) listRegisteredWorkflowDeliverables(ctx context.Context, workflowRunID string) ([]string, error) {
@@ -253,7 +304,17 @@ func (r *WorkflowRuntimeRepository) WaitAgentStage(ctx context.Context, runID, s
 }
 
 func (r *WorkflowRuntimeRepository) RecordEvent(ctx context.Context, event workflow.RuntimeEvent) error {
-	return r.transition(ctx, event.WorkflowRunID, func(*sql.Tx) error { return nil }, event)
+	return r.transition(ctx, event.WorkflowRunID, func(tx *sql.Tx) error {
+		if event.Type == "research.route_adopted" {
+			var payload struct {
+				FormalRunID string `json:"formalRunId"`
+			}
+			if json.Unmarshal(event.Payload, &payload) == nil && payload.FormalRunID == "" {
+				return validateResearchDiscussionAdoption(ctx, tx, event.WorkflowRunID)
+			}
+		}
+		return nil
+	}, event)
 }
 
 func (r *WorkflowRuntimeRepository) GetAIExecutionForStep(ctx context.Context, stepID string, attempt int) (workflow.AIExecution, bool, error) {
@@ -458,8 +519,11 @@ func (r *WorkflowRuntimeRepository) RejectDecision(ctx context.Context, decision
 	}, event)
 }
 
-func (r *WorkflowRuntimeRepository) ResetStepForRetry(ctx context.Context, runID, stepID string, decision *workflow.HumanDecision, at time.Time, event workflow.RuntimeEvent) error {
+func (r *WorkflowRuntimeRepository) ResetStepForRetry(ctx context.Context, runID, stepID string, decision *workflow.HumanDecision, at time.Time, event workflow.RuntimeEvent, guard workflow.RetryGuard) error {
 	return r.transition(ctx, runID, func(tx *sql.Tx) error {
+		if err := checkRetryGuard(ctx, tx, runID, stepID, "", guard); err != nil {
+			return err
+		}
 		var runStatus, stepStatus, stepKind string
 		var currentOrdinal, ordinal int
 		if err := tx.QueryRowContext(ctx, `SELECT r.status,r.current_step_ordinal,s.status,s.node_kind,s.ordinal FROM workflow_runs r JOIN workflow_steps s ON s.workflow_run_id=r.id WHERE r.id=? AND s.id=?`, runID, stepID).Scan(&runStatus, &currentOrdinal, &stepStatus, &stepKind, &ordinal); err != nil {
@@ -470,8 +534,9 @@ func (r *WorkflowRuntimeRepository) ResetStepForRetry(ctx context.Context, runID
 				return fmt.Errorf("cancelled Workflow retry must target the current AI step")
 			}
 			// Cancellation also marks never-started downstream nodes cancelled.
-			// Restore only those untouched nodes; retain all prior results/attempts.
-			if _, err := tx.ExecContext(ctx, `UPDATE workflow_steps SET status='queued',error_code='',error_message='',completed_at=NULL,updated_at=? WHERE workflow_run_id=? AND ordinal>? AND status='cancelled' AND attempt=0 AND tool_call_id IS NULL`, formatTime(at), runID, ordinal); err != nil {
+			// Restore only nodes not started in this generation; historical attempt
+			// counts survive upstream revisions and must not strand their queued suffix.
+			if _, err := tx.ExecContext(ctx, `UPDATE workflow_steps SET status='queued',error_code='',error_message='',completed_at=NULL,updated_at=? WHERE workflow_run_id=? AND ordinal>? AND status='cancelled' AND started_at IS NULL AND input_sha256='' AND input_json='{}' AND output_json='{}' AND tool_call_id IS NULL AND idempotency_key=''`, formatTime(at), runID, ordinal); err != nil {
 				return err
 			}
 		}
@@ -496,8 +561,14 @@ func (r *WorkflowRuntimeRepository) ResetStepForRetry(ctx context.Context, runID
 	}, event)
 }
 
-func (r *WorkflowRuntimeRepository) ResetStepsForUpstreamRetry(ctx context.Context, runID, producerStepID, failedStepID string, decision *workflow.HumanDecision, at time.Time, event workflow.RuntimeEvent) error {
+func (r *WorkflowRuntimeRepository) ResetStepsForUpstreamRetry(ctx context.Context, runID, producerStepID, failedStepID string, decision *workflow.HumanDecision, at time.Time, event workflow.RuntimeEvent, guard workflow.RetryGuard) error {
 	return r.transition(ctx, runID, func(tx *sql.Tx) error {
+		if err := checkRetryGuard(ctx, tx, runID, failedStepID, producerStepID, guard); err != nil {
+			return err
+		}
+		if err := freezeDesignReviewWriteSnapshot(ctx, tx, runID, event); err != nil {
+			return err
+		}
 		var producerOrdinal, failedOrdinal int
 		var producerStatus, failedStatus string
 		if err := tx.QueryRowContext(ctx, `SELECT ordinal,status FROM workflow_steps WHERE id=? AND workflow_run_id=?`, producerStepID, runID).Scan(&producerOrdinal, &producerStatus); err != nil {
@@ -682,11 +753,26 @@ func (r *WorkflowRuntimeRepository) RequestCancel(ctx context.Context, runID str
 
 func (r *WorkflowRuntimeRepository) DeleteRun(ctx context.Context, projectID, runID string) error {
 	projectID, runID = strings.TrimSpace(projectID), strings.TrimSpace(runID)
+	started, phaseStarted := time.Now(), time.Now()
+	phase := "wait_for_transaction"
+	mark := func(next string) {
+		if r.deletionObserver != nil {
+			r.deletionObserver(runID, phase, time.Since(phaseStarted))
+		}
+		phase, phaseStarted = next, time.Now()
+	}
+	defer func() {
+		mark("finished")
+		if r.deletionObserver != nil {
+			r.deletionObserver(runID, "total", time.Since(started))
+		}
+	}()
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin Workflow Run deletion: %w", err)
 	}
 	defer tx.Rollback()
+	mark("check_task_and_active_runs")
 	var selected workflow.Run
 	if err := tx.QueryRowContext(ctx, `
 		SELECT id,creation_key,COALESCE(research_task_id,''),workflow_purpose,status
@@ -711,7 +797,7 @@ func (r *WorkflowRuntimeRepository) DeleteRun(ctx context.Context, projectID, ru
 		SELECT wr.id,wr.creation_key,COALESCE(wr.research_task_id,''),wr.workflow_purpose,wr.status,COALESCE(wc.conversation_id,'')
 		FROM workflow_runs wr
 		LEFT JOIN workflow_conversations wc ON wc.workflow_run_id=wr.id
-		WHERE wr.project_id=?`, projectID)
+		WHERE wr.project_id=? AND (wr.research_task_id=? OR ((wr.research_task_id IS NULL OR wr.research_task_id='') AND wr.id=?))`, projectID, taskID, taskID)
 	if err != nil {
 		return fmt.Errorf("list related Workflow Runs: %w", err)
 	}
@@ -758,6 +844,7 @@ func (r *WorkflowRuntimeRepository) DeleteRun(ctx context.Context, projectID, ru
 		}
 	}
 	for _, item := range related {
+		mark("delete_workflow_graph")
 		result, err := tx.ExecContext(ctx, `DELETE FROM workflow_runs WHERE project_id=? AND id=? AND status IN ('completed','failed','cancelled','interrupted')`, projectID, item.id)
 		if err != nil {
 			return fmt.Errorf("delete Workflow Run: %w", err)
@@ -770,10 +857,12 @@ func (r *WorkflowRuntimeRepository) DeleteRun(ctx context.Context, projectID, ru
 		if item.conversationID == "" {
 			continue
 		}
+		mark("delete_conversation_graph")
 		if _, err := tx.ExecContext(ctx, `DELETE FROM conversations WHERE id=?`, item.conversationID); err != nil {
 			return fmt.Errorf("delete research conversation: %w", err)
 		}
 	}
+	mark("commit")
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit Workflow Run deletion: %w", err)
 	}

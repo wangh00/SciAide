@@ -2,17 +2,18 @@ package builtin
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
 
 	"github.com/wangh00/SciAide/internal/app/research"
 	"github.com/wangh00/SciAide/internal/app/researchworkflow"
+	"github.com/wangh00/SciAide/internal/app/reviewcontract"
 	"github.com/wangh00/SciAide/internal/app/tool"
 	"github.com/wangh00/SciAide/internal/platform/localexec"
+	"github.com/wangh00/SciAide/internal/researchsources"
 )
 
 const (
@@ -67,75 +68,21 @@ func (*ResearchWorkflowReviewGate) Definition(context.Context) (tool.Definition,
 func (*ResearchWorkflowReviewGate) Invoke(_ context.Context, invocation tool.Invocation) (tool.Result, error) {
 	var args struct {
 		Subject json.RawMessage `json:"subject"`
-		Review  struct {
-			Approved            bool     `json:"approved"`
-			ReviewedInputSHA256 string   `json:"reviewedInputSha256"`
-			VerifiedClaims      []string `json:"verifiedClaims"`
-			UnsupportedClaims   []string `json:"unsupportedClaims"`
-			CitationIssues      []string `json:"citationIssues"`
-			NumericIssues       []string `json:"numericIssues"`
-			MethodIssues        []string `json:"methodIssues"`
-			RequiredCorrections []string `json:"requiredCorrections"`
-			Confidence          string   `json:"confidence"`
-			Limitations         []string `json:"limitations"`
-		} `json:"review"`
+		Review  json.RawMessage `json:"review"`
 	}
 	if err := json.Unmarshal(invocation.Arguments, &args); err != nil {
 		return tool.Result{}, err
 	}
-	if len(args.Subject) == 0 || !json.Valid(args.Subject) {
-		return tool.Result{}, tool.NewUserFacingError("独立审查的冻结输入无效；请重新执行审查阶段")
-	}
-	// New Workflow runs provide the complete stage input that the independent
-	// review actually saw. Hash that exact frozen JSON. The envelope fallback
-	// preserves direct callers created before this field existed.
-	snapshot := args.Subject
-	var subjectObject map[string]json.RawMessage
-	if json.Unmarshal(args.Subject, &subjectObject) != nil || subjectObject == nil {
-		return tool.Result{}, tool.NewUserFacingError("independent review snapshot is invalid")
-	}
-	if _, hasContext := subjectObject["context"]; !hasContext {
-		snapshot, _ = json.Marshal(map[string]json.RawMessage{"context": args.Subject})
-	}
-	if len(snapshot) > 0 && subjectObject["context"] == nil {
-		var object map[string]json.RawMessage
-		if !json.Valid(snapshot) || json.Unmarshal(snapshot, &object) != nil || object == nil {
-			return tool.Result{}, tool.NewUserFacingError("独立审查的冻结输入快照无效，已阻止交付；请重新执行审查阶段")
+	receipt, err := reviewcontract.Evaluate(args.Subject, args.Review)
+	if err != nil {
+		var rejected *reviewcontract.Rejected
+		if errors.As(err, &rejected) {
+			return tool.Result{}, tool.BusinessDecisionError{Code: "RESEARCH_REVIEW_NOT_APPROVED", Message: rejected.Error()}
 		}
-		contextSnapshot, ok := object["context"]
-		if !ok || !jsonSnapshotsEqual(contextSnapshot, args.Subject) {
-			return tool.Result{}, tool.NewUserFacingError("独立审查的冻结结果与当前交付结果不一致，已阻止交付；请重新执行审查阶段")
-		}
-	} else if subjectObject["context"] == nil {
-		snapshot, _ = json.Marshal(map[string]json.RawMessage{"context": args.Subject})
+		return tool.Result{}, reportPublicationError{err, "交付核验的审查输入绑定失败。这是技术错误，不代表科研内容被否决；报告和审查已保留，请检查诊断后重试交付核验。"}
 	}
-	digest := sha256.Sum256(snapshot)
-	expected := hex.EncodeToString(digest[:])
-	if args.Review.ReviewedInputSHA256 != expected {
-		return tool.Result{}, tool.NewUserFacingError("独立审查没有覆盖当前冻结结果，已阻止交付；请重新执行审查阶段")
-	}
-	issues := len(args.Review.UnsupportedClaims) + len(args.Review.CitationIssues) + len(args.Review.NumericIssues) + len(args.Review.MethodIssues)
-	corrections := len(args.Review.RequiredCorrections)
-	if !args.Review.Approved || issues > 0 || corrections > 0 {
-		return tool.Result{}, tool.BusinessDecisionError{Code: "RESEARCH_REVIEW_NOT_APPROVED", Message: fmt.Sprintf("独立审查未通过：审查记录列出 %d 条分类意见，并归纳为 %d 条必须修正项；当前结果不会交付", issues, corrections)}
-	}
-	reviewBytes, _ := json.Marshal(args.Review)
-	reviewDigest := sha256.Sum256(reviewBytes)
-	structured, _ := json.Marshal(map[string]any{
-		"approved": true, "reviewedInputSha256": expected, "reviewSha256": hex.EncodeToString(reviewDigest[:]),
-		"confidence": args.Review.Confidence, "verifiedClaimCount": len(args.Review.VerifiedClaims), "limitations": nonNilStrings(args.Review.Limitations),
-	})
+	structured, _ := json.Marshal(receipt)
 	return tool.Result{Status: tool.ResultSuccess, Text: "Independent review passed the deterministic delivery gate for the exact frozen result.", Structured: structured, Artifacts: []tool.ArtifactRef{}, Citations: []tool.CitationRef{}}, nil
-}
-
-func jsonSnapshotsEqual(left, right json.RawMessage) bool {
-	var leftValue, rightValue any
-	if json.Unmarshal(left, &leftValue) != nil || json.Unmarshal(right, &rightValue) != nil {
-		return false
-	}
-	leftJSON, leftErr := json.Marshal(leftValue)
-	rightJSON, rightErr := json.Marshal(rightValue)
-	return leftErr == nil && rightErr == nil && string(leftJSON) == string(rightJSON)
 }
 
 func nonNilStrings(values []string) []string {
@@ -145,22 +92,15 @@ func nonNilStrings(values []string) []string {
 	return values
 }
 
-var researchWorkflowNetworkPermissions = []tool.PermissionRequirement{
-	{Kind: tool.PermissionNetworkDomain, Resource: "api.openalex.org:443"},
-	{Kind: tool.PermissionNetworkDomain, Resource: "api.crossref.org:443"},
-	{Kind: tool.PermissionNetworkDomain, Resource: "export.arxiv.org:443"},
-	{Kind: tool.PermissionNetworkDomain, Resource: "eutils.ncbi.nlm.nih.gov:443"},
-	{Kind: tool.PermissionNetworkDomain, Resource: "www.ebi.ac.uk:443"},
-	{Kind: tool.PermissionNetworkDomain, Resource: "api.semanticscholar.org:443"},
-}
+var researchWorkflowNetworkPermissions = tool.ResearchSearchNetworkPermissions()
 
 var researchFullTextNetworkPermissions = tool.ResearchMaterialNetworkPermissions()
 
 func (*ResearchWorkflowSearch) Definition(context.Context) (tool.Definition, error) {
-	d := tool.Definition{QualifiedName: ResearchWorkflowSearchName, Version: "7", Risk: tool.RiskModerate, Idempotent: true,
-		Description:  "Search public scholarly databases and persist the normalized, deduplicated candidates in the current project. Results remain untrusted discovery data until selected, imported, indexed, and searched locally.",
+	d := tool.Definition{QualifiedName: ResearchWorkflowSearchName, Version: "9", Risk: tool.RiskModerate, Idempotent: true,
+		Description:  "Search public scholarly databases and persist the normalized, deduplicated candidates in the current project. Results remain untrusted discovery data until selected, imported, indexed, and searched locally. CORE requires explicit sourceIds selection and only returns metadata; it is never added to default searches.",
 		Permissions:  append([]tool.PermissionRequirement(nil), researchWorkflowNetworkPermissions...),
-		InputSchema:  json.RawMessage(`{"type":"object","additionalProperties":false,"required":["query"],"properties":{"query":{"type":"string","minLength":1,"maxLength":500},"queries":{"type":"array","maxItems":4,"uniqueItems":true,"items":{"type":"string","minLength":1,"maxLength":500}},"sourceIds":{"type":"array","maxItems":12,"uniqueItems":true,"items":{"type":"string","enum":["openalex","crossref","arxiv","pubmed","europepmc","semantic-scholar"]}},"offset":{"type":"integer","minimum":0,"maximum":150},"publicationYears":{"type":"object","additionalProperties":false,"required":["from","to"],"properties":{"from":{"type":"integer","minimum":0,"maximum":3000},"to":{"type":"integer","minimum":0,"maximum":3000}}},"referencesOnly":{"type":"boolean"},"limit":{"type":"integer","minimum":1,"maximum":50}}}`),
+		InputSchema:  json.RawMessage(`{"type":"object","additionalProperties":false,"required":["query"],"properties":{"query":{"type":"string","minLength":1,"maxLength":500},"queries":{"type":"array","maxItems":4,"uniqueItems":true,"items":{"type":"string","minLength":1,"maxLength":500}},"sourceIds":{"type":"array","maxItems":12,"uniqueItems":true,"items":{"type":"string","enum":` + researchSourceIDsJSON + `}},"offset":{"type":"integer","minimum":0,"maximum":150},"publicationYears":{"type":"object","additionalProperties":false,"required":["from","to"],"properties":{"from":{"type":"integer","minimum":0,"maximum":3000},"to":{"type":"integer","minimum":0,"maximum":3000}}},"referencesOnly":{"type":"boolean"},"limit":{"type":"integer","minimum":1,"maximum":50}}}`),
 		OutputSchema: json.RawMessage(`{"type":"object","additionalProperties":false,"required":["queryId","queryIds","queryText","queries","candidates","sources","partial","searchErrors"],"properties":{"queryId":{"type":"string"},"queryIds":{"type":"array","items":{"type":"string"}},"queryText":{"type":"string"},"queries":{"type":"array","items":{"type":"string"}},"candidates":{"type":"array","items":{"type":"object"}},"candidateIds":{"type":"array","items":{"type":"string"}},"candidateCount":{"type":"integer"},"sources":{"type":"array","items":{"type":"object"}},"partial":{"type":"boolean"},"searchErrors":{"type":"array","items":{"type":"string"}}}}`),
 	}
 	var schema map[string]any
@@ -170,24 +110,32 @@ func (*ResearchWorkflowSearch) Definition(context.Context) (tool.Definition, err
 	p["offset"] = map[string]any{"type": "integer", "const": 0}
 	p["limit"].(map[string]any)["maximum"] = 20
 	providerProps := map[string]any{}
-	for _, source := range []string{"pubmed", "europepmc", "crossref", "openalex"} {
+	for _, source := range researchsources.PlanQueryIDs(false) {
 		providerProps[source] = map[string]any{"type": "array", "minItems": 1, "maxItems": 2, "items": map[string]any{"type": "string", "minLength": 1, "maxLength": 500}}
 	}
 	p["providerQueries"] = map[string]any{"type": "object", "additionalProperties": false, "properties": providerProps}
+	p["retrievalProfile"] = map[string]any{"type": "string", "enum": research.RetrievalProfiles(), "description": "Explicit discipline strategy. When present, search has a shared 14 HTTP-attempt ceiling including retries/redirects, no per-record enrichment, and a persisted source/slot plan. Explicit sourceIds override profile selection, not the ceiling. Omit for legacy source behavior."}
+	p["sourceRationale"] = map[string]any{"type": "string", "maxLength": 800}
+	out := map[string]any{}
+	_ = json.Unmarshal(d.OutputSchema, &out)
+	out["properties"].(map[string]any)["searchPlan"] = map[string]any{"type": "object"}
+	d.OutputSchema, _ = json.Marshal(out)
 	d.InputSchema, _ = json.Marshal(schema)
 	return d, nil
 }
 
 func (t *ResearchWorkflowSearch) Invoke(ctx context.Context, invocation tool.Invocation) (tool.Result, error) {
 	var args struct {
-		ProviderQueries map[string][]string       `json:"providerQueries"`
-		Query           string                    `json:"query"`
-		Years           research.PublicationYears `json:"publicationYears"`
-		Queries         []string                  `json:"queries"`
-		SourceIDs       []string                  `json:"sourceIds"`
-		Limit           int                       `json:"limit"`
-		ReferencesOnly  bool                      `json:"referencesOnly"`
-		Offset          int                       `json:"offset"`
+		RetrievalProfile string                    `json:"retrievalProfile"`
+		SourceRationale  string                    `json:"sourceRationale"`
+		ProviderQueries  map[string][]string       `json:"providerQueries"`
+		Query            string                    `json:"query"`
+		Years            research.PublicationYears `json:"publicationYears"`
+		Queries          []string                  `json:"queries"`
+		SourceIDs        []string                  `json:"sourceIds"`
+		Limit            int                       `json:"limit"`
+		ReferencesOnly   bool                      `json:"referencesOnly"`
+		Offset           int                       `json:"offset"`
 	}
 	if err := json.Unmarshal(invocation.Arguments, &args); err != nil {
 		return tool.Result{}, err
@@ -217,30 +165,65 @@ func (t *ResearchWorkflowSearch) Invoke(ctx context.Context, invocation tool.Inv
 			return tool.Result{}, fmt.Errorf("provider query count must match planned queries")
 		}
 	}
+	var plan *research.RetrievalPlan
+	var budget *research.SourceHTTPBudget
+	if args.RetrievalProfile != "" {
+		value, err := research.BuildRetrievalPlan(args.RetrievalProfile, args.SourceIDs, len(queries))
+		if err != nil {
+			return tool.Result{}, err
+		}
+		ctx, budget, err = research.WithSourceHTTPBudget(ctx, value.MaxHTTP)
+		if err != nil {
+			return tool.Result{}, err
+		}
+		plan = &value
+	}
 	queryIDs := []string{}
 	allSources := []research.SourceSearch{}
 	searchErrors := []string{}
 	partial := false
-	for index, query := range queries {
+	search := func(callCtx context.Context, index int, query string, sourceIDs []string) error {
 		projections := map[string]string{}
 		for source, values := range args.ProviderQueries {
 			projections[source] = values[index]
 		}
-		if err := ctx.Err(); err != nil {
-			return tool.Result{}, err
+		if err := callCtx.Err(); err != nil {
+			return err
 		}
-		value, err := t.service.SearchScopedPage(ctx, research.DiscoverySearchCommand{ProjectID: invocation.ProjectID, Query: query, ProviderQueries: projections, SourceIDs: args.SourceIDs, Limit: args.Limit, Offset: args.Offset, SnapshotKey: invocation.CallID, ResearchTaskID: invocation.ResearchTaskID, Years: args.Years})
+		value, err := t.service.SearchScopedPage(callCtx, research.DiscoverySearchCommand{ProjectID: invocation.ProjectID, Query: query, ProviderQueries: projections, SourceIDs: sourceIDs, Limit: args.Limit, Offset: args.Offset, SnapshotKey: invocation.CallID, ResearchTaskID: invocation.ResearchTaskID, Years: args.Years})
 		if err != nil {
-			if ctx.Err() != nil {
-				return tool.Result{}, ctx.Err()
+			if callCtx.Err() != nil {
+				return callCtx.Err()
 			}
 			partial = true
 			searchErrors = append(searchErrors, fmt.Sprintf("%s: %v", query, err))
-			continue
+			return nil
 		}
 		queryIDs = append(queryIDs, value.Query.ID)
 		allSources = append(allSources, value.Query.Sources...)
 		partial = partial || value.Query.Partial
+		return nil
+	}
+	if plan == nil {
+		for index, query := range queries {
+			if err := search(ctx, index, query, args.SourceIDs); err != nil {
+				return tool.Result{}, err
+			}
+		}
+	} else {
+		for index, query := range queries {
+			sources := plan.SourcesForQuery(index)
+			if len(sources) == 0 {
+				continue
+			} // Never expand an empty schedule to defaults.
+			callCtx, err := research.WithRetrievalSchedule(ctx, plan, index)
+			if err != nil {
+				return tool.Result{}, err
+			}
+			if err := search(callCtx, index, query, sources); err != nil {
+				return tool.Result{}, err
+			}
+		}
 	}
 	if len(queryIDs) == 0 {
 		return tool.Result{}, fmt.Errorf("all literature searches failed: %s", strings.Join(searchErrors, "; "))
@@ -258,12 +241,21 @@ func (t *ResearchWorkflowSearch) Invoke(ctx context.Context, invocation tool.Inv
 			display = append(display, map[string]any{"id": candidate.ID, "title": w.Title, "year": w.Year, "doi": w.Identifiers.DOI, "abstract": w.Abstract})
 		}
 	}
-	structured, _ := json.Marshal(map[string]any{"queryId": queryIDs[0], "queryIds": queryIDs, "queryText": queries[0], "queries": queries, "candidates": display, "candidateIds": ids, "candidateCount": len(ids), "sources": allSources, "partial": partial, "searchErrors": searchErrors})
-	return tool.Result{Status: tool.ResultSuccess, Text: fmt.Sprintf("Persisted %d deduplicated candidates for paged AI screening. No candidates were discarded by a model batch limit.", len(ids)), Structured: structured, Artifacts: []tool.ArtifactRef{}, Citations: []tool.CitationRef{}}, nil
+	output := map[string]any{"queryId": queryIDs[0], "queryIds": queryIDs, "queryText": queries[0], "queries": queries, "candidates": display, "candidateIds": ids, "candidateCount": len(ids), "sources": allSources, "partial": partial, "searchErrors": searchErrors}
+	text := fmt.Sprintf("Persisted %d deduplicated candidates for paged AI screening. No candidates were discarded by a model batch limit.", len(ids))
+	if plan != nil {
+		plan.UsedHTTP, plan.BudgetDenied = budget.Usage()
+		output["searchPlan"] = map[string]any{"allocation": plan, "rationale": args.SourceRationale,
+			"limits": "Fixed per-invocation HTTP ceiling, including retries/redirects. Deferred or failed slots are not empty evidence. No per-record enrichment or exhaustive-coverage claim."}
+		output["partial"] = partial || plan.BudgetDenied > 0
+		text += fmt.Sprintf(" 检索策略 %s / %s，实际来源 HTTP %d/%d，未安排槽位 %d；逐来源理由与执行槽位见 searchPlan。不是独立研究计数或穷尽检索。", plan.Profile, plan.SelectionMode, plan.UsedHTTP, plan.MaxHTTP, len(plan.Deferred))
+	}
+	structured, _ := json.Marshal(output)
+	return tool.Result{Status: tool.ResultSuccess, Text: text, Structured: structured, Artifacts: []tool.ArtifactRef{}, Citations: []tool.CitationRef{}}, nil
 }
 
 func (*ResearchWorkflowImport) Definition(context.Context) (tool.Definition, error) {
-	return tool.Definition{QualifiedName: ResearchWorkflowImportName, Version: "5", Risk: tool.RiskHigh, Idempotent: true,
+	return tool.Definition{QualifiedName: ResearchWorkflowImportName, Version: "6", Risk: tool.RiskHigh, Idempotent: true,
 		Description:  "Mark the exact human-selected research candidates as included, materialize open full text or disclosed metadata/abstract files, and import them as project attachments. Completed candidates are reused on retry.",
 		Permissions:  append(append([]tool.PermissionRequirement{}, researchFullTextNetworkPermissions...), tool.PermissionRequirement{Kind: tool.PermissionWorkspaceWrite, Resource: "."}),
 		InputSchema:  json.RawMessage(`{"type":"object","additionalProperties":false,"required":["selectedCandidateIds"],"properties":{"selectedCandidateIds":{"type":"array","maxItems":100,"uniqueItems":true,"items":{"type":"string","minLength":1,"maxLength":128}},"selectedAttachmentIds":{"type":"array","maxItems":16,"uniqueItems":true,"items":{"type":"string","minLength":1,"maxLength":128}},"mode":{"type":"string","enum":["auto","full_text","metadata_abstract"]}}}`),
@@ -401,15 +393,20 @@ func (t *ResearchWorkflowReport) Invoke(ctx context.Context, invocation tool.Inv
 	var args struct {
 		Name            string             `json:"name"`
 		Citations       []tool.CitationRef `json:"citations"`
-		ReportDraft     map[string]any     `json:"reportDraft"`
+		ReportDraft     json.RawMessage    `json:"reportDraft"`
 		SourceArtifacts []tool.ArtifactRef `json:"sourceArtifacts"`
 		ReviewGate      json.RawMessage    `json:"reviewGate"`
 	}
 	if err := json.Unmarshal(invocation.Arguments, &args); err != nil {
 		return tool.Result{}, err
 	}
-	markdownBody, _ := args.ReportDraft["markdown"].(string)
-	analysisSnapshot, _ := json.Marshal(args.ReportDraft)
+	var report struct {
+		Markdown string `json:"markdown"`
+	}
+	if err := json.Unmarshal(args.ReportDraft, &report); err != nil {
+		return tool.Result{}, err
+	}
+	markdownBody, analysisSnapshot := report.Markdown, args.ReportDraft
 	markdown := composeWorkflowReport(markdownBody, args.Citations, args.SourceArtifacts)
 	value, err := t.service.PublishReport(ctx, researchworkflow.ReportRequest{ProjectID: invocation.ProjectID, WorkflowRunID: invocation.RunID, ResearchTaskID: invocation.ResearchTaskID, ToolCallID: invocation.CallID, IdempotencyKey: stableWorkflowOperationKey(invocation), Name: args.Name, Markdown: markdown, Citations: args.Citations, Analysis: analysisSnapshot, SourceArtifacts: args.SourceArtifacts, ReviewGate: args.ReviewGate})
 	if err != nil {
@@ -420,9 +417,29 @@ func (t *ResearchWorkflowReport) Invoke(ctx context.Context, invocation tool.Inv
 	return tool.Result{Status: tool.ResultSuccess, Text: text, Structured: structured, Artifacts: []tool.ArtifactRef{{ID: value.Artifact.ID, Name: value.Artifact.Name}, {ID: value.DOCX.ID, Name: value.DOCX.FileName, MIMEType: value.DOCX.MIMEType}, {ID: value.PDF.ID, Name: value.PDF.FileName, MIMEType: value.PDF.MIMEType}}, Citations: []tool.CitationRef{}}, nil
 }
 
+// Keep the diagnostic cause in host logs while exposing only a bounded,
+// actionable explanation to the researcher. Do not turn binding failures into
+// scientific rejections or erase the actual assembly failure.
+type reportPublicationError struct {
+	cause   error
+	message string
+}
+
+func (e reportPublicationError) Error() string             { return e.cause.Error() }
+func (e reportPublicationError) Unwrap() error             { return e.cause }
+func (e reportPublicationError) UserFacingMessage() string { return e.message }
+
 func workflowReportError(err error) error {
 	message := err.Error()
 	switch {
+	case errors.Is(err, researchworkflow.ErrPublicationIdentityUnavailable):
+		return reportPublicationError{err, "报告发布恢复校验失败：无法核对旧发布回执与本次冻结报告、引用及审查快照。已完成的新稿和审查保留；请检查发布来源记录，不要重新生成整篇报告。"}
+	case errors.Is(err, researchworkflow.ErrReviewReportMismatch):
+		return reportPublicationError{err, "报告发布校验失败：待发布报告与已审查报告的内容快照不一致。这不是独立审查否决；已完成的审查和报告保留，请检查发布绑定，不要重复返修。"}
+	case errors.Is(err, researchworkflow.ErrReviewReportInvalid):
+		return reportPublicationError{err, "报告发布校验失败：无法完整还原审查中的报告正文与记录附录。这是快照绑定错误，不是独立审查否决；已完成的内容保留，请检查程序诊断。"}
+	case errors.Is(err, researchworkflow.ErrReviewGateUnavailable):
+		return reportPublicationError{err, "报告发布校验失败：找不到与本次发布匹配的已完成交付核验记录。已完成的报告与审查保留；请检查交付核验和发布绑定，不要直接返修报告。"}
 	case strings.Contains(message, "report Markdown contains unverified marker"), strings.Contains(message, "report Markdown does not cite selected marker"):
 		return tool.NewUserFacingError("报告正文中的引用标记与本次科研任务人工选定的证据不一致；请重试报告阶段，系统会使用当前任务冻结的引用重新生成")
 	case strings.Contains(message, "report citation was not returned"), strings.Contains(message, "report citation marker or quote hash was altered"), strings.Contains(message, "report citation no longer matches"):
@@ -430,7 +447,7 @@ func workflowReportError(err error) error {
 	case strings.Contains(message, "report source Artifact"):
 		return tool.NewUserFacingError("报告引用的分析产物不属于当前科研任务或内容已变化；请重新执行分析阶段")
 	case strings.Contains(message, "independent review gate"):
-		return tool.NewUserFacingError("报告未通过当前科研任务的独立二次审查门禁；请重新执行审查阶段")
+		return reportPublicationError{err, "报告发布所需的交付核验记录无效或缺失。这是发布校验错误，不代表报告科学内容未通过独立审查；请检查交付核验记录。"}
 	default:
 		return err
 	}

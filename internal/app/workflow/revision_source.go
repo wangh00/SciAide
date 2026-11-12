@@ -93,11 +93,7 @@ func (s *RuntimeService) prepareRevisionSource(ctx context.Context, d RunDetail,
 	if len(ids) == 0 {
 		return version, nil
 	}
-	repo, ok := s.repository.(discussionMaterialsRepository)
-	if !ok {
-		return nil, fmt.Errorf("discussion material storage unavailable")
-	}
-	allowed, err := repo.DiscussionAttachmentIDs(ctx, d.Run.ID)
+	allowed, err := s.discussionAttachmentIDs(ctx, d)
 	if err != nil {
 		return nil, err
 	}
@@ -108,7 +104,11 @@ func (s *RuntimeService) prepareRevisionSource(ctx context.Context, d RunDetail,
 	if !ok {
 		return nil, fmt.Errorf("revision source service unavailable")
 	}
-	v, source, err := loader.OpenRevisionSource(ctx, d.Run.ProjectID, d.Run.ConversationID, ids[0])
+	owner, err := s.discussionAttachmentOwner(ctx, d, ids[0])
+	if err != nil {
+		return nil, err
+	}
+	v, source, err := loader.OpenRevisionSource(ctx, d.Run.ProjectID, owner, ids[0])
 	if err != nil {
 		return nil, err
 	}

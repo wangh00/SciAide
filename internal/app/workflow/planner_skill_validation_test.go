@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"encoding/json"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -27,6 +28,10 @@ func TestPlannerSkillClaimsUseActualLoadsNotCatalogOrSummary(t *testing.T) {
 	err = ValidateResearchPlannerSkillClaims(names, loaded)
 	if err == nil || !strings.Contains(err.Error(), "scientific-visualization") || !strings.Contains(err.Error(), "seaborn") {
 		t.Fatalf("accepted catalog candidates: %v", err)
+	}
+	var missing *ResearchPlannerSkillsMissingError
+	if !errors.As(err, &missing) || !reflect.DeepEqual(missing.Names, names[1:]) || strings.Contains(err.Error(), "builtin.") {
+		t.Fatal("missing evidence was not typed or prescribed an unbound tool interface", err)
 	}
 	for _, name := range names[1:] {
 		loaded = append(loaded, skillrun.Snapshot{Name: name, ContentHash: "content", PackageHash: "package"})

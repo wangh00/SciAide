@@ -10,6 +10,7 @@ import (
 	"github.com/wangh00/SciAide/internal/app/attachment"
 	"github.com/wangh00/SciAide/internal/app/knowledge"
 	"github.com/wangh00/SciAide/internal/app/tool"
+	"github.com/wangh00/SciAide/internal/app/userinput"
 	"github.com/wangh00/SciAide/internal/document"
 )
 
@@ -46,20 +47,20 @@ func TestClarificationSelectionContracts(t *testing.T) {
 func TestMultipleClarificationAnswersAreCanonicalAndRejectUnknownDuplicates(t *testing.T) {
 	q := clarificationFixture()
 	q.Questions[0].SelectionMode = "multiple"
-	a, err := normalizeResearchClarificationAnswers(q, map[string][]string{"population": {"adults", "students"}})
+	a, err := userinput.NormalizeAnswers(clarificationQuestions(q), clarificationResponses(map[string][]string{"population": {"adults", "students"}}, nil))
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := normalizeResearchClarificationAnswers(q, map[string][]string{"population": {"students", "adults"}})
+	b, err := userinput.NormalizeAnswers(clarificationQuestions(q), clarificationResponses(map[string][]string{"population": {"students", "adults"}}, nil))
 	if err != nil || !reflect.DeepEqual(a, b) {
 		t.Fatalf("noncanonical answers: %v %v %v", a, b, err)
 	}
 	for _, ids := range [][]string{{"students", "students"}, {"students", "unknown"}, {}} {
-		if _, err := normalizeResearchClarificationAnswers(q, map[string][]string{"population": ids}); err == nil {
+		if _, err := userinput.NormalizeAnswers(clarificationQuestions(q), clarificationResponses(map[string][]string{"population": ids}, nil)); err == nil {
 			t.Fatalf("accepted %v", ids)
 		}
 	}
-	idea := clarifiedResearchIdea("目标", q, a)
+	idea := clarifiedResearchIdea("目标", q, map[string][]string{"population": a["population"].OptionIDs})
 	if !strings.Contains(idea, "在校大学生") || !strings.Contains(idea, "一般成年人") {
 		t.Fatalf("answers lost: %s", idea)
 	}

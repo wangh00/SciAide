@@ -47,7 +47,7 @@ func TestHistoricalStageReadPreservesLargeCodeAndPagingIdentity(t *testing.T) {
 }
 
 func TestImplementationPromptUpdatesKeepV5Executable(t *testing.T) {
-	for _, version := range []string{"dynamic-implementation-v5", dynamicImplementationPromptVersion, dynamicImplementationPromptVersion + "-ds1"} {
+	for _, version := range []string{"dynamic-implementation-v5", "dynamic-implementation-v6", "dynamic-implementation-v6-ds1", dynamicImplementationPromptVersion, dynamicImplementationPromptVersion + "-ds1"} {
 		node := CompiledNode{ID: "method_implementation", PromptVersion: version}
 		if err := validateAIStageProtocol(node); err != nil {
 			t.Fatal(err)

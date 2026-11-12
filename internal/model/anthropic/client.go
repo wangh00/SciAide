@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/wangh00/SciAide/internal/app/modelprofile"
 	"github.com/wangh00/SciAide/internal/model"
@@ -42,6 +43,11 @@ func New(profile modelprofile.Profile, secret []byte, recorders ...modelcap.Reas
 		recorder = recorders[0]
 	}
 	return &Client{profile: profile, secret: append([]byte(nil), secret...), http: modelutil.NewStreamingHTTPClient(timeout), recorder: recorder}
+}
+
+// Called once, before sharing a newly constructed client.
+func (c *Client) SetRequestGate(gate func(context.Context) error) {
+	c.http = modelutil.WithRequestGate(c.http, gate)
 }
 
 func (c *Client) Capabilities(context.Context) (model.Capabilities, error) {
@@ -144,8 +150,8 @@ func (e *reasoningRejectedError) Error() string { return e.err.Error() }
 func (e *reasoningRejectedError) Unwrap() error { return e.err }
 
 func (c *Client) Stream(ctx context.Context, request model.ChatRequest) (model.Stream, error) {
-	if request.ForcedTool != "" {
-		// A forced tool is incompatible with extended thinking. Do not record this
+	if request.ForcedTool != "" || request.RequireTool {
+		// Forced/required tool choice is incompatible with extended thinking. Do not record this
 		// deliberate per-request mode as evidence that reasoning controls work/fail.
 		requested := request.RequestedReasoningLevel
 		request.ResolvedReasoningLevel = ""
@@ -302,6 +308,12 @@ func (c *Client) streamOnce(ctx context.Context, request model.ChatRequest, mode
 	if request.DisableTools {
 		value.ToolChoice = map[string]any{"type": "none"}
 	}
+	if request.RequireTool {
+		if request.DisableTools || len(request.Tools) == 0 {
+			return nil, fmt.Errorf("invalid required tool contract")
+		}
+		value.ToolChoice = map[string]any{"type": "any", "disable_parallel_tool_use": true}
+	}
 	if request.ForcedTool != "" {
 		name := aliases[request.ForcedTool]
 		if name == "" || request.DisableTools {
@@ -310,7 +322,7 @@ func (c *Client) streamOnce(ctx context.Context, request model.ChatRequest, mode
 		value.ToolChoice = map[string]any{"type": "tool", "name": name, "disable_parallel_tool_use": true}
 	}
 	// Forced tool submission cannot be combined with extended thinking.
-	if request.ForcedTool == "" && request.ResolvedReasoningLevel.Valid() && mode != thinkingProviderDefault {
+	if request.ForcedTool == "" && !request.RequireTool && request.ResolvedReasoningLevel.Valid() && mode != thinkingProviderDefault {
 		if value.MaxTokens <= 1024 {
 			value.MaxTokens = 2048
 		}
@@ -431,6 +443,9 @@ func (c *Client) streamOnce(ctx context.Context, request model.ChatRequest, mode
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		b := modelutil.ReadErrorBody(response.Body)
 		response.Body.Close()
+		if err := modelutil.HTTPGatewayIdentityError(response.StatusCode, b); err != nil {
+			return nil, err
+		}
 		if useCacheControl && cacheControlRejected(response.StatusCode, b) {
 			return nil, &cacheControlRejectedError{err: modelutil.ClassifyStatusWithHeaders(response.StatusCode, response.Header, b)}
 		}
@@ -441,8 +456,8 @@ func (c *Client) streamOnce(ctx context.Context, request model.ChatRequest, mode
 		}
 		return nil, modelutil.ClassifyStatusWithHeaders(response.StatusCode, response.Header, b)
 	}
-	scanner := modelutil.NewSSEDecoder(response.Body, maxStreamLineBytes)
-	return &stream{body: response.Body, scanner: scanner, providerNames: providerNames, blocks: map[int]*blockAccumulator{}, completed: map[int]struct{}{}}, nil
+	scanner, guardedBody := modelutil.NewProgressSSEDecoder(ctx, response.Body, maxStreamLineBytes, modelutil.StreamInactivityTimeout(c.profile.TimeoutSeconds, request.StreamInactivityTimeout), request.StreamRecoveryDeadline)
+	return &stream{body: guardedBody, scanner: scanner, providerNames: providerNames, blocks: map[int]*blockAccumulator{}, completed: map[int]struct{}{}}, nil
 }
 
 func markLatestCacheBreakpoint(messages []message) {
@@ -572,6 +587,17 @@ type stream struct {
 	stopReason    string
 	usage         model.Usage
 }
+
+func (s *stream) PendingToolArgumentChars() int {
+	count := 0
+	for _, block := range s.blocks {
+		if block.Type == "tool_use" {
+			count += utf8.RuneCountInString(block.Arguments.String())
+		}
+	}
+	return count
+}
+
 type event struct {
 	Type    string `json:"type"`
 	Index   int    `json:"index"`
@@ -682,7 +708,7 @@ func (s *stream) Recv() (model.Event, error) {
 		data := s.scanner.Text()
 		var e event
 		if err := json.Unmarshal([]byte(data), &e); err != nil {
-			return model.Event{}, modelutil.ClassifySSEJSONError("Anthropic stream event", "模型返回了无法解析的 Anthropic 流数据。", []byte(data), err)
+			return model.Event{}, modelutil.ClassifySSEJSONError("Anthropic stream event", "模型返回了无法解析的 Anthropic 流数据。", []byte(data), err, s.scanner.EventComplete())
 		}
 		switch e.Type {
 		case "message_start":
@@ -721,6 +747,9 @@ func (s *stream) Recv() (model.Event, error) {
 				return model.Event{}, modelutil.Error("MODEL_STREAM_INVALID", "Anthropic 内容块超过大小限制。", false, nil)
 			}
 			s.blocks[e.Index] = a
+			if a.size() > 0 {
+				s.scanner.MarkProgress()
+			}
 		case "content_block_delta":
 			a := s.blocks[e.Index]
 			if a == nil {
@@ -747,6 +776,9 @@ func (s *stream) Recv() (model.Event, error) {
 			if a.size() > maxProviderBlockBytes {
 				return model.Event{}, modelutil.Error("MODEL_STREAM_INVALID", "Anthropic 内容块超过大小限制。", false, nil)
 			}
+			if e.Delta.Text != "" || e.Delta.Thinking != "" || e.Delta.Signature != "" || e.Delta.PartialJSON != "" {
+				s.scanner.MarkProgress()
+			}
 		case "content_block_stop":
 			a := s.blocks[e.Index]
 			if a == nil {
@@ -766,6 +798,7 @@ func (s *stream) Recv() (model.Event, error) {
 			s.queue = append(s.queue, model.Event{Type: model.EventProviderItem, ProviderItem: &item})
 			delete(s.blocks, e.Index)
 			s.completed[e.Index] = struct{}{}
+			s.scanner.MarkProgress()
 		case "message_delta":
 			if e.Delta.StopReason != "" {
 				s.stopReason = e.Delta.StopReason
@@ -801,7 +834,7 @@ func (s *stream) Recv() (model.Event, error) {
 			if message == "" {
 				message = "Anthropic 请求未完成。"
 			}
-			return model.Event{}, modelutil.ClassifyStreamError(e.Error.Type, e.Error.Code, message, modelutil.ProviderErrorDetails("Anthropic stream event", 0, []byte(data)))
+			return model.Event{}, modelutil.ClassifyStreamError(e.Error.Type, e.Error.Code, message, modelutil.StreamEventErrorDetails("Anthropic stream event", []byte(data)))
 		}
 		if len(s.queue) > 0 {
 			return s.pop(), nil
@@ -814,3 +847,5 @@ func (s *stream) Recv() (model.Event, error) {
 }
 func (s *stream) pop() model.Event { e := s.queue[0]; s.queue = s.queue[1:]; return e }
 func (s *stream) Close() error     { s.done = true; return s.body.Close() }
+
+func (s *stream) LastProgressAt() time.Time { return s.scanner.LastProgressAt() }

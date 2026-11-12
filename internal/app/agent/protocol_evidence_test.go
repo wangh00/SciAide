@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -57,6 +58,12 @@ func TestProtocolEvidenceRolloverPreservesFrozenInputAndCompletedCalls(t *testin
 			if !foundInput || !foundEvidence || !foundCommentary || request.Messages[len(request.Messages)-1].Role != model.RoleSystem {
 				t.Fatal("lost exact input, evidence, visible commentary or host state")
 			}
+			// The following first source checkpoint must retain this independently
+			// budgeted evidence too, without decoding hidden native reasoning.
+			completed := completedToolEvidence(request, "run")
+			if len(completed) != 1 || completed[0].CallID != "call" || completed[0].ToolName != resource.OpenTool || !strings.Contains(completed[0].Result, "complete evidence") || strings.Contains(completed[0].Result, "PRIVATE") {
+				t.Fatal("protocol rollover cannot checkpoint completed source evidence", completed)
+			}
 			unchanged, _ := json.Marshal(turns)
 			if string(original) != string(unchanged) {
 				t.Fatal("mutated original protocol audit")
@@ -64,7 +71,12 @@ func TestProtocolEvidenceRolloverPreservesFrozenInputAndCompletedCalls(t *testin
 			if native, _, err := build(true, 1000, turns); err != nil || !reflect.DeepEqual(native.ProviderTurns[0].Items, turns[0].Items) {
 				t.Fatal("native protocol changed despite sufficient budget", err)
 			}
-			if _, _, err := build(true, 72750, turns); err == nil {
+			// Crossing the automatic threshold is not exceeding the effective
+			// model input budget. Keep the frozen input, not a needless failure.
+			if near, info, err := build(true, 72750, turns); err != nil || info.EstimatedTokens > info.ContextBudgetTokens || info.AutoCompactTokenLimit != 180000 || len(near.ProviderTurns) != 0 {
+				t.Fatal("soft threshold rejected an otherwise fitting independent exchange", info, err)
+			}
+			if _, _, err := build(true, 82750, turns); err == nil {
 				t.Fatal("oversized evidence bypassed context limit")
 			}
 			broken := append([]model.ProviderTurn(nil), turns...)
@@ -102,5 +114,46 @@ func TestContextBudgetChangesApplyToNewRunsNotExistingTurns(t *testing.T) {
 				t.Fatal("context budget changed at the wrong lifecycle boundary")
 			}
 		})
+	}
+}
+
+func TestOrdinaryProtocolEvidenceReservesHistoryAndHumanAnswers(t *testing.T) {
+	input := "继续检索；保持学习专注度构念，不启动返修。"
+	messages := []conversation.Message{checkpointText("old", "old-run", strings.Repeat("旧历史", 10000)), checkpointText("u", "run", input)}
+	human := strings.Repeat("人类选择条件", 1200) + "末尾完整决定"
+	calls := []tool.Call{{ID: "human", ProviderCallID: "human", ToolName: "builtin.user_input.request", Arguments: json.RawMessage(`{}`), Status: tool.CallCompleted, Result: &tool.Result{Status: tool.ResultSuccess, Text: human}}}
+	for n := 0; n < 20; n++ {
+		id := fmt.Sprintf("read-%d", n)
+		calls = append(calls, tool.Call{ID: id, ProviderCallID: id, ToolName: "read", Arguments: json.RawMessage(`{}`), Status: tool.CallCompleted, Result: &tool.Result{Status: tool.ResultSuccess, Text: strings.Repeat("公开证据", 2500)}})
+	}
+	turn := model.ProviderTurn{TurnIndex: 1, Protocol: modelcap.ProtocolOpenAIResponses, Items: []model.ProviderItem{{Ordinal: 0, Type: "reasoning", Payload: json.RawMessage(`{"type":"reasoning","encrypted_content":"` + strings.Repeat("PRIVATE", 10000) + `"}`)}}}
+	for n, call := range calls {
+		turn.Items = append(turn.Items, model.ProviderItem{Ordinal: n + 1, CallID: call.ProviderCallID, Payload: json.RawMessage(fmt.Sprintf(`{"type":"function_call","call_id":%q}`, call.ProviderCallID))})
+	}
+	limits := ContextLimits{EffectiveTokens: 40000, AutoCompactTokens: 36000, AllowProtocolRollover: true}
+	b := NewContextBuilder(0)
+	request, info, err := b.BuildWithRuntimeContext(context.Background(), messages, "", "u", nil, calls, skill.RunContext{}, limits, contextmemory.Checkpoint{}, turn)
+	if err != nil || !info.ProtocolRollover || info.CompactedThroughMessageID != "old" || info.EstimatedTokens > limits.AutoCompactTokens || len(request.ProviderTurns) != 0 {
+		t.Fatal("history/evidence reservation invalid", info, err)
+	}
+	foundInput, foundAnswer := false, false
+	for _, m := range request.Messages {
+		foundInput = foundInput || m.Content == input
+		foundAnswer = foundAnswer || strings.Contains(m.Content, toolCallContext(calls[0]))
+		if strings.Contains(m.Content, "PRIVATE") || len(m.ToolCalls) > 0 || m.Role == model.RoleTool {
+			t.Fatal("incomplete native state leaked into independent exchange")
+		}
+	}
+	if !foundInput || !foundAnswer {
+		t.Fatal("rollover lost current input/human reply")
+	}
+	broken := append([]tool.Call(nil), calls...)
+	broken[2].Result = nil
+	if _, _, err := b.BuildWithRuntimeContext(context.Background(), messages, "", "u", nil, broken, skill.RunContext{}, limits, contextmemory.Checkpoint{}, turn); err == nil {
+		t.Fatal("unresolved tool call treated as completed evidence")
+	}
+	limits.EffectiveTokens, limits.AutoCompactTokens = 2000, 1800
+	if _, _, err := b.BuildWithRuntimeContext(context.Background(), messages, "", "u", nil, calls, skill.RunContext{}, limits, contextmemory.Checkpoint{}, turn); err == nil {
+		t.Fatal("oversized human answers silently truncated")
 	}
 }

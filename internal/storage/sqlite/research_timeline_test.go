@@ -7,7 +7,9 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/wangh00/SciAide/internal/app/conversation"
 	"github.com/wangh00/SciAide/internal/app/tool"
 	"github.com/wangh00/SciAide/internal/app/workflow"
 )
@@ -103,4 +105,103 @@ func TestResearchTimelinePreservesDecisionFailureAndRetry(t *testing.T) {
 	if err := h.store.DB().QueryRow(`SELECT COUNT(*) FROM research_timeline`).Scan(&count); err != nil || count != 0 {
 		t.Fatal("deleted task retained timeline", count, err)
 	}
+}
+
+func TestResearchTimelineCancelledAIRecoveryProjection(t *testing.T) {
+	h := newWorkflowRuntimeHarness(t)
+	saved := h.save(t, workflow.Definition{SchemaVersion: 1, Name: "Cancellation projection", Nodes: []workflow.Node{
+		{ID: "current", Name: "Current AI", Kind: workflow.NodeAIAnalysis, Prompt: "Return summary", PromptVersion: "fixture-v1", OutputSchema: json.RawMessage(`{"type":"object"}`), Arguments: json.RawMessage(`{}`)},
+		{ID: "later", Name: "Later checkpoint", Kind: workflow.NodeHumanConfirmation, Prompt: "Continue?", Arguments: json.RawMessage(`{}`)},
+	}, Edges: []workflow.Edge{{FromNode: "current", FromPort: "analysis", ToNode: "later", ToPort: "context"}}})
+	started, err := h.runtime.Start(context.Background(), workflow.StartCommand{ProjectID: h.project.ID, ResearchTaskID: workflow.NewResearchTaskID, WorkflowID: saved.Workflow.ID, ModelProfileID: "fixture", ModelID: "fixture", Inputs: json.RawMessage(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// No AI executor: produce a durable run and then replay cancellation state
+	// only in this temporary DB. The bootstrap test covers live Cancel/restart.
+	detail := waitWorkflowStatus(t, h.runtime, h.project.ID, started.Run.ID, workflow.RunFailed)
+	h.runtime.Wait()
+	repo := NewWorkflowRuntimeRepository(h.store.DB())
+	ctx := context.Background()
+	setStatus := func(status string) {
+		t.Helper()
+		if _, err := h.store.DB().Exec(`UPDATE workflow_runs SET status=?,completed_at=NULL WHERE id=?`, status, detail.Run.ID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := h.store.DB().Exec(`UPDATE workflow_steps SET status='cancelled' WHERE workflow_run_id=?`, detail.Run.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	setStatus("cancelled")
+	appendCancellation := func(eventID string, payload json.RawMessage) {
+		t.Helper()
+		event := workflow.RuntimeEvent{ID: eventID, WorkflowRunID: detail.Run.ID, Type: "workflow.cancel_requested", Payload: payload, CreatedAt: time.Now().UTC()}
+		if err := repo.RecordEvent(ctx, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	appendCancellation("legacy-empty-cancel", json.RawMessage(`{}`))
+	read := func(wantID string) workflow.ResearchTimelinePage {
+		t.Helper()
+		page, err := repo.ReadResearchTimeline(ctx, workflow.ResearchTimelineQuery{ProjectID: h.project.ID, TaskID: detail.Run.ResearchTaskID, Limit: 100})
+		if err != nil {
+			t.Fatal(err)
+		}
+		count := 0
+		for _, entry := range page.Entries {
+			if entry.EventType == "workflow.cancel_requested" && entry.Active {
+				count++
+				if entry.ID != "event:"+wantID || entry.Step == nil || entry.Step.ID != detail.Steps[0].ID {
+					t.Fatalf("wrong recovery projection: %+v", entry)
+				}
+			}
+		}
+		wantCount := 0
+		if wantID != "" {
+			wantCount = 1
+		}
+		if count != wantCount {
+			t.Fatalf("active cancellation count=%d, want %d", count, wantCount)
+		}
+		return page
+	}
+	read("legacy-empty-cancel")
+	appendCancellation("captured-cancel", json.RawMessage(fmt.Sprintf(`{"stepId":%q}`, detail.Steps[0].ID)))
+	read("captured-cancel") // empty-payload predecessor must become history too.
+	if _, err := h.store.DB().Exec(`UPDATE workflow_steps SET attempt=attempt+1 WHERE id=?`, detail.Steps[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	read("") // a captured old attempt is not current authorization.
+	appendCancellation("latest-empty-cancel", json.RawMessage(`{}`))
+	read("latest-empty-cancel")
+	for _, kind := range []workflow.NodeKind{workflow.NodeTool, workflow.NodePython, workflow.NodeHumanConfirmation} {
+		if _, err := h.store.DB().Exec(`UPDATE workflow_steps SET node_kind=? WHERE id=?`, string(kind), detail.Steps[0].ID); err != nil {
+			t.Fatal(err)
+		}
+		read("")
+	}
+	if _, err := h.store.DB().Exec(`UPDATE workflow_steps SET node_kind='ai_analysis' WHERE id=?`, detail.Steps[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	for _, status := range []string{"running", "queued", "completed", "failed", "interrupted"} {
+		setStatus(status)
+		read("")
+	}
+	setStatus("cancelled")
+	if _, err := h.store.DB().Exec(`UPDATE workflow_runs SET current_step_ordinal=1 WHERE id=?`, detail.Run.ID); err != nil {
+		t.Fatal(err)
+	}
+	read("") // cancelling the later human checkpoint cannot recover the AI.
+	if _, err := h.store.DB().Exec(`UPDATE workflow_runs SET current_step_ordinal=0 WHERE id=?`, detail.Run.ID); err != nil {
+		t.Fatal(err)
+	}
+	// A newer run of this task makes every earlier run's action historical.
+	newer := detail.Run
+	newer.ID, newer.ConversationID, newer.Status = "newer-cancelled-run", "newer-conversation", workflow.RunCancelled
+	newer.CreatedAt, newer.UpdatedAt = time.Now().UTC().Add(time.Second), time.Now().UTC().Add(time.Second)
+	conv := conversation.Conversation{ID: newer.ConversationID, ProjectID: h.project.ID, Title: "Newer run", PermissionMode: newer.PermissionMode, ReasoningLevel: "medium", CreatedAt: newer.CreatedAt, UpdatedAt: newer.UpdatedAt}
+	if err := repo.CreateResearchRun(ctx, newer, nil, workflow.RuntimeEvent{ID: "newer-created", WorkflowRunID: newer.ID, Type: "workflow.created", Payload: json.RawMessage(`{}`), CreatedAt: newer.CreatedAt}, conv); err != nil {
+		t.Fatal(err)
+	}
+	read("")
 }

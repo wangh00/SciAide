@@ -40,6 +40,15 @@ func TestNormalizeSaveUsesCodexToolTimeoutDefault(t *testing.T) {
 	}
 }
 
+func TestRepeatedEmptyArgsNormalizationKeepsJSONArray(t *testing.T) {
+	for _, input := range [][]string{nil, {}} {
+		value := cloneStrings(cloneStrings(input))
+		if value == nil || len(value) != 0 {
+			t.Fatal("HTTP empty args became JSON null", value)
+		}
+	}
+}
+
 type memoryRepository struct{ values map[string]Server }
 
 func (r *memoryRepository) Save(_ context.Context, value Server) error {

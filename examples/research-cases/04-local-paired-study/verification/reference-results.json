@@ -1,0 +1,17 @@
+{
+  "origin": "synthetic software fixture; not real research evidence",
+  "n": 24,
+  "pre_mean": 66.91666666666667,
+  "post_mean": 70.5,
+  "post_minus_pre_mean": 3.5833333333333335,
+  "difference_sd": 3.7290477472739973,
+  "paired_t": 4.707549401259048,
+  "degrees_of_freedom": 23,
+  "mean_difference_ci95": [
+    2.008694569333176,
+    5.1579720973334915
+  ],
+  "increased": 18,
+  "unchanged": 2,
+  "decreased": 4
+}

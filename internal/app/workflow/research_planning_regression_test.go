@@ -38,6 +38,21 @@ func plannerRegressionPayload(t *testing.T, legacy bool) map[string]any {
 	return result
 }
 
+func TestPlannerReportsSiblingFormatDefectsBeforeAnyScientificAcceptance(t *testing.T) {
+	for _, field := range []string{"clarification", "clarificati"} {
+		t.Run(field, func(t *testing.T) {
+			payload := plannerRegressionPayload(t, false)
+			payload[field] = nil
+			payload["selectedSkills"] = []any{map[string]any{"name": "scientific-brainstorming", "role": "design", "limitations": true}}
+			data, _ := json.Marshal(payload)
+			_, changes, err := NormalizeAIStageSubmission(string(data), semanticResearchStarterSchema(), "explore")
+			if err == nil || !IsAIStageOutputFormatError(err) || len(changes) != 0 || !strings.Contains(err.Error(), "$."+field+":") || !strings.Contains(err.Error(), "$.selectedSkills[0].limitations: expected array") {
+				t.Fatal("planner masked a sibling defect or repaired the candidate automatically", err, changes)
+			}
+		})
+	}
+}
+
 func TestPlannerClarificationNormalizationIsNarrow(t *testing.T) {
 	for _, legacy := range []bool{false, true} {
 		for _, tc := range []struct {

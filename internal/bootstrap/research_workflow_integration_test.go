@@ -14,7 +14,9 @@ import (
 	"time"
 
 	"github.com/wangh00/SciAide/internal/app/artifact"
+	"github.com/wangh00/SciAide/internal/app/modelprofile"
 	"github.com/wangh00/SciAide/internal/app/permission"
+	"github.com/wangh00/SciAide/internal/app/reportview"
 	"github.com/wangh00/SciAide/internal/app/research"
 	"github.com/wangh00/SciAide/internal/app/tool"
 	"github.com/wangh00/SciAide/internal/app/workflow"
@@ -67,6 +69,24 @@ func researchClosureWork() research.Work {
 }
 
 func TestTrustedResearchWorkflowClosesAndSurvivesRestart(t *testing.T) {
+	testTrustedResearchClosure(t, false)
+}
+
+func TestSeparatedReportPublicationRetryAndExportsSurviveRestart(t *testing.T) {
+	for _, protocol := range []modelprofile.APIProtocol{modelprofile.ProtocolOpenAIChat, modelprofile.ProtocolOpenAIResponses, modelprofile.ProtocolAnthropic} {
+		t.Run(string(protocol), func(t *testing.T) { testTrustedResearchClosure(t, true, protocol) })
+	}
+}
+
+func testTrustedResearchClosure(t *testing.T, separated bool, protocols ...modelprofile.APIProtocol) {
+	testTrustedResearchClosureWithPublicationFault(t, separated, false, protocols...)
+}
+
+func TestLegacyPartialPublicationUpgradeKeepsReceiptAndOnlyCompletesExports(t *testing.T) {
+	testTrustedResearchClosureWithPublicationFault(t, true, true, modelprofile.ProtocolOpenAIResponses)
+}
+
+func testTrustedResearchClosureWithPublicationFault(t *testing.T, separated, legacyPartial bool, protocols ...modelprofile.APIProtocol) {
 	if _, err := exec.LookPath("python"); err != nil {
 		if _, fallbackErr := exec.LookPath("python3"); fallbackErr != nil {
 			t.Skip("Python 3 is not installed on this test host")
@@ -78,10 +98,26 @@ func TestTrustedResearchWorkflowClosesAndSurvivesRestart(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(root) })
 	options := Options{RootDir: root, ResearchConnectors: []research.Connector{researchClosureConnector{}}, EventPublisher: workflowAITestPublisher{}}
-	aiServer := newWorkflowAITestServer(t)
+	aiServer := newWorkflowAITestServer(t, func(output map[string]any, prompt string) {
+		if !separated {
+			return
+		}
+		delete(output, "reviewedInputSha256") // exercise host identity binding through real publication
+		if markdown, ok := output["markdown"].(string); ok {
+			// The model fixture must actually cite the offered evidence so the
+			// production host generates the bibliography appendix, not fake one.
+			output["markdown"] = markdown + "\n" + workflowAIReissuedCitation(prompt)
+		}
+	})
 
 	application := openResearchClosureApplication(t, options)
 	aiProfile := saveWorkflowAITestProfile(t, application, aiServer.URL)
+	if len(protocols) > 0 {
+		aiProfile, err = application.ModelFacade.SaveModelProfile(modelprofile.SaveCommand{Name: "publication protocol fixture", BaseURL: aiServer.URL + "/v1", APIProtocol: protocols[0], ModelID: workflowAITestModelID, Models: []modelprofile.ProfileModel{{ID: workflowAITestModelID, Enabled: true, IsDefault: true, ContextWindowTokens: 272000, AutoCompactTokenLimit: 244800}}, TimeoutSeconds: 20, Enabled: true, IsDefault: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 	created, err := application.ProjectFacade.CreateProject(wailstransport.CreateProjectRequest{Name: "P7 trusted research closure"})
 	if err != nil {
 		application.Close()
@@ -92,6 +128,42 @@ func TestTrustedResearchWorkflowClosesAndSurvivesRestart(t *testing.T) {
 		if template.Definition.Nodes[i].ID == "knowledge" {
 			// Exercise the same abstract-only retrieval used by dynamic routes.
 			template.Definition.Nodes[i].Arguments = json.RawMessage(`{"perDocument":true}`)
+		}
+	}
+	if separated {
+		renames := map[string]string{"search": "literature_discovery", "draft_report": "report_drafting", "review": "independent_review", "review_gate": "delivery_gate", "report": "report_publication"}
+		rename := func(id string) string {
+			if next, ok := renames[id]; ok {
+				return next
+			}
+			return id
+		}
+		for i := range template.Definition.Nodes {
+			n := &template.Definition.Nodes[i]
+			n.ID = rename(n.ID)
+			if n.ID == "report_drafting" {
+				n.PromptVersion = "dynamic-report-v6"
+			}
+		}
+		for i := range template.Definition.Edges {
+			e := &template.Definition.Edges[i]
+			e.FromNode, e.ToNode = rename(e.FromNode), rename(e.ToNode)
+		}
+		for i := range template.Definition.Outputs {
+			o := &template.Definition.Outputs[i]
+			o.FromNode = rename(o.FromNode)
+		}
+		for _, target := range []string{"report_drafting", "independent_review"} {
+			template.Definition.Edges = append(template.Definition.Edges, workflow.Edge{FromNode: "select_citations", FromPort: "citations", ToNode: target, ToPort: "evidenceContext"})
+		}
+		// Isolated failure AFTER the report-binding and citation checks. No
+		// real user database is opened. Recovery must retry publication only.
+		fault := `CREATE TRIGGER fixture_publication_failure BEFORE INSERT ON artifacts WHEN NEW.name='可信科研证据报告' BEGIN SELECT RAISE(ABORT, 'fixture publication unavailable'); END`
+		if legacyPartial {
+			fault = `CREATE TRIGGER fixture_publication_failure BEFORE INSERT ON artifact_exports WHEN NEW.export_format='pdf' BEGIN SELECT RAISE(ABORT, 'fixture PDF publication unavailable'); END`
+		}
+		if _, err := application.store.DB().Exec(fault); err != nil {
+			t.Fatal(err)
 		}
 	}
 	saved, err := application.WorkflowFacade.Save(workflow.SaveCommand{ProjectID: created.ID, Definition: template.Definition})
@@ -145,12 +217,130 @@ func TestTrustedResearchWorkflowClosesAndSurvivesRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	completed := driveResearchClosure(t, application, created.ID, started.Run.ID, 2*time.Minute)
+	completed := driveResearchClosure(t, application, created.ID, started.Run.ID, 2*time.Minute, separated)
+	if separated {
+		failed := currentWorkflowStep(t, completed)
+		if completed.Recovery == nil || completed.Recovery.Kind != "retry_publication" || completed.Recovery.CallsModel {
+			t.Fatal("wrong recovery projected to client", completed.Recovery)
+		}
+		if completed.Run.Status != workflow.RunFailed || failed.NodeID != "report_publication" {
+			t.Fatalf("expected injected publication failure: %s %s", completed.Run.Status, failed.NodeID)
+		}
+		var view struct {
+			Composition reportview.Composition `json:"reportComposition"`
+			Records     []string               `json:"reportRecordAppendices"`
+		}
+		upstream := map[string]string{}
+		for _, step := range completed.Steps {
+			if step.NodeID == "independent_review" {
+				if err := json.Unmarshal(step.Input, &view); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if step.NodeID != "report_publication" {
+				upstream[step.ID] = string(mustBootstrapJSON(t, step))
+			}
+		}
+		if view.Composition.ViewVersion != reportview.PartsVersion || len(view.Records) < 2 {
+			t.Fatal("test did not exercise real separated report appendices", view.Composition)
+		}
+		var triggerExists int
+		if err := application.store.DB().QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name='fixture_publication_failure'`).Scan(&triggerExists); err != nil || triggerExists != 1 {
+			t.Fatal("missing fault injection", err)
+		}
+		// A gate mismatch must not be confused with the deliberate storage
+		// failure: it would mean the original bug still prevents publication.
+		calls, err := sqlite.NewToolRepository(application.store.DB()).ListBySubject(context.Background(), tool.SubjectWorkflowRun, started.Run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, call := range calls {
+			if call.ToolName == "builtin.research.workflow.report" && (strings.Contains(call.ErrorMessage, "快照") || strings.Contains(call.ErrorMessage, "审查")) {
+				t.Fatal("report identity failure before injected storage fault", call.ErrorMessage)
+			}
+		}
+		var legacyArtifactID, legacyVersionID string
+		if legacyPartial {
+			// Simulate a previous install's stable key AFTER Markdown and DOCX
+			// commit, before PDF. Only this owned temporary fixture is altered.
+			if err := application.store.DB().QueryRow(`SELECT v.id,v.artifact_id FROM artifact_versions v JOIN artifacts a ON a.id=v.artifact_id WHERE a.project_id=? AND json_extract(v.provenance_json,'$.workflowRunId')=? AND json_extract(v.provenance_json,'$.toolName')='builtin.research.workflow.report'`, created.ID, started.Run.ID).Scan(&legacyVersionID, &legacyArtifactID); err != nil {
+				t.Fatal("partial publication was not saved", err)
+			}
+			key := "workflow-report-operation:" + started.Run.ID + ":workflow:report_publication"
+			// Construct an old-install fixture atomically; restore the exact
+			// immutable trigger before committing. Production never rewrites it.
+			tx, err := application.store.DB().Begin()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer tx.Rollback()
+			var immutableSQL string
+			if err := tx.QueryRow(`SELECT sql FROM sqlite_master WHERE type='trigger' AND name='artifact_versions_immutable'`).Scan(&immutableSQL); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := tx.Exec(`DROP TRIGGER artifact_versions_immutable`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := tx.Exec(`UPDATE artifact_versions SET source_key=? WHERE id=?`, key, legacyVersionID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := tx.Exec(immutableSQL); err != nil {
+				t.Fatal(err)
+			}
+			if err := tx.Commit(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := application.store.DB().Exec(`UPDATE artifact_versions SET source_key=source_key WHERE id=?`, legacyVersionID); err == nil {
+				t.Fatal("fixture did not restore immutable versions")
+			}
+			var exports int
+			if err := application.store.DB().QueryRow(`SELECT COUNT(*) FROM artifact_exports WHERE artifact_version_id=?`, legacyVersionID).Scan(&exports); err != nil || exports != 1 {
+				t.Fatal("expected saved DOCX with missing PDF", exports, err)
+			}
+		}
+		aiCount := len(completed.AIExecutions)
+		if err := application.Close(); err != nil {
+			t.Fatal(err)
+		}
+		application = openResearchClosureApplication(t, options)
+		if _, err := application.store.DB().Exec(`DROP TRIGGER fixture_publication_failure`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := application.WorkflowFacade.Retry(workflow.RetryCommand{ProjectID: created.ID, RunID: started.Run.ID, StepID: failed.ID, ConfirmSideEffect: true}); err != nil {
+			t.Fatal(err)
+		}
+		completed = driveResearchClosure(t, application, created.ID, started.Run.ID, 30*time.Second)
+		if len(completed.AIExecutions) != aiCount {
+			t.Fatal("publication retry reran AI")
+		}
+		if legacyPartial {
+			var versions, exports int
+			if err := application.store.DB().QueryRow(`SELECT COUNT(*) FROM artifact_versions v JOIN artifacts a ON a.id=v.artifact_id WHERE a.project_id=? AND json_extract(v.provenance_json,'$.workflowRunId')=? AND json_extract(v.provenance_json,'$.toolName')='builtin.research.workflow.report'`, created.ID, started.Run.ID).Scan(&versions); err != nil || versions != 1 {
+				t.Fatal("upgrade duplicated a publication", versions, err)
+			}
+			if err := application.store.DB().QueryRow(`SELECT COUNT(*) FROM artifact_exports WHERE artifact_version_id=?`, legacyVersionID).Scan(&exports); err != nil || exports != 2 {
+				t.Fatal("upgrade lost the original export receipt", exports, err)
+			}
+			var id string
+			if err := application.store.DB().QueryRow(`SELECT artifact_id FROM artifact_versions WHERE id=?`, legacyVersionID).Scan(&id); err != nil || id != legacyArtifactID {
+				t.Fatal("upgrade changed legacy Artifact identity", id, err)
+			}
+		}
+		for _, step := range completed.Steps {
+			if previous, ok := upstream[step.ID]; ok && previous != string(mustBootstrapJSON(t, step)) {
+				t.Fatal("publication retry changed completed upstream", step.NodeID)
+			}
+			if step.NodeID == "report_publication" && step.Attempt != failed.Attempt+1 {
+				t.Fatal("publication retry did not advance just this attempt")
+			}
+		}
+		t.Log("real report assembly → HTTP fixture review → gate → publication failure → SQLite restart → publication-only retry → DOCX/PDF")
+	}
 	if completed.Run.Status != workflow.RunCompleted || completed.Run.CompletedAt == nil {
 		application.Close()
 		t.Fatalf("Workflow did not complete: %#v", completed.Run)
 	}
-	assertResearchClosureEvidence(t, application, created.ID, started.Run.ID, created.WorkspacePath)
+	assertResearchClosureEvidence(t, application, created.ID, started.Run.ID, created.WorkspacePath, separated, legacyPartial)
 	artifactIDs := researchClosureArtifactIDs(t, application, created.ID)
 	if err := application.Close(); err != nil {
 		t.Fatal(err)
@@ -209,7 +399,11 @@ func waitForWorkflowState(t *testing.T, application *Application, projectID, run
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatalf("Workflow timed out waiting for %s; last state=%#v", expected, last.Run)
+	states := make([]string, 0, len(last.Steps))
+	for _, step := range last.Steps {
+		states = append(states, fmt.Sprintf("%s=%s(attempt=%d)", step.NodeID, step.Status, step.Attempt))
+	}
+	t.Fatalf("Workflow timed out waiting for %s; run=%s status=%s currentStep=%d error=%s: %s steps=%v", expected, last.Run.ID, last.Run.Status, last.Run.CurrentStep, last.Run.ErrorCode, last.Run.ErrorMessage, states)
 	return workflow.RunDetail{}
 }
 
@@ -260,7 +454,7 @@ func driveToCandidateSelection(t *testing.T, application *Application, projectID
 	return workflow.RunDetail{}
 }
 
-func driveResearchClosure(t *testing.T, application *Application, projectID, runID string, timeout time.Duration) workflow.RunDetail {
+func driveResearchClosure(t *testing.T, application *Application, projectID, runID string, timeout time.Duration, expectPublicationFailure ...bool) workflow.RunDetail {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -272,6 +466,9 @@ func driveResearchClosure(t *testing.T, application *Application, projectID, run
 		case workflow.RunCompleted:
 			return detail
 		case workflow.RunFailed, workflow.RunCancelled, workflow.RunInterrupted:
+			if len(expectPublicationFailure) > 0 && expectPublicationFailure[0] && detail.Run.Status == workflow.RunFailed && currentWorkflowStep(t, detail).NodeID == "report_publication" {
+				return detail
+			}
 			environment, _ := application.PythonFacade.GetProjectEnvironment(projectID)
 			var operationError string
 			_ = application.store.DB().QueryRow(`SELECT error_message FROM python_environment_operations WHERE project_id=? ORDER BY started_at DESC LIMIT 1`, projectID).Scan(&operationError)
@@ -321,7 +518,7 @@ func driveResearchClosure(t *testing.T, application *Application, projectID, run
 	return workflow.RunDetail{}
 }
 
-func assertResearchClosureEvidence(t *testing.T, application *Application, projectID, runID, workspacePath string) {
+func assertResearchClosureEvidence(t *testing.T, application *Application, projectID, runID, workspacePath string, retriedPublication ...bool) {
 	t.Helper()
 	ctx := context.Background()
 	taskWorkspacePath := workspacePath
@@ -332,11 +529,18 @@ func assertResearchClosureEvidence(t *testing.T, application *Application, proje
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(toolCalls) != 8 {
-		t.Fatalf("Workflow ToolCalls = %d, want 8: %#v", len(toolCalls), toolCalls)
+	wantCalls := 8
+	if len(retriedPublication) > 0 && retriedPublication[0] {
+		wantCalls++
+	}
+	if len(toolCalls) != wantCalls {
+		t.Fatalf("Workflow ToolCalls = %d, want %d", len(toolCalls), wantCalls)
 	}
 	callIDs := make(map[string]tool.Call, len(toolCalls))
 	for _, call := range toolCalls {
+		if wantCalls == 9 && call.ToolName == "builtin.research.workflow.report" && call.Status == tool.CallFailed {
+			continue
+		}
 		if call.RunID != runID || tool.NormalizeSubjectKind(call.SubjectKind) != tool.SubjectWorkflowRun || call.Status != tool.CallCompleted || call.Result == nil || call.Result.Status != tool.ResultSuccess {
 			t.Fatalf("invalid Workflow ToolCall: %#v", call)
 		}
@@ -434,6 +638,39 @@ func assertResearchClosureEvidence(t *testing.T, application *Application, proje
 		t.Fatalf("analysis/report Artifact partition = %#v, report=%#v", seenAnalysis, report)
 	}
 	reportVersion := report.Versions[0]
+	if len(retriedPublication) > 1 && retriedPublication[1] {
+		// A reused Markdown receipt correctly preserves its original producer,
+		// which failed only AFTER committing Markdown/DOCX. The later export
+		// recovery call is verified above but cannot rewrite frozen lineage.
+		var original *tool.Call
+		for i := range toolCalls {
+			if toolCalls[i].ID == reportVersion.Provenance.ToolCallID {
+				original = &toolCalls[i]
+			}
+		}
+		if original == nil || original.RunID != runID || tool.NormalizeSubjectKind(original.SubjectKind) != tool.SubjectWorkflowRun || original.ToolName != "builtin.research.workflow.report" || original.Status != tool.CallFailed {
+			t.Fatal("legacy partial receipt has no verified original producer")
+		}
+		for id, call := range callIDs {
+			if call.ToolName == "builtin.research.workflow.report" {
+				delete(callIDs, id)
+			}
+		}
+		callIDs[original.ID] = *original
+	}
+	if wantCalls == 9 {
+		// Read the immutable Markdown object, not the UI's structured preview
+		// (which deliberately uses Document blocks instead of Preview.Text).
+		var objectPath string
+		if err := application.store.DB().QueryRowContext(ctx, `SELECT b.storage_relative_path FROM artifact_blobs b JOIN artifact_versions v ON v.blob_id=b.id WHERE v.id=?`, reportVersion.ID).Scan(&objectPath); err != nil {
+			t.Fatal(err)
+		}
+		contents, err := os.ReadFile(filepath.Join(workspacePath, ".sciaide", filepath.FromSlash(objectPath)))
+		text := string(contents)
+		if err != nil || !strings.Contains(text, "# Frozen empirical report") || strings.Count(text, "## 附录：检索方法记录") != 1 || strings.Count(text, "## 附录：引用来源书目") != 1 {
+			t.Fatal("published report lost or duplicated body/appendices", err)
+		}
+	}
 	if reportVersion.Provenance.WorkflowRunID != runID || reportVersion.Provenance.ToolName != "builtin.research.workflow.report" || len(reportVersion.Citations) != 1 || len(reportVersion.Exports) != 2 {
 		t.Fatalf("trusted report snapshot is incomplete: %#v", reportVersion)
 	}

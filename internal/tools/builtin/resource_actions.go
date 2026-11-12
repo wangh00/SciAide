@@ -146,6 +146,7 @@ func (r *ResourceActions) Prepare(ctx context.Context, req resource.Request) (re
 		}
 		view.Definitions = append(view.Definitions, d)
 	}
+	view.RecoveryOptions = options
 	state, _ := json.Marshal(struct {
 		Version string            `json:"version"`
 		Facts   json.RawMessage   `json:"facts"`
@@ -260,9 +261,19 @@ func (t *ResourceActionTool) Invoke(ctx context.Context, inv tool.Invocation) (t
 			return tool.Result{}, err
 		}
 		if result.Status == tool.ResultSuccess {
-			seeds, err = r.followups(scope, action.Seed, result)
+			result, sourceArgs, err = r.fitWorkspaceResourcePage(ctx, scope, inv, action, result, sourceArgs)
 			if err != nil {
 				return tool.Result{}, err
+			}
+			// Continuation must use the actual fitted read limit, never the
+			// original larger limit or a guessed offset.
+			resolved := action.Seed
+			resolved.Arguments = sourceArgs
+			if result.Status == tool.ResultSuccess {
+				seeds, err = r.followups(scope, resolved, result)
+				if err != nil {
+					return tool.Result{}, err
+				}
 			}
 		}
 	}
@@ -297,29 +308,10 @@ func (t *ResourceActionTool) Invoke(ctx context.Context, inv tool.Invocation) (t
 	// The full resolved locator and adapter output stay in Structured for
 	// audit/UI. Model replay needs content and issued next actions, not private
 	// adapter call syntax or a second copy of a long Skill section index.
-	var source map[string]json.RawMessage
-	if err = json.Unmarshal(src, &source); err != nil {
+	result.ModelProjection, err = resourceModelProjection(action, result.Text, src, opts)
+	if err != nil {
 		return tool.Result{}, err
 	}
-	modelData := map[string]any{"actionId": action.ID, "label": action.Seed.Label, "kind": action.Seed.Kind, "actions": opts}
-	if action.Seed.ToolName == SearchDocumentName {
-		var matches []json.RawMessage
-		if err = json.Unmarshal(source["matches"], &matches); err == nil {
-			modelData["matchCount"] = len(matches)
-		}
-	}
-	for _, key := range []string{"name", "mode", "loaded", "truncated", "bytesRead", "originalBytes", "offset", "characters", "total", "totalUnits", "nextOffset", "hasMore", "metadata"} {
-		if value, ok := source[key]; ok {
-			modelData[key] = value
-		}
-	}
-	modelText := result.Text
-	var mode string
-	_ = json.Unmarshal(source["mode"], &mode)
-	if action.Seed.ToolName == SkillLoadName && mode == "index" {
-		modelText = action.Seed.Label + "\nSkill 快照已加载；请选择宿主签发的相关章节操作，不填写章节名或路径。"
-	}
-	result.ModelProjection = &tool.ModelResultProjection{Text: modelText, Structured: resourceArgs(modelData)}
 	return result, nil
 }
 

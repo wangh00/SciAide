@@ -3,6 +3,7 @@ package opensciskill
 import (
 	"context"
 	"crypto/sha256"
+	"embed"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -22,6 +23,11 @@ import (
 	"github.com/wangh00/SciAide/internal/app/tool"
 	"github.com/wangh00/SciAide/internal/storage/sqlite"
 )
+
+// Provenance/build inventories are test-only, never shipped in the EXE.
+//
+//go:embed defaultskills.manifest.json defaultskills.upstream.manifest.json
+var bundledManifests embed.FS
 
 func likelySkills(message string, skills []Info) []Info {
 	return recallSkills(message, "", skills, nil)
@@ -120,14 +126,14 @@ func TestBundledSciAideDerivedManifestMatchesEveryFile(t *testing.T) {
 		FileCount           int     `json:"fileCount"`
 		Files               []entry `json:"files"`
 	}
-	encoded, err := bundled.ReadFile("defaultskills.manifest.json")
+	encoded, err := bundledManifests.ReadFile("defaultskills.manifest.json")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := json.Unmarshal(encoded, &manifest); err != nil {
 		t.Fatal(err)
 	}
-	upstream, err := bundled.ReadFile("defaultskills.upstream.manifest.json")
+	upstream, err := bundledManifests.ReadFile("defaultskills.upstream.manifest.json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,7 +191,7 @@ func TestBundledUpstreamManifestPreservesOpenScienceProvenance(t *testing.T) {
 		FileCount        int               `json:"fileCount"`
 		Files            []json.RawMessage `json:"files"`
 	}
-	encoded, err := bundled.ReadFile("defaultskills.upstream.manifest.json")
+	encoded, err := bundledManifests.ReadFile("defaultskills.upstream.manifest.json")
 	if err != nil {
 		t.Fatal(err)
 	}

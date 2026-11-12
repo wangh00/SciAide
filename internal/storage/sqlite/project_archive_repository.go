@@ -980,6 +980,7 @@ func (m *archiveIDMaps) get(table, old string) string {
 }
 
 var idTables = []string{
+	"workbench_tasks", "workbench_attempts", "workbench_jobs",
 	"research_revision_proposals",
 	"model_profiles", "conversations", "messages", "message_parts", "runs", "tool_calls", "approvals", "permission_grants",
 	"conversation_context_checkpoints", "attachments", "knowledge_index_versions", "knowledge_documents", "knowledge_import_jobs",
@@ -1056,6 +1057,13 @@ func rewriteProjectSnapshot(ctx context.Context, db *sql.DB, oldProjectID string
 	updateMappings := []struct {
 		table, column, target string
 	}{
+		// Retired workbench rows are retained as historical records, not revived
+		// executable jobs. Preserve immutable JSON/hash snapshots byte-for-byte.
+		{"workbench_contracts", "task_id", "workbench_tasks"},
+		{"workbench_attempts", "task_id", "workbench_tasks"},
+		{"workbench_objects", "attempt_id", "workbench_attempts"},
+		{"workbench_execution_results", "attempt_id", "workbench_attempts"},
+		{"workbench_jobs", "task_id", "workbench_tasks"},
 		{"model_profile_models", "profile_id", "model_profiles"},
 		{"conversations", "model_profile_id", "model_profiles"},
 		{"runs", "model_profile_id", "model_profiles"},
@@ -1158,6 +1166,8 @@ func rewriteProjectSnapshot(ctx context.Context, db *sql.DB, oldProjectID string
 		{"workflow_human_decisions", "workflow_step_id", "workflow_steps"},
 		{"workflow_events", "id", "workflow_events"},
 		{"workflow_events", "workflow_run_id", "workflow_runs"},
+		{"workflow_revision_write_snapshots", "workflow_run_id", "workflow_runs"},
+		{"workflow_revision_write_snapshots", "event_id", "workflow_events"},
 		{"research_revision_proposals", "id", "research_revision_proposals"},
 		{"research_revision_proposals", "workflow_run_id", "workflow_runs"},
 		{"research_revision_proposals", "chat_run_id", "runs"},
@@ -1296,6 +1306,7 @@ func updateMappedColumn(ctx context.Context, tx *sql.Tx, table, column string, v
 }
 
 var projectScopedTables = []string{
+	"workbench_tasks",
 	"conversations", "attachments", "knowledge_index_versions", "knowledge_documents", "knowledge_import_jobs",
 	"artifact_blobs", "artifacts", "artifact_exports", "research_queries", "research_source_records", "research_candidates",
 	"research_candidate_aliases", "research_candidate_task_imports", "research_candidate_reviews", "research_bibliographies", "research_bibliography_materials", "research_evidence_entries", "message_citations",
@@ -1423,6 +1434,9 @@ func rewriteWorkflowRunSnapshots(ctx context.Context, tx *sql.Tx, maps *archiveI
 			if len(parts) == 2 {
 				item.key = prefix + maps.get("workflow_runs", parts[0]) + ":" + parts[1]
 			}
+		}
+		if strings.HasPrefix(item.key, "research-discussion-plan:") {
+			item.key = "research-discussion-plan:" + maps.get("tool_calls", strings.TrimPrefix(item.key, "research-discussion-plan:"))
 		}
 		creationUpdates = append(creationUpdates, item)
 	}
@@ -1634,9 +1648,21 @@ func rewriteWorkflowPayload(raw []byte, maps *archiveIDMaps, oldProjectID, proje
 		switch typed := current.(type) {
 		case map[string]any:
 			for childKey, child := range typed {
+				if childKey == "id" && typed["sourceSha256Version"] == workflow.LiteratureCandidateDigestVersion {
+					if original, ok := child.(string); ok {
+						typed[childKey] = maps.get("research_candidates", original)
+						continue
+					}
+				}
 				// Host revision identity is an ID in the proposal table, not an
 				// artifact ID. Embedded confirmed events need the same remapping
 				// as the proposal rows and timeline cards.
+				if childKey == "id" && key == "discussionHistory" {
+					if original, ok := child.(string); ok {
+						typed[childKey] = maps.get("messages", original)
+						continue
+					}
+				}
 				if childKey == "id" {
 					if original, ok := child.(string); ok && maps.values["research_revision_proposals"][original] != "" {
 						typed[childKey] = maps.get("research_revision_proposals", original)
@@ -1659,7 +1685,7 @@ func rewriteWorkflowPayload(raw []byte, maps *archiveIDMaps, oldProjectID, proje
 				return projectID
 			}
 			table := map[string]string{
-				"proposalId": "research_revision_proposals", "userMessageId": "messages",
+				"proposalId": "research_revision_proposals", "messageId": "messages", "discussionMessageIds": "messages", "userMessageId": "messages", "discussionUserMessageId": "messages", "discussionConversationId": "conversations", "priorStarterRunId": "workflow_runs", "sourcePlannerRunId": "workflow_runs",
 				"id": "artifacts", "artifactId": "artifacts", "artifactVersionId": "artifact_versions",
 				"toolCallId": "tool_calls", "workflowId": "workflows", "workflowVersionId": "workflow_versions",
 				"workflowRunId": "workflow_runs", "formalRunId": "workflow_runs", "workflowStepId": "workflow_steps", "stepId": "workflow_steps",
@@ -1667,6 +1693,8 @@ func rewriteWorkflowPayload(raw []byte, maps *archiveIDMaps, oldProjectID, proje
 				"approvalId": "approvals", "decisionId": "workflow_human_decisions", "runId": "runs", "conversationId": "conversations", "modelProfileId": "model_profiles",
 				"attachmentId": "attachments", "documentId": "knowledge_documents", "indexVersionId": "knowledge_index_versions",
 				"bibliographyId": "research_bibliographies", "candidateId": "research_candidates",
+				"targetCandidateId": "research_candidates", "relatedCandidateIds": "research_candidates",
+				"queryId": "research_queries", "queryIds": "research_queries",
 			}[key]
 			if table != "" {
 				return maps.get(table, typed)
@@ -2123,7 +2151,14 @@ func validateArchiveSchemaForVersion(ctx context.Context, archived *sql.DB, vers
 		return fmt.Errorf("project archive database schema does not match migration %d", version)
 	}
 	for index := range expected {
-		if actual[index] != expected[index] {
+		value := actual[index]
+		// The verified Windows workbench 98 release persisted CRLF in this
+		// rebuilt table's sqlite_schema SQL. Ignore only that newline spelling;
+		// object identity, all tokens and every other schema remain exact.
+		if value.Table == "artifact_lineage" && expected[index].Table == "artifact_lineage" {
+			value.SQL = strings.ReplaceAll(value.SQL, "\r\n", "\n")
+		}
+		if value != expected[index] {
 			return fmt.Errorf("project archive database schema object %q does not match migration %d", actual[index].Name, version)
 		}
 	}
@@ -2174,12 +2209,13 @@ func validateAttachedArchive(ctx context.Context, tx *sql.Tx) error {
 
 var archiveMergeOrder = []string{
 	"projects", "model_profiles", "model_profile_models", "conversations", "messages", "message_parts", "runs", "run_events", "run_event_sequences",
+	"workbench_tasks", "workbench_contracts", "workbench_attempts", "workbench_objects", "workbench_execution_results", "workbench_jobs",
 	"research_tasks",
 	"workflows", "workflow_versions", "workflow_runs", "workflow_conversations",
 	"tool_calls", "tool_results", "process_execution_audits", "provider_turn_items", "run_steps", "model_turn_journal", "model_request_usage", "run_skill_contexts", "run_skills", "run_dynamic_skills", "run_skill_routing", "run_skill_routing_audits", "run_skill_routing_candidates",
 	"conversation_context_checkpoints", "attachments", "material_library", "knowledge_index_versions", "knowledge_documents", "knowledge_import_jobs", "message_citations",
 	"artifact_blobs", "artifacts", "artifact_versions", "artifact_lineage", "artifact_citations", "artifact_exports",
-	"workflow_steps", "workflow_human_decisions", "workflow_events", "workflow_ai_executions", "workflow_ai_chat_runs",
+	"workflow_steps", "workflow_human_decisions", "workflow_events", "workflow_ai_executions", "workflow_ai_chat_runs", "workflow_revision_write_snapshots",
 	"research_revision_proposals", "research_timeline",
 	"research_queries", "research_source_records", "research_candidates", "research_candidate_records", "research_candidate_aliases", "research_candidate_task_imports", "research_query_records",
 	"research_query_origins", "research_query_candidates", "research_candidate_reviews",

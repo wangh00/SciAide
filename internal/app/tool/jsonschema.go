@@ -242,7 +242,7 @@ func validateSchemaSyntax(rawSchema any, path string) error {
 			}
 		}
 	}
-	for _, keyword := range []string{"minLength", "maxLength", "minItems", "maxItems"} {
+	for _, keyword := range []string{"minLength", "maxLength", "minItems", "maxItems", "minProperties"} {
 		if raw, exists := schema[keyword]; exists {
 			number, ok := raw.(json.Number)
 			if !ok {
@@ -267,6 +267,7 @@ var supportedSchemaKeywords = map[string]struct{}{
 	"type": {}, "properties": {}, "required": {}, "additionalProperties": {}, "items": {},
 	"enum": {}, "const": {}, "minimum": {}, "maximum": {}, "exclusiveMinimum": {}, "exclusiveMaximum": {},
 	"minLength": {}, "maxLength": {}, "pattern": {}, "minItems": {}, "maxItems": {}, "uniqueItems": {},
+	"minProperties": {},
 }
 
 func validateSchemaNode(rawSchema, instance any, path string) error {
@@ -328,6 +329,9 @@ func validateSchemaNode(rawSchema, instance any, path string) error {
 }
 
 func validateObjectSchema(schema, object map[string]any, path string) error {
+	if err := checkIntegerLimit(schema, "minProperties", len(object), path, true); err != nil {
+		return err
+	}
 	properties := map[string]any{}
 	if raw, exists := schema["properties"]; exists {
 		var ok bool
@@ -482,7 +486,7 @@ func checkIntegerLimit(schema map[string]any, keyword string, actual int, path s
 		return fmt.Errorf("%s: invalid %s", path, keyword)
 	}
 	if (minimum && actual < int(limit)) || (!minimum && actual > int(limit)) {
-		return fmt.Errorf("%s: violates %s", path, keyword)
+		return fmt.Errorf("%s: violates %s (actual=%d, limit=%d)", path, keyword, actual, limit)
 	}
 	return nil
 }

@@ -129,6 +129,29 @@ func TestStageTaskReadPreservesScopeAndDiscussionBoundary(t *testing.T) {
 	}
 }
 
+func TestExecutingStageReadsOnlyFrozenPlanningDiscussion(t *testing.T) {
+	s, f := stageMemoryService()
+	f.detail.Run.Inputs = raw(`{"starter_context":{"discussionRecord":{"messageCount":1}}}`)
+	f.detail.Events = []RuntimeEvent{{Type: "workflow.created", Payload: raw(`{"planningDiscussion":{"discussionHistory":[{"id":"human","role":"user","status":"complete","parts":[{"type":"text","text":"Do not recruit participants; deliver a plan only."}]}]}}`)}}
+	page, err := s.ReadResearchTask(context.Background(), "current-chat", ResearchTaskReadCommand{Section: "planning_discussion"})
+	if err != nil || !strings.Contains(string(page), "Do not recruit participants") {
+		t.Fatal("stage cannot read frozen negotiated requirements", err)
+	}
+	if _, err := s.ReadResearchTask(context.Background(), "foreign-chat", ResearchTaskReadCommand{Section: "planning_discussion"}); err == nil {
+		t.Fatal("foreign stage borrowed frozen discussion")
+	}
+	if _, err := s.ReadResearchTask(context.Background(), "current-chat", ResearchTaskReadCommand{Section: "messages"}); err == nil {
+		t.Fatal("frozen reader expanded live private access")
+	}
+	f.detail.Run.Compilation.Nodes[0].AllowedTools[0].Version = "7"
+	if _, err := s.ReadResearchTask(context.Background(), "current-chat", ResearchTaskReadCommand{Section: "planning_discussion"}); err == nil {
+		t.Fatal("version-7 route gained a new read scope")
+	}
+	if _, err := s.ReadResearchTask(context.Background(), "current-chat", ResearchTaskReadCommand{Section: "overview"}); err != nil {
+		t.Fatal("old route lost its existing read capability", err)
+	}
+}
+
 func TestHistoricalInputsAndArtifactsKeepActualVersion(t *testing.T) {
 	snapshot := rawObject(map[string]any{"run": Run{Inputs: raw(`{"input_paths":["original.csv"]}`)}, "effectiveInputs": raw(`{"input_paths":["updated.csv"]}`),
 		"steps": []Step{{NodeID: "python_analysis", Status: StepCompleted, Attempt: 3, Output: raw(`{"artifacts":[{"workspacePath":"analysis-output/old.py","sha256":"source-hash"}]}`)}}})

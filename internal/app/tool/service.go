@@ -47,7 +47,11 @@ func (s *Service) propose(ctx context.Context, definition Definition, cmd Create
 		return Call{}, err
 	}
 	definition = SnapshotDefinition(definition)
-	if err := ValidateArguments(cmd.Arguments); err != nil {
+	validateArguments := ValidateArguments
+	if cmd.SubjectKind == SubjectWorkflowRun {
+		validateArguments = ValidateWorkflowArguments
+	}
+	if err := validateArguments(cmd.Arguments); err != nil {
 		return Call{}, err
 	}
 	// Providers sometimes encode JSON integer fields as canonical decimal

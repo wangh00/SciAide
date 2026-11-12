@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"sort"
+	"strings"
 
 	"github.com/wangh00/SciAide/internal/app/workflow"
 )
@@ -83,21 +84,68 @@ func conditionalView(value any, revision string, err error) (ViewUpdate, error) 
 }
 
 func (f *ChatFacade) PollRunSnapshot(runID, revision string) (ViewUpdate, error) {
-	value, err := f.GetRunSnapshot(runID)
-	return conditionalObjectView(value, revision, err)
+	version, err := f.service.UIRevision(f.lifecycle.Context(), runID, "")
+	return conditionalStoredView(version, revision, err, func(prior string) (ViewUpdate, error) {
+		value, err := f.GetRunSnapshot(runID)
+		return conditionalObjectView(value, prior, err)
+	})
 }
 
 func (f *ChatFacade) PollLatestRunSnapshot(conversationID, revision string) (ViewUpdate, error) {
-	value, err := f.GetLatestRunSnapshot(conversationID)
-	return conditionalObjectView(value, revision, err)
+	version, err := f.service.UIRevision(f.lifecycle.Context(), "", conversationID)
+	return conditionalStoredView(version, revision, err, func(prior string) (ViewUpdate, error) {
+		value, err := f.GetLatestRunSnapshot(conversationID)
+		return conditionalObjectView(value, prior, err)
+	})
 }
 
 func (f *WorkflowFacade) PollRun(projectID, runID, revision string) (ViewUpdate, error) {
-	value, err := f.GetRun(projectID, runID)
-	return conditionalObjectView(value, revision, err)
+	version, err := f.runtime.UIRevision(f.lifecycle.Context(), projectID, runID)
+	return conditionalStoredView(version, revision, err, func(prior string) (ViewUpdate, error) {
+		value, err := f.GetRun(projectID, runID)
+		return conditionalObjectView(value, prior, err)
+	})
 }
 
 func (f *WorkflowFacade) PollResearchTimeline(query workflow.ResearchTimelineQuery, revision string) (ViewUpdate, error) {
-	value, err := f.ResearchTimeline(query)
-	return conditionalView(value, revision, err)
+	version, err := f.runtime.ResearchTimelineRevision(f.lifecycle.Context(), query)
+	return conditionalStoredView(version, revision, err, func(prior string) (ViewUpdate, error) {
+		value, err := f.ResearchTimeline(query)
+		return conditionalView(value, prior, err)
+	})
+}
+
+// The client retains the view; the host retains no payload at all. A
+// conservative database generation avoids loading and serializing an unchanged
+// view. Field-level revisions still handle running/live-only projections.
+func conditionalStoredView(version, revision string, err error, load func(string) (ViewUpdate, error)) (ViewUpdate, error) {
+	if err != nil {
+		return ViewUpdate{}, err
+	}
+	var prior struct {
+		Store  string `json:"store"`
+		Fields string `json:"fields"`
+	}
+	valid := len(revision) <= 20000 && json.Unmarshal([]byte(revision), &prior) == nil && strings.TrimSpace(prior.Fields) != ""
+	if valid && version != "" && prior.Store == version {
+		return ViewUpdate{Revision: revision, Unchanged: true}, nil
+	}
+	fields := ""
+	if valid {
+		fields = prior.Fields
+	} else {
+		// An ordinary field manifest from an older page is still a valid
+		// baseline. The next response upgrades only its opaque revision.
+		fields = revision
+	}
+	update, err := load(fields)
+	if err != nil {
+		return update, err
+	}
+	manifest, err := json.Marshal(struct {
+		Store  string `json:"store"`
+		Fields string `json:"fields"`
+	}{version, update.Revision})
+	update.Revision = string(manifest)
+	return update, err
 }

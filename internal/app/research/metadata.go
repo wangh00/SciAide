@@ -3,6 +3,7 @@ package research
 import (
 	"context"
 	"encoding/json"
+	"errors"
 )
 
 // Enrichment runs inside the registered search invocation, under its source
@@ -11,10 +12,16 @@ func (s *Service) enrichMetadata(ctx context.Context, original Work) Work {
 	fetched, err := s.Fetch(ctx, FetchCommand{SourceID: original.SourceID, RecordID: original.SourceRecordID})
 	if err != nil {
 		original.MetadataFetchStatus = "failed"
+		var mismatch *fetchedIdentityMismatch
+		if errors.As(err, &mismatch) {
+			original.MetadataFetchStatus = "identity_mismatch"
+		}
 		_, original.MetadataFetchError, _ = classifyFailure(err)
 		return original
 	}
-	if fetched.SourceRecordID != original.SourceRecordID || (original.Identifiers.DOI != "" && fetched.Identifiers.DOI != "" && NormalizeDOI(original.Identifiers.DOI) != NormalizeDOI(fetched.Identifiers.DOI)) {
+	// Fetch already bound the source record ID using its canonical identity.
+	// Keep the separate search-vs-detail DOI conflict guard before any merge.
+	if original.Identifiers.DOI != "" && fetched.Identifiers.DOI != "" && NormalizeDOI(original.Identifiers.DOI) != NormalizeDOI(fetched.Identifiers.DOI) {
 		original.MetadataFetchStatus = "identity_mismatch"
 		return original
 	}

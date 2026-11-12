@@ -168,6 +168,17 @@ func (m *memoryRepo) FailRun(_ context.Context, runID, code, message string, at 
 	m.envelopes = append(m.envelopes, event)
 	return m.run, true, nil
 }
+func (m *memoryRepo) InterruptRun(_ context.Context, runID, code, message string, at time.Time, event events.Envelope) (Run, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if isTerminal(m.run.Status) {
+		return m.run, false, nil
+	}
+	m.run.Status, m.run.ErrorCode, m.run.ErrorMessage, m.run.CompletedAt, m.run.UpdatedAt = RunInterrupted, code, message, &at, at
+	event.Sequence = int64(len(m.envelopes) + 1)
+	m.envelopes = append(m.envelopes, event)
+	return m.run, true, nil
+}
 func (m *memoryRepo) ListToolCallIDs(context.Context, string) ([]string, error) { return nil, nil }
 func (m *memoryRepo) UpdateMessageText(_ context.Context, id string, status conversation.MessageStatus, text string, at time.Time) error {
 	m.mu.Lock()

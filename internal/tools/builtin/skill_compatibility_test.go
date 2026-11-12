@@ -3,10 +3,11 @@ package builtin
 import (
 	"context"
 	"encoding/json"
-	"github.com/wangh00/SciAide/internal/app/tool"
-	"github.com/wangh00/SciAide/internal/opensciskill"
 	"strings"
 	"testing"
+
+	"github.com/wangh00/SciAide/internal/app/tool"
+	"github.com/wangh00/SciAide/internal/opensciskill"
 )
 
 type compatibleSkillFixture struct {
@@ -23,7 +24,10 @@ func (f *compatibleSkillFixture) LoadStructuredForRun(_ context.Context, _, _, _
 	return opensciskill.Info{Name: name, Origin: opensciskill.OriginUser}, opensciskill.Chunk{Mode: "skill", Content: "Instructions"}, true, nil
 }
 func TestEmptySkillCategoryReturnsActualChoicesWithoutFailingOrLoading(t *testing.T) {
-	f := &compatibleSkillFixture{}
+	f := &compatibleSkillFixture{names: []opensciskill.Info{
+		{Name: "code-one", Category: "coding", Enabled: true, Entry: true},
+		{Name: "bio-one", Category: "biology", Enabled: true, Entry: true},
+	}}
 	loader := NewSkillLoad(f)
 	result, err := loader.Invoke(context.Background(), tool.Invocation{Arguments: json.RawMessage(`{"category":"statistics","limit":10}`)})
 	if err != nil || result.Status != tool.ResultSuccess || f.loaded != "" {

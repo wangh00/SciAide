@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wangh00/SciAide/internal/app/conversation"
 	"github.com/wangh00/SciAide/internal/app/project"
 	"github.com/wangh00/SciAide/internal/app/tool"
 	"github.com/wangh00/SciAide/internal/app/workflow"
@@ -134,16 +135,13 @@ func TestResearchStarterNormalizesNoClarificationWithoutAnotherModelAttempt(t *t
 	}
 	// The normalization changes only the accepted structured projection, not
 	// the provider response retained for auditing and replay.
-	_, text, found := strings.Cut(execution.OutputText, "```json\n")
-	if !found {
-		t.Fatal("fixture response lost its original JSON fence")
-	}
-	text, _, found = strings.Cut(text, "\n```")
-	if !found {
-		t.Fatal("fixture response lost its closing JSON fence")
-	}
-	if err := json.Unmarshal([]byte(text), &original); err != nil {
+	// New built-in planning submits actual native arguments, not a fence.
+	if err := json.Unmarshal([]byte(execution.OutputText), &original); err != nil {
 		t.Fatal(err)
+	}
+	journal, found, err := sqlite.NewRunRepository(application.store.DB()).LatestModelTurnJournal(context.Background(), execution.ChatRunID)
+	if err != nil || !found || journal.DraftText != execution.OutputText {
+		t.Fatal("native raw arguments differ from the original submission journal", err)
 	}
 	if _, present := original.Clarification["questions"]; present {
 		t.Fatal("raw provider response was rewritten")
@@ -575,7 +573,9 @@ func TestResearchStarterFreezesAndReloadsRouteSkillsInFormalStages(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	planner := waitForWorkflowState(t, application, projectValue.ID, started.Run.ID, workflow.RunCompleted, 10*time.Second)
+	// This fixture loads packaged Skills and runs several real local stages.
+	// Bound the wait without treating a loaded Windows test host as a 10s SLA.
+	planner := waitForWorkflowState(t, application, projectValue.ID, started.Run.ID, workflow.RunCompleted, 30*time.Second)
 	if len(planner.AIExecutions) != 1 || planner.AIExecutions[0].ChatRunID == "" {
 		t.Fatalf("planner AI execution = %#v", planner.AIExecutions)
 	}
@@ -602,7 +602,7 @@ func TestResearchStarterFreezesAndReloadsRouteSkillsInFormalStages(t *testing.T)
 	if json.Unmarshal(adopted.InitialInputs, &initial) != nil || len(initial.RouteContext.SelectedSkills) != 1 || initial.RouteContext.SelectedSkills[0].ContentHash != plannerContentHash || initial.RouteContext.SelectedSkills[0].PackageHash != plannerPackageHash {
 		t.Fatalf("formal route did not freeze planner Skill hashes: %s", adopted.InitialInputs)
 	}
-	formal := waitForWorkflowState(t, application, projectValue.ID, adopted.Run.Run.ID, workflow.RunCompleted, 10*time.Second)
+	formal := waitForWorkflowState(t, application, projectValue.ID, adopted.Run.Run.ID, workflow.RunCompleted, 30*time.Second)
 	steps := map[string]workflow.Step{}
 	for _, step := range formal.Steps {
 		steps[step.ID] = step
@@ -669,8 +669,12 @@ func TestResearchStarterPersistsHiddenSystemRunAndAdoptsOnlyFrozenRoutes(t *test
 		t.Fatalf("Workflow AI Chat Run workspace = %q, %v; want %q, %v", workspaceRoot, err, wantWorkspaceRoot, pathErr)
 	}
 	messages, err := application.ConversationFacade.ListMessages(completed.Run.ConversationID)
-	if err != nil || len(messages) != 2 || !messages[0].Internal || !messages[1].Internal {
-		t.Fatalf("research starter internal messages = %#v, %v", messages, err)
+	if err != nil || len(messages) != 1 || !messages[0].Internal || messages[0].Role != conversation.RoleAssistant {
+		t.Fatalf("research starter visible result = %#v, %v", messages, err)
+	}
+	fullMessages, err := sqlite.NewConversationRepository(application.store.DB()).ListMessages(context.Background(), completed.Run.ConversationID, 200)
+	if err != nil || len(fullMessages) != 2 || !fullMessages[0].Internal || !fullMessages[1].Internal {
+		t.Fatal("UI projection changed durable stage history", err)
 	}
 	plans, err := application.WorkflowFacade.List(projectValue.ID)
 	if err != nil || len(plans) != 0 {
@@ -753,11 +757,11 @@ func TestResearchStarterPersistsHiddenSystemRunAndAdoptsOnlyFrozenRoutes(t *test
 		t.Fatalf("formal research design Artifact count = %d, %v", registered.ArtifactCount, err)
 	}
 	formalMessages, err := application.ConversationFacade.ListMessages(formal.Run.ConversationID)
-	if err != nil || len(formalMessages) != 8 {
+	if err != nil || len(formalMessages) != 4 {
 		t.Fatalf("formal research conversation = %#v, %v", formalMessages, err)
 	}
 	for _, message := range formalMessages {
-		if !message.Internal {
+		if !message.Internal || message.Role != conversation.RoleAssistant {
 			t.Fatalf("formal research message leaked as a user conversation message: %#v", message)
 		}
 	}

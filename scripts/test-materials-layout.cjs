@@ -26,7 +26,10 @@ const materials = Array.from({length:Number(process.argv[2]||100)},(_,i)=>({
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
   await page.setContent("<div id=\"root\"></div>");
-  await page.addStyleTag({ content: fs.readFileSync("frontend/src/styles.css", "utf8")+"\n"+fs.readFileSync("frontend/src/researchMaterialsLibrary.css", "utf8") });
+  const css = process.env.SCIAIDE_PRODUCTION_CSS === '1'
+    ? fs.readdirSync('frontend/dist/assets').filter(f => f.endsWith('.css')).map(f => fs.readFileSync(path.join('frontend/dist/assets', f), 'utf8')).join('\n')
+    : fs.readFileSync("frontend/src/styles.css", "utf8")+"\n"+fs.readFileSync("frontend/src/researchMaterialsLibrary.css", "utf8");
+  await page.addStyleTag({ content: css });
   await page.addScriptTag({ content: bundle.outputFiles[0].text });
   await page.locator(".research-materials-modal").waitFor();
   await page.screenshot({ path: "build/qa/research-material-many-1280.png", fullPage: true });

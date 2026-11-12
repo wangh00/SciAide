@@ -24,7 +24,10 @@ func TestProviderProjectionPreservesLogicalQuery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != "A versus C" || result.Query != `("A" OR "B") AND "C"` || result.Sources[0].ProviderQuery != got {
+	if got != "A versus C" || result.Query != `("A" OR "B") AND "C"` || result.Sources[0].ProviderQuery != got || result.Sources[0].EffectiveQuery != got {
 		t.Fatal(result, got)
+	}
+	if status := result.Sources[0]; status.InputQuery != got || status.QueryOrigin != "planned_provider_query" || status.QueryMode != "ranked_bibliographic" {
+		t.Fatal("planned origin must not conceal the endpoint's actual syntax", status)
 	}
 }

@@ -18,7 +18,7 @@ test("reasoning strength is selectable before a conversation and carried into ne
   const source = await readFile(new URL("./App.tsx", import.meta.url), "utf8");
   assert.match(source, /workspaceReasoningLevel/);
   assert.match(source, /reasoningLevel: workspaceReasoningLevel/);
-  assert.match(source, /reasoningLevel: selectedConversation\?\.reasoningLevel \?\? workspaceReasoningLevel/);
+  assert.match(source, /reasoningLevel: opening \? workspaceReasoningLevel : selectedConversation\?\.reasoningLevel \?\? workspaceReasoningLevel/);
   assert.match(source, /value=\{effectiveReasoningLevel\} disabled=\{!selectableModels\.length \|\| busy \|\| researchConversationLocked\}/);
   assert.doesNotMatch(source, /value=\{selectedConversation\?\.reasoningLevel \?\? "medium"\} disabled=\{!selectedConversation \|\| busy\}/);
 });
@@ -32,7 +32,7 @@ test("project resources stay in the shared topbar while engineering controls rem
   assert.match(topbar, /className="knowledge-open"[\s\S]*?<span>研究资料库<\/span>/);
   assert.doesNotMatch(source, /research-resource-tools/);
   assert.doesNotMatch(source, /function WorkflowStudio\(\{ project, open/);
-  assert.match(source, /\{detail \? "创建任务" : "方案预览"\}<\/button>/);
+  assert.match(source, />创建任务<\/button>/);
   assert.doesNotMatch(source, />任务进度<\/button>/);
   assert.match(source, />编辑方案<\/button>/);
   assert.match(source, /view === "advanced"[\s\S]*Workflow JSON/);
@@ -42,7 +42,7 @@ test("research mode has a persistent visual identity and reduced-motion fallback
   const css = await readFile(new URL("./styles.css", import.meta.url), "utf8");
   assert.match(css, /\.mode-research \.workspace\s*\{[^}]*background:\s*#fff/s);
   assert.match(css, /\.research-mode-workspace\s*\{[^}]*animation:\s*research-workspace-enter/s);
-  assert.match(css, /\.research-mode-indicator > i\s*\{[^}]*animation:\s*research-status-pulse/s);
+  assert.doesNotMatch(css, /\.research-mode-indicator(?![\w-])/);
   assert.match(css, /\.research-mode-hero\s*\{[^}]*background:\s*#f4f6f5/s);
   assert.match(css, /\.research-mode-hero::before\s*\{[^}]*background:\s*#18877e/s);
   assert.match(css, /\.research-mode-mark\s*\{[^}]*background:\s*#273033/s);
@@ -51,6 +51,23 @@ test("research mode has a persistent visual identity and reduced-motion fallback
   assert.match(css, /\.mode-research \.workspace-mode-switch button\.selected\s*\{[^}]*color:\s*#176f69[^}]*box-shadow:[^}]*#18877e/s);
   assert.doesNotMatch(css, /\.research-mode-hero\s*\{[^}]*background:\s*#(?:20242d|24483a|3152bf|4266ed|4f72f6)/s);
   assert.match(css, /@media \(prefers-reduced-motion:\s*reduce\)/);
+});
+
+test("research entry shares draft and send controls without adding a bottom chat box", async () => {
+  const source = await readFile(new URL("./App.tsx", import.meta.url), "utf8");
+  const css = await readFile(new URL("./styles.css", import.meta.url), "utf8");
+  assert.equal((source.match(/<form className="composer"/g) ?? []).length, 1);
+  assert.equal((source.match(/id="workspace-message-input"/g) ?? []).length, 1);
+  assert.match(source, /aria-label=\{researchEntry \? "研究问题" : "聊天消息"\}/);
+  assert.match(source, /researchEntry \? createPortal\([\s\S]*researchEntryTarget!\) : <footer className="composer-wrap">\{composerUI\}/);
+  assert.match(source, /className="research-entry-slot" ref=\{entrySlotRef\}/);
+  assert.match(css, /\.workspace:has\(\.research-entry-slot\)\s*\{[^}]*grid-template-areas:\s*"top top"\s*"hero hero"\s*"home-side home-content";/s);
+  assert.match(css, /\.workspace:has\(\.research-mode-workspace\)\s*\{[^}]*grid-template-areas:\s*"top top"\s*"hero hero"\s*"home-side home-content"\s*"home-side compose"/s);
+  assert.match(css, /\.research-mode-workspace > \.workflow-layout\s*\{\s*display:\s*contents/s);
+  assert.match(css, /\.research-mode-workspace > \.workflow-layout > \.workflow-side\s*\{[^}]*grid-area:\s*home-side/s);
+  assert.match(css, /\.research-mode-workspace > \.workflow-layout > main\s*\{[^}]*grid-area:\s*home-content[^}]*overflow:\s*auto/s);
+  assert.match(css, /\.workspace:has\(\.research-mode-workspace\) > \.composer-wrap\s*\{[^}]*grid-area:\s*compose/s);
+  assert.match(css, /\.research-mode-workspace > \.research-scene-curtain\s*\{[^}]*inset:\s*calc\(64px \+ var\(--research-home-hero-height\)\)/s);
 });
 
 test("desktop prompts use the animated in-app dialog system", async () => {
@@ -76,20 +93,16 @@ test("desktop prompts use the animated in-app dialog system", async () => {
   assert.match(css, /@media \(prefers-reduced-motion:\s*reduce\)/);
 });
 
-test("research templates open a focused detail dialog before activation", async () => {
+test("research start removes template entry and opens past plans only on demand", async () => {
   const source = await readFile(new URL("./App.tsx", import.meta.url), "utf8");
   const css = await readFile(new URL("./styles.css", import.meta.url), "utf8");
-  assert.match(source, /const \[selectedTemplateId, setSelectedTemplateId\] = useState\(""\)/);
-  assert.match(source, /const \[selectedTemplateDefinition, setSelectedTemplateDefinition\] = useState<WorkflowDefinition \| null>\(null\)/);
-  assert.match(source, /const \[templateDetail, setTemplateDetail\] = useState<WorkflowTemplate \| null>\(null\)/);
-  assert.match(source, /function WorkflowTemplateDialog/);
-  assert.match(source, /className="model-modal research-template-dialog" role="dialog"/);
-  assert.match(source, /onClick=\{\(\) => setTemplateDetail\(template\)\}/);
-  assert.match(source, /使用此模板/);
-  assert.match(source, /if \(selectedTemplateDefinition\) return selectedTemplateDefinition/);
-  assert.match(source, /模板不会直接运行/);
+  assert.match(source, /const \[historyPlansOpen, setHistoryPlansOpen\] = useState\(false\)/);
+  assert.match(source, /historyPlansOpen && <ResearchPlanHistory/);
+  assert.match(source, /plans=\{visibleWorkflows\}/);
+  assert.match(source, /openPlan=\{selectWorkflow\} deletePlan=\{deleteWorkflow\} deleteSelected=\{deleteSelectedPlans\}/);
+  assert.doesNotMatch(source, /WorkflowTemplateDialog|selectedTemplateDefinition|selectedTemplateId|newFromTemplate|"WorkflowFacade", "Templates"/);
   assert.doesNotMatch(source, /if \(!editorTouched\.current && !selectedId && loaded\[0\]\)/);
-  assert.match(css, /\.research-template-dialog-body\s*\{[^}]*overflow-y:\s*auto/s);
+  assert.match(css, /\.research-plan-history-body\s*\{[^}]*overflow-y:\s*auto/s);
   assert.match(source, /pythonOpen && selectedProject && <PythonEnvironmentSettings/);
   assert.match(source, /useState<"" \| "adopting" \| "adopted">\(""\)/);
   assert.match(source, /className="research-scene-curtain"/);
@@ -111,7 +124,7 @@ test("research task setup uses guided data controls and explicit preflight inste
   assert.match(source, /未检测到可用的 Python 3/);
   assert.match(source, /任务输入已就绪/);
   assert.match(source, /这里创建的是一次独立任务；输入、方案版本与工具权限会在启动时冻结/);
-  assert.match(source, /当前路线已经采用，尚未启动科研任务/);
+  assert.match(source, /正在查看已有方案，尚未启动新任务/);
   assert.match(source, /查看科研产物/);
 });
 
@@ -191,7 +204,7 @@ test("research runs freeze an explicit permission mode and saved plans are delet
   assert.match(source, /WorkflowFacade", "Delete"/);
   assert.match(source, /await backend<void>\("WorkflowFacade", "Delete", project\.id, value\.id\)/);
   assert.doesNotMatch(source, /for \(const item of group\) await backend<void>\("WorkflowFacade", "Delete"/);
-  assert.match(source, /删除方案及任务历史/);
+  assert.match(await readFile(new URL('./ResearchPlanHistory.tsx', import.meta.url), 'utf8'), /删除方案及已结束任务历史/);
   assert.match(source, /group\.map\(async \(workflow\) => \(\{ workflow, runs: await backend<WorkflowRun\[]>\("WorkflowFacade", "ListRuns", project\.id, workflow\.id, 100\) \}\)\)/);
   assert.match(source, /filter\(\(run\) => !workflowTerminal\(run\.status\)\)/);
   assert.match(source, /必须先进入任务并点击“取消”/);
@@ -234,7 +247,8 @@ test("research runs bind the existing chat loop and restore the selected task", 
   assert.doesNotMatch(source, /className=\{`conversation-row[^\n]*research-bound/);
   assert.match(source, /科研流程正在自主推进，任务结束后可继续提问/);
   assert.match(source, /流程与 AI 正在完成闭环；可在左侧取消任务/);
-  assert.match(source, /busy && !activeRunIsWorkflowAI && !researchConversationLocked \? <button type="button" className="send is-stop"/);
+  assert.match(source, /busy && !activeRunIsWorkflowAI && !researchConversationLocked \? conversationStopControl/);
+  assert.match(source, /pendingQuestionKey && conversationStopControl/);
   assert.match(css, /\.workspace:has\(\.research-route-panel\)\s*\{[^}]*grid-template-areas:\s*[^}]*"route chat evidence"[^}]*"route compose evidence"/s);
   assert.match(css, /\.workspace:has\(\.research-route-panel\) > \.workspace-content\s*\{[^}]*display:\s*contents/s);
   assert.match(css, /\.workspace:has\(\.research-route-panel\) > \.composer-wrap\s*\{[^}]*grid-area:\s*compose[^}]*background:\s*#fff/s);
@@ -244,7 +258,7 @@ test("research runs bind the existing chat loop and restore the selected task", 
   assert.match(css, /\.mode-research \.workflow-side\.tasks\s*\{[^}]*background:\s*#f1f3f2/s);
   assert.match(css, /@media \(max-width:\s*1220px\)[\s\S]*?grid-template-areas:\s*[^}]*"route chat"[^}]*"route compose"/s);
   assert.match(css, /@media \(max-width:\s*880px\)[\s\S]*?grid-template-areas:\s*[^}]*"chat"[^}]*"compose"/s);
-  assert.match(css, /\.workspace:has\(\.research-mode-workspace\) \.composer-wrap\s*\{[^}]*display:\s*none/s);
+  assert.match(css, /\.workspace:has\(\.research-mode-workspace\) > \.composer-wrap\s*\{[^}]*display:\s*block/s);
 });
 
 test("pending adopted routes stage files against the durable task identity", async () => {
@@ -356,16 +370,16 @@ test("research tasks are first-class entries separate from reusable plans", asyn
   assert.match(source, /async function openProjectRun\(run: WorkflowRun\)/);
   assert.match(source, /className="workflow-side-tabs"/);
   assert.match(source, /科研任务<small>\{sideView === "loading" \? "正在读取…" : `\$\{projectRuns\.length\} 条运行记录`\}<\/small>/);
-  assert.match(source, /研究方案<small>创建新任务<\/small>/);
-  assert.match(source, /<h3>方案模板<\/h3>/);
-  assert.match(source, /<h3>我的方案<\/h3>/);
+  assert.match(source, /研究方案<small>提出问题，开始研究<\/small>/);
+  assert.doesNotMatch(source, /<h3>方案模板<\/h3>|<h3>我的方案<\/h3>/);
+  assert.match(source, /aria-label="历史方案"/);
   assert.match(source, /每一项对应一个研究问题/);
-  assert.match(source, /<h2>选择开始方式<\/h2>[\s\S]*描述研究问题[\s\S]*直接使用模板[\s\S]*继续已有方案/);
-  assert.match(source, /<b>输入研究问题<\/b>/);
+  assert.match(source, /aria-label="研究如何开始"[\s\S]*先聊问题或材料[\s\S]*一起明确执行计划[\s\S]*执行后继续讨论/);
+  assert.match(source, /你想研究什么？/);
   assert.doesNotMatch(source, /不确定路线时交给 AI；目标明确时直接选择模板/);
   assert.match(source, /function workflowTaskTitle\(run: WorkflowRun\)/);
   assert.match(source, /title=\{workflowTaskQuestion\(run\)\?\.text\}>\{workflowTaskTitle\(run\)\}/);
-  assert.match(source, /保存到“我的方案”后，才可填写输入并创建任务/);
+  assert.match(source, /确认采用路线后才执行/);
   assert.match(source, /创建并开始任务/);
   assert.doesNotMatch(source, /<h2>方案库<\/h2>|已保存的可复用方案|>任务进度<\/button>/);
   assert.doesNotMatch(source, /view === "runs"|setView\("runs"\)|workflow-history-browser/);
@@ -379,12 +393,16 @@ test("research starter records are not presented as completed formal tasks", asy
   assert.match(source, /function workflowRunStatusLabel\(run: WorkflowRun\)/);
   assert.match(source, /run\.workflowPurpose === "research_starter" && run\.status === "completed"/);
   assert.match(source, /return "路线规划已完成"/);
+  assert.match(source, /eyebrow="候选执行计划已准备"/);
+  assert.doesNotMatch(source, /AI 研究启动已完成/);
   assert.match(source, /researchTaskId\?: string/);
   assert.match(source, /researchStarterRunId\?: string/);
   assert.match(source, /AI 路线规划与后续执行会作为同一任务连续推进/);
   assert.match(source, /const activeProjectRuns = useMemo/);
   assert.match(source, /\{projectRuns\.length\}<\/b><small>全部任务/);
-  assert.match(source, /<b><span>AI 路线规划<\/span><\/b>/);
+  assert.match(source, /<ResearchRoute detail=\{runDetail\}/);
+  const routeSource = await readFile(new URL('./ResearchRoute.tsx', import.meta.url), 'utf8');
+  assert.match(routeSource, /<b><span>AI 路线规划<\/span><\/b>/);
 });
 
 test("research mode chooses the useful first screen after task discovery", async () => {
@@ -409,20 +427,22 @@ test("saved plans collapse identical definitions while research tasks remain ind
   assert.match(source, /currentDefinitionSha256\?: string/);
   assert.match(source, /const visibleWorkflows = useMemo/);
   assert.match(source, /value\.currentDefinitionSha256 \|\| `workflow:\$\{value\.id\}`/);
-  assert.match(source, /visibleWorkflows\.map\(\(value\) =>/);
-  assert.match(source, /<h3>我的方案<\/h3>/);
-  assert.match(source, /暂无已保存方案/);
-  assert.match(source, /已在我的方案中，已直接打开，不会重复添加/);
+  assert.match(source, /plans=\{visibleWorkflows\}/);
+  const history = await readFile(new URL('./ResearchPlanHistory.tsx', import.meta.url), 'utf8');
+  assert.match(history, /plans\.map\(plan =>/);
+  assert.match(history, /<h2>历史方案<\/h2>/);
+  assert.match(history, /暂无历史方案/);
+  assert.match(history, /打开只查看设置，不会启动任务/);
   assert.match(source, /projectRuns\.map\(\(run\) =>/);
 });
 
 test("one-sentence research ideas use a persisted AI starter and host-validated route cards", async () => {
   const source = await readFile(new URL("./App.tsx", import.meta.url), "utf8");
   const css = await readFile(new URL("./styles.css", import.meta.url), "utf8");
-  assert.match(source, /className="workflow-plan-idea"/);
-  assert.match(source, /输入研究问题/);
+  assert.match(source, /className="research-start-welcome"/);
+  assert.match(source, /researchEntry \? "开始讨论" : "发送"/);
   assert.match(source, /WorkflowFacade", "StartResearch"/);
-  assert.match(source, /请先在顶部选择用于研究规划的 AI 模型/);
+  assert.match(source, /请先在顶部选择协作模型/);
   assert.match(source, /function researchStarterPlan\(detail: WorkflowRunDetail\)/);
   assert.match(source, /const visibleMessageText = \(message: Message\)/);
   assert.match(source, /message\.internal && message\.status !== "complete" \? "" : visibleMessageText\(message\)/);
@@ -440,10 +460,10 @@ test("one-sentence research ideas use a persisted AI starter and host-validated 
   assert.match(source, /workflowInputDraft\(current\.definition, adopted\.initialInputs\)/);
   assert.match(source, /workflowTaskTitle\(run\)/);
   assert.match(source, /const researchStarter = runDetail\.run\.workflowPurpose === "research_starter"/);
-  assert.match(source, /研究路线规划已完成/);
+  assert.match(source, /候选路线已准备/);
   assert.match(source, /!researchStarter && <WorkflowRunEvidence/);
   assert.doesNotMatch(source, /disabled=\{!owner \|\| Boolean\(busy\)\}/);
-  assert.match(css, /\.workflow-plan-idea\s*\{/);
+  assert.match(css, /\.research-start-welcome\s*\{/);
   assert.match(css, /\.research-route-options\s*\{/);
   assert.match(source, /function ResearchRouteDetailDialog/);
   assert.match(source, /查看路线详情/);
@@ -454,20 +474,19 @@ test("one-sentence research ideas use a persisted AI starter and host-validated 
   assert.match(css, /\.research-route-options\s*\{[^}]*grid-template-columns:\s*1fr/s);
 });
 
-test("research clarification choices stay compact and open a focused selector", async () => {
-  const source = await readFile(new URL("./App.tsx", import.meta.url), "utf8");
-  const css = await readFile(new URL("./styles.css", import.meta.url), "utf8");
-  assert.match(source, /const \[clarificationQuestion, setClarificationQuestion\] = useState<ResearchClarificationQuestion \| null>\(null\)/);
-  assert.match(source, /className="research-clarification-answer"/);
-  assert.match(source, /setClarificationQuestion\(question\)/);
-  const dialog = await readFile(new URL("./ResearchClarificationDialog.tsx", import.meta.url), "utf8");
-  assert.match(dialog, /className="model-modal research-clarification-dialog" role="dialog"/);
-  assert.match(dialog, /className="research-clarification-impact"/);
-  assert.match(source, /setClarificationQuestion\(null\)/);
-  assert.doesNotMatch(source, /className="research-clarification-answer"[\s\S]*?research-clarification fieldset > small/);
-  assert.match(css, /\.research-clarification-answer\s*\{/);
-  assert.match(css, /\.research-clarification-dialog\s*\{/);
-  assert.match(css, /\.research-clarification-dialog-options label\s*\{/);
+test("legacy clarification and chat share the same inline question card", async () => {
+ const source = await readFile(new URL("./App.tsx", import.meta.url), "utf8");
+ const css = await readFile(new URL("./styles.css", import.meta.url), "utf8");
+ const dialog = await readFile(new URL("./UserInputCard.tsx", import.meta.url), "utf8");
+ assert.match(source, /questions=\{clarificationQuestions\}/);
+ assert.match(source, /questions=\{userInputRequest.questions\}/);
+ assert.doesNotMatch(source, /ResearchClarificationDialog|setClarificationQuestion|按我的选择生成研究路线/);
+ assert.match(source, /starterRunId: runDetail.run.id, answers, freeTextAnswers/);
+ assert.match(dialog, /<ResearchCard className="user-input-card"/);
+ assert.doesNotMatch(dialog, /ModalBackdrop|createPortal|role="dialog"|aria-modal/);
+ assert.match(dialog, /className="user-input-free-text"/);
+ assert.match(css, /\.user-input-options label\s*\{/);
+ assert.doesNotMatch(css, /\.research-clarification-dialog/);
 });
 
 test("research route gaps expose user actions instead of host implementation names", async () => {
@@ -553,7 +572,7 @@ test("completed empirical routes show the reviewed Markdown report before a desi
   assert.match(renderer, /if \(report\) return [^\n]*<WorkflowResearchReportCard/);
   assert.match(renderer, /if \(design\) return [^\n]*<WorkflowResearchDesignCard/);
   assert.match(source, /function WorkflowResearchReportCard/);
-  assert.match(source, /<CitedMarkdown text=\{report\.markdown\} citations=\{citations\}/);
+  assert.match(source, /<ResearchReportLayers report=\{report\} renderMarkdown=\{text => <CitedMarkdown text=\{text\} citations=\{citations\}/);
   assert.match(source, /outputName === "report_draft"/);
   assert.match(source, /outputName \}/);
   assert.match(source, /runDetail\.deliveryAssessment\?\.label/);
@@ -576,7 +595,8 @@ test("active research task keeps the route compact and scoped to the current tas
   const styles = await readFile(new URL("./styles.css", import.meta.url), "utf8");
   assert.doesNotMatch(source, /className="research-run-switcher"/);
   assert.doesNotMatch(source, /<small>\{workflowStepLabels\[step\.status\]\}/);
-  assert.match(source, /step\.attempt > 1 && <em title=\{`已执行 \$\{step\.attempt\} 次`\}>\{step\.attempt\}<\/em>/);
+  const routeSource = await readFile(new URL('./ResearchRoute.tsx', import.meta.url), 'utf8');
+  assert.match(routeSource, /s\.attempt > 1 && <em title=\{`已执行 \$\{s\.attempt\} 次`\}>\{s\.attempt\}<\/em>/);
   assert.match(styles, /grid-template-rows: auto auto auto minmax\(150px,1fr\) auto/);
   assert.match(styles, /research-route-steps article \{[^}]*min-height: 41px/);
   assert.doesNotMatch(styles, /\.research-run-switcher/);
@@ -599,22 +619,23 @@ test("failed independent review enters a visible revision loop instead of retryi
   assert.match(css, /\.research-review-recovery\s*\{/);
 });
 
-test("research plan home defers template detail and keeps a bounded scroll flow", async () => {
+test("research plan home centers the question entry with optional materials and history", async () => {
   const source = await readFile(new URL("./App.tsx", import.meta.url), "utf8");
   const css = await readFile(new URL("./styles.css", import.meta.url), "utf8");
-  assert.match(source, /className="workflow-plan-idea"[\s\S]*className="workflow-template-gallery"[\s\S]*className="workflow-saved-plan-list"/);
-  assert.match(source, /!detail && !selectedTemplateId \? <main className="workflow-plan-home">/);
-  assert.match(source, /<section className="workflow-plan-side-guide"><header>[\s\S]*选择开始方式[\s\S]*研究方案快速导航/);
-  assert.match(source, /function moveToPlanSection\(target: "idea" \| "templates" \| "saved"\)/);
-  assert.match(source, /moveToPlanSection\("idea"\)[\s\S]*moveToPlanSection\("templates"\)[\s\S]*moveToPlanSection\("saved"\)/);
-  assert.match(source, /<section className="workflow-plan-home-section" ref=\{planTemplateRef\}><header><h3>方案模板<\/h3>/);
+  assert.match(source, /className="research-start-welcome"[\s\S]*className="research-start-materials"[\s\S]*<details className="research-start-examples">/);
+  assert.match(source, /!detail \? <main className="workflow-plan-home research-start-home">/);
+  assert.match(source, /className="research-start-center"[\s\S]*className="research-entry"[\s\S]*htmlFor="workspace-message-input"/);
+  assert.doesNotMatch(source, /research-start-focus|在下方输入，开始对话/);
+  assert.match(source, /aria-label="历史方案"[^\n]*setHistoryPlansOpen\(true\)/);
+  assert.doesNotMatch(source, /workflow-template-gallery|workflow-plan-home-section|moveToPlanSection/);
   assert.doesNotMatch(source, /目标明确时，从经过验证的研究流程开始/);
   assert.match(css, /\.workflow-side\s*\{[^}]*overflow:\s*hidden/s);
   assert.match(css, /\.workflow-plan-home\s*\{[^}]*overflow-y:\s*auto/s);
   assert.match(css, /\.workflow-plan-home\s*\{[^}]*background:\s*#fff/s);
   assert.match(css, /\.mode-research \.workflow-task-home,\.mode-research \.workflow-plan-home\s*\{[^}]*background:\s*#fff/s);
-  assert.match(css, /\.workflow-template-gallery\s*\{[^}]*grid-template-columns:\s*repeat\(auto-fit,minmax\(210px,1fr\)\)/s);
-  assert.match(css, /@media \(max-width:\s*760px\)[\s\S]*?\.workflow-template-gallery,[^{]+\{[^}]*grid-template-columns:\s*1fr/s);
+  assert.match(css, /\.research-start-home\s*\{[^}]*flex-direction:\s*column/s);
+  assert.match(css, /\.research-start-center\s*\{[^}]*width:\s*min\(820px,100%\)[^}]*align-self:\s*center[^}]*margin:\s*auto 0/s);
+  assert.match(css, /\.research-plan-history-dialog\s*\{[^}]*max-height:\s*calc\(100vh - 100px\)/s);
 });
 
 test("frameless titlebar supports double-click maximize without handling control buttons", async () => {
@@ -641,7 +662,9 @@ test("artifact and research materials preserve task scopes with focused detail d
   assert.match(css, /\.resource-browser-layout\s*\{/);
   assert.match(css, /\.resource-tree-flow\.columns-4\s*\{[^}]*grid-template-columns:\s*repeat\(4,minmax\(0,1fr\)\)/s);
   assert.match(css, /\.resource-tree-flow\.columns-3\s*\{[^}]*grid-template-columns:\s*repeat\(3,minmax\(0,1fr\)\)/s);
-  assert.match(css, /\.knowledge-modal\s*\{[^}]*width:\s*min\(1480px,calc\(100vw - 48px\)\)/s);
+  const materialsCSS = await readFile(new URL("./researchMaterialsLibrary.css", import.meta.url), "utf8");
+  assert.match(materialsCSS, /\.research-materials-modal\s*\{/);
+  assert.doesNotMatch(css, /\.knowledge-modal\s*\{/);
   assert.match(css, /\.resource-tree-flow\s*\{[^}]*height:\s*100%[^}]*overflow:\s*hidden/s);
   assert.match(css, /\.resource-tree-column\s*\{[^}]*height:\s*100%[^}]*overflow:\s*hidden/s);
   assert.match(source, /className="artifact-detail-dialog resource-detail-dialog"/);
@@ -650,9 +673,8 @@ test("artifact and research materials preserve task scopes with focused detail d
   assert.match(source, /批量移入回收站/);
   assert.match(source, /taskId\.trim\(\) \? "TrashTaskArtifact" : "TrashArtifact"/);
   assert.match(source, /const scopeWritable = !taskId\.trim\(\) \|\| selectedScopeKey === `task:\$\{taskId\.trim\(\)\}`/);
-  assert.match(css, /\.research-material-list\s*\{/);
-  assert.match(css, /\.research-material-card\s*\{/);
-  assert.match(css, /\.knowledge-technical-details\s*\{/);
+  assert.match(materialsCSS, /\.research-materials-list\s*\{/);
+  assert.doesNotMatch(css, /\.(?:research-material-card|knowledge-technical-details)\s*\{/);
   assert.doesNotMatch(source, /String\(index \+ 1\)\.padStart/);
   assert.doesNotMatch(css, /\.resource-tree-column:not\(:last-child\)::(?:before|after)/);
 });

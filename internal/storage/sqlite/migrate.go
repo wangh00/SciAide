@@ -53,6 +53,11 @@ func migrateToVersion(ctx context.Context, db *sql.DB, targetVersion int) error 
 	if len(migrations) == 0 || targetVersion <= 0 || targetVersion > migrations[len(migrations)-1].version {
 		return fmt.Errorf("unsupported database migration target %d", targetVersion)
 	}
+	if targetVersion >= 99 {
+		if err := repairUserInputMigrationCollision(ctx, db, migrations); err != nil {
+			return err
+		}
+	}
 	for _, item := range migrations {
 		if item.version > targetVersion {
 			break
@@ -99,7 +104,99 @@ func migrationChecksumAccepted(item migration, recorded string) bool {
 	}
 	// Early P7.2 development builds embedded migration 54 with one extra
 	// trailing LF. Both byte sequences create the same tables and index.
-	return item.version == 54 && pythonEnvironmentMigrationChecksum(recorded) && pythonEnvironmentMigrationChecksum(item.checksum)
+	if item.version == 54 && pythonEnvironmentMigrationChecksum(recorded) && pythonEnvironmentMigrationChecksum(item.checksum) {
+		return true
+	}
+	if item.version == 99 && userInputMigrationChecksum(recorded) && userInputMigrationChecksum(item.checksum) {
+		return true
+	}
+	// Retired workbench builds already occupied 95-98. Preserve their SQL and
+	// history; accept only the verified released/canonical byte pairs, whose
+	// sole difference is Windows line endings. Never reuse these version IDs.
+	return retiredWorkbenchMigrationChecksum(item.version, recorded) && retiredWorkbenchMigrationChecksum(item.version, item.checksum)
+}
+
+func userInputMigrationChecksum(value string) bool {
+	return value == "148926e35e64fca45b5188a40fb1321c96928f5720f99e1bfaa3f0baec0cc25b" || value == "79b3489c1fea9fe016d9dabf79c55921ecfc25648699435388aa301c6babc8ad"
+}
+
+// One unreleased question build incorrectly reused retired version 95. Repair
+// only that exact identity on the schema it actually created. The historical
+// workbench branch is never renumbered or rewritten. All changes are atomic.
+func repairUserInputMigrationCollision(ctx context.Context, db *sql.DB, items []migration) error {
+	var name, checksum, appliedAt string
+	err := db.QueryRowContext(ctx, `SELECT name,checksum,applied_at FROM schema_migrations WHERE version=95`).Scan(&name, &checksum, &appliedAt)
+	if err == sql.ErrNoRows || (err == nil && name != "000095_conversation_user_input.sql") {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read user input migration collision: %w", err)
+	}
+	if !userInputMigrationChecksum(checksum) {
+		return fmt.Errorf("migration 95 checksum changed")
+	}
+	var later, oldTables, column int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM schema_migrations WHERE version>95`).Scan(&later); err != nil {
+		return err
+	}
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_schema WHERE name IN ('workbench_tasks','workbench_contracts','workbench_attempts','workbench_objects','workbench_execution_results','workbench_jobs')`).Scan(&oldTables); err != nil {
+		return err
+	}
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('runs') WHERE name='pending_user_input_call_id' AND type='TEXT' AND "notnull"=1 AND dflt_value="''"`).Scan(&column); err != nil {
+		return err
+	}
+	if later != 0 || oldTables != 0 || column != 1 {
+		return fmt.Errorf("migration 95 user input collision does not match the known schema")
+	}
+	// Validate the complete pre-collision history before changing any rows.
+	for _, item := range items {
+		if item.version >= 95 {
+			break
+		}
+		var recordedName, recorded string
+		if err := db.QueryRowContext(ctx, `SELECT name,checksum FROM schema_migrations WHERE version=?`, item.version).Scan(&recordedName, &recorded); err != nil || recordedName != item.name || !migrationChecksumAccepted(item, recorded) {
+			return fmt.Errorf("migration %d does not match the user input upgrade history", item.version)
+		}
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `UPDATE schema_migrations SET version=99,name='000099_conversation_user_input.sql' WHERE version=95 AND name=? AND checksum=? AND applied_at=?`, name, checksum, appliedAt)
+	if err != nil {
+		return err
+	}
+	if count, err := result.RowsAffected(); err != nil || count != 1 {
+		return fmt.Errorf("user input migration collision changed during repair")
+	}
+	for _, item := range items {
+		if item.version < 95 || item.version > 98 {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, item.sql); err != nil {
+			return fmt.Errorf("repair migration collision at %d: %w", item.version, err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version,name,checksum,applied_at) VALUES (?,?,?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))`, item.version, item.name, item.checksum); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func retiredWorkbenchMigrationChecksum(version int, value string) bool {
+	switch version {
+	case 95:
+		return value == "17a5d194ee707ff672b5855bfef4605b60874731c3de6b184e08334030813e43" || value == "0c5f17f877a0ece08721d4b4642b81bc21c190d6ad6c1fa5591d20672a992c93"
+	case 96:
+		return value == "4202f37fe038a6a369e3fad44d1f5c39df456f365408f333b317d83299adec6f" || value == "0b18353c32c6315544efba77ef19fb13bcf244a3495716d45ccbd0144be4f2de"
+	case 97:
+		return value == "d1e4225f590c9d50f6a3f84e6d2e10a629b368ca840b462829f17cde0e23a342" || value == "e017fd9ccdc2350f2ae4a811e7c3d0525cd15eb37bd9b67758ebe229b46c86cf"
+	case 98:
+		return value == "bc20825f883e2964439df0a3240fddd4102a824078048d152b07f5450a6f8a93" || value == "45238222dd08bc15f043b5b53bff05baa8f1318468b7364828338a9650c7d1bd"
+	default:
+		return false
+	}
 }
 
 type transactionBeginner interface {

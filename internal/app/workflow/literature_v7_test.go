@@ -25,7 +25,16 @@ func withProviderQueryFixture(d tool.Definition) tool.Definition {
 	if d.QualifiedName == "builtin.research.workflow.search" {
 		schema := decodeObject(d.InputSchema)
 		schema["properties"].(map[string]any)["providerQueries"] = map[string]any{"type": "object"}
+		schema["properties"].(map[string]any)["retrievalProfile"] = map[string]any{"type": "string"}
+		schema["properties"].(map[string]any)["sourceRationale"] = map[string]any{"type": "string"}
+		schema["properties"].(map[string]any)["sourceIds"] = map[string]any{"type": "array", "items": map[string]any{"type": "string"}}
 		d.InputSchema = mustJSON(schema)
+		output := decodeObject(d.OutputSchema)
+		if output["properties"] == nil {
+			output["properties"] = map[string]any{}
+		}
+		output["properties"].(map[string]any)["searchPlan"] = map[string]any{"type": "object"}
+		d.OutputSchema = mustJSON(output)
 	}
 	return d
 }

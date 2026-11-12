@@ -20,10 +20,10 @@ func TestReportAssessmentAdaptsOnlyNewExecution(t *testing.T) {
 		if string(before) != string(mustJSON(node)) {
 			t.Fatal("frozen node mutated")
 		}
-		if got := reportExecutionPromptVersion(node, prompt); got != version+"-"+claimAssessmentVersion {
+		if got := reportExecutionPromptVersion(node, prompt); got != version+"-"+claimAssessmentVersion+"-"+reportDeliverableVersion {
 			t.Fatal(got)
 		}
-		node.PromptVersion += "-" + claimAssessmentVersion
+		node.PromptVersion += "-" + claimAssessmentVersion + "-" + reportDeliverableVersion
 		if got := reportExecutionPromptVersion(node, prompt); got != node.PromptVersion {
 			t.Fatal("duplicate execution suffix")
 		}
@@ -70,6 +70,24 @@ func TestNewReportRouteAndReviewGuidance(t *testing.T) {
 	}
 }
 
+func TestEvidenceCountingAndRatioGuidancePreservesContract(t *testing.T) {
+	for _, node := range []CompiledNode{
+		{ID: "report_drafting", OutputSchema: dynamicReportSchema()},
+		{ID: "independent_review", OutputSchema: researchAcceptanceReviewSchema()},
+	} {
+		before := mustJSON(node)
+		prompt := buildAIStagePrompt(RunDetail{}, Step{Input: raw(`{}`)}, node)
+		for _, want := range []string{"independently conducted studies", "explicit mappings", "one independent-study row per", "numerator, denominator, unit of analysis", "arithmetic correctness separately", "not by itself fabrication", "does not relax acceptance criteria"} {
+			if !strings.Contains(prompt, want) {
+				t.Fatalf("%s prompt missing %q", node.ID, want)
+			}
+		}
+		if string(before) != string(mustJSON(node)) {
+			t.Fatal("counting guidance mutated frozen contract")
+		}
+	}
+}
+
 func TestLimitedEvidenceHostAuditDoesNotGradeByCount(t *testing.T) {
 	detail := RunDetail{Run: Run{Inputs: raw(`{}`), Compilation: Compilation{Nodes: []CompiledNode{{ID: "selection", Kind: NodeCitationSelection}}}}, Steps: []Step{{NodeID: "selection", Status: StepCompleted, Output: raw(`{"citations":[],"evidenceStatus":"limited_citations_accepted"}`)}}}
 	audit := independentReviewHostAudit(detail)
@@ -79,7 +97,7 @@ func TestLimitedEvidenceHostAuditDoesNotGradeByCount(t *testing.T) {
 }
 
 func TestReviewVersionsPreserveOriginalGoalBinding(t *testing.T) {
-	for _, version := range []string{"dynamic-independent-review-v5", "dynamic-independent-review-v6-focused-v1", "dynamic-independent-review-v7-focused-v1"} {
+	for _, version := range []string{"dynamic-independent-review-v5", "dynamic-independent-review-v6-focused-v1", "dynamic-independent-review-v7-focused-v1", "dynamic-independent-review-v8-focused-v1", "dynamic-independent-review-v9-focused-v1"} {
 		detail := RunDetail{Run: Run{Inputs: raw(`{}`)}}
 		node := CompiledNode{ID: "independent_review", PromptVersion: version, OutputSchema: researchAcceptanceReviewSchema(), Arguments: raw(`{"researchContract":{"researchQuestion":"compare","successCriteria":["metrics and comparators"]},"evidenceScreening":{"coverage":{"strength":"limited"}}}`)}
 		value, err := bindNodeInput(detail, node)
@@ -112,9 +130,17 @@ func TestRecordedReportAssessmentUsesCurrentFrozenSources(t *testing.T) {
 	if string(before) != string(mustJSON(detail)) {
 		t.Fatal("history rewritten")
 	}
-	detail.AIExecutions[0].PromptVersion += "-" + claimAssessmentVersion
-	if recordedReportAssessment(detail).ConfidencePolicy != "claim_based" {
-		t.Fatal("new execution on old route not identifiable")
+	for _, marker := range []string{"claim-assessment-v1", "claim-assessment-v2", "claim-assessment-v3", "claim-assessment-v4"} {
+		for _, suffix := range []string{"", "-stage-input-pages-v1"} {
+			detail.AIExecutions[0].PromptVersion = node.PromptVersion + "-" + marker + suffix
+			unchanged := string(mustJSON(detail))
+			if !hasClaimAssessmentVersion(detail.AIExecutions[0].PromptVersion) || recordedReportAssessment(detail).ConfidencePolicy != "claim_based" {
+				t.Fatalf("historical %s assessment lost", marker+suffix)
+			}
+			if string(mustJSON(detail)) != unchanged {
+				t.Fatal("historical assessment rewritten")
+			}
+		}
 	}
 	detail.AIExecutions[0].Attempt--
 	if recordedReportAssessment(detail).ConfidencePolicy != "unknown" {
@@ -133,6 +159,17 @@ func TestRecordedReportAssessmentUsesCurrentFrozenSources(t *testing.T) {
 	detail.Steps[1].Input = raw(`{}`)
 	if got := recordedReportAssessment(detail); got.LimitedDraft || got.Coverage != "unknown" || got.SelectedExcerpts != 0 {
 		t.Fatal("missing audit guessed")
+	}
+}
+
+func TestLiteratureGuidanceIsScopedAwayFromImplementationCheckpoints(t *testing.T) {
+	node := CompiledNode{ID: "method_implementation", PromptVersion: "dynamic-implementation-v6", Prompt: "Keep the same frozen method."}
+	prompt := buildAIStagePrompt(RunDetail{}, Step{Input: raw(`{}`)}, node)
+	if strings.Contains(prompt, researchLiteratureAssessmentInstruction) || researchReportScopePrompt(node) != "" {
+		t.Fatal("unrelated implementation prompt hash changed by literature guidance")
+	}
+	if hasClaimAssessmentVersion("dynamic-report-v5-claim-assessment-v30") || hasClaimAssessmentVersion("claim-assessment-v4-untrusted-prefix") {
+		t.Fatal("ambiguous historical marker accepted")
 	}
 }
 

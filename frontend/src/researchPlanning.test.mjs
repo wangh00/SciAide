@@ -81,7 +81,7 @@ test("adopted routes bind files and start the frozen route without replanning", 
   assert.match(choose, /ChooseInputFileForResearchRoute/);
   assert.match(launch, /StartAdoptedResearchRoute/);
   assert.doesNotMatch(choose + launch, /AnswerResearchClarification|ReplanResearchStarter/);
-  assert.match(source, /已选路线 · 补充数据/);
+  assert.match(source, /已选路线 · 确认数据/);
   assert.match(source, /开始执行所选路线/);
 });
 
@@ -119,7 +119,8 @@ test("discovery navigation and history have separate bounded layouts", async () 
   assert.match(css, /\.research-history-toolbar\s*\{[^}]*flex: 0 0 42px/);
   assert.match(source, /effectiveQueryId === item.id/);
   assert.match(source, /deleteHistory\(\[\], true\)/);
-  assert.match(source, /function selectOrigin\(id: string\)[\s\S]*?setCheckedQueries\(\[\]\)/);
+  assert.match(source, /function selectOrigin\(id: string\)[\s\S]*?candidateRequests\.current\.invalidate\(\)/);
+  assert.doesNotMatch(source, /checkedQueries|setCheckedQueries/);
   assert.match(source, /<summary>检索详情<\/summary>/);
   assert.match(source, /entry.createdAt/);
   assert.doesNotMatch(source, /aria-label="全选当前分组检索记录"/);

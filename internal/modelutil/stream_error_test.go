@@ -2,6 +2,7 @@ package modelutil
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/wangh00/SciAide/internal/apperr"
@@ -15,6 +16,22 @@ func TestStreamErrorRetryable(t *testing.T) {
 		want      bool
 	}{
 		{"observed upstream read failure", "upstream_error", "stream_read_error", true},
+		{"observed prefixed upstream read failure", "error", "upstream_stream_read_error", true},
+		{"prefixed read code only", "", "upstream_stream_read_error", true},
+		{"prefixed read type only", "upstream_stream_read_error", "", true},
+		{"prefixed read normalized", " ERROR ", " UPSTREAM_STREAM_READ_ERROR ", true},
+		{"prefixed read not substring", "error", "not_upstream_stream_read_error", false},
+		{"prefixed read permanent code wins", "upstream_stream_read_error", "usage_limit_reached", false},
+		{"prefixed read permanent type wins", "authentication_error", "upstream_stream_read_error", false},
+		{"prefixed read unknown code wins", "upstream_stream_read_error", "unknown_error", false},
+		{"observed HTTP2 code", "error", "upstream_http2_stream_error", true},
+		{"HTTP2 code only", "", "upstream_http2_stream_error", true},
+		{"HTTP2 type only", "upstream_http2_stream_error", "", true},
+		{"HTTP2 normalized", " ERROR ", " UPSTREAM_HTTP2_STREAM_ERROR ", true},
+		{"HTTP2 not substring", "error", "not_upstream_http2_stream_error", false},
+		{"HTTP2 permanent code wins", "upstream_http2_stream_error", "invalid_api_key", false},
+		{"HTTP2 permanent type wins", "permission_error", "upstream_http2_stream_error", false},
+		{"HTTP2 unknown code wins", "upstream_http2_stream_error", "unknown_error", false},
 		{"code only", "", "stream_read_error", true},
 		{"type only", "stream_read_error", "", true},
 		{"normalized", " UPSTREAM_ERROR ", " STREAM_READ_ERROR ", true},
@@ -72,11 +89,12 @@ func TestStreamErrorClassificationUsesSpecificIdentityBeforeMessage(t *testing.T
 		{"negated temporary phrase", "upstream_error", "upstream_error", "The service is not temporarily unavailable. Invalid request.", false},
 		{"long misleading message", "upstream_error", "upstream_error", "Invalid key. The service is temporarily unavailable. Please retry later.", false},
 		{"provider specific outage", "error", "service_unavailable", "fixture unavailable", true},
+		{"live upstream stream interruption", "error", "upstream_stream_read_error", "Upstream response stream was interrupted", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := ClassifyStreamError(tc.typ, tc.code, tc.message, "original diagnostic")
 			var appErr *apperr.Error
-			if !errors.As(err, &appErr) || appErr.Retryable != tc.retryable || appErr.Details != "original diagnostic" {
+			if !errors.As(err, &appErr) || appErr.Retryable != tc.retryable || !strings.Contains(appErr.Details, "payloadSha256") || strings.Contains(appErr.Details, "original diagnostic") || appErr.UserMessage == tc.message {
 				t.Fatalf("classification=%#v", err)
 			}
 		})

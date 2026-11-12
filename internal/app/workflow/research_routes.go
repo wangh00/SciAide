@@ -671,6 +671,7 @@ func dynamicResearchStarterTemplate() Template {
 				ID: "explore", Name: "AI 综合 Skill 并设计研究路线", Kind: NodeAgentStage, Arguments: raw(`{}`),
 				PromptVersion: "research-starter-semantic-v6", ReviewPolicy: AIReviewAuto, SkillRouting: true,
 				AllowedTools: []string{
+					ResearchTaskReadTool,
 					"builtin.mcp.list", "builtin.tools.search",
 					"builtin.resource.open", "builtin.resource.search",
 					"builtin.attachment.list", "builtin.document.inspect", "builtin.document.read", "builtin.document.search",

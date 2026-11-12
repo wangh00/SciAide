@@ -214,7 +214,10 @@ func workspaceTextResource(path string) bool {
 }
 func workspaceResourceSeeds(scope resource.Scope, result tool.Result) ([]resource.Seed, error) {
 	var data struct {
-		Entries   []struct{ Name, Path, Kind string }
+		Entries []struct {
+			Name, Path, Kind string
+			Size             int64
+		}
 		Truncated bool
 	}
 	if err := json.Unmarshal(result.Structured, &data); err != nil {
@@ -226,7 +229,14 @@ func workspaceResourceSeeds(scope resource.Scope, result tool.Result) ([]resourc
 			seeds = append(seeds, resource.Seed{Kind: "directory", Label: "浏览目录 · " + entry.Name, ToolName: ListWorkspaceName, Arguments: resourceArgs(map[string]any{"path": entry.Path, "limit": 500})})
 		}
 		if entry.Kind == "file" && scope.ToolContracts[ReadTextName] != "" && workspaceTextResource(entry.Path) {
-			seeds = append(seeds, resource.Seed{Kind: "workspace_read", Label: "读取文件 · " + entry.Name, ToolName: ReadTextName, Arguments: resourceArgs(map[string]any{"path": entry.Path, "maxBytes": 6000})})
+			limit := 6000
+			// Machine-readable JSON has less human navigation overhead than a
+			// manual/source chapter. Stay below the immutable 10K model envelope;
+			// escaped pages are fitted again locally before issuing continuation.
+			if strings.EqualFold(filepath.Ext(entry.Path), ".json") && entry.Size > 6000 && entry.Size <= maxReadBytes {
+				limit = workspaceJSONResourceReadBytes
+			}
+			seeds = append(seeds, resource.Seed{Kind: "workspace_read", Label: "读取文件 · " + entry.Name, ToolName: ReadTextName, Arguments: resourceArgs(map[string]any{"path": entry.Path, "maxBytes": limit})})
 		}
 	}
 	return seeds, nil
@@ -344,7 +354,7 @@ func (r *ResourceActions) followups(scope resource.Scope, parent resource.Seed, 
 		if data.Truncated && data.BytesRead > 0 && offset+data.BytesRead < data.OriginalBytes {
 			args["offset"] = offset + data.BytesRead
 			child := parent
-			child.Label = "继续读取 · " + parent.Label
+			child.Label = "继续读取 · " + strings.TrimPrefix(parent.Label, "继续读取 · ")
 			child.Arguments = resourceArgs(args)
 			seeds = append(seeds, child)
 		}

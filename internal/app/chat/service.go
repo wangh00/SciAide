@@ -14,6 +14,7 @@ import (
 	"github.com/wangh00/SciAide/internal/app/citation"
 	"github.com/wangh00/SciAide/internal/app/conversation"
 	"github.com/wangh00/SciAide/internal/app/tool"
+	"github.com/wangh00/SciAide/internal/app/userinput"
 	"github.com/wangh00/SciAide/internal/events"
 	"github.com/wangh00/SciAide/internal/id"
 	"github.com/wangh00/SciAide/internal/modelcap"
@@ -55,18 +56,11 @@ var clientMessageIDPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a
 
 const maxUserMessageChars = 100_000
 
-// Match the persisted Workflow AI prompt bound; model budgets are checked later.
-const maxWorkflowMessageChars = 262_144
-
 func validateStartMessageLength(text string, workflowAI *WorkflowAIExecution) error {
-	limit := maxUserMessageChars
 	if workflowAI != nil {
-		limit = maxWorkflowMessageChars
+		return ValidateWorkflowPrompt(text)
 	}
-	if len([]rune(text)) > limit {
-		if workflowAI != nil {
-			return fmt.Errorf("科研阶段输入超过 %d 字符的存储上限，请减少重复结果或拆分阶段输入；内容未截断", limit)
-		}
+	if len([]rune(text)) > maxUserMessageChars {
 		return fmt.Errorf("message is too long")
 	}
 	return nil
@@ -77,12 +71,16 @@ const defaultContextWindowTokens = modelcap.DefaultContextWindowTokens
 // Snapshot is the durable UI recovery view. Events improve latency, but this
 // snapshot remains the source of truth after lost or out-of-order UI events.
 type Snapshot struct {
-	Sequence   int64                  `json:"sequence"`
-	Run        Run                    `json:"run"`
-	WorkflowAI bool                   `json:"workflowAI"`
-	Messages   []conversation.Message `json:"messages"`
-	ToolCalls  []tool.Call            `json:"toolCalls"`
-	RunSteps   []RunStep              `json:"runSteps"`
+	Activity      *RuntimeActivity       `json:"activity,omitempty"`
+	Retry         *ModelRetryStatus      `json:"retry,omitempty"`
+	RetrySequence *int64                 `json:"retrySequence,omitempty"`
+	UserInput     *userinput.Request     `json:"userInput,omitempty"`
+	Sequence      int64                  `json:"sequence"`
+	Run           Run                    `json:"run"`
+	WorkflowAI    bool                   `json:"workflowAI"`
+	Messages      []conversation.Message `json:"messages"`
+	ToolCalls     []tool.Call            `json:"toolCalls"`
+	RunSteps      []RunStep              `json:"runSteps"`
 	// These primitive fields are the safe UI projection of the active model
 	// turn. Keep the persistence journal type private to avoid exposing a
 	// database-shaped type through Wails bindings.
@@ -125,13 +123,14 @@ type Service struct {
 	attachments   AttachmentResolver
 	now           func() time.Time
 
-	mu            sync.Mutex
-	runner        RunExecutor
-	active        map[string]context.CancelFunc
-	pendingResume map[string]bool
-	lastResumeKey map[string]string
-	closing       bool
-	wg            sync.WaitGroup
+	mu                sync.Mutex
+	runner            RunExecutor
+	active            map[string]context.CancelCauseFunc
+	pendingResume     map[string]bool
+	lastResumeKey     map[string]string
+	resumedUserInputs map[string]bool
+	closing           bool
+	wg                sync.WaitGroup
 }
 
 func (s *Service) SetAttachmentResolver(resolver AttachmentResolver) error {
@@ -187,7 +186,7 @@ func (s *Service) SetTerminator(terminator *Terminator) error {
 }
 
 func NewService(runs Repository, conversations ConversationRepository, eventRepository EventRepository, publisher Publisher) *Service {
-	return &Service{runs: runs, conversations: conversations, events: eventRepository, publisher: publisher, now: func() time.Time { return time.Now().UTC() }, active: make(map[string]context.CancelFunc), pendingResume: make(map[string]bool), lastResumeKey: make(map[string]string)}
+	return &Service{runs: runs, conversations: conversations, events: eventRepository, publisher: publisher, now: func() time.Time { return time.Now().UTC() }, active: make(map[string]context.CancelCauseFunc), pendingResume: make(map[string]bool), resumedUserInputs: make(map[string]bool), lastResumeKey: make(map[string]string)}
 }
 
 // SetRunner completes bootstrap's dependency cycle: Chat creates the durable
@@ -208,6 +207,58 @@ func (s *Service) SetRunner(runner RunExecutor) error {
 
 func (s *Service) Recover(ctx context.Context) (int64, error) {
 	return s.runs.InterruptActive(ctx, s.now())
+}
+
+type userInputRepository interface {
+	WaitForUserInput(context.Context, string, string, time.Time) (Run, error)
+	RespondToUserInput(context.Context, userinput.Response, time.Time) (Run, error)
+}
+
+func (s *Service) WaitForUserInput(ctx context.Context, runID, callID string) (Run, error) {
+	repo, ok := s.runs.(userInputRepository)
+	if !ok {
+		return Run{}, fmt.Errorf("user input storage unavailable")
+	}
+	run, err := repo.WaitForUserInput(ctx, runID, callID, s.now())
+	if err == nil {
+		s.emit(ctx, run.ID, "run.user_input_requested", map[string]any{"runId": run.ID, "callId": callID, "status": run.Status})
+	}
+	return run, err
+}
+
+func (s *Service) RespondToUserInput(ctx context.Context, response userinput.Response) (Run, error) {
+	repo, ok := s.runs.(userInputRepository)
+	if !ok {
+		return Run{}, fmt.Errorf("user input storage unavailable")
+	}
+	run, err := repo.RespondToUserInput(ctx, response, s.now())
+	if err != nil {
+		return Run{}, err
+	}
+	if run.Status == RunRunning {
+		// The in-memory resume keys reset on restart. An exact retry of an
+		// earlier question must not schedule another continuation after a later
+		// question has already been answered in the same durable Run.
+		s.mu.Lock()
+		reader := s.toolCalls
+		s.mu.Unlock()
+		if reader != nil {
+			calls, loadErr := reader.ListByRun(ctx, run.ID)
+			if loadErr != nil {
+				return run, loadErr
+			}
+			for i := len(calls) - 1; i >= 0; i-- {
+				if calls[i].ToolName == userinput.ToolName && calls[i].Status == tool.CallCompleted {
+					if calls[i].ID != response.CallID {
+						return run, nil
+					}
+					break
+				}
+			}
+		}
+		err = s.Resume(ctx, run.ID, "user-input:"+response.CallID)
+	}
+	return run, err
 }
 
 func (s *Service) Start(ctx context.Context, cmd StartCommand) (Run, error) {
@@ -489,11 +540,19 @@ func (s *Service) Resume(_ context.Context, runID, approvalID string) error {
 		return fmt.Errorf("run is not ready to resume")
 	}
 	s.mu.Lock()
+	inputKey := run.ID + ":" + approvalID
+	if strings.HasPrefix(approvalID, "user-input:") && s.resumedUserInputs[inputKey] {
+		s.mu.Unlock()
+		return nil
+	}
 	if s.lastResumeKey[run.ID] == approvalID {
 		s.mu.Unlock()
 		return nil
 	}
 	if s.active[run.ID] != nil {
+		if strings.HasPrefix(approvalID, "user-input:") {
+			s.resumedUserInputs[inputKey] = true
+		}
 		s.pendingResume[run.ID] = true
 		s.lastResumeKey[run.ID] = approvalID
 		s.mu.Unlock()
@@ -501,6 +560,9 @@ func (s *Service) Resume(_ context.Context, runID, approvalID string) error {
 	}
 	err = s.launchLocked(run.ID, true)
 	if err == nil {
+		if strings.HasPrefix(approvalID, "user-input:") {
+			s.resumedUserInputs[inputKey] = true
+		}
 		s.lastResumeKey[run.ID] = approvalID
 	}
 	s.mu.Unlock()
@@ -522,13 +584,13 @@ func (s *Service) Cancel(ctx context.Context, runID string) error {
 	}
 	if isTerminal(run.Status) {
 		if cancel != nil {
-			cancel()
+			cancel(context.Canceled)
 		}
 		return nil
 	}
 	if terminator == nil {
 		if cancel != nil {
-			cancel()
+			cancel(context.Canceled)
 			return nil
 		}
 		return fmt.Errorf("run is not active")
@@ -537,13 +599,27 @@ func (s *Service) Cancel(ctx context.Context, runID string) error {
 		return err
 	}
 	if cancel != nil {
-		cancel()
+		cancel(context.Canceled)
 	}
 	return nil
 }
 
 func (s *Service) Snapshot(ctx context.Context, runID string) (Snapshot, error) {
 	return s.readSnapshot(ctx, runID, "conversation")
+}
+
+// UISnapshot does not change the durable/model snapshot contract.
+func (s *Service) UISnapshot(ctx context.Context, runID string) (Snapshot, error) {
+	return s.readSnapshot(ctx, runID, "ui")
+}
+
+func (s *Service) UIRevision(ctx context.Context, runID, conversationID string) (string, error) {
+	if reader, ok := s.runs.(interface {
+		UIRevision(context.Context, string, string) (string, error)
+	}); ok {
+		return reader.UIRevision(ctx, runID, conversationID)
+	}
+	return "", nil
 }
 
 // Activity needs status, the current draft and tools, not conversation history.
@@ -579,6 +655,17 @@ func (s *Service) StageSnapshot(ctx context.Context, runID string) (Snapshot, er
 }
 
 func (s *Service) readSnapshot(ctx context.Context, runID, mode string) (Snapshot, error) {
+	// This is a conservative high-water mark. Reading it after individual fields
+	// could attach a newer event sequence to older data and suppress the actual
+	// recovery/terminal event arriving while the snapshot was being assembled.
+	var sequence int64
+	if reader, ok := s.events.(eventSequenceReader); ok {
+		var err error
+		sequence, err = reader.LatestEventSequence(ctx, runID)
+		if err != nil {
+			return Snapshot{}, err
+		}
+	}
 	run, err := s.runs.Get(ctx, runID)
 	if err != nil {
 		return Snapshot{}, err
@@ -586,27 +673,42 @@ func (s *Service) readSnapshot(ctx context.Context, runID, mode string) (Snapsho
 	var messages []conversation.Message
 	if mode != "activity" {
 		if reader, ok := s.conversations.(interface {
+			ListVisibleMessages(context.Context, string, int) ([]conversation.Message, error)
+		}); ok && mode == "ui" {
+			messages, err = reader.ListVisibleMessages(ctx, run.ConversationID, 200)
+		} else if reader, ok := s.conversations.(interface {
 			ListMessagesForRun(context.Context, string, string) ([]conversation.Message, error)
 		}); ok && mode == "stage" {
 			messages, err = reader.ListMessagesForRun(ctx, run.ConversationID, run.ID)
 		} else {
 			messages, err = s.conversations.ListMessages(ctx, run.ConversationID, 200)
+			if mode == "ui" {
+				messages = conversation.VisibleMessageProjection(messages)
+			}
 		}
 		if err != nil {
 			return Snapshot{}, err
 		}
 	}
-	snapshot := Snapshot{Run: run, Messages: messages, ToolCalls: []tool.Call{}, RunSteps: []RunStep{}}
+	snapshot := Snapshot{Sequence: sequence, Run: run, Messages: messages, ToolCalls: []tool.Call{}, RunSteps: []RunStep{}}
+	if reader, ok := s.runs.(ModelRetryStatusReader); ok {
+		if retry, retrySequence, exists, readErr := reader.LatestModelRetryStatus(ctx, run.ID); readErr == nil {
+			snapshot.RetrySequence = &retrySequence
+			if exists && run.Status == RunRunning {
+				snapshot.Retry = &retry
+			}
+		}
+	}
+	if reader, ok := s.runs.(RuntimeActivityReader); ok && run.Status == RunRunning {
+		// Display telemetry is best-effort; it cannot prevent chat recovery.
+		if activity, exists, readErr := reader.LatestRuntimeActivity(ctx, run.ID); readErr == nil && exists && activity.Matches(run) {
+			snapshot.Activity = &activity
+		}
+	}
 	if detector, ok := s.runs.(interface {
 		IsWorkflowAIRun(context.Context, string) (bool, error)
 	}); ok {
 		snapshot.WorkflowAI, err = detector.IsWorkflowAIRun(ctx, run.ID)
-		if err != nil {
-			return Snapshot{}, err
-		}
-	}
-	if reader, ok := s.events.(eventSequenceReader); ok {
-		snapshot.Sequence, err = reader.LatestEventSequence(ctx, run.ID)
 		if err != nil {
 			return Snapshot{}, err
 		}
@@ -619,6 +721,18 @@ func (s *Service) readSnapshot(ctx context.Context, runID, mode string) (Snapsho
 		snapshot.ToolCalls, err = toolCalls.ListByRun(ctx, run.ID)
 		if err != nil {
 			return Snapshot{}, err
+		}
+	}
+	if run.Status == RunWaitingUserInput {
+		for _, call := range snapshot.ToolCalls {
+			if call.ID == run.PendingUserInputCallID && call.ToolName == userinput.ToolName {
+				questions, decodeErr := userinput.Decode(call.Arguments)
+				if decodeErr != nil {
+					return Snapshot{}, decodeErr
+				}
+				snapshot.UserInput = &userinput.Request{RunID: run.ID, CallID: call.ID, Questions: questions.Questions}
+				break
+			}
 		}
 	}
 	if runSteps != nil && mode != "activity" {
@@ -641,6 +755,38 @@ func (s *Service) readSnapshot(ctx context.Context, runID, mode string) (Snapsho
 }
 
 func (s *Service) LatestSnapshot(ctx context.Context, conversationID string) (*Snapshot, error) {
+	return s.latestSnapshot(ctx, conversationID, false)
+}
+
+func (s *Service) LatestUISnapshot(ctx context.Context, conversationID string) (*Snapshot, error) {
+	return s.latestSnapshot(ctx, conversationID, true)
+}
+
+// LatestOrdinaryUISnapshot keeps human follow-ups separate from internal
+// Workflow stage Runs, even after many newer internal executions.
+func (s *Service) LatestOrdinaryUISnapshot(ctx context.Context, conversationID string) (*Snapshot, error) {
+	conversationID = strings.TrimSpace(conversationID)
+	if conversationID == "" {
+		return nil, fmt.Errorf("conversation id is required")
+	}
+	reader, ok := s.runs.(interface {
+		LatestOrdinaryForConversation(context.Context, string) (Run, bool, error)
+	})
+	if !ok {
+		return nil, fmt.Errorf("ordinary conversation Run lookup is unavailable")
+	}
+	run, exists, err := reader.LatestOrdinaryForConversation(ctx, conversationID)
+	if err != nil || !exists {
+		return nil, err
+	}
+	snapshot, err := s.readSnapshot(ctx, run.ID, "ui")
+	if err != nil {
+		return nil, err
+	}
+	return &snapshot, nil
+}
+
+func (s *Service) latestSnapshot(ctx context.Context, conversationID string, ui bool) (*Snapshot, error) {
 	conversationID = strings.TrimSpace(conversationID)
 	if conversationID == "" {
 		return nil, fmt.Errorf("conversation id is required")
@@ -649,7 +795,11 @@ func (s *Service) LatestSnapshot(ctx context.Context, conversationID string) (*S
 	if err != nil || !exists {
 		return nil, err
 	}
-	snapshot, err := s.Snapshot(ctx, run.ID)
+	mode := "conversation"
+	if ui {
+		mode = "ui"
+	}
+	snapshot, err := s.readSnapshot(ctx, run.ID, mode)
 	if err != nil {
 		return nil, err
 	}
@@ -735,15 +885,25 @@ func normalizeUsageQuery(query *UsageQuery) error {
 	return nil
 }
 
-func (s *Service) Close() {
+// BeginShutdown labels cancellation before process runners start unwinding.
+// Waiting question cards have no active runner and remain answerable on restart.
+func (s *Service) BeginShutdown() {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.closing = true
 	clear(s.pendingResume)
 	for _, cancel := range s.active {
-		cancel()
+		cancel(ErrApplicationClosing)
 	}
-	s.mu.Unlock()
+}
+
+func (s *Service) Close() {
+	s.BeginShutdown()
 	s.wg.Wait()
+	s.mu.Lock()
+	clear(s.lastResumeKey)
+	clear(s.resumedUserInputs)
+	s.mu.Unlock()
 }
 
 func (s *Service) launch(runID string, resume bool) error {
@@ -769,7 +929,7 @@ func (s *Service) launchLocked(runID string, resume bool) error {
 		return fmt.Errorf("run is already active")
 	}
 	runner := s.runner
-	runCtx, cancel := context.WithCancel(context.Background())
+	runCtx, cancel := context.WithCancelCause(context.Background())
 	s.active[runID] = cancel
 	s.wg.Add(1)
 	go func() {
@@ -810,10 +970,21 @@ func (s *Service) emit(ctx context.Context, runID, eventType string, payload any
 }
 
 func (s *Service) finishActive(runID string) {
+	// A wait for user input/approval can have multiple runner lifetimes. Keep
+	// the deduplication keys until the durable run is terminal, not every exit.
+	run, err := s.runs.Get(context.Background(), runID)
 	s.mu.Lock()
 	delete(s.active, runID)
 	resume := s.pendingResume[runID] && !s.closing
 	delete(s.pendingResume, runID)
+	if !resume && err == nil && isTerminal(run.Status) {
+		delete(s.lastResumeKey, runID)
+		for key := range s.resumedUserInputs {
+			if strings.HasPrefix(key, runID+":") {
+				delete(s.resumedUserInputs, key)
+			}
+		}
+	}
 	s.mu.Unlock()
 	if resume {
 		s.mu.Lock()

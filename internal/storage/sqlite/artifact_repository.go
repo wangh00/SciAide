@@ -19,6 +19,21 @@ type ArtifactRepository struct{ db *sql.DB }
 
 func NewArtifactRepository(db *sql.DB) *ArtifactRepository { return &ArtifactRepository{db: db} }
 
+// VersionForSourceKey is a scoped read for compatibility with already-written
+// publication receipts. It does not weaken CreateVersion's conflict checks.
+func (r *ArtifactRepository) VersionForSourceKey(ctx context.Context, projectID, key string) (artifact.Version, bool, error) {
+	var versionID string
+	err := r.db.QueryRowContext(ctx, `SELECT v.id FROM artifact_versions v JOIN artifacts a ON a.id=v.artifact_id WHERE a.project_id=? AND v.source_key=?`, projectID, key).Scan(&versionID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return artifact.Version{}, false, nil
+	}
+	if err != nil {
+		return artifact.Version{}, false, err
+	}
+	version, _, err := r.GetVersion(ctx, projectID, versionID)
+	return version, err == nil, err
+}
+
 func (r *ArtifactRepository) CreateVersion(ctx context.Context, record artifact.CreateVersionRecord) (artifact.SaveResult, error) {
 	encoded, err := json.Marshal(record.Version.Provenance)
 	if err != nil {

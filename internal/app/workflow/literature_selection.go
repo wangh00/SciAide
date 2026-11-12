@@ -43,7 +43,7 @@ func (s *RuntimeService) finishLiteratureSelection(ctx context.Context, detail R
 			continue
 		}
 		a, ok := prior[c.ID]
-		if !ok || fingerprints[c.ID] != hashJSON(mustJSON(c)) {
+		if !ok || fingerprints[c.ID] != literatureCandidateSHA256(c) {
 			return true, fmt.Errorf("selection candidate has no current assessment: %s", c.ID)
 		}
 		if err := validateLiteratureImportAction(a); err != nil {

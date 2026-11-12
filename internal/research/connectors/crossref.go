@@ -2,6 +2,7 @@ package connectors
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"strings"
@@ -16,13 +17,50 @@ type crossrefConnector struct {
 }
 
 type crossrefResponse struct {
-	Message struct {
+	Status      json.RawMessage `json:"status"`
+	searchLimit int
+	Message     struct {
 		Items []crossrefWork `json:"items"`
 	} `json:"message"`
 }
 
+func (r *crossrefResponse) validateSourceResponse() error {
+	if err := validateCrossrefStatus(r.Status); err != nil {
+		return err
+	}
+	if r.Message.Items == nil {
+		return &appresearch.SourceError{SourceID: "crossref", Code: appresearch.FailureInvalidData, Message: "Crossref response is missing message.items"}
+	}
+	if len(r.Message.Items) == 0 {
+		return nil
+	}
+	admitted := 0
+	for _, record := range r.Message.Items {
+		if appresearch.NormalizeDOI(record.DOI) == "" {
+			continue
+		}
+		if r.searchLimit > 0 && admitted >= r.searchLimit {
+			break
+		}
+		admitted++
+		if usableSearchRecord("crossref", appresearch.NormalizeDOI(record.DOI), firstString(record.Title)) {
+			return nil
+		}
+	}
+	return &appresearch.SourceError{SourceID: "crossref", Code: appresearch.FailureInvalidData, Message: "Crossref returned records but no usable identity/title pair"}
+}
+
 type crossrefSingle struct {
-	Message crossrefWork `json:"message"`
+	Status        json.RawMessage `json:"status"`
+	fetchRecordID string
+	Message       crossrefWork `json:"message"`
+}
+
+func (r *crossrefSingle) validateSourceResponse() error {
+	if err := validateCrossrefStatus(r.Status); err != nil {
+		return err
+	}
+	return validateFetchedRecords("crossref", r.fetchRecordID, crossrefWorks([]crossrefWork{r.Message}))
 }
 
 type crossrefWork struct {
@@ -75,7 +113,7 @@ func (c *crossrefConnector) Search(ctx context.Context, options appresearch.Sear
 	if options.Offset > 0 {
 		query.Set("offset", fmt.Sprint(options.Offset))
 	}
-	var response crossrefResponse
+	response := crossrefResponse{searchLimit: options.Limit}
 	if err := c.client.getJSON(ctx, c.base+"?"+query.Encode(), requestOptions{SourceID: "crossref", Host: c.host, Cache: true}, &response); err != nil {
 		return nil, err
 	}
@@ -84,10 +122,10 @@ func (c *crossrefConnector) Search(ctx context.Context, options appresearch.Sear
 
 func (c *crossrefConnector) Fetch(ctx context.Context, recordID string) (appresearch.Work, error) {
 	doi := appresearch.NormalizeDOI(recordID)
-	if doi == "" {
+	if appresearch.CanonicalSourceRecordID("crossref", recordID) == "" {
 		return appresearch.Work{}, &appresearch.SourceError{SourceID: "crossref", Code: appresearch.FailureInvalidData, Message: "Crossref fetch requires a DOI"}
 	}
-	var response crossrefSingle
+	response := crossrefSingle{fetchRecordID: doi}
 	if err := c.client.getJSON(ctx, c.base+"/"+url.PathEscape(doi), requestOptions{SourceID: "crossref", Host: c.host, Cache: true}, &response); err != nil {
 		return appresearch.Work{}, err
 	}

@@ -34,3 +34,20 @@ func TestExecutedPythonSourceUsesFrozenSuccessfulInput(t *testing.T) {
 		t.Fatal("accepted failed Kernel as successful execution")
 	}
 }
+
+func TestExecutedPythonSourceMatchesKernelWhitespaceNormalization(t *testing.T) {
+	s, f := stageMemoryService()
+	code := " \n\t# 精确执行源码\r\nprint('paired result')\n\t"
+	executed := strings.TrimSpace(code)
+	input := rawObject(map[string]any{"code": code})
+	f.detail.Run.Compilation = Compilation{Nodes: []CompiledNode{{ID: "python_analysis", Kind: NodePython}}}
+	f.detail.Steps = []Step{{NodeID: "python_analysis", Attempt: 1, Status: StepCompleted, Input: input, Output: rawObject(map[string]any{"structured": map[string]any{"status": "success", "codeSha256": hashBytes([]byte(executed))}})}}
+	got, err := s.ExecutedPythonCode(context.Background(), "p", "run", "python_analysis", 1)
+	if err != nil || got.Code != executed || got.SHA256 != hashBytes([]byte(got.Code)) || string(f.detail.Steps[0].Input) != string(input) {
+		t.Fatal("export did not match actual Kernel bytes, or rewrote the frozen input", err)
+	}
+	f.detail.Steps[0].Input = rawObject(map[string]any{"code": code + "# different code"})
+	if _, err := s.ExecutedPythonCode(context.Background(), "p", "run", "python_analysis", 1); err == nil {
+		t.Fatal("normalization bypassed real code hash mismatch")
+	}
+}

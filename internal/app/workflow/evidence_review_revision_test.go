@@ -11,6 +11,7 @@ func TestEvidenceReviewTargetAndBatchCorrectionLifetime(t *testing.T) {
 	d.Run.Status = RunFailed
 	gate := findStepByNode(d.Steps, "review_gate")
 	gate.Status = StepFailed
+	gate.ErrorCode = "RESEARCH_REVIEW_NOT_APPROVED"
 	// Use the rejected, frozen gate from the existing review fixture.
 	f := reviewRevisionFixture()
 	gate.Input = f.Steps[2].Input

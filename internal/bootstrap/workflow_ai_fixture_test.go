@@ -30,10 +30,10 @@ type workflowAITestPublisher struct{}
 
 func (workflowAITestPublisher) Publish(context.Context, events.Envelope) {}
 
-func newWorkflowAITestServer(t *testing.T) *httptest.Server {
+func newWorkflowAITestServer(t *testing.T, mutations ...func(map[string]any, string)) *httptest.Server {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/chat/completions" {
+		if r.URL.Path != "/v1/chat/completions" && r.URL.Path != "/v1/responses" && r.URL.Path != "/v1/messages" {
 			http.Error(w, "unexpected path", http.StatusNotFound)
 			return
 		}
@@ -42,7 +42,7 @@ func newWorkflowAITestServer(t *testing.T) *httptest.Server {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		prompt := workflowAITestPrompt(body)
+		prompt := workflowAITestPrompt(contextPipelineCanonicalRequest(t, body))
 		schema, err := workflowAITestSchema(prompt)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -52,17 +52,26 @@ func newWorkflowAITestServer(t *testing.T) *httptest.Server {
 		// Keep the fixture indented so Workflow output verification exercises
 		// semantic JSON equality instead of byte-for-byte whitespace equality.
 		fixture := workflowAISchemaFixture(schema)
+		sourceReview := strings.Contains(prompt, "<review_submission_sources>")
 		if object, ok := fixture.(map[string]any); ok {
-			if _, review := object["reviewedInputSha256"]; review {
+			if _, review := object["reviewedInputSha256"]; review || sourceReview {
 				object["reviewedInputSha256"] = workflowAITestStageInputSHA256(prompt)
 				object["approved"] = true
 				applyResearchAcceptanceFixture(object, prompt)
+				if sourceReview {
+					applyTrackedReviewFixture(object, prompt)
+				}
 			}
 		}
 		reference := workflowAIReissuedCitation(prompt)
 		if object, ok := fixture.(map[string]any); ok && reference != "" {
 			if summary, exists := object["summary"].(string); exists {
 				object["summary"] = summary + " " + reference
+			}
+		}
+		if object, ok := fixture.(map[string]any); ok {
+			for _, mutate := range mutations {
+				mutate(object, prompt)
 			}
 		}
 		output, err := json.MarshalIndent(fixture, "", "  ")
@@ -75,14 +84,19 @@ func newWorkflowAITestServer(t *testing.T) *httptest.Server {
 			answer += " " + reference
 		}
 		answer += "\n```json\n" + string(output) + "\n```"
-		w.Header().Set("Content-Type", "text/event-stream")
-		chunk, _ := json.Marshal(map[string]any{"choices": []any{map[string]any{"delta": map[string]any{"content": answer}, "finish_reason": nil}}})
-		_, _ = fmt.Fprintf(w, "data: %s\n\n", chunk)
-		finished, _ := json.Marshal(map[string]any{
-			"choices": []any{map[string]any{"delta": map[string]any{}, "finish_reason": "stop"}},
-			"usage":   map[string]any{"prompt_tokens": 32, "completion_tokens": 16},
-		})
-		_, _ = fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", finished)
+		protocol := modelprofile.ProtocolOpenAIChat
+		if r.URL.Path == "/v1/responses" {
+			protocol = modelprofile.ProtocolOpenAIResponses
+		}
+		if r.URL.Path == "/v1/messages" {
+			protocol = modelprofile.ProtocolAnthropic
+		}
+		if sourceReview {
+			wire := reviewFixtureSourceSelections(t, prompt, reviewFixtureIssueWire(t, fixture.(map[string]any)))
+			emitQuestionHandoffFixture(t, w, protocol, 1, "", "submit_stage_result", string(wire))
+		} else if !emitRequiredPlannerResultFixture(t, w, protocol, body, string(output)) {
+			emitQuestionHandoffFixture(t, w, protocol, 1, answer, "", "")
+		}
 	}))
 	t.Cleanup(server.Close)
 	return server
@@ -237,7 +251,18 @@ func applyTrackedReviewFixture(output map[string]any, prompt string) {
 	target := workflowAITestRevisionTarget(input)
 	plan := make([]any, 0, len(corrections))
 	for index := range corrections {
-		plan = append(plan, map[string]any{"correctionIndex": index, "nodeId": target, "reason": "测试桩依据当前审查问题安排返修", "whyNotLater": "需要在上游阶段修正后再生成交付", "needsUserInput": false, "requiredInput": ""})
+		item := map[string]any{"correctionIndex": index, "nodeId": target, "reason": "测试桩依据当前审查问题安排返修", "whyNotLater": "需要在上游阶段修正后再生成交付", "needsUserInput": false, "requiredInput": ""}
+		if contract, ok := input["revisionWriteContract"].(map[string]any); ok {
+			objects, _ := contract["objects"].([]any)
+			for _, raw := range objects {
+				object, _ := raw.(map[string]any)
+				if object["ownerNodeId"] == target && (object["kind"] == "stage_result" || object["kind"] == "report_authored_body") {
+					item["editTargets"] = []any{object["id"]}
+					break
+				}
+			}
+		}
+		plan = append(plan, item)
 	}
 	output["revisionPlan"] = plan
 }
@@ -404,6 +429,9 @@ func newWorkflowAISkillTestServer(t *testing.T) *httptest.Server {
 			return
 		}
 		output, _ := json.Marshal(workflowAISchemaFixture(schema))
+		if emitRequiredPlannerResultFixture(t, w, modelprofile.ProtocolOpenAIChat, body, string(output)) {
+			return
+		}
 		answer := "Skill-assisted analysis completed.\n```json\n" + string(output) + "\n```"
 		chunk, _ := json.Marshal(map[string]any{"choices": []any{map[string]any{"delta": map[string]any{"content": answer}, "finish_reason": nil}}})
 		_, _ = fmt.Fprintf(w, "data: %s\n\n", chunk)
@@ -433,6 +461,9 @@ func newResearchStarterOutputTestServer(t *testing.T, mutateOutput func(map[stri
 				Function struct {
 					Name        string `json:"name"`
 					Description string `json:"description"`
+					Parameters  struct {
+						Properties map[string]json.RawMessage `json:"properties"`
+					} `json:"parameters"`
 				} `json:"function"`
 			} `json:"tools"`
 		}
@@ -503,7 +534,7 @@ func newResearchStarterOutputTestServer(t *testing.T, mutateOutput func(map[stri
 					}
 				}
 			}
-			if _, review := object["reviewedInputSha256"]; review {
+			if _, review := object["reviewedInputSha256"]; review || strings.Contains(prompt, "<review_submission_sources>") {
 				object["reviewedInputSha256"] = workflowAITestStageInputSHA256(prompt)
 				object["approved"] = true
 				applyResearchAcceptanceFixture(object, prompt)
@@ -514,18 +545,71 @@ func newResearchStarterOutputTestServer(t *testing.T, mutateOutput func(map[stri
 		}
 		if object, ok := fixture.(map[string]any); ok {
 			applyTrackedReviewFixture(object, prompt)
+			if _, tracked := object["reviewFindings"]; tracked {
+				for _, key := range []string{"unsupportedClaims", "citationIssues", "numericIssues", "methodIssues"} {
+					delete(object, key)
+				}
+			}
 		}
 		implementationCode := workflowAITestImplementationCode()
+		implementationComplete := true
+		var implementationPatch any
 		if object, ok := fixture.(map[string]any); ok {
+			implementationPatch = object["_fixtureImplementationPatch"]
+			delete(object, "_fixtureImplementationPatch")
 			if override, exists := object["_fixturePythonCode"].(string); exists {
 				implementationCode = override
 				delete(object, "_fixturePythonCode")
+			}
+			if complete, exists := object["_fixtureImplementationComplete"].(bool); exists {
+				implementationComplete = complete
+				delete(object, "_fixtureImplementationComplete")
 			}
 		}
 		output, err := json.Marshal(fixture)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
+		}
+		if emitRequiredPlannerResultFixture(t, w, modelprofile.ProtocolOpenAIChat, body, string(output)) {
+			return
+		}
+		if strings.Contains(prompt, "<metadata_output_schema>") {
+			for _, candidate := range request.Tools {
+				if candidate.Function.Name == "submit_implementation_patch" && implementationPatch != nil {
+					arguments, _ := json.Marshal(implementationPatch)
+					chunk, _ := json.Marshal(map[string]any{"choices": []any{map[string]any{"delta": map[string]any{"tool_calls": []any{map[string]any{
+						"index": 0, "id": "fixture-implementation-patch", "function": map[string]any{"name": candidate.Function.Name, "arguments": string(arguments)},
+					}}}, "finish_reason": "tool_calls"}}, "usage": map[string]any{"prompt_tokens": 48, "completion_tokens": 20}})
+					fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", chunk)
+					return
+				}
+				if candidate.Function.Name != "submit_implementation_part" {
+					continue
+				}
+				// A fixture requested a patch; do not accidentally turn it into
+				// a full-code response just because the fallback tool is first.
+				if implementationPatch != nil {
+					continue
+				}
+				index := 1
+				var indexSchema struct {
+					Enum []int `json:"enum"`
+				}
+				if json.Unmarshal(candidate.Function.Parameters.Properties["index"], &indexSchema) == nil && len(indexSchema.Enum) == 1 {
+					index = indexSchema.Enum[0]
+				}
+				part := map[string]any{"index": index, "code": implementationCode, "complete": implementationComplete}
+				if index == 1 {
+					part["metadata"] = fixture
+				}
+				arguments, _ := json.Marshal(part)
+				chunk, _ := json.Marshal(map[string]any{"choices": []any{map[string]any{"delta": map[string]any{"tool_calls": []any{map[string]any{
+					"index": 0, "id": "fixture-implementation-part", "function": map[string]any{"name": candidate.Function.Name, "arguments": string(arguments)},
+				}}}, "finish_reason": "tool_calls"}}, "usage": map[string]any{"prompt_tokens": 48, "completion_tokens": 20}})
+				fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", chunk)
+				return
+			}
 		}
 		answer := "Skill-assisted research stage completed.\n```json\n" + string(output) + "\n```"
 		if strings.Contains(prompt, "split implementation envelope") {
@@ -538,6 +622,36 @@ func newResearchStarterOutputTestServer(t *testing.T, mutateOutput func(map[stri
 	}))
 	t.Cleanup(server.Close)
 	return server
+}
+
+// Normal fixtures must obey the actual required native stage contract.
+// Negative protocol fixtures use their own handlers and intentionally do not.
+func emitRequiredPlannerResultFixture(t *testing.T, w http.ResponseWriter, protocol modelprofile.APIProtocol, body []byte, output string) bool {
+	prompt := workflowAITestPrompt(contextPipelineCanonicalRequest(t, body))
+	if strings.Contains(prompt, "<review_submission_sources>") {
+		var expected map[string]any
+		if json.Unmarshal([]byte(output), &expected) != nil {
+			t.Fatal("invalid scripted complete review")
+		}
+		wire := reviewFixtureSourceSelections(t, prompt, reviewFixtureIssueWire(t, expected))
+		emitQuestionHandoffFixture(t, w, protocol, 1, "", "submit_stage_result", string(wire))
+		return true
+	}
+	if strings.Contains(prompt, "<citation_submission_sources>") {
+		var result map[string]any
+		if err := json.Unmarshal([]byte(output), &result); err != nil {
+			t.Fatal(err)
+		}
+		wire := citationFixtureSourceSelections(t, prompt, result)
+		emitQuestionHandoffFixture(t, w, protocol, 1, "", "submit_stage_result", string(wire))
+		return true
+	}
+	if !workflow.IsResearchPlannerSchema(plannerSubmissionSchemaOnWire(protocol, body)) ||
+		!(plannerActionRequiredOnWire(protocol, body) || singleStageToolForcedOnWire(protocol, body)) {
+		return false
+	}
+	emitQuestionHandoffFixture(t, w, protocol, 1, "", "submit_stage_result", output)
+	return true
 }
 
 func applyScientificWritingRouteFixture(plan map[string]any) {
@@ -589,6 +703,7 @@ func saveWorkflowAITestProfile(t *testing.T, application *Application, baseURL s
 func workflowAITestPrompt(body []byte) string {
 	var request struct {
 		Messages []struct {
+			Role    string          `json:"role"`
 			Content json.RawMessage `json:"content"`
 		} `json:"messages"`
 	}
@@ -720,6 +835,11 @@ func workflowAISchemaFixture(schema map[string]any) any {
 			name, _ := rawName.(string)
 			property, _ := properties[name].(map[string]any)
 			result[name] = workflowAISchemaFixture(property)
+		}
+		// Existing scenario hooks identify review fixtures by this optional
+		// field. Individual host-binding tests deliberately remove it on wire.
+		if _, review := properties["reviewedInputSha256"]; review {
+			result["reviewedInputSha256"] = strings.Repeat("0", 64)
 		}
 		return result
 	case "array":
@@ -887,6 +1007,12 @@ func TestWorkflowDeletionRemovesAIConversationGraph(t *testing.T) {
 			t.Fatalf("deleted AI lifecycle retained %s/%s: count=%d err=%v", table, id, count, err)
 		}
 	}
+	for _, aggregateID := range []string{chatRunID, detail.Run.ID} {
+		var n int
+		if err := application.store.DB().QueryRow(`SELECT count(*) FROM run_events WHERE aggregate_id=?`, aggregateID).Scan(&n); err != nil || n != 0 {
+			t.Fatalf("orphaned deleted run events %s: %d %v", aggregateID, n, err)
+		}
+	}
 	var messages, bindings int
 	_ = application.store.DB().QueryRow(`SELECT COUNT(*) FROM messages WHERE conversation_id=?`, conversationID).Scan(&messages)
 	_ = application.store.DB().QueryRow(`SELECT COUNT(*) FROM workflow_ai_chat_runs WHERE chat_run_id=?`, chatRunID).Scan(&bindings)
@@ -918,6 +1044,39 @@ func TestWorkflowRunDeletionRemovesOnlySelectedAIConversationGraph(t *testing.T)
 	}
 	secondDetail := waitForWorkflowState(t, application, project.ID, second.Run.ID, workflow.RunWaitingHumanConfirmation, 10*time.Second)
 	conversationID, chatRunID, executionID := selected.Run.ConversationID, selected.AIExecutions[0].ChatRunID, selected.AIExecutions[0].ID
+	var beforeEvents int
+	_ = application.store.DB().QueryRow(`SELECT count(*) FROM run_events WHERE aggregate_id=?`, chatRunID).Scan(&beforeEvents)
+	var after int64
+	for {
+		next, _, done, err := sqlite.SweepOrphanRunEvents(context.Background(), application.store.DB(), after, 1000)
+		if err != nil {
+			t.Fatal(err)
+		}
+		after = next
+		if done {
+			break
+		}
+	}
+	var afterEvents int
+	_ = application.store.DB().QueryRow(`SELECT count(*) FROM run_events WHERE aggregate_id=?`, chatRunID).Scan(&afterEvents)
+	if beforeEvents == 0 || afterEvents != beforeEvents {
+		t.Fatal("cleanup deleted owned history", beforeEvents, afterEvents)
+	}
+	// A transaction that rolls back must restore the event graph as well.
+	tx, err := application.store.DB().Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = tx.Exec(`DELETE FROM workflow_runs WHERE id=?`, selected.Run.ID); err != nil {
+		tx.Rollback()
+		t.Fatal(err)
+	}
+	if err = tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = application.WorkflowFacade.GetRun(project.ID, selected.Run.ID); err != nil {
+		t.Fatal("rollback lost task", err)
+	}
 	if err := application.WorkflowFacade.DeleteRun(project.ID, selected.Run.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -933,6 +1092,12 @@ func TestWorkflowRunDeletionRemovesOnlySelectedAIConversationGraph(t *testing.T)
 		var count int
 		if err := application.store.DB().QueryRow(`SELECT COUNT(*) FROM `+table+` WHERE id=?`, id).Scan(&count); err != nil || count != 0 {
 			t.Fatalf("deleted Workflow task retained %s/%s: count=%d err=%v", table, id, count, err)
+		}
+	}
+	for _, aggregateID := range []string{chatRunID, selected.Run.ID} {
+		var n int
+		if err := application.store.DB().QueryRow(`SELECT count(*) FROM run_events WHERE aggregate_id=?`, aggregateID).Scan(&n); err != nil || n != 0 {
+			t.Fatalf("orphaned deleted run events %s: %d %v", aggregateID, n, err)
 		}
 	}
 	var messages, bindings int

@@ -1,0 +1,128 @@
+{
+  "version": "literature-quality-pilot-v1",
+  "purpose": "Metadata-level retrieval pilot, not expert eligibility, effect synthesis or population recall gold standard",
+  "publicationYears": {
+    "from": 2022,
+    "to": 2026
+  },
+  "limitPerSourceQuery": 5,
+  "maxHttp": 12,
+  "maxSeconds": 480,
+  "sources": [
+    "eric",
+    "openalex",
+    "crossref"
+  ],
+  "arms": [
+    "baseline",
+    "population_focus"
+  ],
+  "order": "alternate arms by case/source parity; source and case order fixed",
+  "cases": [
+    {
+      "id": "ai_feedback_writing",
+      "question": "AI 辅助反馈与大学生写作：不限语言；实测写作结果、反馈素养和体验分别记录，不作因果批准",
+      "logicalQuery": "(\"artificial intelligence\" OR ChatGPT OR \"automated writing evaluation\") AND feedback AND writing",
+      "focusedProviderQueries": {
+        "eric": "(\"artificial intelligence\" OR ChatGPT OR \"automated writing evaluation\") AND feedback AND writing AND (educationlevel:\"Higher Education\" OR university OR undergraduate OR college)",
+        "openalex": "(\"artificial intelligence\" OR ChatGPT OR \"automated writing evaluation\") AND feedback AND writing AND (university OR undergraduate OR college OR \"higher education\")",
+        "crossref": "artificial intelligence ChatGPT automated writing evaluation feedback writing university undergraduate college"
+      }
+    },
+    {
+      "id": "peer_feedback_writing",
+      "question": "人类同伴反馈与大学生写作：不限语言；AI-only 或非写作 peer review 不纳入该主题",
+      "logicalQuery": "\"peer feedback\" AND writing",
+      "focusedProviderQueries": {
+        "eric": "\"peer feedback\" AND writing AND (educationlevel:\"Higher Education\" OR university OR undergraduate OR college)",
+        "openalex": "\"peer feedback\" AND writing AND (university OR undergraduate OR college OR \"higher education\")",
+        "crossref": "peer feedback writing university undergraduate college"
+      }
+    }
+  ],
+  "screening": {
+    "reviewer": "agent metadata review; no independent expert or full-text adjudication",
+    "armMasking": "screening pack omits arm membership; not a double-blind trial",
+    "population": "University/college/tertiary students must be described in participant/title/education-level metadata, not inferred from author institution alone. Unknown stays unknown.",
+    "intervention": "For ai_feedback_writing, AI provides feedback on student writing; AI drafting alone is insufficient. For peer_feedback_writing, students provide feedback/editing on each others writing; generic peer review/publication or AI-only feedback is insufficient. Mixed interventions are kept uncertain unless the relevant component is explicit.",
+    "outcomes": "writing_performance, feedback_process, self_efficacy_perception, secondary_review, none, unclear. These describe evidence type, never scientific quality or an approved effect.",
+    "labels": [
+      "metadata_relevant",
+      "out_of_scope",
+      "uncertain"
+    ],
+    "unknownPolicy": "No abstract/participant/intervention clarity is not evidence of exclusion; title can support explicit scope, but missing details remain unknown.",
+    "qualityMetrics": "Per-source first-page metadata-label counts and lower/upper descriptive relevance fractions; never recall. Failed/unvisited slots are not empty results. Compare added/lost exact source-record IDs; metadata versions remain distinct.",
+    "anchors": "Predeclared known records, not a complete gold universe. Absence from first pages is a probe miss, not proof of database absence."
+  },
+  "anchors": [
+    {
+      "id": "mahapatra2024",
+      "title": "Impact of ChatGPT on ESL Students’ Academic Writing Skills: A Mixed Methods Intervention Study",
+      "doi": "10.1186/s40561-024-00295-9",
+      "eric": "EJ1412296",
+      "year": 2024,
+      "caseId": "ai_feedback_writing",
+      "expected": "metadata_relevant",
+      "evidenceType": "writing_performance",
+      "basis": "ERIC indexed abstract explicitly describes undergraduate ESL formative feedback and three writing tests. No causal/design approval.",
+      "source": "https://eric.ed.gov/?id=EJ1412296",
+      "verification": "official indexed record seen in web search; direct HTML fetch timed out"
+    },
+    {
+      "id": "gozali2024",
+      "title": "ChatGPT as an Automated Writing Evaluation (AWE) Tool: Feedback Literacy Development and AWE Tools’ Integration Framework",
+      "doi": "10.29140/jaltcall.v20n1.1200",
+      "eric": "EJ1423132",
+      "year": 2024,
+      "caseId": "ai_feedback_writing",
+      "expected": "metadata_relevant",
+      "evidenceType": "feedback_process",
+      "basis": "ERIC metadata: higher education, 18 EFL students, qualitative feedback literacy case study; not a writing-score effect estimate.",
+      "source": "https://eric.ed.gov/?id=EJ1423132",
+      "verification": "official indexed abstract and education levels seen in web search; direct HTML fetch timed out"
+    },
+    {
+      "id": "secondary_essays2024",
+      "title": "Comparing the quality of human and ChatGPT feedback of students’ writing",
+      "doi": "10.1016/j.learninstruc.2024.101894",
+      "year": 2024,
+      "caseId": "ai_feedback_writing",
+      "expected": "out_of_scope",
+      "evidenceType": "none",
+      "basis": "Publisher abstract explicitly says secondary student essays and feedback quality comparison, not university writing improvement.",
+      "source": "https://doi.org/10.1016/j.learninstruc.2024.101894",
+      "verification": "publisher abstract seen in web search"
+    },
+    {
+      "id": "peer_editing2023",
+      "title": "To peer or not to peer: A controlled peer-editing intervention measuring writing self-efficacy in South Korean higher education",
+      "doi": "10.1016/j.ijedro.2022.100218",
+      "year": 2023,
+      "caseId": "peer_feedback_writing",
+      "expected": "metadata_relevant",
+      "evidenceType": "self_efficacy_perception",
+      "basis": "Publisher abstract describes undergraduate online writing course and peer-editing intervention; quantitative outcome is writing self-efficacy, not writing quality.",
+      "source": "https://doi.org/10.1016/j.ijedro.2022.100218",
+      "verification": "publisher indexed abstract seen in web search"
+    },
+    {
+      "id": "guided_peer2025",
+      "title": "The Effects of the Guided Dialogic Peer Feedback-Based Writing Instruction on Chinese EFL Students’ Writing Performance in an Integrated Blended Learning Environment",
+      "eric": "EJ1471030",
+      "year": 2025,
+      "caseId": "peer_feedback_writing",
+      "expected": "metadata_relevant",
+      "evidenceType": "writing_performance",
+      "basis": "Official ERIC fulltext search excerpt presents abstract with 63 university L2 students and writing performance; DOI not established. Identity probe is ERIC-only unless manually adjudicated.",
+      "source": "https://files.eric.ed.gov/fulltext/EJ1471030.pdf",
+      "verification": "official indexed abstract excerpt; not downloaded by app or imported as trusted evidence"
+    }
+  ],
+  "constraints": [
+    "No model requests, formal task/database access, PDF download, enrichment, provider substitution, auto pagination, added quota or silent rerun.",
+    "Only population-scope query additions are compared; no scientific auto-screening or deployed query policy change.",
+    "Order counterbalancing does not eliminate ranking drift, provider differences, incomplete metadata, small-sample selection or annotator bias.",
+    "Official-page anchor checks are separate from the bounded source API experiment; frozen metadata annotations are not independent expert judgments."
+  ]
+}

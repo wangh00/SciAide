@@ -9,6 +9,17 @@ import (
 	"github.com/wangh00/SciAide/internal/skillrun"
 )
 
+// ResearchPlannerSkillsMissingError describes missing evidence, not how a
+// particular model-facing tool interface exposes loading. The caller supplies
+// actionable instructions using that request's actually offered capabilities.
+type ResearchPlannerSkillsMissingError struct {
+	Names []string
+}
+
+func (e *ResearchPlannerSkillsMissingError) Error() string {
+	return fmt.Sprintf("WORKFLOW_PLANNER_SKILLS_MISSING: 本次规划声明但尚未实际加载的 Skill：%s。浏览分类或列出候选不等于加载。", strings.Join(e.Names, ", "))
+}
+
 func IsResearchPlannerSchema(schema json.RawMessage) bool {
 	return schemaDeclaresProperty(schema, "routes") && schemaDeclaresProperty(schema, "selectedSkills") && schemaDeclaresProperty(schema, "normalizedQuestion")
 }
@@ -75,7 +86,7 @@ func ValidateResearchPlannerSkillClaims(names []string, loaded []skillrun.Snapsh
 		}
 	}
 	if len(missing) > 0 {
-		return fmt.Errorf("WORKFLOW_PLANNER_SKILLS_MISSING: 本次规划声明但尚未实际加载的 Skill：%s。浏览分类或列出候选不等于加载。请按准确 name 调用 builtin.skill.load 加载这些 Skill，并读取必要正文后重新提交完整路线 JSON；若不再采用某 Skill，须明确修正方案及其声明，不得伪造已加载状态。", strings.Join(missing, ", "))
+		return &ResearchPlannerSkillsMissingError{Names: append([]string(nil), missing...)}
 	}
 	return nil
 }

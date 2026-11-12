@@ -407,12 +407,14 @@ func (s *RuntimeService) indexedAIStageSubmission(ctx context.Context, d RunDeta
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	value = restoreWorkflowCitationMarkers(value, append(seeds, reads...), e.ChatRunID)
+	value = restoreCitationSubmissionMarkers(value, append(seeds, reads...), e.ChatRunID, node)
 	input, err := indexedSubmissionInput(step, value, reads, seeds)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	value = canonicalSupportingQuotes(value, input)
+	if !usesCitationSourceProtocol(node) {
+		value = canonicalSupportingQuotes(value, input)
+	}
 	return value, input, reads, nil
 }
 

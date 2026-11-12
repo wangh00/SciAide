@@ -22,29 +22,38 @@ type ResearchDiscussionBinding struct {
 }
 
 type ResearchRevisionProposal struct {
-	SourceVersion      *ResearchSourceVersion `json:"sourceVersion,omitempty"`
-	DataVersion        *ResearchDataVersion   `json:"dataVersion,omitempty"`
-	Materials          []RevisionMaterial     `json:"materials,omitempty"`
-	ID                 string                 `json:"id"`
-	RunID              string                 `json:"runId"`
-	ChatRunID          string                 `json:"chatRunId"`
-	UserMessageID      string                 `json:"userMessageId"`
-	SourceCallID       string                 `json:"-"`
-	Status             string                 `json:"status"`
-	SnapshotSHA256     string                 `json:"snapshotSha256"`
-	NodeID             string                 `json:"nodeId"`
-	Label              string                 `json:"label"`
-	Summary            string                 `json:"summary"`
-	Changes            []string               `json:"changes"`
-	Reason             string                 `json:"reason"`
-	AffectedStages     []string               `json:"affectedStages"`
-	ReusedStages       []string               `json:"reusedStages,omitempty"`
-	RepeatsSideEffects bool                   `json:"repeatsSideEffects"`
-	CreatedAt          time.Time              `json:"createdAt"`
-	CanConfirm         bool                   `json:"canConfirm"`
+	EditTargets                 []string               `json:"editTargets,omitempty"`
+	WriteContract               json.RawMessage        `json:"writeContract,omitempty"`
+	WriteContractSHA256         string                 `json:"writeContractSha256,omitempty"`
+	WriteContractVersion        string                 `json:"writeContractVersion,omitempty"`
+	DesignWriteIsolationVersion string                 `json:"designWriteIsolationVersion,omitempty"`
+	ConfirmationBlockedReason   string                 `json:"confirmationBlockedReason,omitempty"`
+	DeliveryScope               *ResearchDeliveryScope `json:"deliveryScope,omitempty"`
+	SourceVersion               *ResearchSourceVersion `json:"sourceVersion,omitempty"`
+	DataVersion                 *ResearchDataVersion   `json:"dataVersion,omitempty"`
+	Materials                   []RevisionMaterial     `json:"materials,omitempty"`
+	ID                          string                 `json:"id"`
+	RunID                       string                 `json:"runId"`
+	ChatRunID                   string                 `json:"chatRunId"`
+	UserMessageID               string                 `json:"userMessageId"`
+	SourceCallID                string                 `json:"-"`
+	Status                      string                 `json:"status"`
+	SnapshotSHA256              string                 `json:"snapshotSha256"`
+	NodeID                      string                 `json:"nodeId"`
+	Label                       string                 `json:"label"`
+	Summary                     string                 `json:"summary"`
+	Changes                     []string               `json:"changes"`
+	Reason                      string                 `json:"reason"`
+	AffectedStages              []string               `json:"affectedStages"`
+	ReusedStages                []string               `json:"reusedStages,omitempty"`
+	RepeatsSideEffects          bool                   `json:"repeatsSideEffects"`
+	CreatedAt                   time.Time              `json:"createdAt"`
+	CanConfirm                  bool                   `json:"canConfirm"`
 }
 
 type ProposeResearchRevisionCommand struct {
+	EditTargets   []string                 `json:"editTargets,omitempty"`
+	DeliveryScope *DeliveryScopeSelection  `json:"deliveryScope,omitempty"`
 	SourceInputs  *RevisionSourceSelection `json:"sourceInputs,omitempty"`
 	DataInputs    *RevisionDataSelection   `json:"dataInputs,omitempty"`
 	AttachmentIDs []string                 `json:"attachmentIds,omitempty"`
@@ -138,6 +147,9 @@ func discussionRevisionTargets(detail RunDetail) []ResearchRevisionTarget {
 	if detail.Run.Status == RunCompleted {
 		return completedRevisionTargets(detail)
 	}
+	if targets := prerequisiteRepairTargets(detail); len(targets) > 0 {
+		return targets
+	}
 	if _, _, err := rejectedDiscussionReview(detail); err != nil {
 		return nil
 	}
@@ -165,8 +177,9 @@ func newResearchRevisionProposal(detail RunDetail, command ProposeResearchRevisi
 		}
 	}
 	if target == nil {
-		return ResearchRevisionProposal{}, fmt.Errorf("当前任务不能从该阶段返修；请选择已交付或独立审查拒绝任务的可用修改起点")
+		return ResearchRevisionProposal{}, fmt.Errorf("当前任务不能从该阶段返修；请使用宿主提供的可用修改起点，明确计算前置缺口须先修复上游方法或数据")
 	}
+	command.NodeID = target.NodeID
 	command.Summary, command.Reason = strings.TrimSpace(command.Summary), strings.TrimSpace(command.Reason)
 	if command.Summary == "" || len([]rune(command.Summary)) > 1000 || command.Reason == "" || len([]rune(command.Reason)) > 2000 || len(command.Changes) == 0 || len(command.Changes) > 20 {
 		return ResearchRevisionProposal{}, fmt.Errorf("返修方案需要完整的修改目标、修改要求和起点依据")
@@ -179,6 +192,14 @@ func newResearchRevisionProposal(detail RunDetail, command ProposeResearchRevisi
 	}
 	proposal := ResearchRevisionProposal{RunID: detail.Run.ID, Status: "pending", SnapshotSHA256: ResearchRevisionSnapshot(detail),
 		NodeID: target.NodeID, Label: target.Label, Summary: command.Summary, Changes: command.Changes, Reason: command.Reason}
+	scope, err := prepareDeliveryScope(detail, command)
+	if err != nil {
+		return ResearchRevisionProposal{}, err
+	}
+	proposal.DeliveryScope = scope
+	if err := bindDiscussionRevisionWrites(detail, command, &proposal); err != nil {
+		return ResearchRevisionProposal{}, err
+	}
 	start := findStepByNode(detail.Steps, target.NodeID)
 	stages := append([]Step(nil), detail.Steps...)
 	sort.Slice(stages, func(i, j int) bool { return stages[i].Ordinal < stages[j].Ordinal })
@@ -215,6 +236,7 @@ func (s *RuntimeService) ProposeResearchRevision(ctx context.Context, chatRunID,
 	if err != nil {
 		return proposal, err
 	}
+	command.NodeID = proposal.NodeID
 	if err := validateRevisionMaterialSelection(command); err != nil {
 		return proposal, err
 	}
@@ -235,7 +257,11 @@ func (s *RuntimeService) ProposeResearchRevision(ctx context.Context, chatRunID,
 		return proposal, err
 	}
 	proposal.ChatRunID, proposal.UserMessageID, proposal.SourceCallID, proposal.CreatedAt = chatRunID, binding.UserMessageID, callID, s.now()
-	return repository.SaveResearchRevisionProposal(ctx, proposal)
+	saved, err := repository.SaveResearchRevisionProposal(ctx, proposal)
+	if err == nil {
+		err = ValidateResearchRevisionWriteBinding(detail, saved)
+	}
+	return saved, err
 }
 
 func (s *RuntimeService) ListResearchRevisionProposals(ctx context.Context, projectID, runID string) ([]ResearchRevisionProposal, error) {
@@ -270,6 +296,9 @@ func (s *RuntimeService) ConfirmResearchRevision(ctx context.Context, command Co
 	}
 	var proposal *ResearchRevisionProposal
 	for _, item := range detail.RevisionProposals {
+		if item.ID == command.ProposalID && item.Status == "pending" && item.ConfirmationBlockedReason != "" {
+			return RunDetail{}, fmt.Errorf("该返修方案不能确认：%s", item.ConfirmationBlockedReason)
+		}
 		if item.ID == command.ProposalID && item.Status == "pending" && item.CanConfirm {
 			value := item
 			proposal = &value
@@ -279,12 +308,25 @@ func (s *RuntimeService) ConfirmResearchRevision(ctx context.Context, command Co
 	if proposal == nil || proposal.SnapshotSHA256 != ResearchRevisionSnapshot(detail) {
 		return RunDetail{}, fmt.Errorf("返修方案已失效或对话尚未完成，请重新确认最新方案")
 	}
-	verified, err := newResearchRevisionProposal(detail, ProposeResearchRevisionCommand{NodeID: proposal.NodeID, Summary: proposal.Summary, Changes: proposal.Changes, Reason: proposal.Reason})
+	if err := ValidateResearchRevisionWriteBinding(detail, *proposal); err != nil {
+		return RunDetail{}, err
+	}
+	verifyCommand := ProposeResearchRevisionCommand{NodeID: proposal.NodeID, Summary: proposal.Summary, Changes: proposal.Changes, Reason: proposal.Reason, EditTargets: proposal.EditTargets}
+	if proposal.SourceVersion != nil {
+		verifyCommand.SourceInputs = &RevisionSourceSelection{}
+	}
+	if proposal.DeliveryScope != nil {
+		verifyCommand.DeliveryScope = &DeliveryScopeSelection{Summary: proposal.DeliveryScope.Summary, SuccessCriteria: proposal.DeliveryScope.SuccessCriteria}
+	}
+	verified, err := newResearchRevisionProposal(detail, verifyCommand)
 	if err != nil {
 		return RunDetail{}, err
 	}
 	if !slices.Equal(verified.AffectedStages, proposal.AffectedStages) || verified.RepeatsSideEffects != proposal.RepeatsSideEffects {
 		return RunDetail{}, fmt.Errorf("返修影响范围已变化，请重新生成方案")
+	}
+	if !rawJSONEqual(mustJSON(verified.DeliveryScope), mustJSON(proposal.DeliveryScope)) {
+		return RunDetail{}, fmt.Errorf("交付范围已变化，请重新确认方案")
 	}
 	if err := s.validateRevisionMaterials(ctx, detail, *proposal); err != nil {
 		return RunDetail{}, err
@@ -295,8 +337,11 @@ func (s *RuntimeService) ConfirmResearchRevision(ctx context.Context, command Co
 	if err := s.validateRevisionSource(ctx, detail, *proposal); err != nil {
 		return RunDetail{}, err
 	}
-	start := findStepByNode(detail.Steps, proposal.NodeID)
-	event, err := s.event(detail.Run.ID, "workflow.user_revision_queued", map[string]any{"proposal": proposal, "startOrdinal": start.Ordinal, "priorOutput": start.Output, "comparisonBaseline": researchComparisonBaseline(detail)}, s.now())
+	payload, err := ResearchRevisionConfirmationPayload(detail, *proposal)
+	if err != nil {
+		return RunDetail{}, err
+	}
+	event, err := s.event(detail.Run.ID, "workflow.user_revision_queued", payload, s.now())
 	if err != nil {
 		return RunDetail{}, err
 	}
@@ -308,11 +353,12 @@ func (s *RuntimeService) ConfirmResearchRevision(ctx context.Context, command Co
 }
 
 type ResearchTaskReadCommand struct {
-	RevisionID   string `json:"revisionId,omitempty"`
-	AttachmentID string `json:"attachmentId,omitempty"`
-	Section      string `json:"section"`
-	NodeID       string `json:"nodeId,omitempty"`
-	Offset       int    `json:"offset,omitempty"`
+	RevisionID   string  `json:"revisionId,omitempty"`
+	AttachmentID string  `json:"attachmentId,omitempty"`
+	Section      string  `json:"section"`
+	NodeID       string  `json:"nodeId,omitempty"`
+	Offset       int     `json:"offset,omitempty"`
+	Pointer      *string `json:"pointer,omitempty"`
 }
 
 func (s *RuntimeService) ReadResearchTask(ctx context.Context, chatRunID string, command ResearchTaskReadCommand) (json.RawMessage, error) {
@@ -323,6 +369,9 @@ func (s *RuntimeService) ReadResearchTask(ctx context.Context, chatRunID string,
 	binding, err := repository.ResolveResearchDiscussion(ctx, chatRunID)
 	if err != nil {
 		return s.readResearchStageTask(ctx, chatRunID, command)
+	}
+	if command.Pointer != nil {
+		return nil, fmt.Errorf("pointer 仅用于当前已授权执行阶段的 stage_input；用户对话请沿原记录分页")
 	}
 	detail, err := s.repository.GetRun(ctx, binding.ProjectID, binding.WorkflowRunID)
 	if err != nil {
@@ -342,9 +391,11 @@ func (s *RuntimeService) readResearchTaskDetail(ctx context.Context, detail RunD
 	var err error
 	switch command.Section {
 	case "overview":
-		value = rawObject(map[string]any{"runId": detail.Run.ID, "status": detail.Run.Status, "stageCount": len(detail.Steps), "stages": researchDiscussionStages(detail), "revisionTargets": discussionRevisionTargets(detail), "evidenceReselection": researchEvidenceReselection(detail), "registeredDeliverables": detail.RegisteredDeliverables})
+		value = discussionRevisionOverview(detail)
 	case "inputs":
 		value = detail.Run.Inputs
+	case "planning_discussion":
+		value, err = s.planningDiscussionRecord(ctx, detail)
 	case "effective_inputs":
 		value, err = ResearchEffectiveInputs(detail)
 	case "data_inputs":
@@ -352,11 +403,7 @@ func (s *RuntimeService) readResearchTaskDetail(ctx context.Context, detail RunD
 	case "source_inputs", "source_content":
 		value, err = s.researchSourceRecord(ctx, detail, command)
 	case "supplemental_materials", "supplemental_content":
-		repo, ok := s.repository.(discussionMaterialsRepository)
-		if !ok {
-			return nil, fmt.Errorf("discussion material storage unavailable")
-		}
-		ids, readErr := repo.DiscussionAttachmentIDs(ctx, detail.Run.ID)
+		ids, readErr := s.discussionAttachmentIDs(ctx, detail)
 		if readErr != nil {
 			return nil, readErr
 		}
@@ -370,7 +417,11 @@ func (s *RuntimeService) readResearchTaskDetail(ctx context.Context, detail RunD
 			if !ok {
 				return nil, fmt.Errorf("supplemental material reader unavailable")
 			}
-			value, err = reader.ReadDiscussionMaterial(ctx, detail.Run.ProjectID, detail.Run.ConversationID, command.AttachmentID)
+			owner, ownerErr := s.discussionAttachmentOwner(ctx, detail, command.AttachmentID)
+			if ownerErr != nil {
+				return nil, ownerErr
+			}
+			value, err = reader.ReadDiscussionMaterial(ctx, detail.Run.ProjectID, owner, command.AttachmentID)
 		} else {
 			value = rawObject(map[string]any{"attachmentIds": ids, "instruction": "These files were sent in user discussion, not automatically adopted. Read supplemental_content with attachmentId and offset before proposing. Literature uses attachmentIds and evidence_import. Tables use dataInputs (complete retainedPaths + attachmentIds) and data_preflight. Read data_inputs to identify the current data set. Single Python source uses sourceInputs.attachmentIds and method_implementation (or data_preflight with new tables); inspect dependencies and adapt, never execute the upload itself. source_inputs identifies the current confirmed reference; source_content reads it after confirmation. Only explicit user confirmation adopts a selection."})
 		}
@@ -436,7 +487,20 @@ func researchDiscussionStages(detail RunDetail) []map[string]any {
 	sort.Slice(steps, func(i, j int) bool { return steps[i].Ordinal < steps[j].Ordinal })
 	result := make([]map[string]any, 0, len(steps))
 	for _, step := range steps {
-		result = append(result, map[string]any{"nodeId": step.NodeID, "name": nodes[step.NodeID].Name, "status": step.Status, "attempt": step.Attempt, "ordinal": step.Ordinal, "error": step.ErrorMessage})
+		node := nodes[step.NodeID]
+		record := map[string]any{"nodeId": step.NodeID, "name": node.Name, "status": step.Status, "attempt": step.Attempt, "ordinal": step.Ordinal, "error": step.ErrorMessage,
+			"isReview": isIndependentReviewSchema(node.OutputSchema)}
+		outputs := []string{}
+		for _, output := range detail.Run.Compilation.Outputs {
+			if output.FromNode == step.NodeID {
+				outputs = append(outputs, output.Name)
+			}
+		}
+		record["publishedOutputs"] = outputs
+		if len(step.Output) > 0 {
+			record["outputCharacters"], record["outputSha256"] = len([]rune(string(step.Output))), hashJSON(step.Output)
+		}
+		result = append(result, record)
 	}
 	return result
 }
@@ -466,6 +530,9 @@ func pendingUserRevision(detail RunDetail, nodeID string) *ResearchRevisionPropo
 }
 
 func validateDiscussionDelivery(detail RunDetail) error {
+	if len(prerequisiteRepairTargets(detail)) > 0 {
+		return nil
+	}
 	if detail.Run.Status == RunFailed {
 		_, _, err := rejectedDiscussionReview(detail)
 		return err

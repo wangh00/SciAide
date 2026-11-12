@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/wangh00/SciAide/internal/apperr"
+	"github.com/wangh00/SciAide/internal/modelutil"
 )
 
 func retryableModelTurnTerminalError(turn modelTurn) error {
@@ -43,10 +44,13 @@ func validateModelTurnTerminal(turn modelTurn) error {
 		// Preserve a provider-visible refusal exactly as returned. An empty refusal
 		// item is protocol state, not a user-facing answer.
 		if visibleModelText(turn.text) == "" {
-			return &apperr.Error{Code: "MODEL_RESPONSE_EMPTY", UserMessage: "模型没有返回可展示的回答。"}
+			return &apperr.Error{Code: "MODEL_OUTPUT_REFUSED", UserMessage: "模型服务明确拒绝生成回答，但未提供拒绝说明；已停止，不自动重复发送。"}
 		}
 		return nil
 	case "stop", "completed", "end_turn", "stop_sequence":
+		if err := modelutil.StandaloneGatewayError(turn.text); err != nil {
+			return err
+		}
 		if visibleModelText(turn.text) == "" {
 			return &apperr.Error{Code: "MODEL_RESPONSE_EMPTY", UserMessage: "模型没有返回可展示的回答。"}
 		}

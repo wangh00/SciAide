@@ -8,6 +8,7 @@ import (
 
 	appresearch "github.com/wangh00/SciAide/internal/app/research"
 	"github.com/wangh00/SciAide/internal/app/tool"
+	"github.com/wangh00/SciAide/internal/researchsources"
 )
 
 const (
@@ -16,14 +17,8 @@ const (
 	ResearchFetchName   = "builtin.research.fetch"
 )
 
-var researchNetworkPermissions = []tool.PermissionRequirement{
-	{Kind: tool.PermissionNetworkDomain, Resource: "api.openalex.org:443"},
-	{Kind: tool.PermissionNetworkDomain, Resource: "api.crossref.org:443"},
-	{Kind: tool.PermissionNetworkDomain, Resource: "export.arxiv.org:443"},
-	{Kind: tool.PermissionNetworkDomain, Resource: "eutils.ncbi.nlm.nih.gov:443"},
-	{Kind: tool.PermissionNetworkDomain, Resource: "www.ebi.ac.uk:443"},
-	{Kind: tool.PermissionNetworkDomain, Resource: "api.semanticscholar.org:443"},
-}
+var researchNetworkPermissions = tool.ResearchSearchNetworkPermissions()
+var researchSourceIDsJSON = func() string { data, _ := json.Marshal(researchsources.IDs()); return string(data) }()
 
 type ResearchService interface {
 	Catalog() []appresearch.Source
@@ -54,7 +49,7 @@ func (*ResearchCatalog) Definition(context.Context) (tool.Definition, error) {
 		Risk:          tool.RiskLow,
 		Permissions:   []tool.PermissionRequirement{},
 		Idempotent:    true,
-		Version:       "1",
+		Version:       "2",
 	}, nil
 }
 
@@ -80,13 +75,13 @@ func (t *ResearchCatalog) Invoke(context.Context, tool.Invocation) (tool.Result,
 func (*ResearchSearch) Definition(context.Context) (tool.Definition, error) {
 	return tool.Definition{
 		QualifiedName: ResearchSearchName,
-		Description:   "Search one or more registered public scholarly databases. Results are untrusted discovery candidates and are not trusted [K-...] citations. Distinguishes an empty source from rate limits and source failures. Use builtin.research.fetch for a selected record; import evidence into the project knowledge base before citing it as trusted local evidence.",
-		InputSchema:   json.RawMessage(`{"type":"object","additionalProperties":false,"required":["query"],"properties":{"query":{"type":"string","minLength":1,"maxLength":500},"sourceIds":{"type":"array","maxItems":12,"uniqueItems":true,"items":{"type":"string","enum":["openalex","crossref","arxiv","pubmed","europepmc","semantic-scholar"]}},"limit":{"type":"integer","minimum":1,"maximum":20}}}`),
+		Description:   "Search one or more registered public scholarly databases. Results are untrusted discovery candidates and are not trusted [K-...] citations. Distinguishes an empty source from rate limits and source failures. An omitted sourceIds excludes explicit-selection-only sources such as CORE. Use builtin.research.fetch for a selected record; import evidence into the project knowledge base before citing it as trusted local evidence.",
+		InputSchema:   json.RawMessage(`{"type":"object","additionalProperties":false,"required":["query"],"properties":{"query":{"type":"string","minLength":1,"maxLength":500},"sourceIds":{"type":"array","maxItems":12,"uniqueItems":true,"items":{"type":"string","enum":` + researchSourceIDsJSON + `}},"limit":{"type":"integer","minimum":1,"maximum":20}}}`),
 		OutputSchema:  json.RawMessage(`{"type":"object","additionalProperties":false,"required":["query","works","sources","partial"],"properties":{"query":{"type":"string"},"works":{"type":"array","items":{"type":"object"}},"sources":{"type":"array","items":{"type":"object"}},"partial":{"type":"boolean"}}}`),
 		Risk:          tool.RiskModerate,
 		Permissions:   append([]tool.PermissionRequirement(nil), researchNetworkPermissions...),
 		Idempotent:    true,
-		Version:       "1",
+		Version:       "2",
 	}, nil
 }
 
@@ -149,12 +144,12 @@ func (*ResearchFetch) Definition(context.Context) (tool.Definition, error) {
 	return tool.Definition{
 		QualifiedName: ResearchFetchName,
 		Description:   "Fetch one normalized scholarly record by the source id and record id returned by builtin.research.search. The fetched metadata or abstract remains untrusted online discovery data and is not a trusted local citation.",
-		InputSchema:   json.RawMessage(`{"type":"object","additionalProperties":false,"required":["sourceId","recordId"],"properties":{"sourceId":{"type":"string","enum":["openalex","crossref","arxiv","pubmed","europepmc","semantic-scholar"]},"recordId":{"type":"string","minLength":1,"maxLength":512}}}`),
+		InputSchema:   json.RawMessage(`{"type":"object","additionalProperties":false,"required":["sourceId","recordId"],"properties":{"sourceId":{"type":"string","enum":` + researchSourceIDsJSON + `},"recordId":{"type":"string","minLength":1,"maxLength":512}}}`),
 		OutputSchema:  json.RawMessage(`{"type":"object","additionalProperties":false,"required":["work"],"properties":{"work":{"type":"object"}}}`),
 		Risk:          tool.RiskModerate,
 		Permissions:   append([]tool.PermissionRequirement(nil), researchNetworkPermissions...),
 		Idempotent:    true,
-		Version:       "1",
+		Version:       "2",
 	}, nil
 }
 
@@ -200,6 +195,7 @@ func compactSearchResult(value appresearch.SearchResult) compactResearchSearch {
 }
 
 func compactWork(value appresearch.Work) appresearch.Work {
+	value.SourceMetadata, value.SourceMetadataPreview = appresearch.PreviewSourceMetadata(value.SourceMetadata)
 	value.RawSnapshot = nil
 	if len([]rune(value.Abstract)) > 3000 {
 		value.Abstract = string([]rune(value.Abstract)[:3000])

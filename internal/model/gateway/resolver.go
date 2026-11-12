@@ -21,10 +21,14 @@ type ProfileLoader interface {
 }
 
 type Resolver struct {
-	profiles ProfileLoader
-	recorder modelcap.ReasoningRecorder
-	mu       sync.Mutex
-	clients  map[string]cachedProtocolClient
+	profiles            ProfileLoader
+	recorder            modelcap.ReasoningRecorder
+	mu                  sync.Mutex
+	clients             map[string]cachedProtocolClient
+	requestGate         func(context.Context) error
+	debugObserver       func(responses.DebugProviderError)
+	debugStreamObserver func(responses.DebugStreamFault)
+	debugHTTPObserver   func(responses.DebugHTTPResponse)
 }
 
 type cachedProtocolClient struct {
@@ -32,12 +36,48 @@ type cachedProtocolClient struct {
 	client      model.ChatModel
 }
 
-func NewResolver(profiles ProfileLoader) *Resolver {
+func NewResolver(profiles ProfileLoader, gates ...func(context.Context) error) *Resolver {
 	resolver := &Resolver{profiles: profiles, clients: make(map[string]cachedProtocolClient)}
+	if len(gates) > 0 {
+		resolver.requestGate = gates[0]
+	}
 	if recorder, ok := profiles.(modelcap.ReasoningRecorder); ok {
 		resolver.recorder = recorder
 	}
 	return resolver
+}
+
+// SetDebugErrorObserver is only used by explicitly opted-in development runs.
+// Configure it before resolving any clients; never mutate shared clients.
+func (r *Resolver) SetDebugErrorObserver(observe func(responses.DebugProviderError)) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.clients) != 0 {
+		return fmt.Errorf("debug observer must be configured before model resolution")
+	}
+	r.debugObserver = observe
+	return nil
+}
+
+func (r *Resolver) SetDebugStreamFaultObserver(observe func(responses.DebugStreamFault)) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.clients) != 0 {
+		return fmt.Errorf("debug observer must be configured before model resolution")
+	}
+	r.debugStreamObserver = observe
+	return nil
+}
+
+// Configure before resolving any shared client. Responses-only, default off.
+func (r *Resolver) SetDebugHTTPResponseObserver(observe func(responses.DebugHTTPResponse)) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.clients) != 0 {
+		return fmt.Errorf("HTTP observer must be configured before model resolution")
+	}
+	r.debugHTTPObserver = observe
+	return nil
 }
 
 func (r *Resolver) Resolve(ctx context.Context, profileID, modelID string) (model.ResolvedChatModel, error) {
@@ -117,11 +157,20 @@ func (r *Resolver) clientFor(profile modelprofile.Profile, secret []byte, protoc
 	case modelprofile.ProtocolOpenAIChat:
 		client = openai.New(profile, secret, r.recorder)
 	case modelprofile.ProtocolOpenAIResponses:
-		client = responses.New(profile, secret, r.recorder)
+		responseClient := responses.New(profile, secret, r.recorder)
+		responseClient.SetDebugErrorObserver(r.debugObserver)
+		responseClient.SetDebugStreamFaultObserver(r.debugStreamObserver)
+		responseClient.SetDebugHTTPResponseObserver(r.debugHTTPObserver)
+		client = responseClient
 	case modelprofile.ProtocolAnthropic:
 		client = anthropic.New(profile, secret, r.recorder)
 	default:
 		return nil, fmt.Errorf("unsupported protocol %q", protocol)
+	}
+	if gated, ok := client.(interface {
+		SetRequestGate(func(context.Context) error)
+	}); ok {
+		gated.SetRequestGate(r.requestGate)
 	}
 	r.clients[key] = cachedProtocolClient{fingerprint: fingerprint, client: client}
 	return client, nil

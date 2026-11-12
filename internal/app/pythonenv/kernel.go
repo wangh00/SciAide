@@ -219,7 +219,7 @@ func (s *KernelService) ExecuteTool(ctx context.Context, request KernelExecuteRe
 	result.CodeSHA256 = hashKernelText(request.Code)
 	result.InputSHA256 = cloneKernelHashes(inputHashes)
 	if string(request.InputData) != "null" {
-		result.InputSHA256["$data"] = hashKernelJSON(request.InputData)
+		result.InputSHA256["$data"] = KernelInputDataSHA256(request.InputData)
 	}
 	result.EnvironmentFingerprint = environment.EnvironmentFingerprint
 	if changed, verifyErr := verifyKernelInputs(guard, inputHashes); verifyErr != nil {
@@ -744,7 +744,10 @@ func hashKernelText(value string) string {
 	return hex.EncodeToString(hash[:])
 }
 
-func hashKernelJSON(value json.RawMessage) string {
+// KernelInputDataSHA256 is the exact parameter canonicalization used in the
+// execution audit. Workflow provenance checks must use this, not float64 JSON
+// round-tripping or a separate approximation of the executed parameters.
+func KernelInputDataSHA256(value json.RawMessage) string {
 	var normalized any
 	decoder := json.NewDecoder(strings.NewReader(string(value)))
 	decoder.UseNumber()

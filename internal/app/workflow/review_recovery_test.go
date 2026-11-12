@@ -32,6 +32,13 @@ func TestReviewCorrectionsReachEveryResponsibleStageAndSurviveCollection(t *test
 	if check := pendingStageReviewCorrections(d, "independent_review"); check == nil || len(check.AllKnownCorrections) != 2 {
 		t.Fatal("review lost full repair goal")
 	}
+	reviewNode := CompiledNode{ID: "independent_review", Arguments: raw(`{}`), OutputSchema: independentReviewSchema()}
+	isolated := d
+	isolated.Run.Compilation.Edges = nil
+	bound, err := bindNodeInput(isolated, reviewNode)
+	if err != nil || decodeObject(bound)["_reviewCorrections"] != nil {
+		t.Fatal("review still receives a generation checklist/prior report", err)
+	}
 	if check := pendingStageReviewCorrections(d, "report_drafting"); !strings.Contains(string(check.PriorOutput), "keep valid findings") {
 		t.Fatal("collection draft replaced scientific prior output")
 	}

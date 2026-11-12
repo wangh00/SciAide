@@ -124,8 +124,8 @@ func TestWorkflowSubmissionSchemaErrorRepairsInSameRun(t *testing.T) {
 	if len(requests) != 2 {
 		t.Fatalf("requests=%d", len(requests))
 	}
-	last := requests[1].Messages
-	if last[len(last)-2].Role != model.RoleAssistant || last[len(last)-2].Content != raw || !strings.Contains(last[len(last)-1].Content, "items") || !strings.Contains(last[len(last)-1].Content, "Do not repeat completed tools") {
+	last := submissionRequestText(requests[1])
+	if requests[1].ForcedTool != stageSubmissionTool || !strings.Contains(last, "Stage evidence (assistant)") || !strings.Contains(last, raw) || !strings.Contains(last, "items") || !strings.Contains(last, "Do not repeat completed tools") {
 		t.Fatalf("missing exact rejected candidate/repair feedback: %#v", last)
 	}
 	if state.run.ID != "run" || state.run.ModelTurns != 2 || len(state.runSteps) != 2 || state.runSteps[0].Commentary != raw || state.runSteps[1].Commentary != valid {
@@ -175,7 +175,7 @@ func TestWorkflowQuoteFailureKeepsLongDiagnosticOutOfVisibleError(t *testing.T) 
 		t.Fatal("detailed quote diagnostic was lost")
 	}
 	requests := provider.Requests()
-	if !strings.Contains(requests[1].Messages[len(requests[1].Messages)-1].Content, issue.CandidateQuote) {
+	if requests[1].ForcedTool != stageSubmissionTool || !strings.Contains(submissionRequestText(requests[1]), issue.CandidateQuote) {
 		t.Fatal("short banner replaced full model repair context")
 	}
 	if state.messages[1].Parts[0].Text != "" {
@@ -200,11 +200,14 @@ func TestWorkflowSubmissionRepairRetainsCompletedToolResults(t *testing.T) {
 	}
 	found := false
 	for _, message := range requests[2].Messages {
-		if message.Role == model.RoleTool && strings.Contains(message.Content, "可信执行") {
+		if message.Role == model.RoleTool || len(message.ToolCalls) != 0 {
+			t.Fatal("submission replayed completed IO as live native calls")
+		}
+		if message.Role == model.RoleUser && strings.Contains(message.Content, "Stage evidence (tool)") && strings.Contains(message.Content, "可信执行") {
 			found = true
 		}
 	}
-	if !found {
+	if !found || requests[2].ForcedTool != stageSubmissionTool {
 		t.Fatalf("repair context lost completed tool results: %#v", requests[2].Messages)
 	}
 }
@@ -309,7 +312,7 @@ func TestWorkflowSubmissionHostBusinessValidationUsesSameChatAndDurableBinding(t
 		t.Fatalf("wrong live host validation binding: %#v", host.validated)
 	}
 	request := provider.Requests()[1]
-	if !strings.Contains(request.Messages[len(request.Messages)-1].Content, "computedFacts requires existing evidence") {
+	if request.ForcedTool != stageSubmissionTool || !strings.Contains(submissionRequestText(request), "computedFacts requires existing evidence") {
 		t.Fatal("input-aware rejection omitted from same-chat feedback")
 	}
 }

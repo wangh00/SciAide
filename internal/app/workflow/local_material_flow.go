@@ -115,10 +115,10 @@ func bindSupplementaryEvidenceQueries(d RunDetail, args map[string]any) {
 	}
 }
 func (s *RuntimeService) supplementLocalEvidence(ctx context.Context, d RunDetail, step Step, output json.RawMessage) (bool, error) {
-	return s.supplementLocalEvidenceWithEvidence(ctx, d, step, output, nil)
+	return s.supplementLocalEvidenceWithEvidence(ctx, d, step, output, nil, nil)
 }
 
-func (s *RuntimeService) supplementLocalEvidenceWithEvidence(ctx context.Context, d RunDetail, step Step, output json.RawMessage, evidence any) (bool, error) {
+func (s *RuntimeService) supplementLocalEvidenceWithEvidence(ctx context.Context, d RunDetail, step Step, output json.RawMessage, evidence any, execution *AIExecution) (bool, error) {
 	search := findStepByNode(d.Steps, "evidence_search")
 	if search == nil || search.Status != StepCompleted || step.Ordinal != search.Ordinal+1 {
 		return false, nil
@@ -185,6 +185,19 @@ func (s *RuntimeService) supplementLocalEvidenceWithEvidence(ctx context.Context
 	payload := map[string]any{"stepId": step.ID, "attempt": step.Attempt, "queries": queries, "materialKey": localEvidenceMaterialKey(d), "previousSearchOutput": previousOutput, "previousSearchHash": hashJSON(previousOutput), "round": rounds + 1, "message": "正在所选材料内补查关键原文，不新增文献、不联网。"}
 	if evidence != nil {
 		payload["indexedEvidence"] = evidence
+	}
+	if execution != nil {
+		// The synthesis is not final, but its host-validated per-document work
+		// must survive this atomic search handoff. Do not checkpoint a draft,
+		// another execution, or reconstructed output bytes.
+		if execution.ID == "" || execution.WorkflowRunID != d.Run.ID || execution.WorkflowStepID != step.ID ||
+			execution.Attempt != step.Attempt || execution.Status != "completed" ||
+			step.InputSHA256 == "" || hashJSON(step.Input) != step.InputSHA256 || execution.InputSHA256 != step.InputSHA256 ||
+			execution.OutputSHA256 == "" || hashJSON(execution.Output) != execution.OutputSHA256 || hashJSON(output) != execution.OutputSHA256 {
+			return true, fmt.Errorf("local evidence analysis checkpoint binding changed")
+		}
+		payload["executionId"] = execution.ID
+		payload["analysisCheckpoint"] = evidenceCheckpointPayload(d, step, evidence)
 	}
 	event, err := s.event(d.Run.ID, "workflow.local_evidence_requested", payload, s.now())
 	if err != nil {

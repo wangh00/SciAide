@@ -144,6 +144,8 @@ type Request struct {
 }
 
 type View struct {
+	RecoveryOptions []Option
+
 	Definitions []tool.Definition
 	Context     string
 	// SkillActions is host-only preload metadata, never model arguments.
@@ -185,7 +187,22 @@ func (v View) RejectionMessage(name string, args json.RawMessage) string {
 			return fmt.Sprintf("资源操作类型不匹配：actionId %s 是搜索操作，请调用 builtin.resource.search 并提供 query。", a.ActionID)
 		}
 	}
-	return "当前阶段只接受本轮资源菜单签发的操作；请选择菜单标明的 tool 和 actionId，不填写路径、Skill 名称或附件 ID，不沿用其他运行的 ID。"
+	message := "当前阶段只接受本轮资源菜单签发的操作；请选择菜单标明的 tool 和 actionId，不填写路径、Skill 名称或附件 ID，不沿用其他运行的 ID。"
+	options := []Option{}
+	for _, option := range v.RecoveryOptions {
+		args, _ := json.Marshal(map[string]string{"actionId": option.ID})
+		if v.Allows(option.Tool, args) {
+			options = append(options, option)
+		}
+		if len(options) == 12 {
+			break
+		}
+	}
+	if len(options) > 0 {
+		encoded, _ := json.Marshal(options)
+		message += " 当前可用操作（仅供重新选择，并未执行；不是失效 ID 的等价替换）：" + string(encoded)
+	}
+	return message
 }
 
 type Provider interface {

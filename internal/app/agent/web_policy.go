@@ -3,7 +3,7 @@ package agent
 import "github.com/wangh00/SciAide/internal/app/tool"
 
 func isWebBrowsingTool(name string) bool {
-	return name == "builtin.web.search" || name == "builtin.web.open" || name == "builtin.browser.open"
+	return name == "builtin.web.search" || name == "builtin.web.open" || name == "builtin.browser.open" || name == "mcp.exa.web_search_exa"
 }
 
 func filterWebTools(definitions []tool.Definition, disabled bool) []tool.Definition {

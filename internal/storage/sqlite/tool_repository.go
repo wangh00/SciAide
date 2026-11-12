@@ -165,7 +165,7 @@ func finishToolCall(ctx context.Context, tx *sql.Tx, id string, expected, next t
 }
 
 func (r *ToolRepository) InterruptActive(ctx context.Context, at time.Time) (int64, error) {
-	result, err := r.db.ExecContext(ctx, `UPDATE tool_calls SET status='interrupted', error_code='APP_RESTARTED', error_message='应用退出时工具调用尚未完成', completed_at=?, updated_at=? WHERE status IN ('pending','running') OR (status='awaiting_approval' AND run_id IS NOT NULL)`, formatTime(at), formatTime(at))
+	result, err := r.db.ExecContext(ctx, `UPDATE tool_calls SET status='interrupted', error_code='APP_RESTARTED', error_message='应用退出时工具调用尚未完成', completed_at=?, updated_at=? WHERE (status IN ('pending','running') OR (status='awaiting_approval' AND run_id IS NOT NULL)) AND NOT EXISTS(SELECT 1 FROM runs r WHERE r.id=tool_calls.run_id AND r.pending_user_input_call_id<>'' AND r.status='waiting_approval')`, formatTime(at), formatTime(at))
 	if err != nil {
 		return 0, fmt.Errorf("interrupt active tool calls: %w", err)
 	}

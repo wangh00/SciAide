@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -62,6 +63,13 @@ func NewMaterializeSkillResource(skills SkillResourceMaterializer, projects Proj
 	return &MaterializeSkillResource{skills: skills, projects: projects}
 }
 
+func skillResourceReadError(err error, name string) error {
+	if errors.Is(err, opensciskill.ErrRunSkillNotFound) {
+		return tool.NewUserFacingError(fmt.Sprintf("当前对话轮次尚未加载 Skill %q，不能读取其配套资源。请先用 builtin.skill.load 的 name 加载；确认成功后用 builtin.skill.resource.list 获取真实 path，再读取或复制，不要猜测文件名。", name))
+	}
+	return skillReadError(err)
+}
+
 func (*ListSkillResources) Definition(context.Context) (tool.Definition, error) {
 	return tool.Definition{
 		QualifiedName: ListSkillResourcesName,
@@ -84,7 +92,7 @@ func (t *ListSkillResources) Invoke(ctx context.Context, invocation tool.Invocat
 	}
 	value, err := t.skills.ListResources(ctx, invocation.RunID, args.Name)
 	if err != nil {
-		return tool.Result{}, err
+		return tool.Result{}, skillResourceReadError(err, args.Name)
 	}
 	structured, err := json.Marshal(value)
 	if err != nil {
@@ -133,7 +141,7 @@ func (t *ReadSkillResource) Invoke(ctx context.Context, invocation tool.Invocati
 	if section, ok := mistakenSkillSectionPath(args.Path); ok && t.sections != nil {
 		_, chunk, _, err := t.sections.LoadStructuredForRun(ctx, invocation.RunID, invocation.ProjectID, invocation.CallID, args.Name, section, args.Offset, sectionReadLimit(args.MaxBytes))
 		if err != nil {
-			return tool.Result{}, fmt.Errorf("load Skill section %s with builtin.skill.load: %w", section, err)
+			return tool.Result{}, skillResourceReadError(fmt.Errorf("load Skill section %s with builtin.skill.load: %w", section, err), args.Name)
 		}
 		payload := struct {
 			Name         string `json:"name"`
@@ -151,7 +159,7 @@ func (t *ReadSkillResource) Invoke(ctx context.Context, invocation tool.Invocati
 	}
 	value, err := t.skills.ReadResource(ctx, invocation.RunID, args.Name, args.Path, args.Offset, args.MaxBytes)
 	if err != nil {
-		return tool.Result{}, err
+		return tool.Result{}, skillResourceReadError(err, args.Name)
 	}
 	payload := struct {
 		Name         string `json:"name"`
@@ -259,7 +267,7 @@ func (t *MaterializeSkillResource) Invoke(ctx context.Context, invocation tool.I
 	}
 	resource, err := t.skills.MaterializeResource(ctx, invocation.RunID, args.Name, args.Path)
 	if err != nil {
-		return tool.Result{}, err
+		return tool.Result{}, skillResourceReadError(err, args.Name)
 	}
 	random := make([]byte, 8)
 	if _, err := rand.Read(random); err != nil {

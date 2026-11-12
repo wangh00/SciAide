@@ -141,7 +141,7 @@ func (s *Service) RoutingPromptForRun(ctx context.Context, projectID string, inp
 	byName, groups := make(map[string]Info, snapshot.EnabledCount), map[string]int{}
 	strictNames := stringSet(input.CandidateNames)
 	for _, item := range snapshot.Skills {
-		if !item.Enabled || !item.Entry || item.Capability == CapabilityUnavailable {
+		if !item.Callable() {
 			continue
 		}
 		if input.StrictCandidates {
@@ -278,6 +278,10 @@ func (s *Service) RoutingPromptForRun(ctx context.Context, projectID string, inp
 	routingInstruction := "Re-rank by the current task and recent user context. Load only useful candidates, or browse a category when recall is insufficient. A recent Skill is continuity evidence, not permission to inherit it."
 	if input.StrictCandidates {
 		routingInstruction = "Use only the host-frozen candidates that apply to this stage. Do not browse categories or load a Skill outside this list."
+	}
+	routingInstruction += ` Load with {"name":"<exact returned name>"}. On first load omit section and offset; use only section IDs and nextOffset actually returned by the host. Catalog results with loaded=false are not instructions. Do not retry an unavailable Skill or invent replacement names/tools.`
+	if !input.StrictCandidates {
+		routingInstruction += ` A category is not a Skill name. Browse with {"category":"<listed category>"}. Correct from the result or continue ordinary discussion without a Skill when no specialized procedure is needed.`
 	}
 	lines = append(lines, routingInstruction, "</available_skills>")
 	if len(invoked) > 0 {

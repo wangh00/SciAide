@@ -17,6 +17,7 @@ import (
 	"github.com/wangh00/SciAide/internal/app/pythonenv"
 	"github.com/wangh00/SciAide/internal/id"
 	"github.com/wangh00/SciAide/internal/platform/localexec"
+	"github.com/wangh00/SciAide/internal/platform/pythonruntime"
 )
 
 const (
@@ -33,10 +34,15 @@ type Runtime struct {
 
 	mu      sync.Mutex
 	kernels map[string]*kernel
-	starts  map[string]*sync.Mutex
+	starts  map[string]*startLock
 	closed  bool
 	stop    chan struct{}
 	done    chan struct{}
+}
+
+type startLock struct {
+	mu    sync.Mutex
+	users int
 }
 
 type kernel struct {
@@ -98,7 +104,7 @@ func NewWithOptions(runner *localexec.Runner, options Options) *Runtime {
 	if reapEvery <= 0 {
 		reapEvery = time.Minute
 	}
-	runtime := &Runtime{runner: runner, memoryBytes: memory, idle: idle, reapEvery: reapEvery, kernels: map[string]*kernel{}, starts: map[string]*sync.Mutex{}, stop: make(chan struct{}), done: make(chan struct{})}
+	runtime := &Runtime{runner: runner, memoryBytes: memory, idle: idle, reapEvery: reapEvery, kernels: map[string]*kernel{}, starts: map[string]*startLock{}, stop: make(chan struct{}), done: make(chan struct{})}
 	go runtime.reap()
 	return runtime
 }
@@ -184,7 +190,10 @@ func (r *Runtime) Execute(ctx context.Context, request pythonenv.KernelExecuteRe
 				return result, fmt.Errorf("Python Kernel output exceeded the 64 KiB per-stream limit; the Kernel was stopped")
 			}
 			if frame.Status == "error" {
-				if frame.Exception != nil && frame.Exception.Type == "MemoryError" {
+				if frame.Exception != nil && (frame.Exception.Type == "MemoryError" || frame.Exception.Type == "SciAideResearchBlocked") {
+					// A prerequisite stop is not a successful notebook cell. The
+					// confirmed method replay starts clean, without publishing the
+					// stopped attempt's figures or reusing half-built globals.
 					r.stopKernel(value, localexec.ReasonExitNonZero)
 				}
 				return result, nil
@@ -253,10 +262,11 @@ func kernelEnvironment() ([]string, []string) {
 }
 
 func (r *Runtime) getOrStart(request pythonenv.KernelExecuteRequest, workspacePath string) (*kernel, error) {
+	unlockProject := r.lockStart(strings.TrimSpace(request.ProjectID))
+	defer unlockProject()
 	key := kernelKey(request.ProjectID, workspacePath)
-	start := r.projectStartLock(key)
-	start.Lock()
-	defer start.Unlock()
+	unlock := r.lockStart(key)
+	defer unlock()
 
 	r.mu.Lock()
 	if r.closed {
@@ -283,7 +293,7 @@ func (r *Runtime) getOrStart(request pythonenv.KernelExecuteRequest, workspacePa
 	}
 	environment, _ := kernelEnvironment()
 	session, err := r.runner.StartSession(localexec.SessionRequest{
-		Program:          request.Environment.EnvironmentPythonPath,
+		Program:          pythonruntime.CommandPath(request.Environment.EnvironmentPythonPath),
 		Args:             []string{"-I", "-u", "-X", "utf8", "-c", kernelBootstrap},
 		Dir:              workspacePath,
 		Env:              environment,
@@ -316,15 +326,27 @@ func kernelKey(projectID, workspacePath string) string {
 	return strings.TrimSpace(projectID) + "\x00" + filepath.Clean(strings.TrimSpace(workspacePath))
 }
 
-func (r *Runtime) projectStartLock(projectID string) *sync.Mutex {
+func (r *Runtime) lockStart(key string) func() {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	lock := r.starts[projectID]
+	lock := r.starts[key]
 	if lock == nil {
-		lock = &sync.Mutex{}
-		r.starts[projectID] = lock
+		lock = &startLock{}
+		r.starts[key] = lock
 	}
-	return lock
+	// Count waiters before releasing the map lock, so the key can never be
+	// removed while another start/stop still holds a reference to this mutex.
+	lock.users++
+	r.mu.Unlock()
+	lock.mu.Lock()
+	return func() {
+		lock.mu.Unlock()
+		r.mu.Lock()
+		lock.users--
+		if lock.users == 0 {
+			delete(r.starts, key)
+		}
+		r.mu.Unlock()
+	}
 }
 
 func (k *kernel) readFrames() {
@@ -355,9 +377,8 @@ func (k *kernel) readFrames() {
 
 func (r *Runtime) Stop(projectID string) error {
 	projectID = strings.TrimSpace(projectID)
-	start := r.projectStartLock(projectID)
-	start.Lock()
-	defer start.Unlock()
+	unlock := r.lockStart(projectID)
+	defer unlock()
 	r.mu.Lock()
 	values := make([]*kernel, 0)
 	for key, value := range r.kernels {
@@ -378,10 +399,11 @@ func (r *Runtime) Stop(projectID string) error {
 
 // StopScoped terminates only the interpreter attached to one task workspace.
 func (r *Runtime) StopScoped(projectID, workspacePath string) error {
+	unlockProject := r.lockStart(strings.TrimSpace(projectID))
+	defer unlockProject()
 	key := kernelKey(projectID, workspacePath)
-	start := r.projectStartLock(key)
-	start.Lock()
-	defer start.Unlock()
+	unlock := r.lockStart(key)
+	defer unlock()
 	r.mu.Lock()
 	value := r.kernels[key]
 	if value != nil {
@@ -528,6 +550,14 @@ def _project(value):
     except Exception: projected = _cell(repr(value))
     return projected, type(value).__name__, table
 
+class SciAideResearchBlocked(Exception):
+    pass
+
+def _require_input(reason):
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValueError("SCIAIDE_REQUIRE_INPUT requires a concrete prerequisite reason")
+    raise SciAideResearchBlocked(reason.strip()[:4000])
+
 _globals = {"__name__": "__main__"}
 _control = _sys.stdout
 for _line in _sys.stdin:
@@ -538,6 +568,7 @@ for _line in _sys.stdin:
         _globals["SCIAIDE_INPUTS"] = list(_request.get("inputs") or [])
         _globals["SCIAIDE_DATA"] = _request.get("input_data")
         _globals["SCIAIDE_OUTPUTS"] = list(_request.get("outputs") or [])
+        _globals["SCIAIDE_REQUIRE_INPUT"] = _require_input
         _os.chdir(_globals["SCIAIDE_WORKSPACE"])
         try:
             with _contextlib.redirect_stdout(_stdout), _contextlib.redirect_stderr(_stderr):

@@ -475,8 +475,8 @@ func validateSave(cmd SaveCommand) error {
 	if cmd.Trust != TrustUntrusted && cmd.Trust != TrustUser {
 		return fmt.Errorf("invalid MCP trust level")
 	}
-	if cmd.AutoStart {
-		return fmt.Errorf("MCP auto-start is not enabled in this release")
+	if cmd.AutoStart && cmd.Trust != TrustUser {
+		return fmt.Errorf("MCP auto-start requires an explicitly trusted configuration")
 	}
 	if cmd.TimeoutSeconds < 5 || cmd.TimeoutSeconds > 300 {
 		return fmt.Errorf("MCP timeout must be between 5 and 300 seconds")
@@ -554,7 +554,7 @@ func sensitiveHeader(name string) bool {
 }
 
 func cloneStrings(values []string) []string {
-	if values == nil {
+	if len(values) == 0 {
 		return []string{}
 	}
 	return append([]string(nil), values...)

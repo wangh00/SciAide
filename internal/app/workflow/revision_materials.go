@@ -17,6 +17,39 @@ type RevisionMaterial struct {
 type discussionMaterialsRepository interface {
 	DiscussionAttachmentIDs(context.Context, string) ([]string, error)
 }
+
+// Reading and adopting attachments share the same task scope and original
+// conversation owner. Repository queries exclude unsent and internal uploads.
+type taskDiscussionMaterialsRepository interface {
+	TaskDiscussionAttachmentIDs(context.Context, string) ([]string, error)
+	TaskDiscussionAttachmentOwner(context.Context, string, string) (string, error)
+}
+
+func (s *RuntimeService) discussionAttachmentIDs(ctx context.Context, d RunDetail) ([]string, error) {
+	if repo, ok := s.repository.(taskDiscussionMaterialsRepository); ok {
+		return repo.TaskDiscussionAttachmentIDs(ctx, d.Run.ID)
+	}
+	if repo, ok := s.repository.(discussionMaterialsRepository); ok {
+		return repo.DiscussionAttachmentIDs(ctx, d.Run.ID)
+	}
+	return nil, fmt.Errorf("discussion material storage unavailable")
+}
+func (s *RuntimeService) discussionAttachmentOwner(ctx context.Context, d RunDetail, id string) (string, error) {
+	if repo, ok := s.repository.(taskDiscussionMaterialsRepository); ok {
+		return repo.TaskDiscussionAttachmentOwner(ctx, d.Run.ID, id)
+	}
+	ids, err := s.discussionAttachmentIDs(ctx, d)
+	if err != nil {
+		return "", err
+	}
+	for _, allowed := range ids {
+		if allowed == id {
+			return d.Run.ConversationID, nil
+		}
+	}
+	return "", fmt.Errorf("该资料未在当前任务的用户对话中发送")
+}
+
 type revisionMaterialService interface {
 	RevisionMaterials(context.Context, string, string, []string) ([]attachment.Attachment, error)
 	PromoteRevisionMaterial(context.Context, string, string, string, string, string) (attachment.Attachment, error)
@@ -95,11 +128,7 @@ func (s *RuntimeService) prepareRevisionMaterials(ctx context.Context, d RunDeta
 	if command.NodeID != "evidence_import" || !revisionMaterialChain(d) {
 		return nil, fmt.Errorf("补充文献须从导入所选研究材料开始返修，不能仅改报告或替换研究数据")
 	}
-	repo, ok := s.repository.(discussionMaterialsRepository)
-	if !ok {
-		return nil, fmt.Errorf("discussion material storage unavailable")
-	}
-	allowed, err := repo.DiscussionAttachmentIDs(ctx, d.Run.ID)
+	allowed, err := s.discussionAttachmentIDs(ctx, d)
 	if err != nil {
 		return nil, err
 	}
@@ -113,9 +142,28 @@ func (s *RuntimeService) prepareRevisionMaterials(ctx context.Context, d RunDeta
 	if !ok {
 		return nil, fmt.Errorf("revision material service unavailable")
 	}
-	values, err := service.RevisionMaterials(ctx, d.Run.ProjectID, d.Run.ConversationID, command.AttachmentIDs)
-	if err != nil {
-		return nil, err
+	if len(command.AttachmentIDs) > 16 {
+		return nil, fmt.Errorf("一次返修最多补充 16 份文献资料")
+	}
+	values := make([]attachment.Attachment, 0, len(command.AttachmentIDs))
+	seenIDs := map[string]bool{}
+	for _, id := range command.AttachmentIDs {
+		if seenIDs[id] {
+			return nil, fmt.Errorf("补充资料不能重复")
+		}
+		seenIDs[id] = true
+		owner, err := s.discussionAttachmentOwner(ctx, d, id)
+		if err != nil {
+			return nil, err
+		}
+		loaded, err := service.RevisionMaterials(ctx, d.Run.ProjectID, owner, []string{id})
+		if err != nil {
+			return nil, err
+		}
+		if len(loaded) != 1 || loaded[0].ID != id {
+			return nil, fmt.Errorf("补充资料读取身份不一致")
+		}
+		values = append(values, loaded[0])
 	}
 	// Reject an impossible plan before showing its confirmation card, not after
 	// discarding the current delivery. Existing material bytes are counted once.
@@ -211,7 +259,11 @@ func (s *RuntimeService) bindRevisionMaterials(ctx context.Context, d RunDetail,
 		if knownHashes[m.SHA256] {
 			continue
 		}
-		v, err := service.PromoteRevisionMaterial(ctx, d.Run.ProjectID, d.Run.ConversationID, d.Run.ResearchTaskID, m.AttachmentID, m.SHA256)
+		owner, err := s.discussionAttachmentOwner(ctx, d, m.AttachmentID)
+		if err != nil {
+			return nil, err
+		}
+		v, err := service.PromoteRevisionMaterial(ctx, d.Run.ProjectID, owner, d.Run.ResearchTaskID, m.AttachmentID, m.SHA256)
 		if err != nil {
 			return nil, err
 		}

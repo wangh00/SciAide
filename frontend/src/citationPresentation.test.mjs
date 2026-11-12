@@ -65,6 +65,7 @@ async function componentExports(file) {
 }
 const {ResearchReportCard} = await componentExports('./ResearchReportCard.tsx');
 const {ResearchReportReader} = await componentExports('./ResearchReportReader.tsx');
+const {ResearchReportLayers} = await componentExports('./ResearchReportLayers.tsx');
 const source = await readFile(new URL("./App.tsx", import.meta.url), "utf8");
 function segment(start, end) {
   const from = source.indexOf(start), to = source.indexOf(end, from);
@@ -75,14 +76,15 @@ const compiled = ts.transpileModule('import React, { Fragment, useState, useEffe
   segment("function CitationMarker(", "function runDuration(") +
   segment("function ArtifactDocumentPreview(", "function ArtifactLibrary(") +
   segment("const researchTimelineLabels:", "const workflowAnalysisMethods") +
-  "\nexport { WorkflowResearchReportCard, ResearchTimelineHistory, ArtifactDocumentPreview, CitedMarkdown };", {
+  "\nexport { WorkflowResearchReportCard, ResearchTimelineHistory, ArtifactDocumentPreview, CitedMarkdown, CitedAnswer };", {
   compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.React, target: ts.ScriptTarget.ES2022, esModuleInterop: true },
 }).outputText;
 const exports = {};
 vm.runInNewContext(compiled, {
   exports, require: createRequire(import.meta.url), MarkdownCodeBlock: ({children}) => React.createElement("pre",null,children), copyToClipboard: async()=>{}, ReactMarkdown, markdownRemarkPlugins, markdownRehypePlugins, remarkGfm, citationDisplayMap, citationTextSegments,
   reportCitationSnapshot, citationSourceURL, citationReferenceFromURL, remarkSciAideCitations, safeMarkdownURL,
-  Icon: () => null, ResearchAcceptanceDetails: () => null, ResearchReportCard, ResearchReportReader,
+  Icon: () => null, ResearchAcceptanceDetails: () => null, ResearchReportCard, ResearchReportReader, ResearchReportLayers,
+  visibleMessageText: message => message.parts?.[0]?.text || "",
 });
 const render = (component, props) => renderToStaticMarkup(React.createElement(component, props));
 const report = { markdown: `## Results\n\nFinding ${first.reference}.`, methodSummary: "Method", confidence: "medium", claimSummary: ["Finding"], limitations: [] };
@@ -120,4 +122,29 @@ test("unknown report citations stay explicit, and markdown code does not become 
   assert.match(html, /citation-unverified/);
   assert.match(html, /<code>\[K-111111111111\]<\/code>/);
   assert.doesNotMatch(html, /class="citation-marker"/);
+  assert.match(html, /来源标记 · 未绑定/);
+  assert.match(html, /正文提及的来源标记未绑定/);
+  assert.match(html, /K-0123456789AB/); // Original identity remains in the tooltip.
+});
+
+test("discussion of an old marker never borrows the latest citation from the same source", () => {
+  const old = "[K-32DD581CCB82]", current = {...first, reference:"[K-6E75257CD221]"};
+  const text = `关于证据 **${old}**：没有样本量，不能称小样本。当前摘录 ${current.reference}。`;
+  const html = render(exports.CitedMarkdown, {text, citations:[current]});
+  assert.match(html, /<strong><span class="citation-unverified"/);
+  assert.match(html, /来源标记 · 未绑定/);
+  assert.match(html, /\[K-32DD581CCB82\]/);
+  assert.equal((html.match(/class="citation-marker"/g)||[]).length,1);
+  assert.match(html, />\[1\]<\/button>/);
+  assert.equal(text, `关于证据 **${old}**：没有样本量，不能称小样本。当前摘录 ${current.reference}。`);
+});
+
+test("ordinary chat uses the same exact snapshot checks as report previews", () => {
+  const message={id:"answer",role:"assistant",status:"complete",parts:[{text:`Finding ${first.reference}`}],citations:[first,{...first,quote:"Ambiguous quote"}]};
+  const html=render(exports.CitedAnswer,{message,saveArtifact:async()=>{}});
+  assert.match(html,/来源标记 · 未绑定/);
+  assert.doesNotMatch(html,/class="citation-marker"/);
+  assert.equal(message.parts[0].text,`Finding ${first.reference}`);
+  message.citations=[first];
+  assert.match(render(exports.CitedAnswer,{message,saveArtifact:async()=>{}}),/>\[1\]<\/button>/);
 });

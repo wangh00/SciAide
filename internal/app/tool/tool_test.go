@@ -34,7 +34,7 @@ func TestModelContextSnapshotIsDeterministicAndBounded(t *testing.T) {
 	if first != second || len([]rune(first)) != MaxModelContextRunes {
 		t.Fatalf("snapshot stability = equal:%v runes:%d", first == second, len([]rune(first)))
 	}
-	if !strings.Contains(first, "tool result truncated for model context") || !strings.Contains(first, `"structured":{"ok":true}`) {
+	if !json.Valid([]byte(first)) || !strings.Contains(first, "tool result truncated for model context") || !strings.Contains(first, `"structured":{"ok":true}`) {
 		t.Fatal("snapshot did not preserve bounded head/tail evidence")
 	}
 }

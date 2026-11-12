@@ -2,6 +2,7 @@ package model_test
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -41,7 +42,7 @@ func TestCapturedTruncatedResponsesEvent(t *testing.T) {
 	defer stream.Close()
 	_, err = stream.Recv()
 	var appErr *apperr.Error
-	if !errors.As(err, &appErr) || appErr.Code != "MODEL_STREAM_INTERRUPTED" || !appErr.Retryable || !strings.Contains(appErr.Details, string(payload)) {
+	if !errors.As(err, &appErr) || appErr.Code != "MODEL_STREAM_INTERRUPTED" || !appErr.Retryable || !strings.Contains(appErr.Details, fmt.Sprintf("%x", sha256.Sum256(payload))) || strings.Contains(appErr.Details, string(payload)) {
 		t.Fatalf("captured half JSON must be discarded and retried: %#v", err)
 	}
 	t.Log("captured half JSON classified as interrupted stream, not accepted output; no live model/DB")

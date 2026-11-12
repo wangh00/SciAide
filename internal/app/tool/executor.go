@@ -575,6 +575,25 @@ func invokeSafely(ctx context.Context, value Tool, invocation Invocation) (resul
 }
 
 func definitionMatchesSnapshot(definition Definition, call Call) bool {
+	// Pending legacy calls must match the exact derived old contract, including
+	// its argument scope; a registry upgrade never adds selectors to that call.
+	if call.ToolName == "builtin.research.task.read" && call.ToolVersion != definition.Version && (call.ToolVersion == "7" || call.ToolVersion == "8") {
+		var prior Definition
+		var ok bool
+		if call.ToolVersion == "7" {
+			prior, ok = ResearchTaskReadVersion7(definition)
+		} else {
+			prior, ok = ResearchTaskReadVersion8(definition)
+		}
+		if !ok || call.ContractSHA256 == "" || call.ContractSHA256 != DefinitionFingerprint(prior) {
+			return false
+		}
+		var args map[string]json.RawMessage
+		if json.Unmarshal(call.Arguments, &args) != nil || args["pointer"] != nil || call.ToolVersion == "7" && string(args["section"]) == `"planning_discussion"` || (JSONSchemaValidator{}).Validate(prior.InputSchema, call.Arguments) != nil {
+			return false
+		}
+		definition = prior
+	}
 	if call.ContractSHA256 != "" && call.IdempotencyKey != "" && call.ContractSHA256 != DefinitionFingerprint(definition) {
 		return false
 	}

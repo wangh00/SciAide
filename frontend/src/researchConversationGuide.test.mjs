@@ -58,10 +58,12 @@ test('analysis-only delivery separates computed facts from inference and renders
 test('guides and report-free results are wired to original planning and chat surfaces', async () => {
   const app = await readFile(new URL('./App.tsx',import.meta.url),'utf8');
   assert.match(app,/<ResearchGettingStarted disabled=\{Boolean\(busy\)\}/);
-  assert.match(app,/const next = appendResearchExample\(researchIdea, prompt\)/);
+  assert.match(app,/const next = appendResearchExample\(current, prompt\)/);
   assert.match(app,/if \(next.length > 8000\)/);
   assert.match(app,/onDraft=\{fillResearchDraft\}/);
-  assert.match(app,/setInput\(current => appendResearchExample/);
+  assert.match(app,/setInput\(current => \{/);
+  assert.equal((app.match(/id="workspace-message-input"/g) ?? []).length,1);
+  assert.match(app,/aria-label=\{researchEntry \? "研究问题" : "聊天消息"\}/);
   assert.match(app,/workflowRevisionConversationId\(runDetail\) \? <ResearchFollowupGuide/);
   assert.match(app,/if \(interpretation\) return <div className="research-completion-stack"><ResearchAnalysisResult/);
 });

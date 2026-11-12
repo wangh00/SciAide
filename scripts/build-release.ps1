@@ -20,6 +20,7 @@ $output = Join-Path $root "build\bin\SciAide.exe"
 $previousGOOS = $env:GOOS
 $previousGOARCH = $env:GOARCH
 $previousCGOEnabled = $env:CGO_ENABLED
+$previousGOWORK = $env:GOWORK
 
 if (-not (Get-Command wails -ErrorAction SilentlyContinue)) {
     throw "Wails CLI was not found. Install the version matching go.mod first."
@@ -32,11 +33,18 @@ try {
     $env:GOOS = "windows"
     $env:GOARCH = "amd64"
     $env:CGO_ENABLED = "0"
+    Invoke-Native go run ./scripts/pack-skills -check
+    # The stock reload API executes JS in the failed page. Apply one reviewed
+    # native-navigation function in a derived module, leaving module cache intact.
+    $workfile = & go run ./scripts/patch-wails-runtime
+    if ($LASTEXITCODE -ne 0) { throw "Preparing native UI recovery overlay failed." }
+    $env:GOWORK = $workfile.Trim()
     Invoke-Native wails build -platform windows/amd64 -clean
 } finally {
     $env:GOOS = $previousGOOS
     $env:GOARCH = $previousGOARCH
     $env:CGO_ENABLED = $previousCGOEnabled
+    $env:GOWORK = $previousGOWORK
     Pop-Location
 }
 

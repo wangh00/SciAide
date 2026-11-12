@@ -210,6 +210,7 @@ func TestApplicationRegistersFixedResearchToolSurface(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := map[string]bool{
+		"builtin.research.plan.prepare":            false,
 		"builtin.research.task.read":               false,
 		"builtin.research.revision.propose":        false,
 		"builtin.research.catalog":                 false,

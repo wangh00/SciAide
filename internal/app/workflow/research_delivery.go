@@ -3,9 +3,8 @@ package workflow
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/wangh00/SciAide/internal/app/reviewcontract"
 	"strings"
-
-	"github.com/wangh00/SciAide/internal/app/tool"
 )
 
 type ResearchDeliveryAssessment struct {
@@ -96,30 +95,11 @@ func ValidateReviewedOutput(detail RunDetail, name string) error {
 	if review == nil || review.Status != StepCompleted || !isIndependentReviewSchema(nodes[review.NodeID].OutputSchema) {
 		return fmt.Errorf("交付物缺少已完成的独立审查")
 	}
-	if review.InputSHA256 == "" || hashJSON(review.Input) != review.InputSHA256 || gate.InputSHA256 == "" || hashJSON(gate.Input) != gate.InputSHA256 {
-		return fmt.Errorf("独立审查或门禁输入摘要不一致")
-	}
-	if err := validateReviewDependencies(detail, *review); err != nil {
-		return err
-	}
-	reviewOutput, err := outputPort(review.Output, "analysis")
+	reviewOutput, err := currentReviewOutput(detail, *review)
 	if err != nil {
 		return err
 	}
-	var execution *AIExecution
-	for i := range detail.AIExecutions {
-		candidate := &detail.AIExecutions[i]
-		if candidate.WorkflowStepID == review.ID && candidate.Attempt == review.Attempt && candidate.Status == "completed" {
-			execution = candidate
-		}
-	}
-	if execution == nil || execution.InputSHA256 != review.InputSHA256 || execution.OutputSHA256 == "" || hashJSON(execution.Output) != execution.OutputSHA256 || !rawJSONEqual(execution.Output, reviewOutput) {
-		return fmt.Errorf("独立审查与当前尝试的 AI 冻结输出不一致")
-	}
-	if err := (tool.JSONSchemaValidator{}).Validate(nodes[review.NodeID].OutputSchema, reviewOutput); err != nil {
-		return fmt.Errorf("独立审查不符合冻结契约：%w", err)
-	}
-	if err := validateWorkflowAIStageOutput(nodes[review.NodeID], reviewOutput, review.Input); err != nil {
+	if err := matchReviewGate(*review, reviewOutput, *gate); err != nil {
 		return err
 	}
 	var decision struct {
@@ -129,23 +109,6 @@ func ValidateReviewedOutput(detail RunDetail, name string) error {
 	if json.Unmarshal(reviewOutput, &decision) != nil || !decision.Approved || decision.InputHash != review.InputSHA256 {
 		return fmt.Errorf("独立审查没有批准当前冻结输入")
 	}
-	var gateInput struct {
-		Subject json.RawMessage `json:"subject"`
-		Review  json.RawMessage `json:"review"`
-	}
-	if json.Unmarshal(gate.Input, &gateInput) != nil || !reviewSubjectMatchesInput(gateInput.Subject, review.Input) {
-		return fmt.Errorf("门禁未覆盖当前独立审查的完整输入")
-	}
-	core := reviewOutput
-	if isResearchAcceptanceSchema(nodes[review.NodeID].OutputSchema) || schemaDeclaresProperty(nodes[review.NodeID].OutputSchema, "revisionPlan") {
-		core, err = reviewCoreForGate(reviewOutput)
-		if err != nil {
-			return err
-		}
-	}
-	if !rawJSONEqual(core, gateInput.Review) {
-		return fmt.Errorf("门禁引用了过期或不同的审查结果")
-	}
 	var approval struct {
 		Approved  bool   `json:"approved"`
 		InputHash string `json:"reviewedInputSha256"`
@@ -154,7 +117,8 @@ func ValidateReviewedOutput(detail RunDetail, name string) error {
 		return fmt.Errorf("门禁未批准当前审查输入")
 	}
 	var reviewInput map[string]json.RawMessage
-	if json.Unmarshal(review.Input, &reviewInput) != nil {
+	assembled, ok := reviewAssembledInput(review.Input)
+	if !ok || json.Unmarshal(assembled, &reviewInput) != nil {
 		return fmt.Errorf("独立审查输入无效")
 	}
 	for _, edge := range detail.Run.Compilation.Edges {
@@ -166,13 +130,7 @@ func ValidateReviewedOutput(detail RunDetail, name string) error {
 }
 
 func reviewSubjectMatchesInput(subject, input json.RawMessage) bool {
-	if rawJSONEqual(subject, input) {
-		return true
-	}
-	// Older gate bindings passed only the context value. Accept that exact
-	// historical envelope, but never discard additional evidence/contract fields.
-	var envelope map[string]json.RawMessage
-	return json.Unmarshal(input, &envelope) == nil && len(envelope) == 1 && rawJSONEqual(envelope["context"], subject)
+	return reviewcontract.SubjectMatchesInput(subject, input)
 }
 
 func researchOutputDeclaration(compilation Compilation, name string) (Output, bool) {
@@ -204,7 +162,7 @@ func assessResearchDelivery(detail RunDetail) *ResearchDeliveryAssessment {
 			assessment.Status = "blocked"
 			assessment.Summary = "流程尚未通过交付检查，请处理失败或中断后继续。"
 			for _, step := range detail.Steps {
-				if step.Status == StepFailed && isReviewGateNode(compilationNodeMap(detail.Run.Compilation)[step.NodeID]) {
+				if isRejectedReviewGate(compilationNodeMap(detail.Run.Compilation)[step.NodeID], step) {
 					assessment.Status = "revision_required"
 					assessment.Summary = "独立审查未通过，需要修订结果并重新审查。"
 				}
@@ -285,7 +243,7 @@ func recordedReportAssessment(detail RunDetail) *ResearchReportAssessment {
 		if err != nil || execution.WorkflowStepID != producer.ID || execution.Attempt != producer.Attempt || execution.Status != "completed" || execution.InputSHA256 != producer.InputSHA256 || execution.OutputSHA256 == "" || hashJSON(execution.Output) != execution.OutputSHA256 || !rawJSONEqual(execution.Output, produced) {
 			continue
 		}
-		if usesReportProvenance(node) && strings.HasSuffix(execution.PromptVersion, "-"+claimAssessmentVersion) {
+		if usesReportProvenance(node) && hasClaimAssessmentVersion(execution.PromptVersion) {
 			result.ConfidencePolicy = "claim_based"
 		} else if result.LimitedDraft && execution.PromptVersion == node.PromptVersion && strings.HasPrefix(execution.PromptVersion, "dynamic-report-v5") && strings.Contains(node.Prompt, "对已接受的有限证据，必须保持低置信并将交付物定位为范围受限的初稿。") {
 			result.ConfidencePolicy = "legacy_limited"

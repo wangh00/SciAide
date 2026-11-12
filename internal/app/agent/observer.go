@@ -1,6 +1,9 @@
 package agent
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+
 	"github.com/wangh00/SciAide/internal/app/chat"
 	"github.com/wangh00/SciAide/internal/app/permission"
 	"github.com/wangh00/SciAide/internal/app/tool"
@@ -15,6 +18,21 @@ type EventSink interface {
 // original observer contract while receiving durable tool lifecycle events.
 type ToolActivityObserver interface {
 	ToolActivity(run chat.Run, phase string, call tool.Call, execution *tool.Execution, activityErr error)
+}
+
+// Optional: status telemetry must not change existing observer contracts.
+type RuntimeActivityObserver interface {
+	RuntimeActivity(run chat.Run, activity chat.RuntimeActivity)
+}
+
+func (l *Loop) publishRuntimeActivity(run chat.Run, phase string) {
+	if observer, ok := l.observer.(RuntimeActivityObserver); ok {
+		observer.RuntimeActivity(run, chat.RuntimeActivity{RunID: run.ID, Phase: phase, TurnIndex: run.ModelTurns, StartedAt: l.now()})
+	}
+}
+
+func (o *EventObserver) RuntimeActivity(run chat.Run, activity chat.RuntimeActivity) {
+	o.sink.PublishRunEvent(run.ID, "run.activity", map[string]any{"activity": activity})
 }
 
 // EventObserver adapts AgentLoop lifecycle callbacks to durable, versioned
@@ -75,6 +93,41 @@ func (o *EventObserver) Retrying(run chat.Run, retry RetryStatus) {
 func (o *EventObserver) RetryRecovered(run chat.Run) {
 	o.sink.PublishRunEvent(run.ID, "run.retry.recovered", map[string]any{"runId": run.ID})
 }
+
+func (l *Loop) submissionRejected(run chat.Run, candidate, diagnostic string, attempt int) {
+	if observer, ok := l.observer.(interface {
+		SubmissionRejected(chat.Run, string, string, int)
+	}); ok {
+		observer.SubmissionRejected(run, candidate, diagnostic, attempt)
+	}
+}
+
+func (o *EventObserver) SubmissionRejected(run chat.Run, candidate, diagnostic string, attempt int) {
+	hash := sha256.Sum256([]byte(candidate))
+	o.sink.PublishRunEvent(run.ID, "run.submission_rejected", map[string]any{
+		"turnIndex": run.ModelTurns, "correctionsUsed": attempt, "candidateSha256": hex.EncodeToString(hash[:]),
+		"diagnostic": tool.SafeActivityText(diagnostic, 12000),
+	})
+}
+
+func (o *EventObserver) RetryReceiving(run chat.Run, retry RetryStatus) {
+	o.sink.PublishRunEvent(run.ID, "run.retrying", map[string]any{"messageId": run.AssistantMessageID, "retry": retry})
+}
+
+func (l *Loop) implementationSaved(run chat.Run, draft chat.ImplementationDraft) {
+	if observer, ok := l.observer.(interface {
+		ImplementationSaved(chat.Run, chat.ImplementationDraft)
+	}); ok {
+		observer.ImplementationSaved(run, draft)
+	}
+}
+
+func (o *EventObserver) ImplementationSaved(run chat.Run, draft chat.ImplementationDraft) {
+	// Never emit the checkpoint source/metadata as a UI status payload.
+	o.sink.PublishRunEvent(run.ID, "run.implementation_progress", map[string]any{
+		"messageId": run.AssistantMessageID, "parts": draft.PartCount, "chars": len([]rune(draft.Code)), "complete": draft.Complete,
+	})
+}
 func (o *EventObserver) ApprovalRequired(run chat.Run, coordination permission.Coordination) {
 	o.sink.PublishRunEvent(run.ID, "approval.required", coordination)
 }
@@ -87,4 +140,8 @@ func (o *EventObserver) RunFailed(run chat.Run, _, _ string) {
 }
 func (o *EventObserver) RunCancelled(run chat.Run) {
 	o.sink.PublishRunEvent(run.ID, "run.cancelled", map[string]any{"run": run})
+}
+
+func (o *EventObserver) RunInterrupted(run chat.Run) {
+	o.sink.PublishRunEvent(run.ID, "run.interrupted", map[string]any{"run": run})
 }

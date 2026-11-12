@@ -8,6 +8,7 @@ param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 if ($Check -and $Update) { throw "-Check and -Update are mutually exclusive." }
+. (Join-Path $PSScriptRoot "publish-skill-catalog.ps1")
 
 $repoRoot = [System.IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 if ([string]::IsNullOrWhiteSpace($SourceRoot)) { $SourceRoot = Join-Path $repoRoot "..\openscience-main" }
@@ -108,12 +109,12 @@ $notice = $sourceInventory | Where-Object path -eq "NOTICE"
 if ($license.sha256 -ne $expectedLicenseHash -or $notice.sha256 -ne $expectedNoticeHash) { throw "OpenScience LICENSE or NOTICE changed; review licensing before syncing." }
 
 $token = [Guid]::NewGuid().ToString("N")
-$staging = Join-Path $catalogRoot ".defaultskills-derived-$token"
-$generatedUpstream = Join-Path $catalogRoot ".defaultskills-upstream-$token.json"
-$generatedDerived = Join-Path $catalogRoot ".defaultskills-derived-$token.json"
-$generatedAudit = Join-Path $catalogRoot ".capability-audit-$token.json"
-$backup = Join-Path $catalogRoot ".defaultskills-backup-$token"
-foreach ($path in @($staging, $generatedUpstream, $generatedDerived, $generatedAudit, $backup)) { Assert-PathWithinRepo $path }
+$prepared = Join-Path $catalogRoot ".defaultskills-prepared-$token"
+$staging = Join-Path $prepared "defaultskills"
+$generatedUpstream = Join-Path $prepared "defaultskills.upstream.manifest.json"
+$generatedDerived = Join-Path $prepared "defaultskills.manifest.json"
+$generatedAudit = Join-Path $prepared "capability-audit.v1.json"
+foreach ($path in @($prepared, $staging, $generatedUpstream, $generatedDerived, $generatedAudit)) { Assert-PathWithinRepo $path }
 
 try {
     New-Item -ItemType Directory -Path $staging | Out-Null
@@ -135,24 +136,21 @@ try {
         Assert-SameFile $generatedUpstream $upstreamManifestPath "Upstream provenance manifest"
         Assert-SameFile $generatedDerived $derivedManifestPath "SciAide derived manifest"
         Assert-SameFile $generatedAudit $auditPath "SciAide capability audit"
+        & go run ./scripts/pack-skills -root $catalogRoot -check
+        if ($LASTEXITCODE -ne 0) { throw "SciAide Skill archive verification failed." }
     } else {
-        foreach ($path in @($targetRoot, $derivedManifestPath, $upstreamManifestPath, $auditPath)) { Assert-PathWithinRepo $path }
-        if (Test-Path -LiteralPath $targetRoot) { Move-Item -LiteralPath $targetRoot -Destination $backup }
-        Move-Item -LiteralPath $staging -Destination $targetRoot
-        Move-Item -LiteralPath $generatedUpstream -Destination $upstreamManifestPath -Force
-        Move-Item -LiteralPath $generatedDerived -Destination $derivedManifestPath -Force
-        Move-Item -LiteralPath $generatedAudit -Destination $auditPath -Force
-        if (Test-Path -LiteralPath $backup) { Remove-Item -LiteralPath $backup -Recurse -Force }
+        # Pack before touching any published member. A Go/ZIP/disk failure here
+        # leaves the old source, both inventories, audit and archive untouched.
+        & go run ./scripts/pack-skills -root $prepared
+        if ($LASTEXITCODE -ne 0) { throw "SciAide Skill resource packing failed." }
+        foreach ($name in @("defaultskills", "defaultskills.manifest.json", "defaultskills.upstream.manifest.json", "capability-audit.v1.json", "defaultskills.zip")) {
+            Assert-PathWithinRepo (Join-Path $catalogRoot $name)
+        }
+        Publish-SkillCatalog -CatalogRoot $catalogRoot -PreparedRoot $prepared
     }
-} catch {
-    if ($Update -and (Test-Path -LiteralPath $backup)) {
-        if (Test-Path -LiteralPath $targetRoot) { Remove-Item -LiteralPath $targetRoot -Recurse -Force }
-        Move-Item -LiteralPath $backup -Destination $targetRoot
-    }
-    throw
 } finally {
-    foreach ($path in @($staging, $backup)) { if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force } }
-    foreach ($path in @($generatedUpstream, $generatedDerived, $generatedAudit)) { if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force } }
+    Assert-PathWithinRepo $prepared
+    if (Test-Path -LiteralPath $prepared) { Remove-Item -LiteralPath $prepared -Recurse -Force }
 }
 
 $mode = if ($Update) { "updated" } else { "verified" }

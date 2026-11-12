@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -45,10 +46,14 @@ func TestCancelledAIRetryRestoresOnlyUntouchedDownstreamAndKeepsHistory(t *testi
 	repo := NewWorkflowRuntimeRepository(h.store.DB())
 	now := time.Now().UTC()
 	event := workflow.RuntimeEvent{ID: "cancelled-retry", WorkflowRunID: failed.Run.ID, Type: "workflow.step_retry_queued", Payload: json.RawMessage(`{}`), CreatedAt: now}
-	if err := repo.ResetStepForRetry(context.Background(), failed.Run.ID, failed.Steps[2].ID, nil, now, event); err == nil {
+	current, err := repo.GetRun(context.Background(), h.project.ID, failed.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.ResetStepForRetry(context.Background(), failed.Run.ID, failed.Steps[2].ID, nil, now, event, workflow.NewRetryGuard(current, current.Steps[2], nil)); err == nil {
 		t.Fatal("restored wrong cancelled step")
 	}
-	if err := repo.ResetStepForRetry(context.Background(), failed.Run.ID, failed.Steps[1].ID, nil, now, event); err != nil {
+	if err := repo.ResetStepForRetry(context.Background(), failed.Run.ID, failed.Steps[1].ID, nil, now, event, workflow.NewRetryGuard(current, current.Steps[1], nil)); err != nil {
 		t.Fatal(err)
 	}
 	reset, err := repo.GetRun(context.Background(), h.project.ID, failed.Run.ID)
@@ -69,11 +74,20 @@ func TestCancelledAIRetryRestoresOnlyUntouchedDownstreamAndKeepsHistory(t *testi
 	if _, err := h.store.DB().Exec(`UPDATE workflow_steps SET status='cancelled' WHERE id=?`, reset.Steps[1].ID); err != nil {
 		t.Fatal(err)
 	}
+	// An anomalous downstream with an actual start/input must not be mistaken
+	// for this generation's untouched queue, regardless of historical attempts.
+	if _, err := h.store.DB().Exec(`UPDATE workflow_steps SET status='cancelled',started_at=?,input_sha256=?,output_json='{"kept":true}' WHERE id=?`, formatTime(now), strings.Repeat("d", 64), reset.Steps[2].ID); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := h.runtime.Retry(context.Background(), workflow.RetryCommand{ProjectID: h.project.ID, RunID: reset.Run.ID, StepID: reset.Steps[1].ID}); err != nil {
 		t.Fatal("explicit cancelled AI retry unavailable", err)
 	}
 	waitWorkflowStatus(t, h.runtime, h.project.ID, reset.Run.ID, workflow.RunFailed) // still no model, no hidden API call.
 	h.runtime.Wait()
+	untouched, err := repo.GetRun(context.Background(), h.project.ID, reset.Run.ID)
+	if err != nil || untouched.Steps[2].Status != workflow.StepCancelled || string(untouched.Steps[2].Output) != `{"kept":true}` {
+		t.Fatal("started downstream was resurrected", err)
+	}
 	if _, err := h.store.DB().Exec(`UPDATE workflow_runs SET status='cancelled',cancel_requested=1,current_step_ordinal=0 WHERE id=?`, reset.Run.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -149,5 +163,86 @@ func TestCancelledAIRetryIgnoresLateProviderResponseAndError(t *testing.T) {
 				t.Fatal("old attempt was accepted or replaced", restored.AIExecutions)
 			}
 		})
+	}
+}
+
+type revisionRetryAI struct {
+	*cancelledRetryAI
+	block atomic.Bool
+}
+
+func (a *revisionRetryAI) Get(ctx context.Context, e workflow.AIExecution) (workflow.AIStageState, error) {
+	if e.Attempt == 2 && a.block.CompareAndSwap(true, false) {
+		close(a.entered)
+		<-a.release
+	}
+	return workflow.AIStageState{Status: "completed", Text: `{"summary":"fixture result"}`}, nil
+}
+func TestCancelledAIRetryAfterUpstreamRevisionRestoresHistoricalSuffix(t *testing.T) {
+	h := newWorkflowRuntimeHarness(t)
+	ai := &revisionRetryAI{cancelledRetryAI: &cancelledRetryAI{db: h.store.DB(), entered: make(chan struct{}), release: make(chan struct{})}}
+	if err := h.runtime.SetAIStageExecutor(ai); err != nil {
+		t.Fatal(err)
+	}
+	saved := h.save(t, workflow.Definition{SchemaVersion: 1, Name: "revision cancel fixture", Inputs: []workflow.Port{{Name: "topic", Type: workflow.TypeString, Required: true}}, Nodes: []workflow.Node{
+		{ID: "producer", Name: "Producer", Kind: workflow.NodeAIAnalysis, PromptVersion: "fixture-v1", Prompt: "Return summary", OutputSchema: json.RawMessage(`{"type":"object","required":["summary"],"properties":{"summary":{"type":"string"}}}`), Arguments: json.RawMessage(`{}`)},
+		{ID: "review", Name: "Review", Kind: workflow.NodeAIAnalysis, PromptVersion: "fixture-v1", Prompt: "Return summary", OutputSchema: json.RawMessage(`{"type":"object","required":["summary"],"properties":{"summary":{"type":"string"}}}`), Arguments: json.RawMessage(`{}`)},
+		{ID: "confirm", Name: "Confirm", Kind: workflow.NodeHumanConfirmation, Prompt: "Continue?", Arguments: json.RawMessage(`{}`)},
+	}, Edges: []workflow.Edge{{FromNode: "$input", FromPort: "topic", ToNode: "producer", ToPort: "context"}, {FromNode: "producer", FromPort: "analysis", ToNode: "review", ToPort: "context"}, {FromNode: "review", FromPort: "analysis", ToNode: "confirm", ToPort: "context"}}})
+	started, err := h.runtime.Start(context.Background(), workflow.StartCommand{ProjectID: h.project.ID, WorkflowID: saved.Workflow.ID, ModelProfileID: "profile", ModelID: "model", Inputs: json.RawMessage(`{"topic":"fixture"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prior := waitWorkflowStatus(t, h.runtime, h.project.ID, started.Run.ID, workflow.RunWaitingHumanConfirmation)
+	h.runtime.Wait()
+	// A revision checkpoint resets the suffix without deleting previous attempts.
+	if _, err = h.store.DB().Exec(`UPDATE workflow_runs SET status='failed' WHERE id=?`, prior.Run.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = h.store.DB().Exec(`UPDATE workflow_steps SET status='failed' WHERE id=?`, prior.Steps[2].ID); err != nil {
+		t.Fatal(err)
+	}
+	repo := NewWorkflowRuntimeRepository(h.store.DB())
+	now := time.Now().UTC()
+	current, err := repo.GetRun(context.Background(), h.project.ID, prior.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = repo.ResetStepsForUpstreamRetry(context.Background(), prior.Run.ID, prior.Steps[0].ID, prior.Steps[2].ID, nil, now, workflow.RuntimeEvent{ID: "audit-revision", WorkflowRunID: prior.Run.ID, Type: "workflow.review_revision_queued", Payload: json.RawMessage(`{}`), CreatedAt: now}, workflow.NewRetryGuard(current, current.Steps[2], &current.Steps[0])); err != nil {
+		t.Fatal(err)
+	}
+	ai.block.Store(true)
+	if _, err = h.runtime.Recover(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-ai.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("revision did not start")
+	}
+	cancelled, err := h.runtime.Cancel(context.Background(), h.project.ID, prior.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = h.runtime.Retry(context.Background(), workflow.RetryCommand{ProjectID: h.project.ID, RunID: prior.Run.ID, StepID: cancelled.Steps[0].ID}); err != nil {
+		t.Fatal(err)
+	}
+	close(ai.release)
+
+	current = waitWorkflowStatus(t, h.runtime, h.project.ID, prior.Run.ID, workflow.RunWaitingHumanConfirmation)
+	h.runtime.Wait()
+	if current.Steps[0].Attempt != 3 || current.Steps[1].Attempt != 2 || current.Steps[1].Status != workflow.StepCompleted {
+		t.Fatalf("suffix not resumed %+v", current.Steps)
+	}
+	if len(current.AIExecutions) != 5 {
+		t.Fatal("history lost", current.AIExecutions)
+	}
+	if _, err = h.runtime.Recover(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	h.runtime.Wait()
+	recovered, err := h.runtime.Get(context.Background(), h.project.ID, prior.Run.ID)
+	if err != nil || recovered.Run.Status != workflow.RunWaitingHumanConfirmation || len(recovered.AIExecutions) != 5 {
+		t.Fatal("duplicate execution on recovery", err)
 	}
 }

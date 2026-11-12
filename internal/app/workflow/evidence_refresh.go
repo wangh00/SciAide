@@ -8,6 +8,7 @@ import (
 
 	"github.com/wangh00/SciAide/internal/app/research"
 	"github.com/wangh00/SciAide/internal/app/tool"
+	"github.com/wangh00/SciAide/internal/apperr"
 )
 
 type evidenceMaterialReader interface {
@@ -19,6 +20,44 @@ type evidenceRefreshRepository interface {
 
 func (s *RuntimeService) SetEvidenceMaterialReader(reader evidenceMaterialReader) {
 	s.evidenceMaterials = reader
+}
+
+// CheckAIRequestEvidence runs before a regular collaboration turn, after durable tool
+// results. A saved full text supersedes the old frozen evidence; generating a
+// complete response against it only to discard that response is both wasteful
+// and misleading. Stop that Chat, then let driveAI perform the existing atomic
+// reindex handoff. Never alter the frozen input or accept a stale submission.
+func (s *RuntimeService) CheckAIRequestEvidence(ctx context.Context, projectID, workflowRunID, stepID, chatRunID, inputSHA256 string) error {
+	detail, err := s.repository.GetRun(ctx, projectID, workflowRunID)
+	if err != nil {
+		return err
+	}
+	step := currentStep(detail)
+	if detail.Run.Status != RunRunning || step == nil || step.ID != stepID || step.Status != StepRunning || step.InputSHA256 != inputSHA256 {
+		return nil // Lifecycle/binding validation and cancellation remain the owner.
+	}
+	node := compilationNodeMap(detail.Run.Compilation)[step.NodeID]
+	if node.ID != "evidence_screening" || node.PromptVersion != selectedEvidenceVersion {
+		return nil
+	}
+	bound := false
+	for _, execution := range detail.AIExecutions {
+		if execution.ChatRunID == chatRunID && execution.WorkflowStepID == step.ID && execution.Attempt == step.Attempt && execution.InputSHA256 == inputSHA256 {
+			bound = true
+			break
+		}
+	}
+	if !bound {
+		return nil // Do not apply a different Chat's material decision.
+	}
+	changes, err := s.changedEvidenceMaterials(ctx, detail, *step, node)
+	if err != nil {
+		return err
+	}
+	if len(changes) != 0 {
+		return &apperr.Error{Code: "WORKFLOW_EVIDENCE_UPDATED", UserMessage: "补充全文已保存，停止旧证据请求；待宿主核对引用更新条件，后续状态以科研任务为准。"}
+	}
+	return nil
 }
 
 // Refresh failures must be visible and retryable, not leave a driverless run.

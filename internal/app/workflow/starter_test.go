@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/wangh00/SciAide/internal/app/userinput"
 	"github.com/wangh00/SciAide/internal/skillrun"
 )
 
@@ -535,13 +536,13 @@ func TestResearchClarificationValidationRequiresFiniteDistinctOptions(t *testing
 
 func TestResearchClarificationAnswersAreHostValidatedAndAuditable(t *testing.T) {
 	clarification := clarificationFixture()
-	answers, err := normalizeResearchClarificationAnswers(clarification, map[string][]string{
+	answers, err := userinput.NormalizeAnswers(clarificationQuestions(clarification), clarificationResponses(map[string][]string{
 		"population": {"students"}, "goal": {"exploratory"},
-	})
+	}, nil))
 	if err != nil {
 		t.Fatalf("valid answers rejected: %v", err)
 	}
-	if got := clarifiedResearchIdea("研究睡眠", clarification, answers); !strings.Contains(got, "在校大学生") || !strings.Contains(got, "探索性分析") {
+	if got := clarifiedResearchIdea("研究睡眠", clarification, map[string][]string{"population": answers["population"].OptionIDs, "goal": answers["goal"].OptionIDs}); !strings.Contains(got, "在校大学生") || !strings.Contains(got, "探索性分析") {
 		t.Fatalf("clarified idea did not preserve selected labels: %q", got)
 	}
 	invalid := []map[string][]string{
@@ -551,7 +552,7 @@ func TestResearchClarificationAnswersAreHostValidatedAndAuditable(t *testing.T) 
 		{"population": {"students", "adults"}},
 	}
 	for index, value := range invalid {
-		if _, err := normalizeResearchClarificationAnswers(clarification, value); err == nil {
+		if _, err := userinput.NormalizeAnswers(clarificationQuestions(clarification), clarificationResponses(value, nil)); err == nil {
 			t.Fatalf("invalid answer %d was accepted: %#v", index, value)
 		}
 	}

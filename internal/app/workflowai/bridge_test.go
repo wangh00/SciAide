@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/wangh00/SciAide/internal/app/chat"
 	"github.com/wangh00/SciAide/internal/app/conversation"
@@ -45,6 +46,25 @@ func TestCurrentActionPrefersRunningTool(t *testing.T) {
 	got := currentAction(chat.Snapshot{Run: chat.Run{Status: chat.RunRunning}}, activity)
 	if got != "正在执行：builtin.python.execute" {
 		t.Fatalf("currentAction() = %q", got)
+	}
+}
+
+func TestCurrentActionShowsQuestionWaitRatherThanToolExecution(t *testing.T) {
+	activity := workflowActivityWithTool(tool.CallRunning, "builtin.user_input.request")
+	if got := currentAction(chat.Snapshot{Run: chat.Run{Status: chat.RunWaitingUserInput}}, activity); got != "等待你的研究选择；回答后继续本次审查" {
+		t.Fatal(got)
+	}
+}
+
+func TestCurrentActionDoesNotClaimModelResponseCompleted(t *testing.T) {
+	run := chat.Run{ID: "run", Status: chat.RunRunning, ModelTurns: 6}
+	snapshot := chat.Snapshot{Run: run, Activity: &chat.RuntimeActivity{RunID: "run", TurnIndex: 6, Phase: "model_processing", StartedAt: time.Now().UTC()}}
+	if got := currentAction(snapshot, workflow.AIStageActivity{}); !strings.Contains(got, "尚未完成") {
+		t.Fatal(got)
+	}
+	snapshot.Run.Status = chat.RunCancelled
+	if got := currentAction(snapshot, workflow.AIStageActivity{}); got != "AI 阶段已停止" {
+		t.Fatal(got)
 	}
 }
 

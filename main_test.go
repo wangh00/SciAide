@@ -2,9 +2,20 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestExplicitHomeAlsoIsolatesBrowserState(t *testing.T) {
+	if webviewUserDataPath("") != "" {
+		t.Fatal("ordinary installation profile changed")
+	}
+	home := t.TempDir()
+	if got := webviewUserDataPath(home); got != filepath.Join(home, "cache", "webview2") {
+		t.Fatalf("browser state escaped application home: %s", got)
+	}
+}
 
 func TestSingleInstanceGatePrecedesApplicationBootstrap(t *testing.T) {
 	source, err := os.ReadFile("main.go")
@@ -12,7 +23,7 @@ func TestSingleInstanceGatePrecedesApplicationBootstrap(t *testing.T) {
 		t.Fatal(err)
 	}
 	gate := strings.Index(string(source), "acquireApplicationInstance()")
-	bootstrap := strings.Index(string(source), "bootstrap.New(bootstrap.Options{})")
+	bootstrap := strings.Index(string(source), "bootstrap.New(bootstrap.Options{")
 	if gate < 0 || bootstrap < 0 || gate > bootstrap {
 		t.Fatalf("single-instance gate must run before application bootstrap: gate=%d bootstrap=%d", gate, bootstrap)
 	}

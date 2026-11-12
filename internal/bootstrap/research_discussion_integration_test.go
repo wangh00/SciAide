@@ -82,11 +82,25 @@ func TestResearchDiscussionNegotiatesThenConfirmsAfterRestart(t *testing.T) {
 				lastUserIndex = i
 			}
 		}
+		lastUser = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(lastUser, "<untrusted_conversation_content>"), "</untrusted_conversation_content>"))
+		for _, m := range request.Messages {
+			if strings.Contains(string(m.Content), "Research Mode rules:") || strings.Contains(string(m.Content), "Stage input JSON:") {
+				t.Error("ordinary discussion replayed internal execution instructions")
+			}
+		}
 		hasTool := false
 		for _, m := range request.Messages[lastUserIndex+1:] {
 			hasTool = hasTool || m.Role == "tool"
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
+		if lastUser == "你好" || lastUser == "解释一下目前的研究，不重新执行" {
+			if hasTool {
+				t.Error("simple dialogue forced task auditing")
+			}
+			chunk, _ := json.Marshal(map[string]any{"choices": []any{map[string]any{"delta": map[string]any{"content": "你好，可以继续聊；现有结果没有改动。"}, "finish_reason": "stop"}}})
+			fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", chunk)
+			return
+		}
 		if hasTool {
 			if strings.Contains(lastUser, "REVISION:") && !strings.Contains(lastUser, "REVISED") {
 				replyOnce.Do(func() { close(proposalReply) })
@@ -190,6 +204,10 @@ func TestResearchDiscussionNegotiatesThenConfirmsAfterRestart(t *testing.T) {
 		t.Fatal("cross-project timeline exposed")
 	}
 	before := workflow.ResearchRevisionSnapshot(completed)
+	guidance, bound, err := app.workflow.GuidanceForConversation(context.Background(), completed.Run.ConversationID)
+	if err != nil || !bound || guidance.StructuredOutputRequired || len(guidance.StructuredOutputSchema) != 0 || !strings.HasPrefix(guidance.SystemContext, workflow.ResearchDiscussionSystemRules) {
+		t.Fatalf("terminal discussion guidance=%+v bound=%v err=%v", guidance, bound, err)
+	}
 	startChat := func(text string) chat.Run {
 		clientMessageID, err := id.New()
 		if err != nil {
@@ -230,6 +248,25 @@ func TestResearchDiscussionNegotiatesThenConfirmsAfterRestart(t *testing.T) {
 			t.Fatal(e)
 		}
 		return d
+	}
+	for _, text := range []string{"你好", "解释一下目前的研究，不重新执行"} {
+		value := startChat(text)
+		waitChat(value)
+		snapshot, err := app.ChatFacade.GetRunSnapshot(value.ID)
+		if err != nil || snapshot.WorkflowAI || len(snapshot.ToolCalls) != 0 || snapshot.Run.ModelTurns != 1 {
+			t.Fatal("simple discussion entered stage/tool execution", snapshot, err)
+		}
+		answerFound := false
+		for _, m := range snapshot.Messages {
+			if m.ID == value.AssistantMessageID {
+				for _, p := range m.Parts {
+					answerFound = answerFound || strings.Contains(p.Text, "可以继续聊")
+				}
+			}
+		}
+		if !answerFound || workflow.ResearchRevisionSnapshot(refresh()) != before {
+			t.Fatal("simple dialogue lost response or changed research results")
+		}
 	}
 	consultation := startChat("How many stages does this task have?")
 	waitChat(consultation)

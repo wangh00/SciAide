@@ -13,7 +13,7 @@ func TestWebOptInFiltersModelTools(t *testing.T) {
 	for _, disabled := range []bool{true, false} {
 		loop, state, provider := newLoopFixture(t, nil, []fake.Step{{Event: model.Event{Type: model.EventTextDelta, Text: "answer"}}, {Event: model.Event{Type: model.EventDone, FinishReason: "stop"}}})
 		state.run.WebSearchDisabled = disabled
-		for _, name := range []string{"builtin.web.search", "builtin.web.open", "builtin.browser.open"} {
+		for _, name := range []string{"builtin.web.search", "builtin.web.open", "builtin.browser.open", "mcp.exa.web_search_exa"} {
 			if err := loop.registry.(tool.MutableRegistry).Register(context.Background(), fixtureTool{definition: tool.Definition{QualifiedName: name, Version: "1", Description: "web", InputSchema: json.RawMessage(`{"type":"object"}`), Risk: tool.RiskLow, Idempotent: true}, invoke: func(tool.Invocation) tool.Result { t.Fatal("unexpected execution"); return tool.Result{} }}); err != nil {
 				t.Fatal(err)
 			}
@@ -28,7 +28,7 @@ func TestWebOptInFiltersModelTools(t *testing.T) {
 					found++
 				}
 			}
-			if disabled && found != 0 || !disabled && found != 3 {
+			if disabled && found != 0 || !disabled && found != 4 {
 				t.Fatalf("disabled=%v web tools=%d", disabled, found)
 			}
 		}

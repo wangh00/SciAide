@@ -14,16 +14,18 @@ import (
 type RunStatus string
 
 const (
-	RunQueued          RunStatus = "queued"
-	RunRunning         RunStatus = "running"
-	RunWaitingApproval RunStatus = "waiting_approval"
-	RunCompleted       RunStatus = "completed"
-	RunFailed          RunStatus = "failed"
-	RunCancelled       RunStatus = "cancelled"
-	RunInterrupted     RunStatus = "interrupted"
+	RunQueued           RunStatus = "queued"
+	RunRunning          RunStatus = "running"
+	RunWaitingApproval  RunStatus = "waiting_approval"
+	RunWaitingUserInput RunStatus = "waiting_user_input"
+	RunCompleted        RunStatus = "completed"
+	RunFailed           RunStatus = "failed"
+	RunCancelled        RunStatus = "cancelled"
+	RunInterrupted      RunStatus = "interrupted"
 )
 
 type Run struct {
+	PendingUserInputCallID        string                      `json:"pendingUserInputCallId,omitempty"`
 	WebSearchDisabled             bool                        `json:"webSearchDisabled"`
 	ID                            string                      `json:"id"`
 	ConversationID                string                      `json:"conversationId"`
@@ -99,15 +101,19 @@ const (
 // step. DraftText contains only provider-visible answer/commentary text, never
 // hidden reasoning payloads.
 type ModelTurnJournal struct {
-	RunID             string          `json:"runId"`
-	TurnIndex         int             `json:"turnIndex"`
-	Status            ModelTurnStatus `json:"status"`
-	DraftText         string          `json:"draftText,omitempty"`
-	FinishReason      string          `json:"finishReason,omitempty"`
-	ProviderItemCount int             `json:"providerItemCount"`
-	StartedAt         time.Time       `json:"startedAt"`
-	CompletedAt       *time.Time      `json:"completedAt,omitempty"`
-	UpdatedAt         time.Time       `json:"updatedAt"`
+	RunID     string          `json:"runId"`
+	TurnIndex int             `json:"turnIndex"`
+	Status    ModelTurnStatus `json:"status"`
+	DraftText string          `json:"draftText,omitempty"`
+	// SubmissionCommentary preserves the original visible text accompanying
+	// native submission arguments, independently of DraftText's candidate.
+	// It is private audit data, not a replacement UI draft or result payload.
+	SubmissionCommentary string     `json:"-"`
+	FinishReason         string     `json:"finishReason,omitempty"`
+	ProviderItemCount    int        `json:"providerItemCount"`
+	StartedAt            time.Time  `json:"startedAt"`
+	CompletedAt          *time.Time `json:"completedAt,omitempty"`
+	UpdatedAt            time.Time  `json:"updatedAt"`
 }
 
 type Repository interface {
@@ -127,11 +133,15 @@ type Repository interface {
 // started by a Workflow AI node. The Workflow owns stage transitions; Chat
 // owns model streaming, tools, approval and cancellation.
 type WorkflowAIExecution struct {
+	// Host-owned active step input, available only while its frozen digest
+	// matches this execution. Never populated from a model response.
+	Input              json.RawMessage
 	ID                 string
 	WorkflowRunID      string
 	WorkflowStepID     string
 	Attempt            int
 	NodeKind           string
+	NodeID             string
 	PromptVersion      string
 	PromptText         string
 	PromptSHA256       string

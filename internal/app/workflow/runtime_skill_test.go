@@ -115,7 +115,7 @@ func TestBuildAIStagePromptMakesFrozenSkillsExplicitToSemanticRouter(t *testing.
 
 func TestMethodImplementationPromptForbidsManualDiagnosticFiles(t *testing.T) {
 	prompt := buildAIStagePrompt(RunDetail{}, Step{Input: raw(`{}`)}, CompiledNode{ID: "method_implementation", Prompt: "implement", OutputSchema: dynamicImplementationSchema()})
-	for _, expected := range []string{"automatically captures open Matplotlib figures", "do not create a diagnostics directory", "never pass an extensionless filename", "split implementation envelope", "fenced python block", "Never embed source code in the JSON metadata"} {
+	for _, expected := range []string{"automatically captures open Matplotlib figures", "do not create a diagnostics directory", "never pass an extensionless filename", "submit_implementation_part", "index, code (nonempty Python source), complete, and metadata TOGETHER", "Source must not contain Markdown fences"} {
 		if !strings.Contains(prompt, expected) {
 			t.Fatalf("method implementation prompt is missing %q:\n%s", expected, prompt)
 		}
@@ -536,7 +536,7 @@ func TestBuildAIStagePromptIncludesPriorOutputValidationFailure(t *testing.T) {
 	step := Step{ID: "step", Attempt: 2, Input: raw(`{"context":"frozen"}`), InputSHA256: strings.Repeat("a", 64)}
 	detail := RunDetail{AIExecutions: []AIExecution{{WorkflowStepID: step.ID, Attempt: 1, InputSHA256: step.InputSHA256, ErrorCode: "WORKFLOW_AI_OUTPUT_INVALID", ErrorMessage: `$.routes[0].layers[0].stages[0].objective: required property is missing`}}}
 	prompt := buildAIStagePrompt(detail, step, CompiledNode{ID: "explore", Prompt: "plan", OutputSchema: raw(`{"type":"object"}`)})
-	for _, expected := range []string{"automatic structured-output correction attempt", "objective: required property is missing", "literal JSON values only", ".replace(...)"} {
+	for _, expected := range []string{"retried after a host validation rejection", "objective: required property is missing", "literal JSON values only", ".replace(...)"} {
 		if !strings.Contains(prompt, expected) {
 			t.Fatalf("automatic correction prompt is missing %q:\n%s", expected, prompt)
 		}
@@ -693,7 +693,7 @@ func TestAutomaticPythonRepairContextReachesMethodPrompt(t *testing.T) {
 		Steps: []Step{producer},
 		Events: []RuntimeEvent{{
 			Type:    "workflow.upstream_revision_queued",
-			Payload: raw(`{"producerStepId":"producer-step","producerNodeId":"method_implementation","failedStepId":"python-step","failedNodeId":"python_analysis","failureSummary":"FileNotFoundError: diagnostics/placeholder","toolCallId":"call","automatic":true}`),
+			Payload: raw(`{"producerStepId":"producer-step","producerNodeId":"method_implementation","failedStepId":"python-step","failedNodeId":"python_analysis","failureSummary":"FileNotFoundError: diagnostics/placeholder","toolCallId":"call","automatic":true,"nextProducerAttempt":1}`),
 		}},
 	}
 	repair, ok := pendingAutomaticPythonRepair(detail, "method_implementation")
@@ -757,5 +757,25 @@ func TestTargetedAIRepairRejectsChangedInputHash(t *testing.T) {
 	node := CompiledNode{ID: "candidate_screening", OutputSchema: candidateScreeningSchema()}
 	if _, _, ok := mergeTargetedAIRepair(detail, step, node, AIExecution{OutputText: "```json\n" + baseline + "\n```"}, errors.New("invalid")); ok {
 		t.Fatal("targeted repair accepted a baseline from a different input")
+	}
+}
+
+func TestImplementationPromptHasOneTransportAndFrozenMetadata(t *testing.T) {
+	schema := dynamicImplementationSchema()
+	var root map[string]any
+	_ = json.Unmarshal(schema, &root)
+	root["properties"].(map[string]any)["customScientificField"] = map[string]any{"type": "string"}
+	root["required"] = append(root["required"].([]any), "customScientificField")
+	schema, _ = json.Marshal(root)
+	node := CompiledNode{ID: "method_implementation", PromptVersion: "saved-route-v1", OutputSchema: schema, Prompt: "研究问题保持原样。完整 Python 源码必须按宿主协议放在独立的 python 代码块中，不得嵌入 JSON。"}
+	before := string(mustJSON(node))
+	prompt := buildAIStagePrompt(RunDetail{}, Step{Input: raw(`{}`)}, node)
+	for _, forbidden := range []string{"End the response with exactly these two blocks", "must be a separate fenced python", "完整 Python 源码必须按宿主协议放在独立的 python", "First supply the full metadata"} {
+		if strings.Contains(prompt, forbidden) {
+			t.Fatal("contradictory transport", forbidden)
+		}
+	}
+	if !strings.Contains(prompt, "customScientificField") || !strings.Contains(prompt, "研究问题保持原样") || string(mustJSON(node)) != before {
+		t.Fatal("frozen contract changed or custom metadata lost")
 	}
 }

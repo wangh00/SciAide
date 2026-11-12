@@ -112,6 +112,8 @@ type environmentRuntimeFixture struct {
 	createdDestination *string
 	finalizeErr        error
 	validateScriptsErr error
+	probeErr           error
+	freezeErr          error
 }
 
 func (r environmentRuntimeFixture) FinalizeEnvironment(_ context.Context, _, _ string) error {
@@ -270,7 +272,7 @@ func (r environmentRuntimeFixture) Discover(context.Context, string) (Discovery,
 	return Discovery{Interpreters: []Interpreter{value}}, nil
 }
 func (r environmentRuntimeFixture) Probe(context.Context, string) (Interpreter, error) {
-	return r.probe, nil
+	return r.probe, r.probeErr
 }
 func (r environmentRuntimeFixture) CreateEnvironment(_ context.Context, _, destination string) error {
 	if r.createdDestination != nil {
@@ -289,7 +291,7 @@ func (r environmentRuntimeFixture) InstallPackages(context.Context, string, []st
 	return r.installErr
 }
 func (r environmentRuntimeFixture) Freeze(context.Context, string) ([]string, error) {
-	return append([]string(nil), r.lock...), nil
+	return append([]string(nil), r.lock...), r.freezeErr
 }
 
 func (r blockingEnvironmentRuntimeFixture) CreateEnvironment(ctx context.Context, _, destination string) error {
@@ -317,9 +319,15 @@ func TestPackageRequirementsSatisfiedUsesFrozenLock(t *testing.T) {
 			t.Fatalf("satisfied requirements were rejected: %v against %v", requested, locked)
 		}
 	}
-	for _, requested := range [][]string{{"numpy>=3"}, {"scipy<1"}, {"pandas>=2"}, {"scikit-learn~=1.6.0"}, {"numpy>=2.5rc1"}} {
+	for _, requested := range [][]string{{"numpy>=3"}, {"scipy<1"}, {"pandas>=2"}, {"scikit-learn~=1.6.0"}, {"numpy>=2.5rc1"}, {"numpy[optional]==2.5.2"}} {
 		if packageRequirementsSatisfied(requested, locked) {
 			t.Fatalf("unsatisfied requirements were accepted: %v against %v", requested, locked)
+		}
+	}
+	for _, version := range []string{"2.5.2rc1", "2.5.2+lab.1", "1!2.5.2"} {
+		pin := "numpy==" + version
+		if !packageRequirementsSatisfied([]string{pin}, []string{pin}) || packageRequirementsSatisfied([]string{"numpy==3.0.0"}, []string{pin}) {
+			t.Fatalf("exact recorded non-stable pin cannot be reused safely: %s", pin)
 		}
 	}
 }
@@ -503,6 +511,17 @@ func TestBindExternalAndDeletePreservesUserEnvironment(t *testing.T) {
 	if _, err := service.Install(context.Background(), projectID, []string{"numpy"}); err == nil || !strings.Contains(err.Error(), "user-owned") {
 		t.Fatalf("external install error = %v", err)
 	}
+	before := len(repository.operations)
+	stopped = false
+	reused, err := service.Install(context.Background(), projectID, []string{"pip==24.0"})
+	if err != nil || reused.EnvironmentFingerprint != value.EnvironmentFingerprint || reused.Kind != KindExternal || len(repository.operations) != before || stopped {
+		t.Fatalf("already satisfied external dependency was not reused without mutation: %+v %v", reused, err)
+	}
+	for _, requested := range [][]string{{"pip==25.0"}, {"pip==24.0", "numpy"}, {"pip[missing-extra]==24.0"}, {"--index-url=https://evil.test"}} {
+		if _, err := service.Install(context.Background(), projectID, requested); err == nil || len(repository.operations) != before {
+			t.Fatalf("unsatisfied external requirements changed the environment: %v %v", requested, err)
+		}
+	}
 	stopped = false
 	if err := service.Delete(context.Background(), projectID); err != nil {
 		t.Fatal(err)
@@ -516,6 +535,90 @@ func TestBindExternalAndDeletePreservesUserEnvironment(t *testing.T) {
 	got := repository.values[projectID]
 	if got.State != StateAbsent || got.Kind != KindWorkspaceManaged || got.EnvironmentPythonPath != "" || len(got.Lock) != 0 {
 		t.Fatalf("environment was not cleanly unbound: %#v", got)
+	}
+}
+
+func TestExternalDependencyReuseRequiresCurrentRecordedEnvironment(t *testing.T) {
+	for _, scenario := range []string{"unchanged", "missing package", "changed version", "changed interpreter", "no venv", "no pip", "probe failed", "freeze failed", "missing path"} {
+		t.Run(scenario, func(t *testing.T) {
+			workspace := t.TempDir()
+			projectID := "external-reuse-freshness"
+			if err := project.PrepareRestoredWorkspace(workspace, projectID); err != nil {
+				t.Fatal(err)
+			}
+			external := t.TempDir()
+			python := environmentPython(external)
+			if err := os.MkdirAll(filepath.Dir(python), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(python, []byte("user-owned"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			selected := Interpreter{ExecutablePath: python, Version: "3.12.4", Architecture: "64bit", Implementation: "CPython", ExecutableSHA256: strings.Repeat("a", 64), HasPip: true, Prefix: external, BasePrefix: "base"}
+			runtime := environmentRuntimeFixture{probe: selected, lock: []string{"numpy==2.5.2"}}
+			repository := &environmentRepositoryFixture{values: map[string]Environment{}, operations: map[string]Operation{}}
+			service, err := NewService(repository, projectFixture{project.Project{ID: projectID, WorkspacePath: workspace}}, runtime, t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := service.BindExternal(context.Background(), projectID, python); err != nil {
+				t.Fatal(err)
+			}
+			before, _ := json.Marshal(repository.values[projectID])
+			operations := len(repository.operations)
+			stopped := false
+			service.SetKernelStopper(func(string) error { stopped = true; return nil })
+			switch scenario {
+			case "missing package":
+				runtime.lock = []string{}
+			case "changed version":
+				runtime.lock = []string{"numpy==2.5.3"}
+			case "changed interpreter":
+				runtime.probe.ExecutableSHA256 = strings.Repeat("b", 64)
+				runtime.probe.Version = "3.13.2"
+				runtime.probe.Architecture = "32bit"
+				runtime.probe.Implementation = "PyPy"
+			case "no venv":
+				runtime.probe.Prefix = runtime.probe.BasePrefix
+			case "no pip":
+				runtime.probe.HasPip = false
+			case "probe failed":
+				runtime.probeErr = errors.New("fixture probe failure")
+			case "freeze failed":
+				runtime.freezeErr = errors.New("fixture freeze failure")
+			case "missing path":
+				if err := os.Remove(python); err != nil {
+					t.Fatal(err)
+				}
+			}
+			service.runtime = runtime
+			result, err := service.Install(context.Background(), projectID, []string{"numpy==2.5.2"})
+			if scenario == "unchanged" {
+				if err != nil || result.EnvironmentFingerprint != repository.values[projectID].EnvironmentFingerprint {
+					t.Fatalf("current external dependency reuse failed: %+v %v", result, err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), "verify the project environment") || result.State == StateReady {
+				t.Fatalf("stale/unavailable external dependency reported ready: %+v %v", result, err)
+			}
+			after, _ := json.Marshal(repository.values[projectID])
+			if string(before) != string(after) || len(repository.operations) != operations || stopped {
+				t.Fatal("read-only reuse changed the committed record, installed packages or stopped Kernel")
+			}
+			if scenario != "missing path" {
+				if data, err := os.ReadFile(python); err != nil || string(data) != "user-owned" {
+					t.Fatal("reuse modified the external interpreter", err)
+				}
+			}
+			if scenario == "changed interpreter" {
+				verified, err := service.Verify(context.Background(), projectID)
+				if err != nil || verified.BaseExecutableSHA256 != runtime.probe.ExecutableSHA256 || verified.BaseExecutableVersion != runtime.probe.Version || verified.BaseExecutablePath != runtime.probe.ExecutablePath || verified.Architecture != runtime.probe.Architecture || verified.Implementation != runtime.probe.Implementation {
+					t.Fatal("explicit external verification failed to record the actual interpreter identity", verified, err)
+				}
+				if reused, err := service.Install(context.Background(), projectID, []string{"numpy==2.5.2"}); err != nil || reused.EnvironmentFingerprint != verified.EnvironmentFingerprint {
+					t.Fatal("explicitly verified current interpreter still cannot be reused", reused, err)
+				}
+			}
+		})
 	}
 }
 

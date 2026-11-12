@@ -69,17 +69,18 @@ type Port struct {
 }
 
 type Node struct {
-	ID            string          `json:"id"`
-	Name          string          `json:"name"`
-	Kind          NodeKind        `json:"kind"`
-	ToolName      string          `json:"toolName,omitempty"`
-	Arguments     json.RawMessage `json:"arguments"`
-	Prompt        string          `json:"prompt,omitempty"`
-	PromptVersion string          `json:"promptVersion,omitempty"`
-	AllowedTools  []string        `json:"allowedTools,omitempty"`
-	SkillRouting  bool            `json:"skillRouting,omitempty"`
-	ReviewPolicy  AIReviewPolicy  `json:"reviewPolicy,omitempty"`
-	OutputSchema  json.RawMessage `json:"outputSchema,omitempty"`
+	ID                    string          `json:"id"`
+	Name                  string          `json:"name"`
+	Kind                  NodeKind        `json:"kind"`
+	ToolName              string          `json:"toolName,omitempty"`
+	Arguments             json.RawMessage `json:"arguments"`
+	Prompt                string          `json:"prompt,omitempty"`
+	PromptVersion         string          `json:"promptVersion,omitempty"`
+	AllowedTools          []string        `json:"allowedTools,omitempty"`
+	SkillRouting          bool            `json:"skillRouting,omitempty"`
+	StageMaterialsVersion string          `json:"stageMaterialsVersion,omitempty"`
+	ReviewPolicy          AIReviewPolicy  `json:"reviewPolicy,omitempty"`
+	OutputSchema          json.RawMessage `json:"outputSchema,omitempty"`
 }
 
 type Edge struct {
@@ -133,20 +134,21 @@ type ToolSnapshot struct {
 }
 
 type CompiledNode struct {
-	ID                 string          `json:"id"`
-	Name               string          `json:"name"`
-	Kind               NodeKind        `json:"kind"`
-	Tool               *ToolSnapshot   `json:"tool,omitempty"`
-	Arguments          json.RawMessage `json:"arguments"`
-	Prompt             string          `json:"prompt,omitempty"`
-	PromptVersion      string          `json:"promptVersion,omitempty"`
-	AllowedTools       []ToolSnapshot  `json:"allowedTools,omitempty"`
-	SkillRouting       bool            `json:"skillRouting,omitempty"`
-	ReviewPolicy       AIReviewPolicy  `json:"reviewPolicy,omitempty"`
-	OutputSchema       json.RawMessage `json:"outputSchema,omitempty"`
-	OutputSchemaSHA256 string          `json:"outputSchemaSha256,omitempty"`
-	Dependencies       []string        `json:"dependencies"`
-	SideEffect         bool            `json:"sideEffect"`
+	ID                    string          `json:"id"`
+	Name                  string          `json:"name"`
+	Kind                  NodeKind        `json:"kind"`
+	Tool                  *ToolSnapshot   `json:"tool,omitempty"`
+	Arguments             json.RawMessage `json:"arguments"`
+	Prompt                string          `json:"prompt,omitempty"`
+	PromptVersion         string          `json:"promptVersion,omitempty"`
+	AllowedTools          []ToolSnapshot  `json:"allowedTools,omitempty"`
+	SkillRouting          bool            `json:"skillRouting,omitempty"`
+	StageMaterialsVersion string          `json:"stageMaterialsVersion,omitempty"`
+	ReviewPolicy          AIReviewPolicy  `json:"reviewPolicy,omitempty"`
+	OutputSchema          json.RawMessage `json:"outputSchema,omitempty"`
+	OutputSchemaSHA256    string          `json:"outputSchemaSha256,omitempty"`
+	Dependencies          []string        `json:"dependencies"`
+	SideEffect            bool            `json:"sideEffect"`
 }
 
 type Compilation struct {

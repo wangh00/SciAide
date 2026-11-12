@@ -48,7 +48,7 @@ test("all research content uses a single task-owned renderer", () => {
   assert.match(source, /<ResearchTaskTimeline key=/);
   assert.match(source, /entry.conversationId === conversationId/);
   assert.doesNotMatch(source,/research-interaction-stream|interactionHost|workflowConversationEntries|workflowConversationCards|function workflowTimeline\(/);
-  assert.match(pager,/visibleEntries.map\(entry => <div data-timeline-id=\{entry.id\} key=\{entry.id\}/);
+  assert.match(pager,/visibleEntries.map\(\(entry, index\) => <TimelineWindow id=\{entry.id\} key=\{entry.id\}/);
 });
 test("paging has scope disposal, single-flight, forward catchup and reading anchor", () => {
   assert.match(pager,/current.inFlight \|\| current.disposed/);
@@ -93,25 +93,68 @@ test("tools retain their work title without route step numbers", () => {
   assert.doesNotMatch(renderer,/ordinal|第.*步/);
 });
 test("adopted upload checkpoint restores without creating another route or run", () => {
-  const open=source.slice(source.indexOf("async function openProjectRun("),source.indexOf("async function startResearch("));
+  const open=source.slice(source.indexOf("async function openProjectRun("),source.indexOf("const startResearchDiscussion ="));
   assert.match(open,/GetPendingResearchAdoption/);
   assert.match(open,/setPendingAdoptedRoute/);
   assert.doesNotMatch(open,/"AdoptResearchRoute"|"StartResearch"/);
 });
-test("late card and streaming content follow only while the reader remains at the bottom", () => {
+function autoFollowHarness() {
   const callbacks = new Map();
   let changed, follows = true, disconnected = false, sequence = 0;
   const scrolls = [];
   const listeners = new Map();
-  const chat = {scrollHeight:1200, scrollTo:value=>scrolls.push(value.top), addEventListener:(name,fn)=>listeners.set(name,fn),removeEventListener:name=>listeners.delete(name)};
+  const chat = {scrollHeight:1200, clientHeight:400, scrollTop:800, scrollTo:value=>{scrolls.push(value.top);chat.scrollTop=Math.max(0,value.top-chat.clientHeight)}, addEventListener:(name,fn)=>listeners.set(name,fn),removeEventListener:name=>listeners.delete(name)};
   const exports = {};
   const observerCode = source.slice(source.indexOf("function observeChatAutoFollow("),source.indexOf("function workflowMessageActivities("));
-  vm.runInNewContext(ts.transpileModule(observerCode+"\nexports.observeChatAutoFollow=observeChatAutoFollow;",{}).outputText, {exports, MutationObserver:class {constructor(callback){changed=callback}observe(){}disconnect(){disconnected=true}}, window:{requestAnimationFrame:fn=>{callbacks.set(++sequence,fn);return sequence},cancelAnimationFrame:id=>callbacks.delete(id)}});
+  class Element {constructor(editing=false){this.editing=editing}closest(){return this.editing ? this : null}}
+  vm.runInNewContext(ts.transpileModule(observerCode+"\nexports.observeChatAutoFollow=observeChatAutoFollow;",{}).outputText, {exports, Element, MutationObserver:class {constructor(callback){changed=callback}observe(){}disconnect(){disconnected=true}}, window:{requestAnimationFrame:fn=>{callbacks.set(++sequence,fn);return sequence},cancelAnimationFrame:id=>callbacks.delete(id)}});
   const flush = () => {const queued=[...callbacks.values()];callbacks.clear();queued.forEach(fn=>fn())};
-  const stop=exports.observeChatAutoFollow(chat,()=>follows);
-  changed();changed();assert.equal(callbacks.size,1);flush();assert.deepEqual(scrolls,[1200]);
-  follows=false;chat.scrollHeight=1500;changed();flush();assert.deepEqual(scrolls,[1200]);
-  follows=true;changed();follows=false;flush();assert.deepEqual(scrolls,[1200]);
-  follows=true;listeners.get("load")();flush();assert.deepEqual(scrolls,[1200,1500]);
-  changed();stop();assert.equal(callbacks.size,0);assert.equal(disconnected,true);assert.equal(listeners.size,0);
+  const stop=exports.observeChatAutoFollow(chat,()=>follows,value=>follows=value);
+  return {chat,callbacks,scrolls,listeners,flush,stop,Element,changed:()=>changed(),setFollow:value=>follows=value,following:()=>follows,disconnected:()=>disconnected};
+}
+
+test("late card and streaming content follow only while the reader remains at the bottom", () => {
+  const h=autoFollowHarness();
+  h.changed();h.changed();assert.equal(h.callbacks.size,1);h.flush();assert.deepEqual(h.scrolls,[1200]);
+  h.setFollow(false);h.chat.scrollHeight=1500;h.changed();h.flush();assert.deepEqual(h.scrolls,[1200]);
+  h.setFollow(true);h.changed();h.setFollow(false);h.flush();assert.deepEqual(h.scrolls,[1200]);
+  h.setFollow(true);h.listeners.get("load")();h.flush();assert.deepEqual(h.scrolls,[1200,1500]);
+  h.changed();h.stop();assert.equal(h.callbacks.size,0);assert.equal(h.disconnected(),true);assert.equal(h.listeners.size,0);
+});
+
+test("one tiny upward wheel cancels even an already queued follow without consuming the event", () => {
+  const h=autoFollowHarness();let consumed=false;
+  h.changed();assert.equal(h.callbacks.size,1);
+  h.listeners.get("wheel")({deltaY:-1,ctrlKey:false,preventDefault:()=>consumed=true});
+  assert.equal(h.following(),false);assert.equal(h.callbacks.size,0);
+  h.chat.scrollTop=799;h.listeners.get("scroll")();h.changed();h.flush();
+  assert.deepEqual(h.scrolls,[]);assert.equal(consumed,false);
+  h.listeners.get("wheel")({deltaY:1});h.chat.scrollTop=800;h.listeners.get("scroll")();
+  assert.equal(h.following(),true);h.changed();h.flush();assert.deepEqual(h.scrolls,[1200]);h.stop();
+});
+
+test("scrollbar reading does not re-enable follow inside the old 96px band", () => {
+  const h=autoFollowHarness();h.chat.scrollTop=799;h.listeners.get("scroll")();
+  assert.equal(h.following(),false);
+  h.chat.scrollTop=780;h.listeners.get("scroll")();h.chat.scrollTop=797;h.listeners.get("scroll")();
+  h.changed();h.flush();assert.equal(h.following(),false);assert.deepEqual(h.scrolls,[]);
+  h.chat.scrollTop=800;h.listeners.get("scroll")();assert.equal(h.following(),true);h.stop();
+});
+
+test("layout-only scroll events cannot undo a reader pause; explicit send can restore follow", () => {
+  const h=autoFollowHarness();h.listeners.get("wheel")({deltaY:-40});
+  h.listeners.get("scroll")();assert.equal(h.following(),false);
+  h.listeners.get("load")();h.changed();h.flush();assert.deepEqual(h.scrolls,[]);
+  h.setFollow(true);h.chat.scrollHeight=1600;h.changed();h.flush();assert.deepEqual(h.scrolls,[1600]);h.stop();
+});
+
+test("keyboard and touch reading pause follow while text editing and ctrl zoom do not", () => {
+  const h=autoFollowHarness();
+  h.listeners.get("wheel")({deltaY:-30,ctrlKey:true});assert.equal(h.following(),true);
+  h.listeners.get("keydown")({key:"ArrowUp",target:new h.Element(true)});assert.equal(h.following(),true);
+  for (const key of ["ArrowUp","PageUp","Home"," "]) {
+    h.setFollow(true);h.listeners.get("keydown")({key,shiftKey:key===" ",target:new h.Element()});assert.equal(h.following(),false);
+  }
+  h.setFollow(true);h.listeners.get("touchstart")({touches:[{clientY:100}]});
+  h.listeners.get("touchmove")({touches:[{clientY:130}]});assert.equal(h.following(),false);h.stop();
 });

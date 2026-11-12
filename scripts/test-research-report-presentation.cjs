@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const {createRequire} = require('node:module');
 const {build} = createRequire(path.resolve('frontend/package.json'))('esbuild');
 const {chromium} = require(process.env.SCIAIDE_PLAYWRIGHT_PATH || 'playwright');
+const productionCSS = process.env.SCIAIDE_PRODUCTION_CSS==='1' ? fs.readdirSync('frontend/dist/assets').filter(file=>file.endsWith('.css')).map(file=>fs.readFileSync(path.join('frontend/dist/assets',file),'utf8')).join('\n') : '';
 const output = path.resolve(process.env.SCIAIDE_REPORT_UI_OUTPUT || '.tmp/report-presentation-ui');
 const capture = process.env.SCIAIDE_REPORT_CAPTURE ? JSON.parse(fs.readFileSync(process.env.SCIAIDE_REPORT_CAPTURE,'utf8')) : null;
 const revisionCapture = process.env.SCIAIDE_REVISION_CAPTURE ? JSON.parse(fs.readFileSync(process.env.SCIAIDE_REVISION_CAPTURE,'utf8')) : null;
@@ -90,11 +91,42 @@ const structured = {format:'markdown',blocks:[{kind:'heading',level:1,text:'原�
       }})})};
       window.runtime={EventsOn:()=>()=>{},EventsOnMultiple:()=>()=>{},OnFileDrop:()=>{},OnFileDropOff:()=>{},ClipboardSetText:async value=>{window.copiedCode=value;}};
     },{report,citations,quality,structured,dataFixture,revisionProposal});
+    if(process.env.SCIAIDE_ROUTE_UI_TEST==='1') await page.evaluate(()=>{
+      window.detail.run.researchStarterRunId='fixture-planning';
+      window.detail.steps=['question','method','review'].map((nodeId,i)=>({id:'s'+i,nodeId,ordinal:i,status:'completed',attempt:1,input:{},output:{}}));
+      window.detail.run.compilation.nodes=window.detail.steps.map(s=>({id:s.nodeId,name:{question:'明确问题',method:'方法实现',review:'独立审查'}[s.nodeId],kind:'agent_stage'}));
+      // Keep the persisted completion event that makes the report timeline
+      // actionable; route fixtures must not erase unrelated delivery state.
+    });
     await page.addScriptTag({content:bundle.outputFiles[0].text});
     await page.getByRole('button',{name:'科研模式',exact:true}).click();
     await page.locator('.workflow-project-tasks article > button').first().click();
     const card=page.getByRole('region',{name:'本轮研究报告'});
     await card.waitFor({timeout:10000}).catch(async error=>{fs.writeFileSync(path.join(output,'failed-page.txt'),await page.locator('body').innerText());fs.writeFileSync(path.join(output,'failed-calls.json'),JSON.stringify(await page.evaluate(()=>window.calls),null,2));await page.screenshot({path:path.join(output,'failed-page.png')});throw error;});
+    if(process.env.SCIAIDE_ROUTE_UI_TEST==='1') {
+      const route=page.getByRole('region',{name:'当前一轮研究路线'});
+      await route.getByText('明确问题',{exact:true}).waitFor();
+      assert.equal(await route.getByRole('button',{name:/历史路线/}).count(),0);
+      await page.evaluate(()=>window.detail.events.push({id:'revision-1',sequence:1,type:'workflow.user_revision_queued',payload:{startOrdinal:1,proposal:{nodeId:'method',summary:'比较新方法'}},createdAt:'2026-10-08T05:00:00Z'}));
+      await page.getByRole('button',{name:'刷新当前任务',exact:true}).click();
+      const history=route.getByRole('button',{name:'历史路线 · 1',exact:true});await history.waitFor();
+      assert.equal(await route.locator('.research-route-current-list article').count(),2);
+      assert.equal(await route.locator('.research-route-current-list').getByText('明确问题',{exact:true}).count(),0);
+      await history.click();const record=route.getByRole('region',{name:'历史研究路线'});await record.waitFor();
+      await record.locator('summary').first().click();assert.equal(await record.getByText('明确问题',{exact:true}).count(),1);
+      for(const width of [1280,960]){
+        await page.setViewportSize({width,height:1000});
+        assert.equal(await route.evaluate(el=>el.scrollWidth>el.clientWidth),false);
+        await page.screenshot({path:path.join(output,`route-history-${width}.png`)});
+      }
+      await page.setViewportSize({width:1280,height:1000});
+      await page.evaluate(()=>window.detail.events.push({id:'revision-2',sequence:2,type:'workflow.review_revision_queued',payload:{producerNodeId:'review',producerStepId:'s2'},createdAt:'2026-10-08T05:01:00Z'}));
+      await page.getByRole('button',{name:'刷新当前任务',exact:true}).click();await route.getByRole('button',{name:'历史路线 · 2',exact:true}).waitFor();
+      assert.equal(await route.locator('.research-route-current-list article').count(),1);
+      assert.equal(await record.locator('details').count(),3);
+      assert.equal((await page.evaluate(()=>window.calls)).filter(c=>['Start','StartChat','Retry','Decide','ConfirmResearchRevision'].includes(c.m)).length,0);
+      console.log('PASS: real App dynamic suffix and two historical routes, initial history hidden, responsive and read-only.');
+    }
     if(revisionProposal) {
       const proposal=page.getByRole('region',{name:'返修确认方案'});
       await proposal.getByRole('button',{name:'确认方案并开始返修',exact:true}).waitFor();

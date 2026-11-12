@@ -17,7 +17,7 @@ func researchRevisionTargets(detail RunDetail) []ResearchRevisionTarget {
 	nodes := compilationNodeMap(detail.Run.Compilation)
 	var gate *Step
 	for i := range detail.Steps {
-		if detail.Steps[i].Status == StepFailed && isReviewGateNode(nodes[detail.Steps[i].NodeID]) {
+		if isRejectedReviewGate(nodes[detail.Steps[i].NodeID], detail.Steps[i]) {
 			gate = &detail.Steps[i]
 			break
 		}

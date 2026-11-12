@@ -52,5 +52,5 @@ func addResearchSourceContext(detail RunDetail, node CompiledNode, input json.Ra
 		args["citationSelectionAvailability"] = availability
 		args["selectionInterpretation"] = "previouslyUnofferedCount 记录推荐项未出现在当时选择列表的数量，不能归因于用户主动排除；只描述程序可选范围，不代表论文质量、独立研究数量或科学置信度。已接受综合候选不等于全部已确认引用，最终仍使用 evidenceContext。"
 	}
-	return mustJSON(args)
+	return bindReportComposition(detail, node, addResearchHandoff(detail, node, mustJSON(args)))
 }

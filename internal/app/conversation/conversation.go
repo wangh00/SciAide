@@ -217,6 +217,28 @@ func (s *Service) Messages(ctx context.Context, conversationID string) ([]Messag
 	return s.repository.ListMessages(ctx, conversationID, 200)
 }
 
+// VisibleMessages is a UI-only projection. Model context and audit readers
+// continue to use Messages/ListMessages, including the complete stage prompt.
+func (s *Service) VisibleMessages(ctx context.Context, conversationID string) ([]Message, error) {
+	if reader, ok := s.repository.(interface {
+		ListVisibleMessages(context.Context, string, int) ([]Message, error)
+	}); ok {
+		return reader.ListVisibleMessages(ctx, conversationID, 200)
+	}
+	values, err := s.Messages(ctx, conversationID)
+	return VisibleMessageProjection(values), err
+}
+
+func VisibleMessageProjection(values []Message) []Message {
+	result := make([]Message, 0, len(values))
+	for _, value := range values {
+		if value.Role != RoleUser || !value.Internal {
+			result = append(result, value)
+		}
+	}
+	return result
+}
+
 func (s *Service) Get(ctx context.Context, conversationID string) (Conversation, error) {
 	conversationID = strings.TrimSpace(conversationID)
 	if conversationID == "" {

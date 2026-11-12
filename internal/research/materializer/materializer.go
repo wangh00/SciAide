@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/wangh00/SciAide/internal/app/browserenv"
@@ -30,6 +31,7 @@ import (
 	"github.com/wangh00/SciAide/internal/app/project"
 	appresearch "github.com/wangh00/SciAide/internal/app/research"
 	"github.com/wangh00/SciAide/internal/id"
+	"github.com/wangh00/SciAide/internal/researchsources"
 )
 
 const (
@@ -38,22 +40,17 @@ const (
 	maxMetadataRunes   = 200_000
 )
 
-var fixedFullTextHosts = map[string]map[string]struct{}{
-	"arxiv": {
-		"arxiv.org": {}, "export.arxiv.org": {},
-	},
-	"europepmc": {
-		"europepmc.org": {}, "www.ebi.ac.uk": {},
-	},
-	"pubmed": {
-		"pmc.ncbi.nlm.nih.gov": {}, "www.ncbi.nlm.nih.gov": {},
-	},
-	"semantic-scholar": {
-		"www.semanticscholar.org": {}, "semanticscholar.org": {},
-	},
-	"crossref": {"www.nature.com": {}, "jamanetwork.com": {}},
-	"openalex": {"www.nature.com": {}, "jamanetwork.com": {}},
-}
+var fixedFullTextHosts = func() map[string]map[string]struct{} {
+	result := map[string]map[string]struct{}{}
+	for _, source := range researchsources.Definitions() {
+		hosts := map[string]struct{}{}
+		for _, host := range source.FullTextHosts {
+			hosts[host] = struct{}{}
+		}
+		result[source.ID] = hosts
+	}
+	return result
+}()
 
 type Service struct {
 	browser         *browserenv.Service
@@ -263,8 +260,11 @@ func (s *Service) allowedTarget(sourceID, target string) bool {
 	hosts := s.allowedHosts[strings.ToLower(strings.TrimSpace(sourceID))]
 	_, allowed := hosts[strings.ToLower(parsed.Hostname())]
 	if sourceID == "openalex" {
-		for _, hosts := range s.allowedHosts {
-			if _, ok := hosts[strings.ToLower(parsed.Hostname())]; ok {
+		for _, source := range researchsources.Definitions() {
+			if !source.OpenAlexMayInheritHosts {
+				continue
+			}
+			if _, ok := s.allowedHosts[source.ID][strings.ToLower(parsed.Hostname())]; ok {
 				allowed = true
 			}
 		}
@@ -510,6 +510,11 @@ func metadataMarkdown(candidate appresearch.Candidate) string {
 		if value := bounded(strings.TrimSpace(field[1]), 4000); value != "" {
 			fmt.Fprintf(&text, "- **%s:** %s\n", field[0], value)
 		}
+	}
+	attributes, total, attributesSHA := appresearch.PreviewSourceMetadataRecords(appresearch.SourceMetadataRecords(candidate.Records))
+	if len(attributes) > 0 {
+		encoded, _ := json.Marshal(map[string]any{"records": attributes, "totalRecords": total, "fullInventorySha256": attributesSHA})
+		fmt.Fprintf(&text, "\n## Source catalogue attributes\n\nCatalogue attributes (untrusted metadata, not study-quality approval). This is a bounded preview; omitted terms/records are not absent. Complete structured records remain saved with the candidate.\n\n%s\n", encoded)
 	}
 	text.WriteString("\n## Abstract\n\n")
 	if abstract := bounded(strings.TrimSpace(work.Abstract), maxMetadataRunes/2); abstract != "" {

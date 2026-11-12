@@ -3,7 +3,7 @@ import test from 'node:test';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import ts from 'typescript';
-import {shareSnapshot, singleFlight, conditionalViews} from './snapshotState.js';
+import {shareSnapshot, singleFlight, conditionalViews, snapshotWeight} from './snapshotState.js';
 import {mergeResearchTimeline} from './researchTimelineState.js';
 
 test('field patches preserve static history, remove absent fields and reject missing baselines',async()=>{
@@ -53,6 +53,30 @@ test('conditional views do not treat an errored read as an unchanged success',as
   await assert.rejects(read('a',async()=>{throw Error('scope rejected')}));
   const next=await read('a',async revision=>{assert.equal(revision,'v1');return{revision:'v2',value:{status:'failed'}}});
   assert.equal(next.status,'failed');
+});
+
+test('cache byte budget evicts retained views without truncating large results',async()=>{
+  const read=conditionalViews(8,200);
+  const huge={code:'中文全文'.repeat(1000)};
+  assert.ok(snapshotWeight(huge)>200);
+  assert.equal((await read('huge',async revision=>{assert.equal(revision,'');return{revision:'v1',value:huge}})).code,huge.code);
+  await read('huge',async revision=>{assert.equal(revision,'');return{revision:'v1',value:huge}});
+  await read('a',async()=>({revision:'a',value:{text:'a'.repeat(40)}}));
+  await read('b',async()=>({revision:'b',value:{text:'b'.repeat(40)}}));
+  await read('a',async revision=>{assert.equal(revision,'');return{revision:'new',value:{}}});
+});
+
+test('pending read cannot double-subtract a baseline evicted by another read',async()=>{
+  const value={text:'x'.repeat(40)},weight=snapshotWeight(value);
+  const read=conditionalViews(8,weight+1);
+  await read('a',async()=>({revision:'a1',value}));
+  let resolve;
+  const pending=read('a',async revision=>{assert.equal(revision,'a1');return new Promise(r=>resolve=r)});
+  await Promise.resolve();
+  await read('b',async()=>({revision:'b1',value})); // evicts a while it is pending
+  resolve({revision:'a1',unchanged:true});assert.deepEqual(await pending,value);
+  await read('c',async()=>({revision:'c1',value}));
+  await read('a',async revision=>{assert.equal(revision,'');return{revision:'a2',value}});
 });
 
 function backendFixture(methods) {

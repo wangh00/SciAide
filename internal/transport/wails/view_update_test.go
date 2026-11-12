@@ -59,3 +59,34 @@ func TestObjectViewOnlySendsChangedFields(t *testing.T) {
 		t.Fatal("null baseline did not reset")
 	}
 }
+
+func TestStoredRevisionSkipsPayloadReadAndPreservesFieldProtocol(t *testing.T) {
+	reads := 0
+	data := map[string]any{"code": strings.Repeat("原文", 10000), "state": "running"}
+	load := func(prior string) (ViewUpdate, error) { reads++; return conditionalObjectView(data, prior, nil) }
+	first, err := conditionalStoredView("v1", "", nil, load)
+	if err != nil || len(first.Value) == 0 {
+		t.Fatal(first, err)
+	}
+	for i := 0; i < 60; i++ {
+		same, err := conditionalStoredView("v1", first.Revision, nil, load)
+		if err != nil || !same.Unchanged {
+			t.Fatal(same, err)
+		}
+	}
+	if reads != 1 {
+		t.Fatal("unchanged view still read/serialized", reads)
+	}
+	data["state"] = "completed"
+	next, err := conditionalStoredView("v2", first.Revision, nil, load)
+	if err != nil || !strings.Contains(string(next.Patch), `"completed"`) || strings.Contains(string(next.Patch), "原文") {
+		t.Fatal(next, err)
+	}
+	if _, err := conditionalStoredView("v2", next.Revision, errors.New("deleted"), load); err == nil {
+		t.Fatal("cached view bypassed scope")
+	}
+	live, err := conditionalStoredView("", next.Revision, nil, load)
+	if err != nil || !live.Unchanged || reads != 3 {
+		t.Fatal("live projection did not load", live, reads, err)
+	}
+}

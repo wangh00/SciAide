@@ -31,7 +31,7 @@ export function ResearchGettingStarted({ disabled, onDraft }: {
     <div className="research-example-buttons">{researchStartExamples.map(example => <button type="button" key={example.title} disabled={disabled} onClick={() => onDraft(example.prompt)}>
       <b>{example.title}</b><small>{example.hint}</small><span>填入示例 ↗</span>
     </button>)}</div>
-    <p>文献用下方「添加本地文献」或「从资料库选择」；表格数据在采用包含计算的路线后，用「添加数据文件」选择，不放入文献选择器。生成路线后，计划、确认与结果会回到原聊天流。</p>
+    <p>文献用「添加本地文献」或「从资料库选择」；表格可以先作为对话附件发送，采用计算路线后确认已上传的数据，无需再上传。也可在路线中「添加数据文件」，不放入文献选择器。计划、确认与结果都回到原聊天流。</p>
   </section>;
 }
 

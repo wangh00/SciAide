@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/wangh00/SciAide/internal/modelcap"
 )
@@ -20,6 +21,10 @@ const (
 )
 
 type Message struct {
+	// Host-only identity of a tool view rewrapped as user evidence. The prefix
+	// must still match the FINAL content before literal page coverage is used.
+	EvidenceToolCallID string `json:"-"`
+	EvidencePrefix     string `json:"-"`
 	// Host-authored instruction text; never set from provider/user content.
 	HostToolReferences bool `json:"-"`
 	// Host lifecycle/menu state, never inferred from message text.
@@ -65,18 +70,37 @@ type ToolDefinition struct {
 }
 
 type ChatRequest struct {
+	// Host-only snapshot of admitted completed tool evidence. Not wire data.
+	CompletedToolEvidence []CompletedToolEvidence `json:"-"`
 	// Display-only names from a preceding exchange, never additional callable tools.
 	ToolReferenceNames []string `json:"-"`
 	ForcedTool         string   `json:"forcedTool,omitempty"`
+	// RequireTool requests one of the offered controls without forcing which one.
+	// Used for local repair vs. full replacement, never for exploratory IO.
+	RequireTool bool `json:"requireTool,omitempty"`
 	// DisableTools reserves a structured submission phase while retaining history schemas.
-	DisableTools            bool                    `json:"disableTools,omitempty"`
-	Messages                []Message               `json:"messages"`
-	Tools                   []ToolDefinition        `json:"tools,omitempty"`
-	ProviderTurns           []ProviderTurn          `json:"providerTurns,omitempty"`
-	PromptCacheKey          string                  `json:"promptCacheKey,omitempty"`
-	DisableStreaming        bool                    `json:"disableStreaming,omitempty"`
+	DisableTools     bool             `json:"disableTools,omitempty"`
+	Messages         []Message        `json:"messages"`
+	Tools            []ToolDefinition `json:"tools,omitempty"`
+	ProviderTurns    []ProviderTurn   `json:"providerTurns,omitempty"`
+	PromptCacheKey   string           `json:"promptCacheKey,omitempty"`
+	DisableStreaming bool             `json:"disableStreaming,omitempty"`
+	// Host-only inactivity ceiling for recovery; never sent to the provider.
+	StreamInactivityTimeout time.Duration `json:"-"`
+	// Connection establishment and the first idle lease share this deadline.
+	// Effective streaming progress renews only the inactivity lease, so this
+	// never becomes a total deadline for a healthy long-running response.
+	StreamRecoveryDeadline  time.Time               `json:"-"`
 	RequestedReasoningLevel modelcap.ReasoningLevel `json:"requestedReasoningLevel,omitempty"`
 	ResolvedReasoningLevel  modelcap.ReasoningLevel `json:"resolvedReasoningLevel,omitempty"`
+}
+
+type CompletedToolEvidence struct {
+	SourceRunID string          `json:"sourceRunId"`
+	CallID      string          `json:"callId"`
+	ToolName    string          `json:"toolName"`
+	Arguments   json.RawMessage `json:"arguments"`
+	Result      string          `json:"result"`
 }
 
 // ProviderItem is an immutable, provider-native assistant content item. It is
@@ -155,6 +179,33 @@ type Stream interface {
 	Close() error
 }
 
+// StreamProgressReporter exposes only a host clock, never reasoning or partial
+// tool arguments. It renews the inactivity watchdog; a failed attempt's entire
+// elapsed time counts as lost work when deciding whether to reconnect again.
+type StreamProgressReporter interface {
+	LastProgressAt() time.Time
+}
+
+func LastStreamProgress(stream Stream) time.Time {
+	if reporter, ok := stream.(StreamProgressReporter); ok {
+		return reporter.LastProgressAt()
+	}
+	return time.Time{}
+}
+
+// Optional numeric-only telemetry. Incomplete function arguments remain
+// private adapter buffers and are never promoted to executable ToolCalls.
+type StreamPendingArgumentsReporter interface {
+	PendingToolArgumentChars() int
+}
+
+func PendingToolArgumentChars(stream Stream) int {
+	if reporter, ok := stream.(StreamPendingArgumentsReporter); ok {
+		return max(0, reporter.PendingToolArgumentChars())
+	}
+	return 0
+}
+
 // ReasoningResolution reports the effort that was accepted when the streaming
 // HTTP request was opened. Resolved is empty when provider-native defaults are
 // used because the optional control is unsupported.
@@ -173,6 +224,10 @@ type resolvedStream struct {
 }
 
 func (s *resolvedStream) ReasoningResolution() ReasoningResolution { return s.resolution }
+
+func (s *resolvedStream) LastProgressAt() time.Time { return LastStreamProgress(s.Stream) }
+
+func (s *resolvedStream) PendingToolArgumentChars() int { return PendingToolArgumentChars(s.Stream) }
 
 func WithReasoningResolution(stream Stream, requested, resolved modelcap.ReasoningLevel) Stream {
 	return &resolvedStream{Stream: stream, resolution: ReasoningResolution{Requested: requested, Resolved: resolved}}

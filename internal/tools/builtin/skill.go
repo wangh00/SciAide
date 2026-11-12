@@ -33,22 +33,13 @@ func NewSkillLoad(skills DynamicSkillService, registries ...tool.Registry) *Skil
 	return value
 }
 
-func (t *SkillLoad) Definition(ctx context.Context) (tool.Definition, error) {
+func (t *SkillLoad) Definition(context.Context) (tool.Definition, error) {
 	if t == nil || t.skills == nil {
 		return tool.Definition{}, fmt.Errorf("Skill catalog is not configured")
 	}
-	snapshot, err := t.skills.Catalog(ctx, "")
-	if err != nil {
-		return tool.Definition{}, err
-	}
-	parts := make([]string, 0, len(snapshot.Categories))
-	for _, category := range snapshot.Categories {
-		parts = append(parts, fmt.Sprintf("%s (%d)", category.Name, category.Count))
-	}
-	description := "Load specialized research instructions before work whenever their procedure applies. Choose by task meaning, not keyword matching. Use category to browse and name to load; call silently and apply the loaded guidance subject to system rules."
-	if len(parts) > 0 {
-		description += " Available categories: " + strings.Join(parts, ", ") + "."
-	}
+	// The registry snapshots definitions at registration. Do not freeze catalog
+	// counts here: policy/MCP/source changes need live routing/catalog results.
+	description := `Load specialized research instructions when their procedure applies; ordinary conversation and asking the user do not require a Skill. Choose by task meaning, not keyword matching. Call with {} for currently available categories, browse with {"category":"<listed category>"}, then load with {"name":"<exact returned name>"}. Omit section on first load; use only returned section IDs and nextOffset to continue. Catalog results with loaded=false do not contain instructions. Call silently and apply loaded guidance subject to system rules.`
 	return tool.Definition{
 		QualifiedName: SkillLoadName,
 		Description:   description,
@@ -116,17 +107,19 @@ func (t *SkillLoad) Invoke(ctx context.Context, invocation tool.Invocation) (too
 		return t.browse(ctx, invocation.ProjectID, args)
 	}
 	if args.Section != "" || args.Offset != 0 || args.Limit != 0 {
-		return tool.Result{}, fmt.Errorf("offset and limit require a Skill name or category")
+		return tool.Result{}, tool.NewUserFacingError("读取章节或分页须提供 name；浏览目录须提供 category。首次加载请只传返回的精确 name，不要猜测 section；仅查看分类列表请传 {}。")
 	}
 	snapshot, err := t.skills.Catalog(ctx, invocation.ProjectID)
 	if err != nil {
 		return tool.Result{}, err
 	}
-	lines := []string{"## Skill categories", "", "Browse a category, then load the most relevant Skill by exact name."}
-	for _, item := range snapshot.Categories {
+	lines := []string{"## Skill categories", "", `CATALOG ONLY: loaded=false. Browse with {"category":"<listed category>"}, then load with {"name":"<exact returned name>"}. Omit section on first load; section-0 is not a universal entry point.`}
+	categories, total := snapshot.CallableCategories(), 0
+	for _, item := range categories {
 		lines = append(lines, fmt.Sprintf("- **%s** (%d)", item.Name, item.Count))
+		total += item.Count
 	}
-	metadata := skillLoadResult{Mode: "categories", Count: len(snapshot.Categories), Total: snapshot.EnabledCount, Skills: []skillListing{}}
+	metadata := skillLoadResult{Mode: "categories", Count: len(categories), Total: total, Skills: []skillListing{}}
 	return skillToolResult(strings.Join(lines, "\n"), metadata, false)
 }
 
@@ -143,17 +136,18 @@ func (t *SkillLoad) browse(ctx context.Context, projectID string, args skillLoad
 			return tool.Result{}, catalogErr
 		}
 		lines := []string{fmt.Sprintf("未找到分类 %q 下的可用 Skill；这不表示相关学科的 Skill 不存在。", args.Category), "CATALOG ONLY: loaded=false. No Skill instructions were loaded. Do not guess category names; select from the actual categories below or load a known exact Skill name."}
-		for _, category := range snapshot.Categories {
+		categories := snapshot.CallableCategories()
+		for _, category := range categories {
 			lines = append(lines, fmt.Sprintf("- %s (%d)", category.Name, category.Count))
 		}
-		if len(snapshot.Categories) == 0 {
+		if len(categories) == 0 {
 			lines = append(lines, "当前没有可用分类；请检查 Skill 是否已启用。")
 		}
 		metadata := skillLoadResult{Mode: "category", Category: args.Category, Count: 0, Total: 0, Skills: []skillListing{}}
 		return skillToolResult(strings.Join(lines, "\n"), metadata, false)
 	}
 	if args.Offset > len(values) {
-		return tool.Result{}, fmt.Errorf("category offset exceeds result count")
+		return tool.Result{}, tool.NewUserFacingError(fmt.Sprintf("分类 %q 共 %d 个可用 Skill，offset 超出列表范围；请用 category=%q、offset=0 重新浏览，随后使用返回的 nextOffset。", args.Category, len(values), args.Category))
 	}
 	limit := args.Limit
 	if limit <= 0 || limit > 30 {
@@ -161,7 +155,7 @@ func (t *SkillLoad) browse(ctx context.Context, projectID string, args skillLoad
 	}
 	end := min(len(values), args.Offset+limit)
 	listed := make([]skillListing, 0, end-args.Offset)
-	lines := []string{fmt.Sprintf("## Skills in category: %s", args.Category), "", "CATALOG ONLY: loaded=false. This call lists candidates; it does not load any Skill instructions. Call builtin.skill.load with an exact name before claiming or applying that Skill."}
+	lines := []string{fmt.Sprintf("## Skills in category: %s", args.Category), "", `CATALOG ONLY: loaded=false. This call lists candidates, not Skill instructions. Load with {"name":"<exact returned name>"}; omit category, section and offset on first load. Use sections/nextOffset returned by the host for continuation; never assume section-0 exists.`}
 	for _, item := range values[args.Offset:end] {
 		description := strings.TrimSpace(item.Description)
 		if runes := []rune(description); len(runes) > 180 {
@@ -187,13 +181,25 @@ func (t *SkillLoad) load(ctx context.Context, invocation tool.Invocation, args s
 		if errors.Is(err, opensciskill.ErrSkillNotFound) {
 			hint := "请先按 category 浏览目录，再逐字使用返回的 name 加载；不要根据学科名称猜测 Skill 名称。"
 			if snapshot, catalogErr := t.skills.Catalog(ctx, invocation.ProjectID); catalogErr == nil {
+				for _, category := range snapshot.Categories {
+					if !strings.EqualFold(category.Name, args.Name) {
+						continue
+					}
+					// Correct a known catalog selector, never choose a research
+					// procedure on the model's behalf or preserve guessed paging.
+					result, browseErr := t.browse(ctx, invocation.ProjectID, skillLoadArguments{Category: strings.ToLower(category.Name)})
+					if browseErr == nil {
+						result.Text = fmt.Sprintf("%q 是分类，不是 Skill 名称；已返回该分类目录，未加载任何 Skill（loaded=false）。\n", requestedName) + result.Text
+					}
+					return result, browseErr
+				}
 				if suggestions := skillNameSuggestions(args.Name, snapshot.Skills); len(suggestions) > 0 {
 					hint += "可核对这些候选名称：" + strings.Join(suggestions, ", ") + "。"
 				}
 			}
 			return tool.Result{}, tool.NewUserFacingError(fmt.Sprintf("未找到 Skill %q，当前目录没有这个名称。%s", args.Name, hint))
 		}
-		return tool.Result{}, err
+		return tool.Result{}, skillReadError(err)
 	}
 	lines := []string{
 		fmt.Sprintf("## Skill: %s", info.Name), "",
@@ -231,7 +237,11 @@ func (t *SkillLoad) load(ctx context.Context, invocation tool.Invocation, args s
 		lines = append(lines, "<skill_instructions>", chunk.Content, "</skill_instructions>")
 	}
 	if chunk.Truncated && chunk.Mode != "index" {
-		lines = append(lines, "", fmt.Sprintf("This Skill is longer than one model-context page. Continue before acting with name=%q and offset=%d.", info.Name, chunk.NextOffset))
+		continuation := fmt.Sprintf("name=%q and offset=%d", info.Name, chunk.NextOffset)
+		if chunk.Section != "" {
+			continuation += fmt.Sprintf(" and section=%q", chunk.Section)
+		}
+		lines = append(lines, "", "This Skill is longer than one model-context page. Continue before acting with "+continuation+".")
 	}
 	capabilities := t.capabilityDiagnostics(ctx, info.AllowedTools)
 	if len(capabilities) > 0 {
@@ -337,12 +347,18 @@ func normalizedSkillCategory(value string) string {
 
 func skillNameSuggestions(query string, values []opensciskill.Info) []string {
 	query = strings.ToLower(strings.TrimSpace(query))
+	if query == "" {
+		return []string{}
+	}
 	type candidate struct {
 		name  string
 		score int
 	}
 	candidates := make([]candidate, 0, len(values))
 	for _, item := range values {
+		if !item.Callable() {
+			continue
+		}
 		name := strings.ToLower(item.Name)
 		score := 0
 		if strings.Contains(name, query) || strings.Contains(query, name) {
@@ -352,7 +368,12 @@ func skillNameSuggestions(query string, values []opensciskill.Info) []string {
 			candidates = append(candidates, candidate{item.Name, score})
 		}
 	}
-	sort.Slice(candidates, func(i, j int) bool { return candidates[i].score > candidates[j].score })
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].score == candidates[j].score {
+			return candidates[i].name < candidates[j].name
+		}
+		return candidates[i].score > candidates[j].score
+	})
 	result := []string{}
 	for _, item := range candidates[:min(5, len(candidates))] {
 		result = append(result, item.name)
@@ -378,7 +399,7 @@ func canonicalSkillChoice(requested string, values []opensciskill.Info) string {
 	}
 	match := ""
 	for _, value := range values {
-		if !value.Enabled || !value.Entry || value.Capability == opensciskill.CapabilityUnavailable || !strings.EqualFold(value.Name, requested) {
+		if !value.Callable() || !strings.EqualFold(value.Name, requested) {
 			continue
 		}
 		if match != "" && match != value.Name {
@@ -390,4 +411,43 @@ func canonicalSkillChoice(requested string, values []opensciskill.Info) string {
 		return match
 	}
 	return requested
+}
+
+func skillUsageMessage(err *opensciskill.UsageError) string {
+	switch err.Kind {
+	case opensciskill.UsageName:
+		return "Skill 的 name 须使用目录返回的精确名称，不是学科描述、文件路径或章节名称。请传 {} 查看分类，再按 category 浏览并使用返回的 name；普通讨论无需加载 Skill。"
+	case opensciskill.UsageDisabled:
+		return fmt.Sprintf("Skill %q 已禁用，未加载。请按 category 浏览其他可用候选；不要重复加载或要求用户修复内部工具，普通讨论可继续。", err.Name)
+	case opensciskill.UsageUnavailable:
+		return fmt.Sprintf("Skill %q 当前不可用，未加载。原因：%s。请按 category 浏览当前可用候选，不要调用缺失工具或重试同一 Skill；无需专用流程时直接继续讨论或提问。", err.Name, tool.SafeActivityText(err.Reason, 600))
+	case opensciskill.UsageSection:
+		ids := make([]string, 0, len(err.Sections))
+		for _, section := range err.Sections {
+			ids = append(ids, section.ID)
+		}
+		message := fmt.Sprintf("Skill %q 不存在章节 %q，本次未返回正文。请只传 {\"name\":%q} 获取正文或真实章节目录，不要猜测 section-0。", err.Name, err.Section, err.Name)
+		if len(ids) > 0 {
+			message += "实际章节：" + strings.Join(ids, ", ") + "。"
+		}
+		return message
+	case opensciskill.UsageOffset:
+		selector := fmt.Sprintf("name=%q", err.Name)
+		if err.Section != "" {
+			selector += fmt.Sprintf(" 和 section=%q", err.Section)
+		}
+		return fmt.Sprintf("Skill %q 的分页 offset 超出范围 0..%d；请保留 %s、从 offset=0 读取，随后只使用返回的 nextOffset。", err.Name, err.Maximum, selector)
+	case opensciskill.UsageLimit:
+		return fmt.Sprintf("Skill 读取 limit 须为 1..%d 的 JSON 数字；首次加载可只传 name，使用宿主默认分页。", err.Maximum)
+	default:
+		return "Skill 读取参数无效；请从目录返回的精确 name 重新读取。"
+	}
+}
+
+func skillReadError(err error) error {
+	var usage *opensciskill.UsageError
+	if errors.As(err, &usage) {
+		return tool.NewUserFacingError(skillUsageMessage(usage))
+	}
+	return err
 }

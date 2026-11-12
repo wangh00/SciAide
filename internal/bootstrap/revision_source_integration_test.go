@@ -142,6 +142,7 @@ func sourceFixtureToolReply(w http.ResponseWriter, name string, args any, _ int)
 }
 
 func TestResearchSourceReuseConfirmsAfterRestartAndUsesReadMethod(t *testing.T) {
+	var reportWrites []string
 	memory := &researchSourceFixture{}
 	var mu sync.Mutex
 	var sourceID, dataID string
@@ -226,6 +227,7 @@ result`
 		}
 		mu.Lock()
 		sid, did := sourceID, dataID
+		bodyTargets := append([]string(nil), reportWrites...)
 		mu.Unlock()
 		if count == 0 && !wording {
 			id := sid
@@ -246,6 +248,7 @@ result`
 			command.NodeID = "report_drafting"
 			command.SourceInputs = nil
 			command.Changes = []string{"Clarify wording, keep current computation and source reference"}
+			command.EditTargets = bodyTargets
 		}
 		sourceFixtureToolReply(w, "research_revision_propose", command, len(req.Messages))
 	}))
@@ -470,6 +473,9 @@ result`
 	if string(reused.Run.Inputs) != string(completed.Run.Inputs) {
 		t.Fatal("source replaced table inputs")
 	}
+	mu.Lock()
+	reportWrites = reportBodyWriteTargetsFromFrozenReview(t, reused)
+	mu.Unlock()
 	_, wording := chatRevision("WORDING: clarify report wording", nil)
 	if _, err := app.WorkflowFacade.ConfirmResearchRevision(workflow.ConfirmResearchRevisionCommand{ProjectID: p.ID, RunID: completed.Run.ID, ProposalID: wording.ID, Confirmed: true}); err != nil {
 		t.Fatal(err)

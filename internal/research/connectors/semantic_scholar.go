@@ -20,10 +20,35 @@ type semanticScholarConnector struct {
 }
 
 type semanticSearchResponse struct {
-	Data []semanticPaper `json:"data"`
+	searchLimit int
+	Data        []semanticPaper `json:"data"`
+}
+
+func (r *semanticSearchResponse) validateSourceResponse() error {
+	if r.Data == nil {
+		return &appresearch.SourceError{SourceID: "semantic-scholar", Code: appresearch.FailureInvalidData, Message: "Semantic Scholar response is missing data"}
+	}
+	if len(r.Data) == 0 {
+		return nil
+	}
+	admitted := 0
+	for _, record := range r.Data {
+		if strings.TrimSpace(record.PaperID) == "" {
+			continue
+		}
+		if r.searchLimit > 0 && admitted >= r.searchLimit {
+			break
+		}
+		admitted++
+		if usableSearchRecord("semantic-scholar", record.PaperID, record.Title) {
+			return nil
+		}
+	}
+	return &appresearch.SourceError{SourceID: "semantic-scholar", Code: appresearch.FailureInvalidData, Message: "Semantic Scholar returned records but no usable identity/title pair"}
 }
 
 type semanticPaper struct {
+	fetchRecordID    string
 	PaperID          string            `json:"paperId"`
 	Title            string            `json:"title"`
 	Abstract         string            `json:"abstract"`
@@ -62,20 +87,24 @@ func (c *semanticScholarConnector) Search(ctx context.Context, options appresear
 	if options.Offset > 0 {
 		query.Set("offset", fmt.Sprint(options.Offset))
 	}
-	var response semanticSearchResponse
+	response := semanticSearchResponse{searchLimit: options.Limit}
 	if err := c.client.getJSON(ctx, c.base+"/search?"+query.Encode(), requestOptions{SourceID: "semantic-scholar", Host: c.host, MinSpacing: c.spacing, Cache: true}, &response); err != nil {
 		return nil, err
 	}
 	return semanticWorks(response.Data), nil
 }
 
+func (r *semanticPaper) validateSourceResponse() error {
+	return validateFetchedRecords("semantic-scholar", r.fetchRecordID, semanticWorks([]semanticPaper{*r}))
+}
+
 func (c *semanticScholarConnector) Fetch(ctx context.Context, recordID string) (appresearch.Work, error) {
 	id := strings.TrimSpace(recordID)
-	if id == "" || strings.ContainsAny(id, "?#") {
+	if appresearch.CanonicalSourceRecordID("semantic-scholar", id) == "" {
 		return appresearch.Work{}, &appresearch.SourceError{SourceID: "semantic-scholar", Code: appresearch.FailureInvalidData, Message: "Semantic Scholar record id is invalid"}
 	}
 	query := url.Values{"fields": {semanticFields}}
-	var record semanticPaper
+	record := semanticPaper{fetchRecordID: id}
 	if err := c.client.getJSON(ctx, c.base+"/"+url.PathEscape(id)+"?"+query.Encode(), requestOptions{SourceID: "semantic-scholar", Host: c.host, MinSpacing: c.spacing, Cache: true}, &record); err != nil {
 		return appresearch.Work{}, err
 	}

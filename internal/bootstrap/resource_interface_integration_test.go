@@ -55,8 +55,25 @@ func TestResearchResourceInterfaceReadsOnlyTaskDocumentWithoutGuessedLocators(t 
 				continue
 			}
 			for _, key := range []string{"path", "attachmentId", "name", "section"} {
+				// task.read selects a finite host-bound task record, not a free
+				// document locator. Its source_content selector can only read an
+				// adopted Python reference; file reads still use issued actions.
+				if d.Function.Name == "research_task_read" && (key == "section" || key == "attachmentId") {
+					continue
+				}
 				if _, present := schema.Properties[key]; present {
 					t.Errorf("free resource locator advertised: %s %s", d.Function.Name, key)
+				}
+			}
+			if d.Function.Name == "research_task_read" {
+				var section struct{ Enum []string }
+				if err = json.Unmarshal(schema.Properties["section"], &section); err != nil || len(section.Enum) == 0 {
+					t.Errorf("task records must use a finite selector: %v", err)
+				}
+				for _, name := range section.Enum {
+					if strings.HasPrefix(name, "supplemental_") || name == "messages" || name == "tool_calls" || name == "attempts" || name == "revisions" {
+						t.Errorf("planner exposes private/live discussion selector: %s", name)
+					}
 				}
 			}
 			if strings.Contains(d.Function.Description, "Operate on a host-issued resource action") {
@@ -275,7 +292,8 @@ func TestResearchResourceInterfaceReadsOnlyTaskDocumentWithoutGuessedLocators(t 
 }
 
 func TestResearchSubmissionInterfaceUsesFrozenSchemaAndRepairsWithoutExploration(t *testing.T) {
-	var requests, submissions atomic.Int32
+	var requests, submissions, exploration atomic.Int32
+	var rejectedTurn, acceptedTurn int
 	var rejected, accepted string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(io.LimitReader(r.Body, 4<<20))
@@ -290,11 +308,9 @@ func TestResearchSubmissionInterfaceUsesFrozenSchemaAndRepairsWithoutExploration
 					Parameters json.RawMessage
 				}
 			}
-			ToolChoice struct {
-				Type     string
-				Function struct{ Name string }
-			} `json:"tool_choice"`
-			Messages []struct {
+			ToolChoice json.RawMessage `json:"tool_choice"`
+			Parallel   *bool           `json:"parallel_tool_calls"`
+			Messages   []struct {
 				Role      string
 				ToolCalls []any `json:"tool_calls"`
 			}
@@ -305,10 +321,26 @@ func TestResearchSubmissionInterfaceUsesFrozenSchemaAndRepairsWithoutExploration
 		}
 		n := requests.Add(1)
 		name, args := "", ""
-		if req.ToolChoice.Function.Name == "submit_stage_result" {
+		controlsOnly := len(req.Tools) > 0
+		for _, d := range req.Tools {
+			controlsOnly = controlsOnly && (d.Function.Name == "submit_stage_result" || d.Function.Name == "submit_stage_repair")
+		}
+		if controlsOnly {
+			// This fixture deliberately waits for the exclusive submission
+			// phase; early native submission is covered by planner tests.
 			k := submissions.Add(1)
-			if req.ToolChoice.Type != "function" || len(req.Tools) != 1 || req.Tools[0].Function.Name != "submit_stage_result" {
-				t.Error("submission was not exclusive")
+			choiceRequired := string(req.ToolChoice) == `"required"`
+			if req.Parallel == nil || *req.Parallel {
+				t.Error("parallel stage controls must be disabled")
+			}
+			if !choiceRequired {
+				var choice struct {
+					Type     string
+					Function struct{ Name string }
+				}
+				if json.Unmarshal(req.ToolChoice, &choice) != nil || choice.Type != "function" || choice.Function.Name != "submit_stage_result" {
+					t.Error("stage action is not required")
+				}
 			}
 			for _, m := range req.Messages {
 				if m.Role == "tool" || len(m.ToolCalls) > 0 {
@@ -316,9 +348,19 @@ func TestResearchSubmissionInterfaceUsesFrozenSchemaAndRepairsWithoutExploration
 				}
 			}
 			var schema map[string]any
-			if err = json.Unmarshal(req.Tools[0].Function.Parameters, &schema); err != nil {
+			var wire json.RawMessage
+			for _, d := range req.Tools {
+				if d.Function.Name == "submit_stage_result" {
+					wire = d.Function.Parameters
+				}
+			}
+			if err = json.Unmarshal(wire, &schema); err != nil {
 				t.Error(err)
 				return
+			}
+			frozen, schemaErr := workflowAITestSchema(workflowAITestPrompt(body))
+			if schemaErr != nil || !bytes.Equal(mustBootstrapJSON(t, frozen), mustBootstrapJSON(t, schema)) {
+				t.Error("native control differs from frozen stage schema", schemaErr)
 			}
 			plan := workflowAISchemaFixture(schema).(map[string]any)
 			applyScientificWritingRouteFixture(plan)
@@ -329,14 +371,15 @@ func TestResearchSubmissionInterfaceUsesFrozenSchemaAndRepairsWithoutExploration
 			args = string(raw)
 			name = "submit_stage_result"
 			if k == 1 {
-				rejected = args
+				rejected, rejectedTurn = args, int(n)
 			} else {
-				accepted = args
+				accepted, acceptedTurn = args, int(n)
 				if !strings.Contains(string(body), "normalizedQuestion") {
 					t.Error("missing repair detail")
 				}
 			}
 		} else {
+			exploration.Add(1)
 			var enabled bool
 			name, args, enabled, err = resourceFixtureSelection(body, "scientific-writing", false)
 			if !enabled || err != nil {
@@ -366,8 +409,8 @@ func TestResearchSubmissionInterfaceUsesFrozenSchemaAndRepairsWithoutExploration
 		t.Fatal(err)
 	}
 	end := waitForWorkflowState(t, app, project.ID, started.Run.ID, workflow.RunCompleted, 25*time.Second)
-	if requests.Load() != 14 || submissions.Load() != 2 {
-		t.Fatalf("requests=%d submissions=%d", requests.Load(), submissions.Load())
+	if exploration.Load() == 0 || requests.Load() != exploration.Load()+2 || submissions.Load() != 2 || acceptedTurn != rejectedTurn+1 {
+		t.Fatalf("requests=%d exploration=%d submissions=%d rejection/acceptance turns=%d/%d", requests.Load(), exploration.Load(), submissions.Load(), rejectedTurn, acceptedTurn)
 	}
 	var runID string
 	if err = app.store.DB().QueryRow(`SELECT chat_run_id FROM workflow_ai_chat_runs WHERE execution_id=?`, end.AIExecutions[0].ID).Scan(&runID); err != nil {
@@ -380,7 +423,7 @@ func TestResearchSubmissionInterfaceUsesFrozenSchemaAndRepairsWithoutExploration
 	if err = app.store.DB().QueryRow(`SELECT COUNT(*) FROM tool_calls WHERE run_id=? AND tool_name='submit_stage_result'`, runID).Scan(&controlCalls); err != nil || controlCalls != 0 {
 		t.Fatal("submission was dispatched as an IO tool", err)
 	}
-	for turn, want := range map[int]string{13: rejected, 14: accepted} {
+	for turn, want := range map[int]string{rejectedTurn: rejected, acceptedTurn: accepted} {
 		var raw string
 		if err = app.store.DB().QueryRow(`SELECT draft_text FROM model_turn_journal WHERE run_id=? AND turn_index=?`, runID, turn).Scan(&raw); err != nil || raw != want {
 			t.Fatalf("candidate audit mismatch turn %d: %v", turn, err)

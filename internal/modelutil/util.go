@@ -36,6 +36,8 @@ const (
 // its response without imposing a deadline on the full SSE body. A total
 // http.Client.Timeout would abort healthy long-running reasoning and tool
 // turns even while the provider is still streaming data.
+// One transport call uses standard TLS + HTTP/1.1 on a fresh connection:
+// invisible HTTP2/pool replays cannot bypass model admission or host retry.
 func NewStreamingHTTPClient(responseTimeout time.Duration) *http.Client {
 	if responseTimeout <= 0 {
 		responseTimeout = 60 * time.Second
@@ -44,7 +46,7 @@ func NewStreamingHTTPClient(responseTimeout time.Duration) *http.Client {
 	transport.DialContext = (&net.Dialer{Timeout: responseTimeout, KeepAlive: 30 * time.Second}).DialContext
 	transport.TLSHandshakeTimeout = responseTimeout
 	transport.ResponseHeaderTimeout = responseTimeout
-	return &http.Client{Transport: browserhttp.NewScoped(transport, "model")}
+	return &http.Client{Transport: tracedModelTransport{base: browserhttp.NewSingleAttemptScoped(transport, "model"), timeout: responseTimeout}}
 }
 
 func ProviderToolName(qualified string) string {
@@ -196,11 +198,19 @@ func ApplyBearerAndCustomHeaders(req *http.Request, secret []byte, headers map[s
 }
 
 func ClassifyNetwork(err error) error {
+	return withHTTPFailureTrace(classifyNetwork(err), err)
+}
+
+func classifyNetwork(err error) error {
+	var admission *modelRequestGateError
+	if errors.As(err, &admission) {
+		return admission.cause
+	}
 	if errors.Is(err, context.Canceled) {
 		return context.Canceled
 	}
 	if permanentTLSError(err) {
-		return ErrorWithDetails("MODEL_TLS_INVALID", "无法验证模型服务的 TLS 证书，请检查 Base URL、系统时间或证书链。", "TLS certificate verification failed.\n"+err.Error(), false, err)
+		return ErrorWithDetails("MODEL_TLS_INVALID", "无法验证模型服务的 TLS 证书，请检查 Base URL、系统时间或证书链。", "TLS certificate verification failed; no HTTP response payload was received.", false, err)
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return ErrorWithDetails("MODEL_TIMEOUT", "模型请求暂时超时，SciAide 将自动重试。", "超时阶段：等待模型连接、TLS 握手或响应头。\n服务端未返回 HTTP 错误载荷。", true, err)
@@ -222,7 +232,17 @@ func permanentTLSError(err error) bool {
 }
 
 func ClassifyStatus(status int, body []byte) error {
+	if err := HTTPGatewayIdentityError(status, body); err != nil {
+		return err
+	}
 	details := ProviderErrorDetails("HTTP response", status, body)
+	var payload map[string]any
+	_ = json.Unmarshal(body, &payload)
+	if status >= 400 && promptPolicyRejected(nestedString(payload, "error", "code"), ProviderErrorMessage(body)) {
+		err := promptPolicyError(details)
+		err.HTTPStatus = status
+		return err
+	}
 	var err error
 	switch status {
 	case http.StatusUnauthorized, http.StatusForbidden:
@@ -284,9 +304,12 @@ func StreamErrorRetryable(errorType, code string) bool {
 	if !genericStreamIdentity(code) {
 		errorType = ""
 	}
-	// Match the explicit transport failure, not the generic upstream wrapper.
-	if code == "stream_read_error" || (code == "" && errorType == "stream_read_error") {
-		return true
+	// Match explicit transport failures, not arbitrary upstream/HTTP2 text.
+	// A permanent identity above still takes precedence over these codes.
+	for _, transportCode := range []string{"stream_read_error", "upstream_stream_read_error", "upstream_http2_stream_error"} {
+		if code == transportCode || (code == "" && errorType == transportCode) {
+			return true
+		}
 	}
 	if streamConcurrencyLimited(errorType, code) {
 		return true
@@ -308,7 +331,7 @@ func permanentStreamIdentity(value string) bool {
 	switch value {
 	case "invalid_api_key", "authentication_error", "permission_error", "permission_denied", "unauthorized", "forbidden",
 		"invalid_request_error", "invalid_parameter", "invalid_parameters", "context_length_exceeded", "model_not_found",
-		"insufficient_quota", "quota_exceeded", "billing_hard_limit_reached", "content_policy_violation":
+		"insufficient_quota", "quota_exceeded", "billing_hard_limit_reached", "usage_limit_reached", "no_userid", "content_policy_violation", "invalid_prompt":
 		return true
 	}
 	return false
@@ -336,9 +359,14 @@ func streamConcurrencyLimited(errorType, code string) bool {
 	return code == "gateway_concurrency_limit" || (code == "" && errorType == "gateway_concurrency_limit")
 }
 
-// ClassifyStreamError is shared by all provider envelopes. The original error
-// payload remains in details; SSE errors do not invent an HTTP status.
+// ClassifyStreamError is shared by all provider envelopes. Native messages are
+// used transiently for classification, never persisted or shown verbatim.
+// Metadata retains known codes and a fingerprint, without inventing HTTP status.
 func ClassifyStreamError(errorType, providerCode, message, details string) error {
+	details = SanitizeProviderDiagnostic(details)
+	if promptPolicyRejected(providerCode, message) {
+		return promptPolicyError(details)
+	}
 	if !permanentStreamIdentity(strings.ToLower(strings.TrimSpace(errorType))) && streamConcurrencyLimited(errorType, providerCode) {
 		return ErrorWithDetails("MODEL_RATE_LIMITED", "模型服务账户并发已达上限，请稍后重试。", details, true, nil)
 	}
@@ -347,7 +375,33 @@ func ClassifyStreamError(errorType, providerCode, message, details string) error
 	if retryable {
 		code = "MODEL_UNAVAILABLE"
 	}
-	return ErrorWithDetails(code, message, details, retryable, nil)
+	publicMessage := "模型服务拒绝了本次请求，请核对模型服务配置并查看诊断。"
+	if retryable {
+		publicMessage = "模型服务暂时不可用，SciAide 将按现有恢复预算重试。"
+	} else {
+		for _, identity := range []string{providerCode, errorType} {
+			switch strings.ToLower(strings.TrimSpace(identity)) {
+			case "context_length_exceeded":
+				publicMessage = "本次请求超过模型上下文限制，请调整输入或模型配置后重试。"
+			case "invalid_api_key", "authentication_error", "unauthorized", "permission_error", "permission_denied", "forbidden":
+				publicMessage = "模型服务认证或权限检查失败，请核对服务配置后重试。"
+			case "insufficient_quota", "quota_exceeded", "billing_hard_limit_reached", "usage_limit_reached":
+				publicMessage = "模型服务配额不足，请核对服务账户后重试。"
+			case "no_userid":
+				publicMessage = "模型接口返回 no_userid 错误，当前请求已停止；这不是科研结果校验失败。请核对接口或中转服务配置后重试。"
+			}
+		}
+	}
+	return ErrorWithDetails(code, publicMessage, details, retryable, nil)
+}
+
+func promptPolicyRejected(code, message string) bool {
+	code = strings.ToLower(strings.TrimSpace(code))
+	return code == "content_policy_violation" || code == "invalid_prompt" && strings.Contains(strings.ToLower(message), "flagged as potentially violating our usage policy")
+}
+
+func promptPolicyError(details string) *apperr.Error {
+	return &apperr.Error{Code: "MODEL_PROMPT_REJECTED", UserMessage: "模型服务的内容检查拒绝了本次完整请求，未说明触发位置；这不等于研究题目违规，也不是科研审查不通过。已完成结果保留，不自动重复发送。请查看诊断并核对服务配置或联系服务商。", Details: boundProviderDetails(details), Retryable: false}
 }
 
 func ProviderErrorMessage(body []byte) string {
@@ -398,11 +452,15 @@ func sanitizedProviderPayload(body []byte) string {
 		return ""
 	}
 	var decoded any
-	if json.Unmarshal(body, &decoded) == nil {
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		// Regex cannot safely redact a broken or truncated JSON document.
+		// Keep reproducible metadata, never guessed pieces of its contents.
+		decoded = providerPayloadMetadata(body, err)
+	} else {
 		decoded = redactProviderValue(decoded, "")
-		if encoded, err := json.MarshalIndent(decoded, "", "  "); err == nil {
-			value = string(encoded)
-		}
+	}
+	if encoded, err := json.MarshalIndent(decoded, "", "  "); err == nil {
+		value = string(encoded)
 	}
 	value = providerBearerPattern.ReplaceAllString(value, `${1}[REDACTED]`)
 	value = providerSecretPattern.ReplaceAllString(value, `${1}[REDACTED]`)
@@ -430,6 +488,10 @@ func redactProviderValue(value any, key string) any {
 
 func sensitiveProviderKey(key string) bool {
 	key = strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(strings.TrimSpace(key), "-", "_"), " ", "_"))
+	switch key {
+	case "encrypted_content", "thinking", "reasoning", "reasoning_content", "signature":
+		return true // Native hidden reasoning is not a public error diagnostic.
+	}
 	for _, marker := range []string{"authorization", "api_key", "apikey", "token", "secret", "cookie", "password", "credential"} {
 		if strings.Contains(key, marker) {
 			return true

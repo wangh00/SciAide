@@ -32,6 +32,12 @@ func (s *RuntimeService) ExecutedPythonCode(ctx context.Context, projectID, runI
 		kernel := decodeObject(mustJSON(output["structured"]))
 		code, _ := input["code"].(string)
 		hash, _ := kernel["codeSha256"].(string)
+		// Current Kernel execution trims outer whitespace before hashing. Keep
+		// legacy exact-byte matches, otherwise reproduce ONLY that same transform.
+		// Never rewrite the frozen input or export a hash-mismatched draft.
+		if hashBytes([]byte(code)) != hash {
+			code = strings.TrimSpace(code)
+		}
 		if code == "" || kernel["status"] != "success" || hashBytes([]byte(code)) != hash {
 			return ExecutedPythonSource{}, fmt.Errorf("saved Python execution source is missing or does not match its hash")
 		}

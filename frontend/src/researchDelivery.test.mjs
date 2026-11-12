@@ -63,8 +63,8 @@ test("revision placeholder is offered only for the current reviewed unregistered
 
 test("composer revision hint respects conversation scope and execution precedence", () => {
   const readyExpression = source.match(/const researchRevisionReady = (.+);/)[1];
-  const expression = source.match(/placeholder=\{(!conversationId[^\n]+)\}\/\>/)[1];
-  const state = { workspaceMode: "research", conversationId: "research-chat", researchConversationId: "research-chat", researchRevisionConversationId: "research-chat", researchConversationLocked: false, busy: false, activeRunIsWorkflowAI: false };
+  const expression = source.match(/placeholder=\{(researchEntry[^\n]+)\}\/\>/)[1];
+  const state = { pendingQuestionKey:"", researchEntry:false, researchOpening:null, workspaceMode: "research", conversationId: "research-chat", researchConversationId: "research-chat", researchRevisionConversationId: "research-chat", researchConversationLocked: false, busy: false, activeRunIsWorkflowAI: false };
   const hint = overrides => {
     const context = { ...state, ...overrides };
     context.researchRevisionReady = vm.runInNewContext(readyExpression, context);
@@ -77,6 +77,7 @@ test("composer revision hint respects conversation scope and execution precedenc
   assert.match(hint({ researchConversationLocked: true }), /科研流程正在自主推进/);
   assert.match(hint({ busy: true }), /正在回答，可先编辑下一条消息/);
   assert.match(hint({ busy: true, activeRunIsWorkflowAI: true }), /当前科研阶段由 AI 自主执行/);
+  assert.match(hint({ researchEntry: true }), /写下你想研究的问题/);
   assert.match(source, /return \(\) => publishRevisionConversationId\(""\)/);
 });
 
@@ -146,9 +147,18 @@ test("existing retry card takes precedence and final artifacts retain acceptance
   assert.match(source, /WorkflowResearchDesignCard assessment=\{runDetail.deliveryAssessment\}/);
 });
 
-test("revision controls carry the selected stage and require confirmation for repeated side effects", () => {
+test("revision controls carry the selected stage and the explicit click confirmation for repeated side effects", () => {
   assert.match(source, /<ResearchRevisionControls/);
-  assert.match(source, /retryStep\(retryableStep, nodeId, recommended, reviewSha\)/);
+  assert.match(source, /retryStep\(retryableStep, nodeId, recommended, reviewSha, confirmed\)/);
   assert.match(source, /revisionNodeId, useRecommendation, expectedReviewSha256/);
-  assert.match(source, /confirmSideEffect: Boolean\(repeatsSideEffects && confirmRetry\)/);
+  assert.match(source, /confirmSideEffect: Boolean\(repeatsSideEffects && sideEffectConfirmed\)/);
+  assert.match(source, /sideEffectConfirmed = reviewRevision \? revisionClickConfirmed : confirmRetry/);
+});
+
+test("design projection preserves concrete material bodies and accepts older designs", () => {
+ const detail = {run:{status:"completed", outputs:{delivery_gate:{approved:true},research_design:{title:"设计",researchQuestion:"研究问题",status:"research_design_not_empirical_result",deliverables:[{title:"访谈提纲",markdown:"## 追问\n请说明具体经历。"}]}}},deliveryAssessment:{status:"reviewed"}};
+ assert.deepEqual(JSON.parse(JSON.stringify(exports.workflowResearchDesign(detail).deliverables)),detail.run.outputs.research_design.deliverables);
+ delete detail.run.outputs.research_design.deliverables;
+ assert.equal(exports.workflowResearchDesign(detail).deliverables.length,0);
+ assert.ok(source.includes('<CitedMarkdown text={material.markdown}'));
 });

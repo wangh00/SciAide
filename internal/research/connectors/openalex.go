@@ -2,6 +2,7 @@ package connectors
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"strings"
@@ -16,10 +17,45 @@ type openAlexConnector struct {
 }
 
 type openAlexResponse struct {
-	Results []openAlexWork `json:"results"`
+	Error       json.RawMessage `json:"error"`
+	searchLimit int
+	Results     []openAlexWork `json:"results"`
+}
+
+func (r *openAlexResponse) validateSourceResponse() error {
+	if err := validateDeclaredJSONError("openalex", r.Error); err != nil {
+		return err
+	}
+	if r.Results == nil {
+		return &appresearch.SourceError{SourceID: "openalex", Code: appresearch.FailureInvalidData, Message: "OpenAlex response is missing results"}
+	}
+	if len(r.Results) == 0 {
+		return nil
+	}
+	admitted := 0
+	for _, record := range r.Results {
+		id := strings.TrimPrefix(strings.TrimSpace(record.ID), "https://openalex.org/")
+		if id == "" {
+			continue
+		}
+		if r.searchLimit > 0 && admitted >= r.searchLimit {
+			break
+		}
+		admitted++
+		title := record.DisplayName
+		if title == "" {
+			title = record.Title
+		}
+		if usableSearchRecord("openalex", id, title) {
+			return nil
+		}
+	}
+	return &appresearch.SourceError{SourceID: "openalex", Code: appresearch.FailureInvalidData, Message: "OpenAlex returned records but no usable identity/title pair"}
 }
 
 type openAlexWork struct {
+	Error                 json.RawMessage `json:"error"`
+	fetchRecordID         string
 	ID                    string               `json:"id"`
 	DOI                   string               `json:"doi"`
 	Title                 string               `json:"title"`
@@ -77,14 +113,18 @@ func (c *openAlexConnector) Search(ctx context.Context, options appresearch.Sear
 	if options.Offset > 0 {
 		query.Set("page", fmt.Sprint(options.Offset/options.Limit+1))
 	}
-	var response openAlexResponse
+	response := openAlexResponse{searchLimit: options.Limit}
 	if err := c.client.getJSON(ctx, c.base+"?"+query.Encode(), requestOptions{SourceID: "openalex", Host: c.host, Cache: true}, &response); err != nil {
 		return nil, err
 	}
-	if response.Results == nil {
-		return nil, fmt.Errorf("OpenAlex response is missing results")
-	}
 	return openAlexWorks(response.Results), nil
+}
+
+func (r *openAlexWork) validateSourceResponse() error {
+	if err := validateDeclaredJSONError("openalex", r.Error); err != nil {
+		return err
+	}
+	return validateFetchedRecords("openalex", r.fetchRecordID, openAlexWorks([]openAlexWork{*r}))
 }
 
 func (c *openAlexConnector) Fetch(ctx context.Context, recordID string) (appresearch.Work, error) {
@@ -92,10 +132,10 @@ func (c *openAlexConnector) Fetch(ctx context.Context, recordID string) (apprese
 	if strings.HasPrefix(strings.ToLower(id), "https://openalex.org/") {
 		id = id[len("https://openalex.org/"):]
 	}
-	if !strings.HasPrefix(strings.ToUpper(id), "W") {
+	if appresearch.CanonicalSourceRecordID("openalex", id) == "" {
 		return appresearch.Work{}, &appresearch.SourceError{SourceID: "openalex", Code: appresearch.FailureInvalidData, Message: "OpenAlex fetch requires a work id returned by search"}
 	}
-	var record openAlexWork
+	record := openAlexWork{fetchRecordID: id}
 	if err := c.client.getJSON(ctx, c.base+"/"+url.PathEscape(id), requestOptions{SourceID: "openalex", Host: c.host, Cache: true}, &record); err != nil {
 		return appresearch.Work{}, err
 	}

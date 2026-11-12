@@ -72,6 +72,10 @@ type workflowArtifactsFixture struct {
 	command artifact.WorkflowReportCommand
 }
 
+func (*workflowArtifactsFixture) LegacyWorkflowReportPublication(context.Context, string, string) (artifact.Version, bool, error) {
+	return artifact.Version{}, false, nil
+}
+
 func (f *workflowArtifactsFixture) PublishWorkflowReport(_ context.Context, command artifact.WorkflowReportCommand) (artifact.WorkflowReportResult, error) {
 	f.command = command
 	return artifact.WorkflowReportResult{Artifact: artifact.Artifact{ID: "artifact"}, Version: artifact.Version{ID: "version"}, DOCX: artifact.Export{ID: "docx"}, PDF: artifact.Export{ID: "pdf"}, Created: true}, nil
@@ -158,7 +162,7 @@ func TestPublishReportRevalidatesKnowledgeAndFreezesBibliography(t *testing.T) {
 	if err != nil || value.Artifact.ID != "artifact" {
 		t.Fatalf("PublishReport()=%#v, %v", value, err)
 	}
-	if len(artifacts.command.Citations) != 1 || artifacts.command.Citations[0].BibliographyIDSnapshot != "bibliography" || artifacts.command.Citations[0].SourceToolCallIDSnapshot != "search-call" || artifacts.command.OperationKey != "stable" {
+	if len(artifacts.command.Citations) != 1 || artifacts.command.Citations[0].BibliographyIDSnapshot != "bibliography" || artifacts.command.Citations[0].SourceToolCallIDSnapshot != "search-call" || !strings.HasPrefix(artifacts.command.OperationKey, "publication-v2:") {
 		t.Fatalf("frozen report=%#v", artifacts.command)
 	}
 	if len(artifacts.command.SourceWorkspaceFiles) != 1 || artifacts.command.SourceWorkspaceFiles[0] != "analysis-output/analysis.csv" {

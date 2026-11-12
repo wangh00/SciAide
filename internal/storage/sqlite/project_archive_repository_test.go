@@ -587,6 +587,18 @@ func TestProjectArchiveRestoresWorkflowRuntimeGraphAndInterruptsPausedRun(t *tes
 		t.Fatalf("source Workflow permission mode = %q, %v", source.Run.PermissionMode, err)
 	}
 	oldRunID, oldConversationID, oldHumanStepID, oldToolStepID, oldCallID := completed.Run.ID, completed.Run.ConversationID, completed.Steps[0].ID, completed.Steps[1].ID, completed.Steps[1].ToolCallID
+	// Private revision baselines are historical evidence, not executable
+	// consent after restore. Preserve their original bytes/hash while remapping
+	// the outer task/event foreign identities into the restored project.
+	privateBaseline, err := json.Marshal(map[string]any{"run": completed.Run, "steps": completed.Steps})
+	if err != nil || len(completed.Events) == 0 {
+		t.Fatal("missing private baseline fixture", err)
+	}
+	privateEventID := completed.Events[0].ID
+	privateDigest := workflow.ResearchRevisionSnapshot(completed)
+	if _, err := store.DB().ExecContext(ctx, `INSERT INTO workflow_revision_write_snapshots(event_id,workflow_run_id,snapshot_sha256,snapshot_json) VALUES(?,?,?,?)`, privateEventID, completed.Run.ID, privateDigest, string(privateBaseline)); err != nil {
+		t.Fatal(err)
+	}
 
 	pausedStart, err := runtimeService.Start(ctx, workflow.StartCommand{ProjectID: created.ID, WorkflowID: saved.Workflow.ID, Inputs: inputs})
 	if err != nil {
@@ -688,6 +700,16 @@ func TestProjectArchiveRestoresWorkflowRuntimeGraphAndInterruptsPausedRun(t *tes
 	}
 	if restoredInterrupted.Run.ErrorCode != "ARCHIVE_RESTORED" || len(restoredInterrupted.Steps) != 2 || restoredInterrupted.Steps[0].Status != workflow.StepInterrupted {
 		t.Fatalf("paused Workflow was not safely interrupted = %#v", restoredInterrupted)
+	}
+	var baselineRun, baselineEvent, baselineHash, baselineJSON string
+	if err := store.DB().QueryRowContext(ctx, `SELECT s.workflow_run_id,s.event_id,s.snapshot_sha256,s.snapshot_json FROM workflow_revision_write_snapshots s JOIN workflow_events e ON e.id=s.event_id AND e.workflow_run_id=s.workflow_run_id WHERE s.workflow_run_id=?`, restoredCompleted.Run.ID).Scan(&baselineRun, &baselineEvent, &baselineHash, &baselineJSON); err != nil {
+		t.Fatal("archive lost/remapped private baseline incorrectly", err)
+	}
+	if baselineRun == oldRunID || baselineEvent == privateEventID || baselineHash != privateDigest || baselineJSON != string(privateBaseline) {
+		t.Fatal("archive rewrote immutable baseline bytes or failed identity mapping")
+	}
+	if _, err := runtimeRepo.ReadDesignRevisionWriteSnapshot(ctx, baselineRun, baselineEvent); err == nil {
+		t.Fatal("archived old-identity baseline became fresh execution authority")
 	}
 	recoverable, err := runtimeRepo.RecoverableRuns(ctx)
 	if err != nil {

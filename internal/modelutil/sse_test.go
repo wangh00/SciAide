@@ -59,16 +59,83 @@ func TestSSEJSONOnlyTruncatedSyntaxIsRetryable(t *testing.T) {
 		if err == nil {
 			t.Fatal("invalid test case")
 		}
-		classified := ClassifySSEJSONError("fixture", "invalid fixture", []byte(tc.data), err)
+		classified := ClassifySSEJSONError("fixture", "invalid fixture", []byte(tc.data), err, false)
 		if IsRetryable(classified) != tc.retryable {
 			t.Fatalf("data=%q classification=%v", tc.data, classified)
 		}
 		var appErr *apperr.Error
 		if !errors.As(classified, &appErr) || !strings.Contains(appErr.Details, "Provider payload:") {
-			t.Fatal("raw provider data not retained")
+			t.Fatal("safe provider metadata not retained")
 		}
 	}
 	if ClassifySSEReadError(context.Canceled) != context.Canceled || ClassifySSEReadError(context.DeadlineExceeded) != context.DeadlineExceeded || !IsRetryable(ClassifySSEReadError(io.ErrUnexpectedEOF)) {
 		t.Fatal("cancellation/read failure classification changed")
+	}
+}
+
+func TestSSEDecoderRetainsExplicitEventChannelWithoutBleeding(t *testing.T) {
+	wire := "event: delta\ndata: first\nevent: error\ndata: second\n\n" +
+		"data: ordinary\n\n" +
+		"event: error\n\ndata: no-inheritance\n\n" +
+		"event: error\nevent:\ndata: reset\n\n" +
+		"event:  error\ndata: preserves-extra-space\n\n" +
+		"event: terminal\ndata: eof"
+	d := NewSSEDecoder(strings.NewReader(wire), 128)
+	for _, want := range []struct {
+		data, channel string
+		complete      bool
+	}{
+		{"first\nsecond", "error", true},
+		{"ordinary", "", true},
+		{"no-inheritance", "", true},
+		{"reset", "", true},
+		{"preserves-extra-space", " error", true},
+		{"eof", "terminal", false},
+	} {
+		if !d.Scan() || d.Text() != want.data || d.EventType() != want.channel || d.EventComplete() != want.complete {
+			t.Fatalf("data=%q channel=%q complete=%v err=%v", d.Text(), d.EventType(), d.EventComplete(), d.Err())
+		}
+	}
+	if d.Scan() || d.Err() != nil || d.EventType() != "" {
+		t.Fatal("channel leaked past EOF")
+	}
+}
+
+func TestSSECoalescedErrorMetadataPreservesOriginalDispatch(t *testing.T) {
+	for _, tc := range []struct {
+		name, wire, prefix, prior, terminal string
+		ok                                  bool
+	}{
+		{"explicit-transition", "event: response.output_item.done\ndata: prefix\nevent: error\ndata: terminal\n\n", "prefix", "response.output_item.done", "terminal", true},
+		{"CRLF", "event: delta\r\ndata: prefix\r\nevent: error\r\ndata: terminal\r\n\r\n", "prefix", "delta", "terminal", true},
+		{"ordinary-error", "event: error\ndata: terminal\n\n", "", "", "", false},
+		{"error-label-before-both", "event: error\ndata: prefix\ndata: terminal\n\n", "", "", "", false},
+		{"no-terminal-data", "event: delta\ndata: prefix\nevent: error\n\n", "", "", "", false},
+		{"no-prior-channel", "data: prefix\nevent: error\ndata: terminal\n\n", "", "", "", false},
+		{"separate-dispatches", "event: delta\ndata: prefix\n\nevent: error\ndata: terminal\n\n", "", "", "", false},
+		{"EOF", "event: delta\ndata: prefix\nevent: error\ndata: terminal", "", "", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := NewSSEDecoder(strings.NewReader(tc.wire), 128)
+			if !d.Scan() {
+				t.Fatal(d.Err())
+			}
+			original := d.Text()
+			prefix, prior, terminal, ok := d.CoalescedErrorFields()
+			if ok != tc.ok || prefix != tc.prefix || prior != tc.prior || terminal != tc.terminal || d.Text() != original {
+				t.Fatal("channel metadata changed SSE dispatch", ok)
+			}
+			if ok && original != prefix+"\n"+terminal {
+				t.Fatal("lost original joined data")
+			}
+			if tc.name == "separate-dispatches" {
+				if !d.Scan() {
+					t.Fatal("lost ordinary terminal")
+				}
+				if _, _, _, ok = d.CoalescedErrorFields(); ok {
+					t.Fatal("preceding block leaked")
+				}
+			}
+		})
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -61,11 +62,12 @@ type Query struct {
 }
 
 type SourceRecord struct {
-	ID          string    `json:"id"`
-	ProjectID   string    `json:"projectId"`
-	Work        Work      `json:"work"`
-	FirstSeenAt time.Time `json:"firstSeenAt"`
-	UpdatedAt   time.Time `json:"updatedAt"`
+	Grouping    *RecordGrouping `json:"grouping,omitempty"`
+	ID          string          `json:"id"`
+	ProjectID   string          `json:"projectId"`
+	Work        Work            `json:"work"`
+	FirstSeenAt time.Time       `json:"firstSeenAt"`
+	UpdatedAt   time.Time       `json:"updatedAt"`
 }
 
 type CandidateAlias struct {
@@ -74,6 +76,7 @@ type CandidateAlias struct {
 }
 
 type Candidate struct {
+	RecordIdentity  *RecordIdentity  `json:"recordIdentity,omitempty"`
 	ID              string           `json:"id"`
 	ProjectID       string           `json:"projectId"`
 	CandidateKey    string           `json:"candidateKey"`
@@ -697,16 +700,34 @@ func SearchQueryKey(query string, sourceIDs []string, limit int) string {
 	return hashText(payload)
 }
 
+// Syntactic identity checks, not proof of registration/resolution. Never erase
+// an invalid source field; simply do not use it as an automatic merge key.
+var identityDOIPattern = regexp.MustCompile(`^10\.[0-9]+/[^\s]+$`)
+var identityPMIDPattern = regexp.MustCompile(`^[1-9][0-9]*$`)
+var identityArxivPattern = regexp.MustCompile(`^(?:[0-9]{4}\.[0-9]{4,5}|[a-z][a-z0-9.-]*/[0-9]{7})$`)
+var identityOpenAlexPattern = regexp.MustCompile(`^W[0-9]+$`)
+
 func CandidateAliases(value Work) []CandidateAlias {
 	aliases := make([]CandidateAlias, 0, 5)
 	appendAlias := func(kind, raw string) {
 		raw = strings.TrimSpace(raw)
-		if raw != "" {
+		valid := raw != ""
+		switch kind {
+		case "doi":
+			valid = identityDOIPattern.MatchString(raw)
+		case "pmid":
+			valid = identityPMIDPattern.MatchString(raw)
+		case "arxiv":
+			valid = identityArxivPattern.MatchString(raw)
+		case "openalex":
+			valid = identityOpenAlexPattern.MatchString(raw)
+		}
+		if valid {
 			aliases = append(aliases, CandidateAlias{Kind: kind, Value: raw})
 		}
 	}
 	appendAlias("doi", NormalizeDOI(value.Identifiers.DOI))
-	appendAlias("pmid", digitsOnly(value.Identifiers.PMID))
+	appendAlias("pmid", strings.TrimSpace(value.Identifiers.PMID))
 	appendAlias("arxiv", strings.ToLower(NormalizeArXiv(value.Identifiers.ArXiv)))
 	appendAlias("openalex", strings.ToUpper(normalizePrefixedID(value.Identifiers.OpenAlex, "https://openalex.org/")))
 	title := normalizeTitle(value.Title)
@@ -718,10 +739,12 @@ func CandidateAliases(value Work) []CandidateAlias {
 
 func CandidateKey(value Work) string {
 	aliases := CandidateAliases(value)
-	if len(aliases) > 0 {
-		return hashText(aliases[0].Kind + ":" + aliases[0].Value)
+	for _, alias := range aliases {
+		if alias.Kind != "title_year" {
+			return hashText(alias.Kind + ":" + alias.Value)
+		}
 	}
-	return hashText("source:" + strings.ToLower(strings.TrimSpace(value.SourceID)) + ":" + strings.ToLower(strings.TrimSpace(value.SourceRecordID)))
+	return hashText("source:" + strings.ToLower(strings.TrimSpace(value.SourceID)) + ":" + strings.TrimSpace(value.SourceRecordID))
 }
 
 func PreferredWork(records []SourceRecord) Work {

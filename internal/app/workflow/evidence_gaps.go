@@ -2,13 +2,14 @@ package workflow
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/wangh00/SciAide/internal/app/tool"
 )
 
-const evidenceGapInstruction = "对用户要求的字段及准备加入报告的字段，缺失时逐项填写 evidenceGaps（无缺项可省略）：field 为具体指标，status 为 not_retrieved（当前片段未找到）、unreadable（材料无法可靠读取）或 explicitly_not_reported（原文明确说未报告），required 表示是否属于原始核心交付。query 是针对该字段的简短检索词，优先用原文学术词和同义词，不复述整段限制；not_retrieved 即使整体 coverage 足够也要补查，不能因它是次要字段就直接写未报告。explicitly_not_reported 必须提供 reference 和 supportingQuote，逐字引用当前候选中明确说明缺失的连续原句；补查无命中也不能证明全文未报告。unreadable 不触发重复关键词检索。已尝试的查询见 localEvidenceSearchQueries，剩余额度见 localEvidenceSearchRoundsRemaining。补查后仍缺少核心字段时 coverage 必须不足；非核心缺项标为当前材料未核验，不强行扩展课题。相对指标 OR/RR/HR 不等于绝对发生率，不得混填；遇到相关指标应说明指标差别，而非声称原文没有任何结果。"
+const evidenceGapInstruction = "对用户要求的字段及准备加入报告的字段，缺失时逐项填写 evidenceGaps（无缺项可省略）：field 为具体指标，status 为 not_retrieved（当前片段未找到）、unreadable（材料无法可靠读取）或 explicitly_not_reported（原文明确说未报告），required 表示是否属于原始核心交付。query 是针对该字段的简短检索词，优先用原文学术词和同义词，不复述整段限制；not_retrieved 即使整体 coverage 足够也要补查，不能因它是次要字段就直接写未报告。explicitly_not_reported 必须提供 reference 和 supportingQuote，逐字引用当前候选中明确说明缺失的连续原句；补查无命中也不能证明全文未报告。unreadable 不触发重复关键词检索。已尝试的查询见 localEvidenceSearchQueries，剩余额度见 localEvidenceSearchRoundsRemaining。补查后仍缺少核心字段时 coverage 必须不足；非核心缺项标为当前材料未核验，不强行扩展课题。相对指标 OR/RR/HR 不等于绝对发生率，不得混填；遇到相关指标应说明指标差别，而非声称原文没有任何结果。required=true 仅用于用户或已确认契约真实要求的核心交付，不把效应量、置信区间、全文或所有调节因素因列入提取表就自动升级为核心目标。已提供候选摘录可支持对这些片段的判断，但不等于 indexedReadRanges 的工具核读收据；没有相应记录时不得声明已核读具体页章或全文，保持当前材料未核验并如实说明。"
 
 type evidenceGap struct {
 	Field           string                  `json:"field"`
@@ -60,16 +61,17 @@ func validateEvidenceGaps(output, input json.RawMessage) error {
 		return err
 	}
 	_ = json.Unmarshal(input, &in)
+	var issues []error
 	for _, g := range out.Gaps {
 		if g.Status == "not_retrieved" && strings.TrimSpace(g.Query) == "" {
-			return fmt.Errorf("缺项 %s 尚未检索到，必须提供针对该字段的 query；不能直接判定原文未报告", g.Field)
+			issues = append(issues, fmt.Errorf("缺项 %s 尚未检索到，必须提供针对该字段的 query；不能直接判定原文未报告", g.Field))
 		}
 		if g.Required && !evidenceGapResolvedForScope(g) && out.Coverage.Sufficient {
-			return fmt.Errorf("核心字段 %s 尚未核验，coverage.sufficientForClaimedScope 不能为 true", g.Field)
+			issues = append(issues, fmt.Errorf("核心字段 %s 尚未核验，coverage.sufficientForClaimedScope 不能为 true", g.Field))
 		}
 		if g.Status == "not_discussed_in_checked_scope" {
 			if err := validateCheckedEvidenceScope(g, input); err != nil {
-				return err
+				issues = append(issues, err)
 			}
 		}
 		if g.Status != "explicitly_not_reported" {
@@ -82,10 +84,10 @@ func validateEvidenceGaps(output, input json.RawMessage) error {
 			}
 		}
 		if !valid {
-			return fmt.Errorf("缺项 %s 的原文未报告判定必须附当前候选的 reference 和连续 supportingQuote；无明确原句时改为 not_retrieved 或 unreadable", g.Field)
+			issues = append(issues, fmt.Errorf("缺项 %s 的原文未报告判定必须附当前候选的 reference 和连续 supportingQuote；无明确原句时改为 not_retrieved 或 unreadable", g.Field))
 		}
 	}
-	return nil
+	return errors.Join(issues...)
 }
 
 // Verify only that the declared sources were actually read. Whether these

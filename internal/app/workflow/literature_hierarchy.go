@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/wangh00/SciAide/internal/app/research"
 )
 
 const literatureHierarchyInstruction = `按 _literature.phase 执行且仅提交对应阶段字段。batch: 逐篇初筛，提交 summary/candidateAssessments/evidenceNotes；不得输出全局 coverage、supplementalQueries 或推荐清单。每个候选对应一条 evidenceNotes；exclude 只需 candidateId 和 quotes，排除依据写在 assessment.reason；core/support 必须包含研究设计、人群、干预/暴露、对照、结局、主要发现及待核验项，未提供的信息明确写 unknown。原文完整分布在 titleSegments/abstractSegments 的 text，按顺序连接就是原文，没有摘要删节。quotes 优先只填写 {field,segmentId}，例如 {"field":"abstract","segmentId":"a0002"}；选择支持本候选判断的实际片段，宿主按当前 candidateId 和 field 取回原句，不必抄写 quote。编号仅在本候选字段内有效，不能借用其他候选片段。若使用 quote 则必须是原文连续逐字摘录，最多500字符。有摘要时引用摘要，无摘要时引用题名且不能判 core。reason 简短说明依据。synthesis: 依据 evidenceRecords 或 childSummaries 整理一致结论、冲突和遗漏，仅提交 summary/findings/uncertainties，每条包含 text 和真实 candidateIds；保留重要不确定性，不将同一试验的多篇文章计为独立试验。coverage: 提交 summary/coverage/supplementalQueries/recommendation/recommendedCandidateIds/recheckCandidateIds/rechecks/findings/uncertainties，不重新逐篇初筛。需要原文解决具体冲突或误排时在 recheckCandidateIds 填候选 ID，并在 rechecks 逐项写具体问题。先前 AI 初筛不是已验证事实。预算不足、来源失败不是学术证据不足，不按报告长短收窄检索。任何 findings/uncertainties 只能引用当前输入覆盖的候选。core=摘要支持冻结范围的直接相关材料，support=相关但需要核验，exclude=有明确不符依据。synthesis 必须在 findings 或 uncertainties 中涵盖每个保留候选，多层综合保留子层重要发现及疑点。所有回复包含 phase，只输出当前阶段字段，不写重复背景。`
@@ -14,18 +16,6 @@ type literatureQuote struct {
 	Field     string `json:"field"`
 	Quote     string `json:"quote,omitempty"`
 	SegmentID string `json:"segmentId,omitempty"`
-}
-
-func completeLiteratureNote(n *literatureNote) bool {
-	if n == nil {
-		return false
-	}
-	for _, value := range []string{n.Design, n.Population, n.Intervention, n.Comparator, n.Outcome, n.Finding, n.Uncertainty} {
-		if strings.TrimSpace(value) == "" {
-			return false
-		}
-	}
-	return true
 }
 
 const literatureEfficiencyInstruction = `本阶段只做题名/摘要证据整理，不是全文质量认证。排除项只输出 candidateId 和支持排除的原文 quotes，其余证据字段省略；保留项各字段用简短事实或 unknown，避免重复研究背景。题名由宿主绑定，无需重复抄写；有摘要必须摘录摘要，无摘要必须摘录题名，保留连续原文依据。不输出解释性前言。coverage 不逐篇重写记录，聚焦跨研究结论与真实缺口；同一试验的报告不能计为独立试验。recheckCandidateIds 与 rechecks[{candidateId,question}] 一一对应，仅请求能通过现有题名/摘要解决的具体冲突或疑似误排；全文、注册号或缺失数据才能解决的问题记入 uncertainties，不能要求反复回读相同摘要。不要请求 alreadyRecheckedCandidateIds 中的未变化来源；remainingRecheckRounds=0 时两个回查数组为空。来源失败和缺少全文不等同于检索不存在相关研究，仍明确限制结论。`
@@ -46,12 +36,13 @@ type literatureFinding struct {
 	CandidateIDs []string `json:"candidateIds"`
 }
 type literatureEvidenceRecord struct {
-	CandidateID  string               `json:"candidateId"`
-	Title        string               `json:"title"`
-	SourceSHA256 string               `json:"sourceSha256"`
-	ExecutionID  string               `json:"executionId,omitempty"`
-	Assessment   literatureAssessment `json:"assessment"`
-	Note         *literatureNote      `json:"note,omitempty"`
+	RecordIdentity *research.RecordIdentity `json:"recordIdentity,omitempty"`
+	CandidateID    string                   `json:"candidateId"`
+	Title          string                   `json:"title"`
+	SourceSHA256   string                   `json:"sourceSha256"`
+	ExecutionID    string                   `json:"executionId,omitempty"`
+	Assessment     literatureAssessment     `json:"assessment"`
+	Note           *literatureNote          `json:"note,omitempty"`
 }
 type literatureSummary struct {
 	Key                   string              `json:"key"`
@@ -165,6 +156,9 @@ func literaturePhaseFields(phase string) []string {
 }
 
 func validateLiteratureHierarchy(output, input json.RawMessage) error {
+	if err := validateLiteratureIdentities(output, input); err != nil {
+		return err
+	}
 	var in struct {
 		Literature literatureInput            `json:"_literature"`
 		Candidates []literatureCandidate      `json:"candidates"`
@@ -281,7 +275,10 @@ func validateLiteratureHierarchy(output, input json.RawMessage) error {
 			return fmt.Errorf("every offered candidate requires a traceable evidence note")
 		}
 		if len(quoteIssues) > 0 {
-			return fmt.Errorf("%d source quote issues (first %d): %s. Prefer the exact candidate's titleSegments/abstractSegments IDs; do not rewrite original numbers or punctuation", len(quoteIssues), min(8, len(quoteIssues)), strings.Join(quoteIssues[:min(8, len(quoteIssues))], "; "))
+			// The batch and quote counts are already bounded by the frozen schema.
+			// List all cell locations (no repeated source text), otherwise two
+			// correction turns cannot even see defects after the first eight.
+			return fmt.Errorf("%d source quote issues: %s. Prefer the exact candidate's titleSegments/abstractSegments IDs; do not rewrite original numbers or punctuation", len(quoteIssues), strings.Join(quoteIssues, "; "))
 		}
 		return nil
 	}
@@ -389,11 +386,11 @@ func literatureRecords(detail RunDetail, state literatureCheckpoint, candidates 
 		if !ok {
 			continue
 		}
-		hash := hashJSON(mustJSON(c))
+		hash := literatureCandidateSHA256(c)
 		if f := fingerprints[c.ID]; f != "" && f != hash {
 			continue
 		}
-		r := literatureEvidenceRecord{CandidateID: c.ID, Title: c.Title, SourceSHA256: hash, ExecutionID: executions[c.ID], Assessment: a}
+		r := literatureEvidenceRecord{RecordIdentity: research.PreviewRecordIdentity(c.RecordIdentity), CandidateID: c.ID, Title: c.Title, SourceSHA256: hash, ExecutionID: executions[c.ID], Assessment: a}
 		if note, ok := notes[c.ID]; ok && fingerprints[c.ID] == hash {
 			r.Note = &note
 		}
@@ -451,13 +448,16 @@ func prepareLiteratureSynthesis(detail RunDetail, candidates []literatureCandida
 			info.Fingerprints[id] = fingerprint
 		}
 	}
+	if nav := literatureIdentityNavigation(records); nav != nil {
+		args["recordIdentityNavigation"] = nav
+	}
 	delete(args, "candidates")
 	delete(args, "excludedAssessments")
 	delete(args, "priorAssessments")
 	info.Phase = "coverage"
 	args["_literature"] = info
 	args["evidenceRecords"] = records
-	args["partialDiscovery"] = info.State.SourceFailures
+	args["partialDiscovery"] = info.State.SourceFailures || len(info.State.BudgetSearches) > 0
 	if len(mustJSON(args)) <= 120*1024 {
 		return literatureCoverageInput(args, info)
 	}
@@ -568,7 +568,7 @@ func (s *RuntimeService) finalizeLiteratureEvidence(ctx context.Context, detail 
 	assessments := []literatureAssessment{}
 	for _, c := range candidates {
 		a, ok := prior[c.ID]
-		if fingerprints[c.ID] != "" && fingerprints[c.ID] != hashJSON(mustJSON(c)) {
+		if fingerprints[c.ID] != "" && fingerprints[c.ID] != literatureCandidateSHA256(c) {
 			ok = false
 		}
 		if !ok {
@@ -587,7 +587,8 @@ func (s *RuntimeService) finalizeLiteratureEvidence(ctx context.Context, detail 
 	}
 	// Selection cards need metadata, not another copy of every long abstract.
 	for i := range kept {
-		kept[i].SourceSHA256 = hashJSON(mustJSON(kept[i]))
+		kept[i].SourceSHA256 = literatureCandidateSHA256(kept[i])
+		kept[i] = literatureCandidateView(kept[i])
 		kept[i].Abstract = ""
 	}
 	(*analysis)["candidateAssessments"] = assessments
@@ -651,7 +652,7 @@ func (s *RuntimeService) ReadLiteratureCandidate(ctx context.Context, projectID,
 		return nil, err
 	}
 	for _, c := range literatureCandidates(values) {
-		if c.ID == candidateID && hashJSON(mustJSON(c)) == hash {
+		if c.ID == candidateID && literatureCandidateSHA256(c) == hash {
 			return mustJSON(c), nil
 		}
 	}

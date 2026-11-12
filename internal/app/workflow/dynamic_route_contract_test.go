@@ -80,7 +80,7 @@ func TestDataDeliveryReceivesActualImplementationAndResults(t *testing.T) {
 	}
 	for _, target := range []string{"report_drafting", "independent_review"} {
 		for _, node := range template.Definition.Nodes {
-			if node.ID == target && !strings.HasSuffix(node.PromptVersion, "-implementation-v1") {
+			if node.ID == target && !strings.Contains(node.PromptVersion, "-implementation-v1") {
 				t.Fatalf("data delivery lost version suffix: %s", node.PromptVersion)
 			}
 		}
@@ -235,7 +235,7 @@ func TestDynamicRouteWithOnlySelectedMaterialsSkipsDiscoveryButKeepsEvidenceChai
 					t.Fatal("local review gained unscoped material access", name)
 				}
 			}
-			if node.PromptVersion != dynamicResearchReviewVersion+"-"+focusedReviewVersion {
+			if node.PromptVersion != routeDeliveryReviewVersion+"-"+focusedReviewVersion {
 				t.Fatal("new review contract not frozen")
 			}
 		}

@@ -6,7 +6,7 @@ import ts from 'typescript';
 
 const source=fs.readFileSync(new URL('./App.tsx',import.meta.url),'utf8');
 const start=source.indexOf('  async function createConversation()');
-const end=source.indexOf('\n  const [cancellingRunId',start);
+const end=source.indexOf('\n  async function stopConversationRun',start);
 function fixture(){
   let resolve,reject;const pending=new Promise((yes,no)=>{resolve=yes;reject=no});
   const state={creating:false,list:[],selected:'',notice:''},calls=[];

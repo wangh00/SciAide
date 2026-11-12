@@ -81,7 +81,7 @@ func TestRetryReviewPromptAddsRequirementPolicyWithoutChangingFrozenSchema(t *te
 	node := CompiledNode{ID: "independent_review", PromptVersion: "frozen-before-fix", OutputSchema: trackedResearchReviewSchema()}
 	beforeSchema, beforeInput := string(node.OutputSchema), string(input)
 	prompt := buildAIStagePrompt(RunDetail{}, Step{Input: input, Attempt: 4}, node)
-	for _, text := range []string{"/_userRevision/changes/<zero-based index>", "never as scientific evidence", "current deliverable /context is mandatory", "Do not cite other _userRevision fields"} {
+	for _, text := range []string{"/_userRevision/changes/<zero-based index>", "never as scientific evidence", "current deliverable /context or a separated /reportRecordAppendices/N record is mandatory", "Do not cite other _userRevision fields"} {
 		if !strings.Contains(prompt, text) {
 			t.Fatalf("missing current host policy: %s", text)
 		}

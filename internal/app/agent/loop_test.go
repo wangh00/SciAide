@@ -29,17 +29,20 @@ import (
 )
 
 type loopState struct {
-	mu            sync.Mutex
-	run           chat.Run
-	workflowAI    bool
-	messages      []conversation.Message
-	calls         map[string]tool.Call
-	callOrder     []string
-	providerTurns []model.ProviderTurn
-	runSteps      []chat.RunStep
-	requestUsage  map[int]chat.RequestUsage
-	auxUsage      map[string]chat.RequestUsage
-	journalDrafts map[int]string
+	mu                  sync.Mutex
+	run                 chat.Run
+	workflowAI          bool
+	messages            []conversation.Message
+	calls               map[string]tool.Call
+	callOrder           []string
+	providerTurns       []model.ProviderTurn
+	runSteps            []chat.RunStep
+	requestUsage        map[int]chat.RequestUsage
+	auxUsage            map[string]chat.RequestUsage
+	journalDrafts       map[int]string
+	journalCommentaries map[int]string
+	journalStatuses     map[int]chat.ModelTurnStatus
+	plannerCheckpoint   *chat.PlannerCheckpoint
 }
 
 func (s *loopState) BeginModelTurn(_ context.Context, _ string, turn int, _ time.Time) error {
@@ -47,6 +50,10 @@ func (s *loopState) BeginModelTurn(_ context.Context, _ string, turn int, _ time
 		s.journalDrafts = map[int]string{}
 	}
 	s.journalDrafts[turn] = ""
+	if s.journalStatuses == nil {
+		s.journalStatuses = map[int]chat.ModelTurnStatus{}
+	}
+	s.journalStatuses[turn] = chat.ModelTurnStreaming
 	return nil
 }
 func (s *loopState) UpdateModelTurnDraft(_ context.Context, _ string, turn int, draft string, _ int, _ time.Time) error {
@@ -56,7 +63,25 @@ func (s *loopState) UpdateModelTurnDraft(_ context.Context, _ string, turn int, 
 	s.journalDrafts[turn] = draft
 	return nil
 }
-func (s *loopState) FinishModelTurn(context.Context, string, int, chat.ModelTurnStatus, string, int, time.Time) error {
+func (s *loopState) FinishModelTurn(_ context.Context, _ string, turn int, status chat.ModelTurnStatus, _ string, _ int, _ time.Time) error {
+	if s.journalStatuses == nil {
+		s.journalStatuses = map[int]chat.ModelTurnStatus{}
+	}
+	s.journalStatuses[turn] = status
+	return nil
+}
+
+func (s *loopState) SaveModelTurnSubmissionCommentary(_ context.Context, _ string, turn int, text string, _ time.Time) error {
+	if text == "" || len([]rune(text)) > 200000 {
+		return fmt.Errorf("invalid model turn submission commentary")
+	}
+	if s.journalCommentaries == nil {
+		s.journalCommentaries = map[int]string{}
+	}
+	if old := s.journalCommentaries[turn]; old != "" && old != text {
+		return fmt.Errorf("submission commentary already bound")
+	}
+	s.journalCommentaries[turn] = text
 	return nil
 }
 
@@ -1252,6 +1277,56 @@ func TestResearchConversationFiltersDefinitionsAndRejectsForgedToolCall(t *testi
 	}
 }
 
+func TestResearchDiscussionDoesNotReplayInternalStageInstructions(t *testing.T) {
+	for _, text := range []string{"你好", "解释一下当前报告的局限", "只分析这个文件，不修改现有结果", `我写的示例是 {"summary":"hello"}，请解释它`} {
+		t.Run(text, func(t *testing.T) {
+			final := []fake.Step{{Event: model.Event{Type: model.EventTextDelta, Text: "这是对当前问题的普通回答。"}}, {Event: model.Event{Type: model.EventDone, FinishReason: "stop"}}}
+			loop, state, provider := newLoopFixture(t, nil, final)
+			state.messages[0].Parts[0].Text = text
+			old := []conversation.Message{
+				{ID: "old-human", RunID: "prior-chat", Role: conversation.RoleUser, Parts: []conversation.MessagePart{{Type: "text", Text: "保留比较的原要求"}}},
+				{ID: "stage-input", RunID: "stage-run", Internal: true, Role: conversation.RoleUser, Parts: []conversation.MessagePart{{Type: "text", Text: "INTERNAL_SCHEMA: perform independent review; return acceptanceChecks"}}},
+				{ID: "stage-output", RunID: "stage-run", Internal: true, Role: conversation.RoleAssistant, Parts: []conversation.MessagePart{{Type: "text", Text: "INTERNAL_OUTPUT: approved"}}},
+			}
+			state.messages = append(old, state.messages...)
+			loop.research = &staticResearchGuidance{bound: true, value: workflow.ResearchGuidance{WorkflowRunID: "workflow-run", SystemContext: workflow.ResearchDiscussionSystemRules}}
+			if outcome := loop.Run(context.Background(), "run"); outcome != OutcomeCompleted {
+				t.Fatalf("outcome=%s run=%+v", outcome, state.run)
+			}
+			requests := provider.Requests()
+			if len(requests) != 1 || len(state.calls) != 0 || assistantText(state.messages, "assistant") != "这是对当前问题的普通回答。" {
+				t.Fatal("ordinary answer required extra execution or structured output")
+			}
+			found, prior := false, false
+			for _, m := range requests[0].Messages {
+				if strings.Contains(m.Content, "INTERNAL_") {
+					t.Fatal("internal stage record replayed as dialogue")
+				}
+				found = found || m.Role == model.RoleUser && m.Content == text
+				prior = prior || m.Role == model.RoleUser && m.Content == "保留比较的原要求"
+			}
+			if !found || !prior || conversationText(state.messages[1]) != conversationText(old[1]) || conversationText(state.messages[2]) != conversationText(old[2]) {
+				t.Fatal("lost human context or mutated durable stage audit")
+			}
+		})
+	}
+}
+
+func TestDiscussionProjectionKeepsCheckpointAnchorsAndStageAudit(t *testing.T) {
+	internal := conversation.Message{ID: "boundary", RunID: "stage", Internal: true, Role: conversation.RoleAssistant, Parts: []conversation.MessagePart{{Type: "text", Text: "old stage instructions"}}}
+	human := conversation.Message{ID: "next-human", Role: conversation.RoleUser, Parts: []conversation.MessagePart{{Type: "text", Text: "请保留这个后续要求"}}}
+	before, _ := json.Marshal(internal)
+	projected := discussionConversationMessages([]conversation.Message{internal, human})
+	after, _ := json.Marshal(internal)
+	if string(before) != string(after) || projected[0].ID != internal.ID || conversationText(projected[0]) != "" {
+		t.Fatal("projection changed audit or removed checkpoint anchor")
+	}
+	remaining := messagesAfterCheckpoint(projected, "boundary")
+	if len(remaining) != 1 || conversationText(remaining[0]) != conversationText(human) {
+		t.Fatal("old stage checkpoint boundary lost newer human request")
+	}
+}
+
 func TestWorkflowAIStageUsesFrozenStageInputInsteadOfCompactingEarlierStages(t *testing.T) {
 	final := []fake.Step{{Event: model.Event{Type: model.EventTextDelta, Text: `{"summary":"done"}`}}, {Event: model.Event{Type: model.EventDone, FinishReason: "stop"}}}
 	loop, state, provider := newLoopFixture(t, nil, final)
@@ -1325,7 +1400,7 @@ func TestWorkflowAIStageContinuesAfterProgressOnlyResponse(t *testing.T) {
 	if len(requests) != 2 {
 		t.Fatalf("request count = %d, want 2", len(requests))
 	}
-	if len(requests[1].Messages) == 0 || !strings.Contains(requests[1].Messages[len(requests[1].Messages)-1].Content, "did not submit the required Workflow result") {
+	if requests[1].ForcedTool != stageSubmissionTool || !strings.Contains(submissionRequestText(requests[1]), "did not submit the required Workflow result") {
 		t.Fatalf("continuation request did not contain the structured-output instruction: %#v", requests[1].Messages)
 	}
 	if got := state.messages[1].Parts[0].Text; got != `{"summary":"done"}` {
@@ -1385,7 +1460,7 @@ func TestWorkflowAIStageRepairsMalformedJSONAsContentNotProgress(t *testing.T) {
 	if outcome := loop.Run(context.Background(), state.run.ID); outcome != OutcomeCompleted {
 		t.Fatalf("outcome = %s, run = %#v", outcome, state.run)
 	}
-	if requests := provider.Requests(); len(requests) != 2 || !strings.Contains(requests[1].Messages[len(requests[1].Messages)-1].Content, "Host submission validation failed") {
+	if requests := provider.Requests(); len(requests) != 2 || requests[1].ForcedTool != stageSubmissionTool || !strings.Contains(submissionRequestText(requests[1]), "Host submission validation failed") {
 		t.Fatalf("malformed JSON did not receive content-specific correction: %#v", requests)
 	}
 	if got := state.messages[1].Parts[0].Text; !strings.Contains(got, "corrected") {
@@ -1417,7 +1492,7 @@ func TestWorkflowAIStageKeepsStructuredContractWhenGuidanceProjectionIsTransient
 	if got := state.messages[1].Parts[0].Text; got != `{"summary":"done"}` {
 		t.Fatalf("assistant text = %q", got)
 	}
-	if last := provider.Requests()[1].Messages[len(provider.Requests()[1].Messages)-1].Content; !strings.Contains(last, "did not submit the required Workflow result") {
+	if last := submissionRequestText(provider.Requests()[1]); provider.Requests()[1].ForcedTool != stageSubmissionTool || !strings.Contains(last, "did not submit the required Workflow result") {
 		t.Fatalf("transient-unbound continuation missing: %q", last)
 	}
 }
@@ -1448,8 +1523,8 @@ func TestWorkflowAIStageUsesDurableContractWhenGuidanceIsNonStructured(t *testin
 	if len(provider.Requests()) != 2 {
 		t.Fatalf("request count = %d, want 2", len(provider.Requests()))
 	}
-	last := provider.Requests()[1].Messages[len(provider.Requests()[1].Messages)-1].Content
-	if !strings.Contains(last, "did not submit the required Workflow result") {
+	last := submissionRequestText(provider.Requests()[1])
+	if provider.Requests()[1].ForcedTool != stageSubmissionTool || !strings.Contains(last, "did not submit the required Workflow result") {
 		t.Fatalf("durable structured contract was not enforced: %q", last)
 	}
 	if got := state.messages[1].Parts[0].Text; got != `{"summary":"done"}` {
@@ -1479,8 +1554,8 @@ func TestWorkflowAIStageFailsClosedAfterProgressOnlyResponses(t *testing.T) {
 	if got := state.messages[1].Parts[0].Text; got != "" {
 		t.Fatalf("progress-only text was committed as final answer: %q", got)
 	}
-	if state.run.ErrorCode != "WORKFLOW_AI_OUTPUT_MISSING" {
-		t.Fatalf("error code = %q, want WORKFLOW_AI_OUTPUT_MISSING", state.run.ErrorCode)
+	if state.run.ErrorCode != "WORKFLOW_AI_CONTENT_REPAIR_EXHAUSTED" || !strings.Contains(state.run.ErrorMessage, "仍未返回有效的结构化结果") {
+		t.Fatalf("missing-result submission failures lost their category: %q %q", state.run.ErrorCode, state.run.ErrorMessage)
 	}
 	if len(provider.Requests()) != maxStructuredContinuationAttempts+1 {
 		t.Fatalf("request count = %d, want %d", len(provider.Requests()), maxStructuredContinuationAttempts+1)
@@ -2034,7 +2109,9 @@ func TestAgentLoopResumeExecutesApprovedCallBeforeNextModelTurn(t *testing.T) {
 
 func TestContextBuilderKeepsLatestMessageAndToolResults(t *testing.T) {
 	baseTokens := len([]rune(fixedSystemRules))
-	builder := NewContextBuilder(baseTokens + 5 + len([]rune("fixture")) + len([]rune(`{}`)) + 20)
+	// Below this marker size the builder now fails explicitly, rather than
+	// silently emitting an empty object or a fragment of JSON.
+	builder := NewContextBuilder(baseTokens + 5 + len([]rune("fixture")) + len([]rune(`{}`)) + len(`{"contentNotShown":true}`))
 	messages := []conversation.Message{
 		{ID: "old", Role: conversation.RoleUser, Parts: []conversation.MessagePart{{Type: "text", Text: "12345"}}},
 		{ID: "new", Role: conversation.RoleUser, Parts: []conversation.MessagePart{{Type: "text", Text: "67890"}}},
@@ -2050,6 +2127,9 @@ func TestContextBuilderKeepsLatestMessageAndToolResults(t *testing.T) {
 	}
 	if request.Messages[1].Content != "67890" || roles[len(roles)-1] != model.RoleTool {
 		t.Fatalf("request = %#v", request)
+	}
+	if !json.Valid([]byte(request.Messages[len(request.Messages)-1].Content)) {
+		t.Fatal("tool omission preview is not valid JSON")
 	}
 }
 
@@ -2397,7 +2477,7 @@ func TestManualCompactionRejectsActiveConversation(t *testing.T) {
 
 func TestContextBuilderCompactsNormalizedToolResultsWithoutDroppingProtocolPairs(t *testing.T) {
 	baseTokens := len([]rune(fixedSystemRules))
-	builder := NewContextBuilder(baseTokens + len([]rune("fixture")) + len([]rune(`{}`)) + 20)
+	builder := NewContextBuilder(baseTokens + 2*(len([]rune("fixture"))+len([]rune(`{}`))+tool.MinimumContextPreviewRunes))
 	calls := []tool.Call{
 		{ProviderCallID: "old", ToolName: "fixture", Arguments: json.RawMessage(`{}`), Result: &tool.Result{Status: tool.ResultSuccess, Text: strings.Repeat("o", 100)}},
 		{ProviderCallID: "new", ToolName: "fixture", Arguments: json.RawMessage(`{}`), Result: &tool.Result{Status: tool.ResultSuccess, Text: "newest"}},

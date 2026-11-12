@@ -3,6 +3,7 @@ package wails
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/wangh00/SciAide/internal/app/project"
 	"github.com/wangh00/SciAide/internal/app/researchtask"
 	"github.com/wangh00/SciAide/internal/app/workflow"
+	"github.com/wangh00/SciAide/internal/apperr"
 )
 
 type WorkflowFacade struct {
@@ -95,6 +97,10 @@ func (f *WorkflowFacade) StartResearch(command workflow.StartResearchCommand) (w
 	return f.starter.Start(f.lifecycle.Context(), command)
 }
 
+func (f *WorkflowFacade) GetCurrentResearchTaskRun(projectID, taskID string) (workflow.RunDetail, error) {
+	return f.runtime.CurrentResearchTaskRun(f.lifecycle.Context(), projectID, taskID)
+}
+
 // AnswerResearchClarification accepts only option IDs offered by the
 // completed planner and starts the next planner attempt for the same task.
 func (f *WorkflowFacade) AnswerResearchClarification(command workflow.AnswerResearchClarificationCommand) (workflow.RunDetail, error) {
@@ -119,6 +125,20 @@ func (f *WorkflowFacade) StartAdoptedResearchRoute(command workflow.StartAdopted
 		return workflow.RunDetail{}, fmt.Errorf("research starter is not configured")
 	}
 	return f.starter.StartAdoptedResearchRoute(f.lifecycle.Context(), command)
+}
+
+func (f *WorkflowFacade) GetResearchRouteDataCandidates(projectID, starterRunID, routeID string) ([]workflow.ResearchRouteDataCandidate, error) {
+	if f.starter == nil {
+		return nil, fmt.Errorf("research starter is not configured")
+	}
+	return f.starter.ResearchRouteDataCandidates(f.lifecycle.Context(), projectID, starterRunID, routeID)
+}
+
+func (f *WorkflowFacade) StageResearchRouteData(command workflow.StageResearchRouteDataCommand) (workflow.RevisionDataFile, error) {
+	if f.starter == nil {
+		return workflow.RevisionDataFile{}, fmt.Errorf("research starter is not configured")
+	}
+	return f.starter.StageResearchRouteData(f.lifecycle.Context(), command)
 }
 
 // GetResearchStarterPlan returns the host-validated projection of a completed
@@ -297,7 +317,13 @@ func (f *WorkflowFacade) ResolveApproval(command permission.ResolveCommand) (wor
 }
 
 func (f *WorkflowFacade) Retry(command workflow.RetryCommand) (workflow.RunDetail, error) {
-	return f.runtime.Retry(f.lifecycle.Context(), command)
+	detail, err := f.runtime.Retry(f.lifecycle.Context(), command)
+	var stateErr *apperr.Error
+	if errors.As(err, &stateErr) && stateErr.Code == "WORKFLOW_RETRY_CONFLICT" {
+		// Wails renders Error(); the debug API still needs the typed code.
+		return detail, fmt.Errorf("%s: %w", stateErr.UserMessage, err)
+	}
+	return detail, err
 }
 
 func (f *WorkflowFacade) Validate(projectID string, definition workflow.Definition) workflow.Preview {

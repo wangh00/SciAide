@@ -1,0 +1,107 @@
+{
+  "originalRequest": "审查并定点修复所给合成数据描述稿，先原样接收草稿，再独立核对；不得在第一次独立审查前改正草稿数字。接收阶段不代表内容正确或交付通过。",
+  "context": {
+    "markdown": "# 合成数据描述核对稿\n\n本稿仅描述四条人为构造的演示记录，不代表真实受试者或实采研究。\n\n四条 score 测量值为 10、12、14、16，算术平均值为 15。\n\n本示例不估计总体参数，不作显著性、因果或长期效果推断。\n\n局限：样本极小且为人工构造，只用于检查记录、数字和正文是否一致。\n"
+  },
+  "dataPreflight": {
+    "syntheticMeasurementRecords": [
+      {
+        "syntheticRecordIdentity": {
+          "recordId": "qa-1",
+          "measurement": {
+            "score": 10,
+            "unit": "illustrative_score"
+          },
+          "provenance": {
+            "kind": "synthetic-test-only",
+            "sequence": 1,
+            "missing": false
+          }
+        }
+      },
+      {
+        "syntheticRecordIdentity": {
+          "recordId": "qa-2",
+          "measurement": {
+            "score": 12,
+            "unit": "illustrative_score"
+          },
+          "provenance": {
+            "kind": "synthetic-test-only",
+            "sequence": 2,
+            "missing": false
+          }
+        }
+      },
+      {
+        "syntheticRecordIdentity": {
+          "recordId": "qa-3",
+          "measurement": {
+            "score": 14,
+            "unit": "illustrative_score"
+          },
+          "provenance": {
+            "kind": "synthetic-test-only",
+            "sequence": 3,
+            "missing": false
+          }
+        }
+      },
+      {
+        "syntheticRecordIdentity": {
+          "recordId": "qa-4",
+          "measurement": {
+            "score": 16,
+            "unit": "illustrative_score"
+          },
+          "provenance": {
+            "kind": "synthetic-test-only",
+            "sequence": 4,
+            "missing": false
+          }
+        }
+      }
+    ],
+    "syntheticMeasurementSummary": {
+      "singleOutcome": {
+        "score": {
+          "descriptiveStatistics": {
+            "n": 4,
+            "sum": 52,
+            "mean": 13,
+            "minimum": 10,
+            "maximum": 16
+          },
+          "calculationDefinition": "Arithmetic mean equals the sum of all four scores divided by four; independently recompute if needed."
+        }
+      }
+    },
+    "scope": "Synthetic evaluation input only; not empirical observations, not expert-validated research."
+  },
+  "researchContract": {
+    "successCriteria": [
+      "核对四条合成记录与正文的样本数、原值和算术平均值，最终交付中的数字必须一致；仅标为待核验不能替代实际核对。",
+      "科学缺陷必须由独立审查据当前原文和数值判断；选择真实依据，保留未解决问题，不因测试意图预设通过或否决。",
+      "修复应限于已确认缺陷及必要关联字段，保持不相关正文、方法与局限，不重跑无关阶段。",
+      "保留人工合成、小规模描述、不支持总体外推或因果推断的边界。"
+    ]
+  },
+  "acceptanceCriteria": [
+    {
+      "id": "criterion-1",
+      "text": "核对四条合成记录与正文的样本数、原值和算术平均值，最终交付中的数字必须一致；仅标为待核验不能替代实际核对。"
+    },
+    {
+      "id": "criterion-2",
+      "text": "科学缺陷必须由独立审查据当前原文和数值判断；选择真实依据，保留未解决问题，不因测试意图预设通过或否决。"
+    },
+    {
+      "id": "criterion-3",
+      "text": "修复应限于已确认缺陷及必要关联字段，保持不相关正文、方法与局限，不重跑无关阶段。"
+    },
+    {
+      "id": "criterion-4",
+      "text": "保留人工合成、小规模描述、不支持总体外推或因果推断的边界。"
+    }
+  ]
+}

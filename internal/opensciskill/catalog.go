@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
-	"embed"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -26,9 +25,6 @@ import (
 	"github.com/wangh00/SciAide/internal/platform/filepublish"
 	"gopkg.in/yaml.v3"
 )
-
-//go:embed all:defaultskills defaultskills.manifest.json defaultskills.upstream.manifest.json capability-audit.v1.json
-var bundled embed.FS
 
 const (
 	DefaultRoot          = "defaultskills"
@@ -203,6 +199,9 @@ type Service struct {
 func NewService(db *sql.DB, projects ProjectLoader, dataRoot string) (*Service, error) {
 	if db == nil || projects == nil || strings.TrimSpace(dataRoot) == "" {
 		return nil, fmt.Errorf("OpenScience Skill service is not configured")
+	}
+	if err := bundled.initialize(); err != nil {
+		return nil, fmt.Errorf("open embedded Skill archive: %w", err)
 	}
 	installed := filepath.Join(dataRoot, "installed-skills")
 	user := filepath.Join(dataRoot, "user-skills")
@@ -454,7 +453,7 @@ func (s *Service) Browse(ctx context.Context, projectID, category string) ([]Inf
 	category = strings.ToLower(strings.TrimSpace(category))
 	result := make([]Info, 0)
 	for _, item := range snapshot.Skills {
-		if item.Enabled && item.Entry && item.Capability != CapabilityUnavailable && strings.ToLower(normalizedCategory(item.Category)) == category {
+		if item.Callable() && strings.ToLower(normalizedCategory(item.Category)) == category {
 			result = append(result, item)
 		}
 	}
@@ -471,11 +470,8 @@ func (s *Service) Load(ctx context.Context, projectID, name string, offset, limi
 			return Info{}, Chunk{}, "", err
 		}
 	}
-	if !info.Enabled {
-		return Info{}, Chunk{}, "", fmt.Errorf("Skill %q is disabled", info.Name)
-	}
-	if info.Capability == CapabilityUnavailable {
-		return Info{}, Chunk{}, "", fmt.Errorf("Skill %q is currently unavailable: %s", info.Name, info.CapabilityReason)
+	if err := skillAvailabilityError(info); err != nil {
+		return Info{}, Chunk{}, "", err
 	}
 	body, err := s.verifiedInstructionBody(info)
 	if err != nil {
@@ -486,11 +482,8 @@ func (s *Service) Load(ctx context.Context, projectID, name string, offset, limi
 		if info, err = s.resolve(ctx, projectID, name); err != nil {
 			return Info{}, Chunk{}, "", err
 		}
-		if !info.Enabled {
-			return Info{}, Chunk{}, "", fmt.Errorf("Skill %q is disabled", info.Name)
-		}
-		if info.Capability == CapabilityUnavailable {
-			return Info{}, Chunk{}, "", fmt.Errorf("Skill %q is currently unavailable: %s", info.Name, info.CapabilityReason)
+		if err := skillAvailabilityError(info); err != nil {
+			return Info{}, Chunk{}, "", err
 		}
 		if body, err = s.verifiedInstructionBody(info); err != nil {
 			return Info{}, Chunk{}, "", err
@@ -510,8 +503,7 @@ func (s *Service) LoadForRun(ctx context.Context, runID, projectID, toolCallID, 
 			return Info{}, Chunk{}, false, fmt.Errorf("loaded Skill belongs to another project")
 		}
 		chunk, err := sliceRunes(persisted.Name, persisted.Origin, persisted.Instructions, offset, limit)
-		info := Info{Name: persisted.Name, Origin: persisted.Origin, Category: persisted.Category, ContentHash: persisted.ContentHash, PackageHash: persisted.PackageHash, InstructionRunes: len([]rune(persisted.Instructions)), Enabled: true, Entry: true}
-		persisted.CapabilityAudit.apply(&info)
+		info := runSkillInfo(persisted)
 		return info, chunk, false, err
 	} else if !errors.Is(err, ErrRunSkillNotFound) {
 		return Info{}, Chunk{}, false, err
@@ -527,21 +519,42 @@ func (s *Service) LoadForRun(ctx context.Context, runID, projectID, toolCallID, 
 // LoadStructuredForRun returns a section index for long Markdown Skills and
 // loads individual sections from the same complete immutable Run snapshot.
 func (s *Service) LoadStructuredForRun(ctx context.Context, runID, projectID, toolCallID, name, section string, offset, limit int) (Info, Chunk, bool, error) {
-	info, _, created, err := s.LoadForRun(ctx, runID, projectID, toolCallID, name, 0, 1)
-	if err != nil {
-		return Info{}, Chunk{}, false, err
-	}
-	loaded, err := s.GetRunSkill(ctx, runID, info.Name)
-	if err != nil {
-		return Info{}, Chunk{}, false, err
-	}
-	if info.AllowedTools == nil {
+	name, section = strings.TrimSpace(name), strings.TrimSpace(section)
+	loaded, err := s.GetRunSkill(ctx, runID, name)
+	if err == nil {
+		if loaded.ProjectID != strings.TrimSpace(projectID) {
+			return Info{}, Chunk{}, false, fmt.Errorf("loaded Skill belongs to another project")
+		}
+		info := runSkillInfo(loaded)
+		chunk, readErr := structuredInstructionChunk(info.Name, info.Origin, loaded.Instructions, section, offset, limit)
+		if readErr != nil {
+			return Info{}, Chunk{}, false, readErr
+		}
 		if current, resolveErr := s.resolveExact(ctx, loaded.ProjectID, loaded); resolveErr == nil {
 			info.AllowedTools = current.AllowedTools
 		}
+		return info, chunk, false, nil
+	} else if !errors.Is(err, ErrRunSkillNotFound) {
+		return Info{}, Chunk{}, false, err
 	}
-	chunk, err := structuredInstructionChunk(info.Name, info.Origin, loaded.Instructions, strings.TrimSpace(section), offset, limit)
+	info, _, body, err := s.Load(ctx, projectID, name, 0, 1)
+	if err != nil {
+		return Info{}, Chunk{}, false, err
+	}
+	// Validate the requested page before recording the full immutable snapshot.
+	// A nonexistent section must not leave a falsely "loaded" Run Skill behind.
+	chunk, err := structuredInstructionChunk(info.Name, info.Origin, body, section, offset, limit)
+	if err != nil {
+		return Info{}, Chunk{}, false, err
+	}
+	_, created, err := s.RecordRunSkill(ctx, runID, projectID, toolCallID, info, body)
 	return info, chunk, created, err
+}
+
+func runSkillInfo(loaded RunSkill) Info {
+	info := Info{Name: loaded.Name, Origin: loaded.Origin, Category: loaded.Category, ContentHash: loaded.ContentHash, PackageHash: loaded.PackageHash, InstructionRunes: len([]rune(loaded.Instructions)), Enabled: true, Entry: true}
+	loaded.CapabilityAudit.apply(&info)
+	return info
 }
 
 func (s *Service) ReadResource(ctx context.Context, runID, name, resourcePath string, offset, maxBytes int) (Resource, error) {
@@ -689,7 +702,7 @@ func (s *Service) ReadSourceFile(ctx context.Context, projectID, name, sourcePat
 func (s *Service) resolve(ctx context.Context, projectID, name string) (Info, error) {
 	name = strings.TrimSpace(name)
 	if !ValidName(name) {
-		return Info{}, fmt.Errorf("valid Skill name is required")
+		return Info{}, &UsageError{Kind: UsageName, Name: name}
 	}
 	snapshot, err := s.Catalog(ctx, projectID)
 	if err != nil {
@@ -714,7 +727,7 @@ func (s *Service) discover(ctx context.Context, projectID string) (Snapshot, err
 		candidates = append(candidates, values...)
 		diagnostics = append(diagnostics, issues...)
 	}
-	values, issues := scanFS(bundled, DefaultRoot, OriginDefault, true)
+	values, issues := bundled.catalog()
 	add(values, issues)
 	defaultCount := len(values)
 	values, issues = scanDisk(s.installedRoot, OriginInstalled, false)
@@ -1056,17 +1069,17 @@ func (s *Service) verifiedInstructionBody(info Info) (string, error) {
 
 func sliceRunes(name string, origin Origin, body string, offset, limit int) (Chunk, error) {
 	if offset < 0 {
-		return Chunk{}, fmt.Errorf("Skill offset must not be negative")
+		return Chunk{}, &UsageError{Kind: UsageOffset, Name: name, Maximum: len([]rune(body))}
 	}
 	if limit == 0 {
 		limit = DefaultReadRunes
 	}
 	if limit < 1 || limit > MaxReadRunes {
-		return Chunk{}, fmt.Errorf("Skill read limit must be between 1 and %d runes", MaxReadRunes)
+		return Chunk{}, &UsageError{Kind: UsageLimit, Name: name, Maximum: MaxReadRunes}
 	}
 	values := []rune(body)
 	if offset > len(values) {
-		return Chunk{}, fmt.Errorf("Skill offset exceeds instruction length")
+		return Chunk{}, &UsageError{Kind: UsageOffset, Name: name, Maximum: len(values)}
 	}
 	end := min(len(values), offset+limit)
 	return Chunk{Name: name, Origin: origin, Mode: "page", Content: string(values[offset:end]), Offset: offset, NextOffset: end, TotalRunes: len(values), Truncated: end < len(values), Sections: []InstructionSection{}}, nil

@@ -45,7 +45,7 @@ func (r *WorkflowRuntimeRepository) ReadResearchTimeline(ctx context.Context, qu
 	rows, err := r.db.QueryContext(ctx, `SELECT t.sequence,t.workflow_run_id,COALESCE(wc.conversation_id,''),t.kind,t.source_id,t.event_type,t.snapshot_json,t.created_at
 		FROM research_timeline t JOIN workflow_runs wr ON wr.id=t.workflow_run_id LEFT JOIN workflow_conversations wc ON wc.workflow_run_id=wr.id
 		WHERE t.research_task_id=? AND wr.project_id=? AND (?=0 OR t.sequence<?) AND (?=0 OR t.sequence>?)
-		AND NOT(t.kind='message' AND EXISTS(SELECT 1 FROM messages m JOIN workflow_ai_chat_runs b ON b.chat_run_id=m.run_id WHERE m.id=t.source_id AND m.role='user'))
+		AND NOT(t.kind='message' AND EXISTS(SELECT 1 FROM messages m JOIN workflow_ai_chat_runs b ON b.chat_run_id=m.run_id JOIN runs stage ON stage.id=b.chat_run_id WHERE m.id=t.source_id AND m.role='user' AND m.id=stage.user_message_id))
 		ORDER BY t.sequence `+order+` LIMIT ?`, query.TaskID, query.ProjectID, before, before, after, after, limit+1)
 	if err != nil {
 		return page, err
@@ -89,6 +89,19 @@ func (r *WorkflowRuntimeRepository) ReadResearchTimeline(ctx context.Context, qu
 	for i := len(items) - 1; i >= 0; i-- {
 		v := items[i]
 		entry := v.entry
+		// Ordinary dialogue rows need neither every stage input nor all events.
+		if entry.Kind == "message" {
+			values, readErr := NewConversationRepository(r.db).readMessagesWhere(ctx, "m.conversation_id=? AND m.id=?", []any{entry.ConversationID, v.source}, 1, true)
+			if readErr != nil {
+				return page, readErr
+			}
+			if len(values) != 1 {
+				return page, fmt.Errorf("timeline message not found")
+			}
+			entry.Message = &values[0]
+			page.Entries = append(page.Entries, entry)
+			continue
+		}
 		detail, ok := details[entry.RunID]
 		if !ok {
 			detail.Run, err = scanWorkflowRun(r.db.QueryRowContext(ctx, workflowRunSelect+` WHERE wr.project_id=? AND wr.id=?`, query.ProjectID, entry.RunID))
@@ -106,12 +119,6 @@ func (r *WorkflowRuntimeRepository) ReadResearchTimeline(ctx context.Context, qu
 			details[entry.RunID] = detail
 		}
 		switch entry.Kind {
-		case "message":
-			message, err := NewConversationRepository(r.db).GetTimelineMessage(ctx, v.source, entry.ConversationID)
-			if err != nil {
-				return page, err
-			}
-			entry.Message = &message
 		case "proposal":
 			if detail.RevisionProposals == nil {
 				detail.RevisionProposals, err = r.ListResearchRevisionProposals(ctx, entry.RunID)
@@ -146,7 +153,7 @@ func (r *WorkflowRuntimeRepository) ReadResearchTimeline(ctx context.Context, qu
 					StepID string `json:"stepId"`
 				}
 				_ = json.Unmarshal(event.Payload, &other)
-				if other.StepID == payload.StepID {
+				if entry.EventType == "workflow.cancel_requested" || other.StepID == payload.StepID {
 					latestEvent = event.ID
 				}
 			}
@@ -165,6 +172,20 @@ func (r *WorkflowRuntimeRepository) ReadResearchTimeline(ctx context.Context, qu
 							entry.Step = &copy
 						}
 						break
+					}
+				}
+			}
+			if entry.EventType == "workflow.cancel_requested" && currentEvent {
+				if step := workflow.CancelledAIRecoveryStep(detail); step != nil {
+					var captured workflow.Step
+					_ = json.Unmarshal(snapshot["step"], &captured)
+					// Existing cancellation events have an empty payload and no
+					// captured step. Derive a live action from durable run state;
+					// never rewrite that historical event or its snapshot.
+					if (payload.StepID == "" || payload.StepID == step.ID) && (captured.ID == "" || captured.ID == step.ID && captured.Attempt == step.Attempt) {
+						entry.Active = true
+						copy := *step
+						entry.Step = &copy
 					}
 				}
 			}

@@ -68,7 +68,7 @@ func TestCapturedEvidenceCoverageRetryReusesCheckpoints(t *testing.T) {
 
 func TestEvidenceCoverageRetriesKeepOnlyMatchingCompletedCheckpoints(t *testing.T) {
 	input := raw(`{"documentIds":["doc-a","doc-b"],"candidates":[]}`)
-	key := hashJSON(input)
+	key := selectedEvidenceSourceKey(RunDetail{}, input)
 	output := raw(`{"documentAnalyses":[{"documentId":"doc-a","finding":"accepted A","limitations":"bounded","references":[]},{"documentId":"doc-b","finding":"accepted B","limitations":"bounded","references":[]}]}`)
 	for _, status := range []StepStatus{StepFailed, StepCancelled, StepInterrupted} {
 		t.Run(string(status), func(t *testing.T) {

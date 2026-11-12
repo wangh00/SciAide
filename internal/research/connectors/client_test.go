@@ -39,9 +39,7 @@ func TestClientRetriesCachesAndClassifiesFailures(t *testing.T) {
 	client := newTestClient(server.Client())
 	client.attempts = 2
 	host := endpointHost(server.URL)
-	var value struct {
-		OK bool `json:"ok"`
-	}
+	var value syntaxFixtureResponse
 	if err := client.getJSON(context.Background(), server.URL, requestOptions{SourceID: "fixture", Host: host, Cache: true}, &value); err != nil {
 		t.Fatal(err)
 	}

@@ -206,6 +206,7 @@ func (b *Bridge) Activity(ctx context.Context, execution workflow.AIExecution) (
 		Status: execution.Status, ChatStatus: string(snapshot.Run.Status), ModelID: snapshot.Run.ModelID,
 		ModelTurns: snapshot.Run.ModelTurns, InputTokens: snapshot.Run.InputTokens,
 		OutputTokens: snapshot.Run.OutputTokens, ReasoningTokens: snapshot.Run.ReasoningTokens,
+		Retry:     snapshot.Retry,
 		StartedAt: execution.StartedAt, UpdatedAt: snapshot.Run.UpdatedAt,
 		ToolCalls: make([]workflow.AIStageToolActivity, 0, len(snapshot.ToolCalls)),
 	}
@@ -293,6 +294,9 @@ func (b *Bridge) Activity(ctx context.Context, execution workflow.AIExecution) (
 }
 
 func currentAction(snapshot chat.Snapshot, activity workflow.AIStageActivity) string {
+	if snapshot.Run.Status == chat.RunWaitingUserInput {
+		return "等待你的研究选择；回答后继续本次审查"
+	}
 	for index := len(activity.ToolCalls) - 1; index >= 0; index-- {
 		call := activity.ToolCalls[index]
 		switch call.Status {
@@ -306,6 +310,16 @@ func currentAction(snapshot chat.Snapshot, activity workflow.AIStageActivity) st
 	case chat.RunQueued:
 		return "正在排队"
 	case chat.RunRunning:
+		if snapshot.Activity != nil && snapshot.Activity.Matches(snapshot.Run) {
+			switch snapshot.Activity.Phase {
+			case "model_processing":
+				return "模型已响应，等待完整结果（尚未完成）"
+			case "compaction":
+				return "正在压缩会话上下文，原始历史保留"
+			case "compaction_completed":
+				return "会话摘要已保存，准备继续"
+			}
+		}
 		return "正在等待 AI 响应"
 	case chat.RunWaitingApproval:
 		return "等待工具授权"

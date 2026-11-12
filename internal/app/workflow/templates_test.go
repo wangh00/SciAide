@@ -9,12 +9,14 @@ import (
 	"testing"
 
 	"github.com/wangh00/SciAide/internal/app/tool"
+	"github.com/wangh00/SciAide/internal/app/userinput"
 	"github.com/wangh00/SciAide/internal/skillrun"
 )
 
 func TestReferenceTemplatesCompileAgainstResearchToolContracts(t *testing.T) {
 	registry := tool.NewRegistry()
 	definitions := []tool.Definition{
+		{QualifiedName: userinput.ToolName, Version: "1", Risk: tool.RiskLow, Idempotent: true, InputSchema: raw(`{"type":"object"}`), OutputSchema: raw(`{"type":"object"}`)},
 		{QualifiedName: ResearchTaskReadTool, Version: "6", Risk: tool.RiskLow, Idempotent: true, InputSchema: raw(`{"type":"object"}`), OutputSchema: raw(`{"type":"object"}`)},
 		fullTextReadFixtureDefinition(),
 		{QualifiedName: "builtin.resource.open", Version: "1", Risk: tool.RiskLow, Idempotent: true, InputSchema: json.RawMessage(`{"type":"object","required":["actionId"],"properties":{"actionId":{"type":"string"}}}`), OutputSchema: json.RawMessage(`{"type":"object"}`)},
@@ -62,7 +64,7 @@ func TestReferenceTemplatesCompileAgainstResearchToolContracts(t *testing.T) {
 				if node.PromptVersion == "" || len(node.OutputSchema) == 0 || len(node.OutputSchemaSHA256) != 64 {
 					t.Fatalf("AI node snapshot is incomplete: %#v", node)
 				}
-				if node.Kind == NodeAgentStage && (node.ReviewPolicy != AIReviewAuto || !node.SkillRouting) {
+				if node.Kind == NodeAgentStage && (node.ReviewPolicy != AIReviewAuto || !node.SkillRouting && !hasFrozenTool(node.AllowedTools, userinput.ToolName)) {
 					t.Fatalf("reference Agent Stage is not autonomy-first: %#v", node)
 				}
 				if node.SkillRouting && (!hasFrozenTool(node.AllowedTools, "builtin.skill.load") || !hasFrozenTool(node.AllowedTools, "builtin.skill.resource.list") || !hasFrozenTool(node.AllowedTools, "builtin.skill.resource.read_text")) {
@@ -392,6 +394,7 @@ func referenceTemplateRegistry(t *testing.T) *tool.MemoryRegistry {
 		}
 	}
 	definitions := []tool.Definition{
+		{QualifiedName: userinput.ToolName, Version: "1", Risk: tool.RiskLow, Idempotent: true, InputSchema: raw(`{"type":"object"}`), OutputSchema: raw(`{"type":"object"}`)},
 		{QualifiedName: "builtin.attachment.list", Version: "1", Risk: tool.RiskLow, Idempotent: true, InputSchema: raw(`{"type":"object"}`), OutputSchema: raw(`{"type":"object"}`)},
 		{QualifiedName: "builtin.document.inspect", Version: "1", Risk: tool.RiskLow, Idempotent: true, InputSchema: raw(`{"type":"object"}`), OutputSchema: raw(`{"type":"object"}`)},
 		{QualifiedName: "builtin.knowledge.read", Version: "1", Risk: tool.RiskLow, Idempotent: true, InputSchema: raw(`{"type":"object"}`), OutputSchema: raw(`{"type":"object"}`)},
@@ -453,7 +456,7 @@ func TestReferenceTemplatesRequireIndependentReviewAndDeliveryGate(t *testing.T)
 	for _, template := range ReferenceTemplates() {
 		hasReview, hasGate := false, false
 		for _, node := range template.Definition.Nodes {
-			hasReview = hasReview || node.Kind == NodeAIAnalysis && strings.Contains(node.ID, "review")
+			hasReview = hasReview || node.Kind == NodeAgentStage && strings.Contains(node.ID, "review") && slices.Contains(node.AllowedTools, userinput.ToolName)
 			hasGate = hasGate || node.ToolName == "builtin.research.workflow.review.gate"
 		}
 		if !hasReview || !hasGate {

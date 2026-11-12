@@ -3,7 +3,7 @@ import {applyRetryEvent,retryStatusLabel,toolDecisionLabel} from './retryPresent
 const retry={phase:'request',attempt:2,maxAttempts:5,delayMillis:6000,message:'retry'};
 test('scientific review decisions are not displayed as generic tool crashes',()=>{
  assert.equal(toolDecisionLabel({toolName:'builtin.research.workflow.review.gate',status:'failed',errorCode:'RESEARCH_REVIEW_NOT_APPROVED'}),'审查未通过 · 待修改');
- assert.equal(toolDecisionLabel({toolName:'builtin.research.workflow.review.gate',status:'failed'}),'审查未通过 · 待修改');
+ assert.equal(toolDecisionLabel({toolName:'builtin.research.workflow.review.gate',status:'failed'}),'');
  assert.equal(toolDecisionLabel({toolName:'builtin.resource.open',status:'failed',errorCode:'TOOL_INVOCATION_FAILED'}),'');
  assert.equal(toolDecisionLabel({toolName:'builtin.research.workflow.review.gate',status:'failed',errorCode:'TOOL_INVOCATION_FAILED',errorMessage:'独立审查的冻结输入无效'}),'');
  assert.equal(toolDecisionLabel({toolName:'builtin.research.workflow.review.gate',status:'failed',errorCode:'TOOL_INVOCATION_FAILED',errorMessage:'独立审查未通过：仍有科学问题'}),'审查未通过 · 待修改');
@@ -23,6 +23,11 @@ test('temporary model outage is shown as service recovery rather than scientific
  assert.equal(retryStatusLabel({...retry,phase:'stream',reason:'service_unavailable'}),'模型服务暂时不可用，等待后重试 2/5 · 本次重试间隔 6 秒');
  assert.equal(retryStatusLabel({...retry,reason:'service_unavailable',delayMillis:0}),'模型服务暂时不可用，等待后重试 2/5');
 });
+
+test('stalled stream and reconnected incomplete response have distinct persistent labels',()=>{
+ assert.equal(retryStatusLabel({...retry,phase:'stream',reason:'stream_stalled'}),'模型流无有效进展，正在重连 2/5 · 本次重试间隔 6 秒');
+ assert.equal(retryStatusLabel({...retry,phase:'stream',reason:'stream_stalled',state:'receiving'}),'重试 2/5 · 已重新连接，等待本次模型结果完成');
+});
 test('retry events remain scoped to their own run and clear on recovery or termination',()=>{
  let current=applyRetryEvent({}, {aggregateId:'a',type:'run.retrying',payload:{retry}});
  current=applyRetryEvent(current,{aggregateId:'b',type:'run.retrying',payload:{retry:{...retry,attempt:1}}});
@@ -34,7 +39,7 @@ test('research and ordinary message cards both receive the run-scoped retry stat
  const src=await readFile(new URL('./App.tsx',import.meta.url),'utf8');
  assert.match(src,/retryStatus=\{message.runId \? retryByRun\[message.runId\]/);
  assert.match(src,/WorkflowMessageActivityCard activity=\{workflowActivity\} retryStatus=\{retryStatus\}/);
- assert.match(src,/running && retryStatusLabel\(retryStatus\)/);
+ assert.match(src,/running && retryStatusLabel\(activity.retry \?\? retryStatus\)/);
  assert.match(src,/const liveDetail = retryStatusLabel\(retryStatus\)/);
 });
 

@@ -71,6 +71,7 @@ func TestAcceptanceGateKeepsOriginalToolContractAndFullAudit(t *testing.T) {
 	input, output := acceptanceFixture(t)
 	full := rawObject(output)
 	detail := RunDetail{Run: Run{Compilation: Compilation{Nodes: []CompiledNode{{ID: "review", Kind: NodeAIAnalysis, OutputSchema: researchAcceptanceReviewSchema()}, {ID: "gate", Kind: NodeTool, Tool: &ToolSnapshot{QualifiedName: "builtin.research.workflow.review.gate"}}}, Edges: []Edge{{FromNode: "review", FromPort: "analysis", ToNode: "gate", ToPort: "review"}}}}, Steps: []Step{{ID: "review-step", NodeID: "review", Status: StepCompleted, Input: input, Output: rawObject(map[string]any{"analysis": full})}}}
+	freezeReviewExecutionFixture(t, &detail, 0)
 	bound, err := bindNodeInput(detail, detail.Run.Compilation.Nodes[1])
 	if err != nil {
 		t.Fatal(err)

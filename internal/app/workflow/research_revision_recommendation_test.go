@@ -30,6 +30,7 @@ func recommendationFixture(t *testing.T) RunDetail {
 		if nodeID == "delivery_gate" {
 			node.Kind, node.Tool = NodeTool, &ToolSnapshot{QualifiedName: "builtin.research.workflow.review.gate"}
 			step.Status = StepFailed
+			step.ErrorCode = "RESEARCH_REVIEW_NOT_APPROVED"
 		}
 		step.NodeKind = node.Kind
 		detail.Run.Compilation.Nodes = append(detail.Run.Compilation.Nodes, node)
@@ -47,7 +48,7 @@ func recommendationFixture(t *testing.T) RunDetail {
 	review := map[string]any{
 		"approved": false, "reviewedInputSha256": hashJSON(input), "verifiedClaims": []string{}, "unsupportedClaims": []string{}, "citationIssues": []string{}, "numericIssues": []string{}, "methodIssues": []string{"method does not match study"},
 		"requiredCorrections": []string{"clarify the report", "correct the method"}, "confidence": "medium", "limitations": []string{},
-		"revisionPlan": []researchRevisionPlanItem{{0, "report_drafting", "report wording is ambiguous", "this is the last producer", false, ""}, {1, "method_selection", "frozen method is unsuitable", "editing prose cannot change the method", false, ""}},
+		"revisionPlan": []researchRevisionPlanItem{{0, "report_drafting", "report wording is ambiguous", "this is the last producer", false, "", nil}, {1, "method_selection", "frozen method is unsuitable", "editing prose cannot change the method", false, "", nil}},
 	}
 	freezeRecommendationReview(t, &detail, review)
 	return detail
@@ -152,6 +153,9 @@ func TestRevisionRecommendationNeedsUserInputAndLegacyUnavailable(t *testing.T) 
 	if len(result.RequiredInputs) != 1 || result.RequiredInputs[0] != "提供原始随访数据" {
 		t.Fatalf("missing actionable requirements: %+v", result)
 	}
+	if len(result.RepairableCorrections) != 1 || result.PendingStartLabel != "撰写报告" || len(result.PendingAffectedStages) != 3 {
+		t.Fatalf("mixed repair lost AI work: %+v", result)
+	}
 	if _, err := resolveReviewRevisionRequest(detail, detail.Steps[5], RetryCommand{UseRecommendation: true, ExpectedReviewSHA256: result.ReviewOutputSHA256}); err == nil {
 		t.Fatal("missing input authorized recommended retry")
 	}
@@ -233,7 +237,7 @@ type recommendationRetryRepository struct {
 func (r *recommendationRetryRepository) GetRun(context.Context, string, string) (RunDetail, error) {
 	return r.detail, nil
 }
-func (r *recommendationRetryRepository) ResetStepsForUpstreamRetry(_ context.Context, _, _, _ string, decision *HumanDecision, _ time.Time, event RuntimeEvent) error {
+func (r *recommendationRetryRepository) ResetStepsForUpstreamRetry(_ context.Context, _, _, _ string, decision *HumanDecision, _ time.Time, event RuntimeEvent, _ RetryGuard) error {
 	r.resets++
 	r.decision = decision
 	r.event = event
@@ -296,5 +300,33 @@ func TestReviewRetryShowsPendingPublicationWithoutDuplicateConsent(t *testing.T)
 	command := RetryCommand{RunID: detail.Run.ID, StepID: detail.Steps[5].ID, UseRecommendation: true, ExpectedReviewSHA256: recommendation.ReviewOutputSHA256}
 	if _, err := service.Retry(context.Background(), command); err != nil || repository.resets != 1 || repository.decision != nil {
 		t.Fatal(err, repository.resets)
+	}
+}
+
+func TestReviewProgressIsInternalContextNotAnotherHumanDecision(t *testing.T) {
+	detail := recommendationFixture(t)
+	detail.Run.Compilation.Nodes[0].ID = "evidence_screening"
+	detail.Run.Compilation.Nodes[0].PromptVersion = selectedEvidenceVersion
+	detail.Run.Compilation.Nodes[0].AllowedTools = []ToolSnapshot{{QualifiedName: "builtin.knowledge.read"}}
+	detail.Steps[0].NodeID = "evidence_screening"
+	detail.Run.Compilation.Order[0] = "evidence_screening"
+	detail.Run.Compilation.Edges[0].FromNode = "evidence_screening"
+	detail.Steps[4].Input = rawObject(map[string]any{"context": raw(`{"summary":"current result"}`), "revisionTargets": revisionPlanTargetsForReview(detail, "independent_review")})
+	detail.Steps[4].InputSHA256 = hashJSON(detail.Steps[4].Input)
+	mutateRecommendationReview(t, &detail, func(out map[string]any) {
+		out["reviewedInputSha256"] = detail.Steps[4].InputSHA256
+		out["revisionPlan"].([]any)[1].(map[string]any)["nodeId"] = "evidence_screening"
+	})
+	output := raw(`{"coverage":{"sufficientForClaimedScope":false},"evidenceGaps":[{"field":"mechanism","status":"not_retrieved","required":true,"query":"q"}],"recommendedReferences":["same"]}`)
+	detail.AIExecutions = append(detail.AIExecutions,
+		AIExecution{WorkflowStepID: detail.Steps[0].ID, Attempt: 1, Status: "completed", InputSHA256: "same", Output: output},
+		AIExecution{WorkflowStepID: detail.Steps[0].ID, Attempt: 2, Status: "completed", InputSHA256: "same", Output: output})
+	result := researchRevisionRecommendation(detail)
+	if result.Status != "recommended" || result.NodeID != "evidence_screening" || len(result.RequiredInputs) != 0 || !strings.Contains(strings.Join(result.Reasons, " "), "未观察到补证进展") {
+		t.Fatal("history heuristic made an unnecessary user-input gate", result)
+	}
+	bound, err := bindNodeInput(detail, detail.Run.Compilation.Nodes[4])
+	if err != nil || !strings.Contains(string(bound), "reviewRepairProgress") || !strings.Contains(string(bound), "未观察到补证进展") {
+		t.Fatal("review did not receive its internal progress context", string(bound), err)
 	}
 }

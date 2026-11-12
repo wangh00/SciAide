@@ -11,8 +11,10 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/wangh00/SciAide/internal/app/modelprofile"
+	"github.com/wangh00/SciAide/internal/apperr"
 	"github.com/wangh00/SciAide/internal/model"
 	"github.com/wangh00/SciAide/internal/modelcap"
 	"github.com/wangh00/SciAide/internal/modelutil"
@@ -25,6 +27,8 @@ type Client struct {
 	secret                    []byte
 	http                      *http.Client
 	recorder                  modelcap.ReasoningRecorder
+	debugObserver             func(DebugProviderError)
+	debugStreamObserver       func(DebugStreamFault)
 	cacheMu                   sync.RWMutex
 	promptCacheKeyUnsupported bool
 }
@@ -39,6 +43,11 @@ func New(profile modelprofile.Profile, secret []byte, recorders ...modelcap.Reas
 		recorder = recorders[0]
 	}
 	return &Client{profile: profile, secret: append([]byte(nil), secret...), http: modelutil.NewStreamingHTTPClient(timeout), recorder: recorder}
+}
+
+// Called once, before sharing a newly constructed client.
+func (c *Client) SetRequestGate(gate func(context.Context) error) {
+	c.http = modelutil.WithRequestGate(c.http, gate)
 }
 
 func (c *Client) Capabilities(context.Context) (model.Capabilities, error) {
@@ -214,12 +223,27 @@ func (c *Client) streamOnce(ctx context.Context, request model.ChatRequest, requ
 	if request.DisableTools {
 		value.ToolChoice = "none"
 	}
+	if request.RequireTool {
+		if request.DisableTools || len(request.Tools) == 0 {
+			return nil, fmt.Errorf("invalid required tool contract")
+		}
+		value.ToolChoice = "required"
+		disabled := false
+		value.ParallelToolCalls = &disabled
+	}
 	if request.ForcedTool != "" {
 		name := aliases[request.ForcedTool]
 		if name == "" || request.DisableTools {
 			return nil, fmt.Errorf("invalid forced tool contract")
 		}
 		value.ToolChoice = map[string]string{"type": "function", "name": name}
+		if len(request.Tools) == 1 {
+			// The sole offered tool is already the validated forced target.
+			// Required + nonparallel preserves that exact constraint without
+			// depending on a gateway's named-tool dialect. Never use this
+			// shorthand with multiple offered tools: it would weaken the target.
+			value.ToolChoice = "required"
+		}
 		disabled := false
 		value.ParallelToolCalls = &disabled
 	}
@@ -309,6 +333,12 @@ func (c *Client) streamOnce(ctx context.Context, request model.ChatRequest, requ
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		body := modelutil.ReadErrorBody(response.Body)
 		response.Body.Close()
+		if observe := debugErrorObserver(c.debugObserver, c.secret, c.profile.CustomHeaders); observe != nil {
+			observe("http_error", fmt.Sprintf("%d", response.StatusCode), modelutil.ProviderErrorMessage(body))
+		}
+		if err := modelutil.HTTPGatewayIdentityError(response.StatusCode, body); err != nil {
+			return nil, err
+		}
 		if request.PromptCacheKey != "" && promptCacheKeyRejected(response.StatusCode, body) {
 			return nil, &promptCacheKeyRejectedError{err: modelutil.ClassifyStatusWithHeaders(response.StatusCode, response.Header, body)}
 		}
@@ -322,9 +352,17 @@ func (c *Client) streamOnce(ctx context.Context, request model.ChatRequest, requ
 		}
 		return nil, modelutil.ClassifyStatusWithHeaders(response.StatusCode, response.Header, body)
 	}
-	scanner := modelutil.NewSSEDecoder(response.Body, maxStreamLineBytes)
+	var trace *streamWireTrace
+	if c.debugStreamObserver != nil {
+		trace = &streamWireTrace{ReadCloser: response.Body}
+		response.Body = trace
+	}
+	scanner, guardedBody := modelutil.NewProgressSSEDecoder(ctx, response.Body, maxStreamLineBytes, modelutil.StreamInactivityTimeout(c.profile.TimeoutSeconds, request.StreamInactivityTimeout), request.StreamRecoveryDeadline)
 	return &stream{
-		body:              response.Body,
+		debugError:        debugErrorObserver(c.debugObserver, c.secret, c.profile.CustomHeaders),
+		debugStreamFault:  debugStreamFaultObserver(c.debugStreamObserver, c.secret, c.profile.CustomHeaders),
+		wireTrace:         trace,
+		body:              guardedBody,
 		scanner:           scanner,
 		providerNames:     providerNames,
 		calls:             map[string]*callAccumulator{},
@@ -414,6 +452,22 @@ func responseMessageText(item responseItem) (string, error) {
 	return text.String(), nil
 }
 
+func responseMessageRefused(item responseItem) bool {
+	if item.Type != "message" {
+		return false
+	}
+	var content []responseMessageContent
+	if json.Unmarshal(item.Content, &content) != nil {
+		return false
+	}
+	for _, block := range content {
+		if block.Type == "refusal" {
+			return true
+		}
+	}
+	return false
+}
+
 func appendProviderTurns(value *payload, turns []model.ProviderTurn) error {
 	for _, turn := range turns {
 		if turn.Protocol != modelcap.ProtocolOpenAIResponses {
@@ -482,6 +536,9 @@ type anonymousItemState struct {
 }
 
 type stream struct {
+	debugError        func(string, string, string)
+	debugStreamFault  func([]byte, bool, *streamWireTrace)
+	wireTrace         *streamWireTrace
 	body              io.ReadCloser
 	scanner           *modelutil.SSEDecoder
 	providerNames     map[string]string
@@ -500,8 +557,18 @@ type stream struct {
 	providerBytes     int
 	queue             []model.Event
 	hadToolCalls      bool
+	refused           bool
 	done              bool
 }
+
+func (s *stream) PendingToolArgumentChars() int {
+	count := 0
+	for _, call := range s.calls {
+		count += utf8.RuneCountInString(call.Arguments.String())
+	}
+	return count
+}
+
 type eventPayload struct {
 	Type        string          `json:"type"`
 	Code        string          `json:"code"`
@@ -701,9 +768,9 @@ func responsesStreamEventError(message, data string, cause error) error {
 	return modelutil.ErrorWithDetails(
 		"MODEL_STREAM_INVALID",
 		message,
-		modelutil.ProviderErrorDetails("Responses stream event", 0, []byte(data)),
+		modelutil.StreamEventErrorDetails("Responses stream event", []byte(data)),
 		false,
-		cause,
+		modelutil.ProviderProtocolErrorCause(cause),
 	)
 }
 
@@ -763,11 +830,27 @@ func (s *stream) Recv() (model.Event, error) {
 		}
 		var event eventPayload
 		if err := json.Unmarshal([]byte(data), &event); err != nil {
-			return model.Event{}, modelutil.ClassifySSEJSONError("Responses stream event", "模型返回了无法解析的 Responses 流数据。", []byte(data), err)
+			if s.debugStreamFault != nil {
+				s.debugStreamFault([]byte(data), s.scanner.EventComplete(), s.wireTrace)
+			}
+			prefix, priorType, terminal, coalesced := s.scanner.CoalescedErrorFields()
+			if failure, raw, ok := coalescedTerminalFault(prefix, priorType, terminal); coalesced && !s.refused && ok {
+				// Surface only the fully decoded terminal failure. Never salvage
+				// preceding output, finish a tool, or accept a scientific draft.
+				s.done = true
+				if s.debugError != nil {
+					s.debugError(failure.Type, failure.Code, failure.Message)
+				}
+				details := modelutil.CoalescedStreamErrorDetails("Responses stream error framing", []byte(data), raw)
+				return model.Event{}, classifyCoalescedTerminalFault(failure, details)
+			}
+			return model.Event{}, modelutil.ClassifySSEJSONError("Responses stream event", "模型返回了无法解析的 Responses 流数据。", []byte(data), err, s.scanner.EventComplete())
 		}
 		switch event.Type {
-		case "response.output_text.delta":
+		case "response.output_text.delta", "response.refusal.delta":
+			s.refused = s.refused || event.Type == "response.refusal.delta"
 			if event.Delta != "" {
+				s.scanner.MarkProgress()
 				key := event.ItemID
 				ordinal, known := s.itemIndexes[key]
 				if known {
@@ -793,12 +876,16 @@ func (s *stream) Recv() (model.Event, error) {
 				s.itemIndexes[key] = ordinal
 			}
 			if item.Type == "message" {
+				s.refused = s.refused || responseMessageRefused(item)
 				initialText, textErr := responseMessageText(item)
 				if textErr != nil {
 					return model.Event{}, responsesStreamEventError("Responses 返回了无效的消息内容。", data, textErr)
 				}
 				if err := s.queueMessageText(ordinal, item.Phase, initialText); err != nil {
 					return model.Event{}, responsesStreamEventError("Responses 消息增量不一致。", data, err)
+				}
+				if initialText != "" {
+					s.scanner.MarkProgress()
 				}
 			}
 			if item.Type == "function_call" {
@@ -813,6 +900,10 @@ func (s *stream) Recv() (model.Event, error) {
 				a.Arguments.WriteString(item.Arguments)
 				s.calls[key] = a
 			}
+		case "response.reasoning_summary_text.delta", "response.reasoning_text.delta", "response.reasoning.delta":
+			if event.Delta != "" {
+				s.scanner.MarkProgress()
+			}
 		case "response.function_call_arguments.delta":
 			key := event.ItemID
 			if a := s.calls[key]; a != nil {
@@ -820,6 +911,9 @@ func (s *stream) Recv() (model.Event, error) {
 					return model.Event{}, modelutil.Error("MODEL_TOOL_CALL_INVALID", "模型返回的工具参数过大。", false, nil)
 				}
 				a.Arguments.WriteString(event.Delta)
+				if event.Delta != "" {
+					s.scanner.MarkProgress()
+				}
 			}
 		case "response.output_item.done":
 			item, err := decodeResponseItem(event.Item)
@@ -862,6 +956,7 @@ func (s *stream) Recv() (model.Event, error) {
 				return model.Event{}, responsesStreamEventError("Responses 完成项顺序无效。", data, err)
 			}
 			if item.Type == "message" {
+				s.refused = s.refused || responseMessageRefused(item)
 				completeText, textErr := responseMessageText(item)
 				if textErr != nil {
 					return model.Event{}, responsesStreamEventError("Responses 返回了无效的完成消息。", data, textErr)
@@ -884,6 +979,7 @@ func (s *stream) Recv() (model.Event, error) {
 			if err := s.queueProviderItem(providerItem); err != nil {
 				return model.Event{}, responsesStreamEventError("Responses 完成项无法安全排序。", data, err)
 			}
+			s.scanner.MarkProgress()
 		case "response.completed", "response.incomplete":
 			if event.Type == "response.completed" && (len(s.calls) > 0 || len(s.completedOrdinals) < len(s.seenOrdinals) || len(s.providerItems) > 0) {
 				return model.Event{}, responsesStreamEventError("Responses 流在输出项完成前结束。", data, nil)
@@ -893,9 +989,10 @@ func (s *stream) Recv() (model.Event, error) {
 				s.queue = append(s.queue, model.Event{Type: model.EventUsage, Usage: &usage})
 			}
 			reason := "stop"
-			if s.hadToolCalls {
-				reason = "tool_calls"
-			} else if event.Response.IncompleteDetails != nil {
+			if event.Type == "response.incomplete" {
+				reason = "incomplete"
+			}
+			if event.Response.IncompleteDetails != nil {
 				switch event.Response.IncompleteDetails.Reason {
 				case "max_output_tokens":
 					reason = "length"
@@ -904,6 +1001,11 @@ func (s *stream) Recv() (model.Event, error) {
 				default:
 					reason = "incomplete"
 				}
+			} else if event.Type == "response.completed" && s.hadToolCalls {
+				reason = "tool_calls"
+			}
+			if event.Type == "response.completed" && s.refused {
+				reason = "refusal"
 			}
 			s.queue = append(s.queue, model.Event{Type: model.EventDone, FinishReason: reason})
 			s.done = true
@@ -924,14 +1026,27 @@ func (s *stream) Recv() (model.Event, error) {
 			} else if event.Response.Error != nil {
 				errorType, errorCode = event.Response.Error.Type, event.Response.Error.Code
 			}
-			return model.Event{}, modelutil.ClassifyStreamError(errorType, errorCode, message, modelutil.ProviderErrorDetails("Responses stream event", 0, []byte(data)))
+			if s.debugError != nil {
+				s.debugError(errorType, errorCode, message)
+			}
+			return model.Event{}, modelutil.ClassifyStreamError(errorType, errorCode, message, modelutil.StreamEventErrorDetails("Responses stream event", []byte(data)))
 		}
 		if len(s.queue) > 0 {
 			return s.pop(), nil
 		}
 	}
 	if err := s.scanner.Err(); err != nil {
-		return model.Event{}, modelutil.ClassifySSEReadError(err)
+		classified := modelutil.ClassifySSEReadError(err)
+		var public *apperr.Error
+		if errors.As(classified, &public) && public.Code == "MODEL_STREAM_STALLED" {
+			copy := *public
+			copy.Details += fmt.Sprintf("\nResponses terminal_received=false; completed_items=%d; seen_items=%d; pending_calls=%d. Waiting for response.completed or response.incomplete; complete-looking JSON is not a protocol terminal.", len(s.completedOrdinals), len(s.seenOrdinals), len(s.calls))
+			if len(s.completedOrdinals) > 0 && len(s.completedOrdinals) == len(s.seenOrdinals) && len(s.calls) == 0 {
+				copy.UserMessage = "已收到模型输出项，但未收到整次响应的完成确认，正在尝试重连。"
+			}
+			classified = &copy
+		}
+		return model.Event{}, classified
 	}
 	if !s.done {
 		return model.Event{}, modelutil.Error("MODEL_STREAM_INTERRUPTED", "Responses 流在完成事件前中断，SciAide 将自动重连。", true, io.ErrUnexpectedEOF)
@@ -965,6 +1080,8 @@ func (s *stream) finish() error {
 }
 func (s *stream) pop() model.Event { e := s.queue[0]; s.queue = s.queue[1:]; return e }
 func (s *stream) Close() error     { s.done = true; return s.body.Close() }
+
+func (s *stream) LastProgressAt() time.Time { return s.scanner.LastProgressAt() }
 
 func max(a, b int) int {
 	if a > b {

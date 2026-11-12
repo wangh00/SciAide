@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 type RiskLevel string
@@ -352,6 +353,9 @@ func truncateModelContext(value string, limit int) string {
 	if limit <= 0 {
 		return ""
 	}
+	if preview, ok := FitModelContextPreview(value, limit); ok {
+		return preview
+	}
 	runes := []rune(value)
 	if len(runes) <= limit {
 		return value
@@ -469,6 +473,18 @@ func ValidateArguments(value json.RawMessage) error {
 		return fmt.Errorf("tool arguments exceed size limit")
 	}
 	return validateJSONObject("tool arguments", value)
+}
+
+// Workflow snapshots are host-bound persisted data, not model tool arguments.
+// Match the existing SQLite character capacity (including Unicode), with a
+// byte ceiling before decoding. Chat/model calls retain their 256 KiB limit.
+const MaxWorkflowSnapshotRunes = 1_048_576
+
+func ValidateWorkflowArguments(value json.RawMessage) error {
+	if len(value) > 4*MaxWorkflowSnapshotRunes || !utf8.Valid(value) || utf8.RuneCount(value) > MaxWorkflowSnapshotRunes {
+		return fmt.Errorf("workflow tool arguments exceed snapshot capacity")
+	}
+	return validateJSONObject("workflow tool arguments", value)
 }
 
 func ValidateResult(value Result) error {

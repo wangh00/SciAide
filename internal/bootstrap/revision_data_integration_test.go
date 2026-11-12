@@ -28,6 +28,7 @@ import (
 func TestResearchDataUpdateConfirmsAfterRestartAndKeepsVersion(t *testing.T) {
 	var mu sync.Mutex
 	var selection workflow.RevisionDataSelection
+	var reportWrites []string
 	memory := &researchStageMemoryFixture{}
 	stageServer := newResearchStarterOutputTestServer(t, func(out map[string]any, prompt string) {
 		if _, ok := out["analysisInput"]; ok {
@@ -97,6 +98,7 @@ result`
 		}
 		mu.Lock()
 		dataSelection := selection
+		bodyTargets := append([]string(nil), reportWrites...)
 		mu.Unlock()
 		wording := strings.Contains(text, "WORDING")
 		steps := 3
@@ -119,6 +121,7 @@ result`
 			if wording {
 				command.NodeID, command.Summary, command.DataInputs = "report_drafting", "Clarify report wording without recomputing", nil
 				command.Changes = []string{"Clarify wording; preserve current computed data and results"}
+				command.EditTargets = bodyTargets
 			}
 			args = command
 		}
@@ -361,6 +364,9 @@ result`
 	if err != nil || !bytes.Equal(original, originalBytes) {
 		t.Fatal("old input changed", err)
 	}
+	mu.Lock()
+	reportWrites = reportBodyWriteTargetsFromFrozenReview(t, updated)
+	mu.Unlock()
 	_, wording := chatRevision("WORDING: clarify report wording only, keep current results", nil)
 	if wording.DataVersion != nil {
 		t.Fatal("wording proposal claimed data update")

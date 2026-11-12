@@ -23,6 +23,7 @@ import (
 	"github.com/wangh00/SciAide/internal/app/resource"
 	"github.com/wangh00/SciAide/internal/app/skill"
 	"github.com/wangh00/SciAide/internal/app/tool"
+	"github.com/wangh00/SciAide/internal/app/userinput"
 	"github.com/wangh00/SciAide/internal/app/workflow"
 	"github.com/wangh00/SciAide/internal/apperr"
 	"github.com/wangh00/SciAide/internal/id"
@@ -106,6 +107,10 @@ type modelTurnJournal interface {
 	FinishModelTurn(ctx context.Context, runID string, turnIndex int, status chat.ModelTurnStatus, finishReason string, providerItemCount int, at time.Time) error
 }
 
+type modelTurnSubmissionCommentaryJournal interface {
+	SaveModelTurnSubmissionCommentary(ctx context.Context, runID string, turnIndex int, text string, at time.Time) error
+}
+
 type Conversations interface {
 	UpdateMessageText(ctx context.Context, messageID string, status conversation.MessageStatus, text string, updatedAt time.Time) error
 	ListMessages(ctx context.Context, conversationID string, limit int) ([]conversation.Message, error)
@@ -172,17 +177,21 @@ func (NopObserver) RunFailed(chat.Run, string, string)                 {}
 func (NopObserver) RunCancelled(chat.Run)                              {}
 
 type Options struct {
-	ContextBuilder *ContextBuilder
-	Checkpoints    *contextmemory.Service
-	Terminator     *chat.Terminator
-	SkillContexts  RunSkillContexts
-	SkillRouter    DynamicSkillRouter
-	Images         ImageAttachmentResolver
-	Multimodal     MultimodalFallback
-	Research       ResearchGuidanceProvider
-	Resources      resource.Provider
-	RetryDelay     func(retryIndex int) time.Duration
-	Sleep          func(context.Context, time.Duration) error
+	UserInput interface {
+		WaitForUserInput(context.Context, string, string) (chat.Run, error)
+	}
+	ContextBuilder      *ContextBuilder
+	Checkpoints         *contextmemory.Service
+	Terminator          *chat.Terminator
+	SkillContexts       RunSkillContexts
+	SkillRouter         DynamicSkillRouter
+	Images              ImageAttachmentResolver
+	Multimodal          MultimodalFallback
+	Research            ResearchGuidanceProvider
+	Resources           resource.Provider
+	RetryDelay          func(retryIndex int) time.Duration
+	Sleep               func(context.Context, time.Duration) error
+	ModelRecoveryBudget time.Duration
 }
 
 type Outcome string
@@ -192,33 +201,38 @@ const (
 	OutcomeWaitingApproval Outcome = "waiting_approval"
 	OutcomeFailed          Outcome = "failed"
 	OutcomeCancelled       Outcome = "cancelled"
+	OutcomeInterrupted     Outcome = "interrupted"
 )
 
 type Loop struct {
-	browserReady  func(context.Context, string) bool
-	runs          Runs
-	conversations Conversations
-	tools         ToolCalls
-	registry      tool.Registry
-	approvals     ApprovalCoordinator
-	executor      ToolExecutor
-	models        ModelResolver
-	observer      Observer
-	builder       *ContextBuilder
-	terminator    *chat.Terminator
-	checkpoints   *contextmemory.Service
-	skillContexts RunSkillContexts
-	skillRouter   DynamicSkillRouter
-	images        ImageAttachmentResolver
-	multimodal    MultimodalFallback
-	research      ResearchGuidanceProvider
-	resources     resource.Provider
-	now           func() time.Time
-	retryDelay    func(int) time.Duration
-	sleep         func(context.Context, time.Duration) error
-	maintenanceMu sync.Mutex
-	multimodalMu  sync.Mutex
-	fallbackByRun map[string]multimodal.Result
+	userInput interface {
+		WaitForUserInput(context.Context, string, string) (chat.Run, error)
+	}
+	browserReady        func(context.Context, string) bool
+	runs                Runs
+	conversations       Conversations
+	tools               ToolCalls
+	registry            tool.Registry
+	approvals           ApprovalCoordinator
+	executor            ToolExecutor
+	models              ModelResolver
+	observer            Observer
+	builder             *ContextBuilder
+	terminator          *chat.Terminator
+	checkpoints         *contextmemory.Service
+	skillContexts       RunSkillContexts
+	skillRouter         DynamicSkillRouter
+	images              ImageAttachmentResolver
+	multimodal          MultimodalFallback
+	research            ResearchGuidanceProvider
+	resources           resource.Provider
+	now                 func() time.Time
+	retryDelay          func(int) time.Duration
+	sleep               func(context.Context, time.Duration) error
+	modelRecoveryBudget time.Duration
+	maintenanceMu       sync.Mutex
+	multimodalMu        sync.Mutex
+	fallbackByRun       map[string]multimodal.Result
 }
 
 func NewLoop(runs Runs, conversations Conversations, tools ToolCalls, registry tool.Registry, approvals ApprovalCoordinator, executor ToolExecutor, models ModelResolver, observer Observer, options Options) *Loop {
@@ -234,7 +248,7 @@ func NewLoop(runs Runs, conversations Conversations, tools ToolCalls, registry t
 	if options.Sleep == nil {
 		options.Sleep = sleepContext
 	}
-	return &Loop{runs: runs, conversations: conversations, tools: tools, registry: registry, approvals: approvals, executor: executor, models: models, observer: observer, builder: options.ContextBuilder, terminator: options.Terminator, checkpoints: options.Checkpoints, skillContexts: options.SkillContexts, skillRouter: options.SkillRouter, images: options.Images, multimodal: options.Multimodal, research: options.Research, resources: options.Resources, now: func() time.Time { return time.Now().UTC() }, retryDelay: options.RetryDelay, sleep: options.Sleep, fallbackByRun: make(map[string]multimodal.Result)}
+	return &Loop{userInput: options.UserInput, runs: runs, conversations: conversations, tools: tools, registry: registry, approvals: approvals, executor: executor, models: models, observer: observer, builder: options.ContextBuilder, terminator: options.Terminator, checkpoints: options.Checkpoints, skillContexts: options.SkillContexts, skillRouter: options.SkillRouter, images: options.Images, multimodal: options.Multimodal, research: options.Research, resources: options.Resources, now: func() time.Time { return time.Now().UTC() }, retryDelay: options.RetryDelay, sleep: options.Sleep, modelRecoveryBudget: options.ModelRecoveryBudget, fallbackByRun: make(map[string]multimodal.Result)}
 }
 
 func (l *Loop) Run(ctx context.Context, runID string) Outcome {
@@ -267,6 +281,10 @@ func (l *Loop) Run(ctx context.Context, runID string) Outcome {
 	}
 	l.clearMultimodalResult(run.ID)
 	if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+		if errors.Is(context.Cause(ctx), chat.ErrApplicationClosing) {
+			l.interrupt(&run)
+			return OutcomeInterrupted
+		}
 		if current, loadErr := l.runs.Get(context.Background(), run.ID); loadErr != nil || current.Status != chat.RunCancelled {
 			l.cancel(&run)
 		}
@@ -312,6 +330,7 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 	}
 	var workflowContract chat.WorkflowAIExecution
 	workflowContractFound := false
+	nativePlannerAction := false
 	if workflowAIRun {
 		if reader, ok := l.runs.(workflowAIContractReader); ok {
 			workflowContract, workflowContractFound, err = reader.WorkflowAIContract(ctx, run.ID)
@@ -324,6 +343,10 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 			if len(workflowContract.OutputSchema) == 0 || !json.Valid(workflowContract.OutputSchema) {
 				return OutcomeFailed, &apperr.Error{Code: "WORKFLOW_AI_CONTRACT_INVALID", UserMessage: "科研阶段的结构化输出契约无效，已停止本次请求。"}
 			}
+			nativePlannerAction, err = nativePlannerContract(workflowContract)
+			if err != nil {
+				return OutcomeFailed, err
+			}
 		}
 	}
 	if workflowAIRun {
@@ -331,6 +354,33 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 		// stage into its current user message. Keep the durable conversation for
 		// the UI and audit, but do not replay every earlier stage to the model.
 		messages = workflowAIRunMessages(messages, run.ID)
+	} else {
+		// Human history is continuous across this task's immutable runs.
+		if reader, ok := l.research.(interface {
+			DiscussionMessagesForConversation(context.Context, string) ([]conversation.Message, bool, error)
+		}); ok {
+			values, bound, loadErr := reader.DiscussionMessagesForConversation(ctx, run.ConversationID)
+			if loadErr != nil {
+				return OutcomeFailed, &apperr.Error{Code: "CONTEXT_LOAD_FAILED", UserMessage: "无法加载研究讨论历史。", Cause: loadErr}
+			}
+			if bound {
+				messages = values
+			}
+		}
+		// Internal prompts remain in audit/UI, not human dialogue. They can resume
+		// the previous reviewer or its output schema. Keep empty ID anchors so
+		// existing checkpoint boundaries still resolve against durable history.
+		messages = discussionConversationMessages(messages)
+		// Answers are durable human history for future turns. During this
+		// turn they enter at the tool-result position, not before the question.
+		filtered := messages[:0]
+		for _, message := range messages {
+			if message.RunID == run.ID && message.Role == conversation.RoleUser && message.ID != run.UserMessageID {
+				continue
+			}
+			filtered = append(filtered, message)
+		}
+		messages = filtered
 	}
 	currentImages, currentUserContent, currentUserPrompt, err := l.resolveRunImages(ctx, projectID, messages, run.UserMessageID)
 	if err != nil {
@@ -362,6 +412,14 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 		contextCheckpoint, exists, err = l.checkpoints.Latest(ctx, run.ConversationID)
 		if err != nil {
 			return OutcomeFailed, &apperr.Error{Code: "CONTEXT_CHECKPOINT_LOAD_FAILED", UserMessage: "无法校验会话上下文检查点。", Cause: err}
+		}
+		if exists && checkpointHasInternalBoundary(contextCheckpoint, messages) {
+			// Do not carry a stage-audit summary into human dialogue. Verify first,
+			// then rebuild from the retained full discussion; no history is deleted.
+			if err := contextmemory.Verify(contextCheckpoint); err != nil {
+				return OutcomeFailed, err
+			}
+			exists = false
 		}
 		if !exists {
 			contextCheckpoint = contextmemory.Checkpoint{}
@@ -433,6 +491,9 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 			return OutcomeFailed, &apperr.Error{Code: "RESEARCH_CONTEXT_FAILED", UserMessage: "无法加载科研任务当前阶段。", Cause: err}
 		}
 		if researchBound {
+			if !workflowAIRun {
+				researchGuidance.AllowedToolNames = append(researchGuidance.AllowedToolNames, userinput.ToolName)
+			}
 			definitions, researchAllowed = filterResearchTools(baseDefinitions, researchGuidance)
 			if workflowContractFound {
 				definitions, researchAllowed = intersectResearchToolScope(baseDefinitions, researchAllowed, workflowContractAllowed)
@@ -443,7 +504,7 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 	if !researchBound && !workflowContractFound {
 		filtered := make([]tool.Definition, 0, len(definitions))
 		for _, definition := range definitions {
-			if definition.QualifiedName != workflow.ResearchTaskReadTool && definition.QualifiedName != workflow.ResearchRevisionProposeTool {
+			if definition.QualifiedName != workflow.ResearchTaskReadTool && definition.QualifiedName != workflow.ResearchRevisionProposeTool && definition.QualifiedName != workflow.ResearchPlanPrepareTool {
 				filtered = append(filtered, definition)
 			}
 		}
@@ -483,12 +544,19 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 		if bound {
 			researchGuidance = latest
 			researchBound = true
+			if !workflowAIRun {
+				latest.AllowedToolNames = append(latest.AllowedToolNames, userinput.ToolName)
+			}
 			definitions, researchAllowed = filterResearchTools(baseDefinitions, latest)
 			if workflowContractFound {
 				definitions, researchAllowed = intersectResearchToolScope(baseDefinitions, researchAllowed, workflowContractAllowed)
 			}
 		}
 		return nil
+	}
+	plannerCheckpoint, err := l.loadPlannerCheckpoint(ctx, *run, workflowContract, workflowContractFound)
+	if err != nil {
+		return OutcomeFailed, err
 	}
 	calls, err := l.tools.ListByRun(ctx, run.ID)
 	if err != nil {
@@ -531,9 +599,84 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 	structuredCorrectionAttempts := 0
 	structuredCorrection := ""
 	structuredCandidate := ""
+	questionContinuation := ""
+	questionBody, questionContinuationUsed := "", false
+	var questionEvidence questionHandoff
+	if run.ModelTurns > 0 && !workflowAIRun && l.userInput != nil && definitionVisible(definitions, userinput.ToolName) {
+		steps, stepErr := l.runs.ListRunSteps(ctx, run.ID)
+		if stepErr != nil {
+			return OutcomeFailed, stepErr
+		}
+		questionEvidence, questionContinuationUsed = savedQuestionContinuation(steps, calls)
+		questionBody = questionEvidence.body
+	}
 	var quoteRepair *citationRepair
+	var reviewCorrection *reviewRepair
+	var identityCorrection *literatureIdentityRepair
+	fullReviewNavigation, lastContentDiagnostic := "", ""
+	resultSubmissionPhase := false
 	contentCorrectionAttempts := 0
+	contentCorrectionLimit := maxWorkflowContentCorrections
+	var previousReviewDefects map[string]bool
+	var stageContextMessages []conversation.Message
+	var stageSources *workflow.StageMaterials
+	var readConvergence *stageReadConvergence
+	var pendingReadTurn []model.ToolCall
+	readConvergenceEvidence := ""
+	materialLedger := newStageMaterialLedger(workflowContract, run.ID)
+	implementation, err := l.loadImplementationParts(ctx, *run, workflowContract, workflowContractFound)
+	if err != nil {
+		return OutcomeFailed, err
+	}
+	revisionEdit, err := l.loadStageRevisionEdit(ctx, projectID, *run, workflowContract, workflowContractFound)
+	if err != nil {
+		return OutcomeFailed, err
+	}
+	reviewSources, err := l.loadReviewSourceSubmission(ctx, projectID, *run, workflowContract, workflowContractFound)
+	if err != nil {
+		return OutcomeFailed, err
+	}
+	citationSources, err := loadCitationSourceSubmission(projectID, *run, workflowContract, workflowContractFound, calls)
+	if err != nil {
+		return OutcomeFailed, err
+	}
+	if implementation != nil {
+		contentCorrectionAttempts = implementation.draft.CorrectionCount
+		providerTurns = withoutImplementationControlTurns(providerTurns)
+	}
 	plannerSkillCorrectionAttempts := 0
+	var plannerSkillCorrection error
+	plannerSkillCorrectionCandidate := ""
+	plannerSkillCorrectionToolCalls := 0
+	if plannerCheckpoint != nil {
+		saved := plannerCheckpoint.state
+		structuredCorrectionAttempts, contentCorrectionAttempts, plannerSkillCorrectionAttempts = saved.ProgressCorrections, saved.ContentCorrections, saved.SkillCorrections
+		structuredCorrection, structuredCandidate, lastContentDiagnostic = saved.Correction, saved.Candidate, saved.LastContentDiagnostic
+		resultSubmissionPhase = saved.SubmissionPhase
+		if saved.SkillPending {
+			plannerSkillCorrectionCandidate, plannerSkillCorrectionToolCalls = saved.Candidate, len(calls)
+			plannerSkillCorrection = l.validatePlannerCompletion(ctx, run.ID, saved.Candidate, workflowContract.OutputSchema)
+			if plannerSkillCorrection == nil {
+				structuredCorrection = plannerSkillsNowSatisfied
+			}
+		}
+	}
+	savePlannerCheckpoint := func(inFlight bool) error {
+		if plannerCheckpoint == nil {
+			return nil
+		}
+		// Diagnostics are a bounded projection, not the candidate or validator.
+		// A provider-controlled long JSON property must not break checkpoint
+		// storage or silently replenish the original correction allowances.
+		structuredCorrection = boundedPlannerFeedback(structuredCorrection, 14_000)
+		lastContentDiagnostic = boundedPlannerFeedback(lastContentDiagnostic, 7_000)
+		value := plannerCheckpoint.state
+		value.TurnIndex, value.RequestInFlight, value.UpdatedAt = run.ModelTurns, inFlight, l.now()
+		value.ProgressCorrections, value.ContentCorrections, value.SkillCorrections = structuredCorrectionAttempts, contentCorrectionAttempts, plannerSkillCorrectionAttempts
+		value.Correction, value.Candidate, value.LastContentDiagnostic = structuredCorrection, structuredCandidate, lastContentDiagnostic
+		value.SkillPending, value.SubmissionPhase = plannerSkillCorrection != nil, resultSubmissionPhase
+		return plannerCheckpoint.save(ctx, value)
+	}
 	// A durable workflow_ai_chat_runs binding is itself a host-owned
 	// structured-output contract. Guidance normally supplies the exact schema,
 	// but a just-created Workflow conversation can briefly be visible before
@@ -549,9 +692,24 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 	if contextCheckpoint.ThroughMessageID != "" {
 		checkpointBoundaries[contextCheckpoint.ThroughMessageID] = struct{}{}
 	}
+	var contextUsage *chat.ContextUsageObservation
+	if repository, ok := l.runs.(chat.ContextUsageRepository); ok {
+		if value, found, err := repository.LatestContextUsage(ctx, run.ID); err == nil && found && value.Matches(*run) {
+			contextUsage = &value
+		}
+	}
 	for {
 		if err := refreshResearchGuidance(true); err != nil {
 			return OutcomeFailed, err
+		}
+		if workflowContractFound && workflowContract.NodeID == "evidence_screening" {
+			if checker, ok := l.research.(interface {
+				CheckAIRequestEvidence(context.Context, string, string, string, string, string) error
+			}); ok {
+				if err := checker.CheckAIRequestEvidence(ctx, projectID, workflowContract.WorkflowRunID, workflowContract.WorkflowStepID, run.ID, workflowContract.InputSHA256); err != nil {
+					return OutcomeFailed, err
+				}
+			}
 		}
 		if err := prepareWorkflowSkillRouting(); err != nil {
 			return OutcomeFailed, err
@@ -567,6 +725,7 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 		// value. Production SQLite runs also have workflowContractFound=true, so
 		// their requirement remains hard-bound to the durable execution record.
 		workflowStructuredOutputRequired = workflowAIRun && (workflowContractFound || !researchBound || researchGuidance.StructuredOutputRequired)
+		plannerStage := workflowStructuredOutputRequired && workflow.IsResearchPlannerSchema(researchGuidance.StructuredOutputSchema)
 		if workflowStructuredOutputRequired && len(researchGuidance.StructuredOutputSchema) > 0 {
 			if err := workflow.ValidateAIStageSchema(researchGuidance.StructuredOutputSchema); err != nil {
 				return OutcomeFailed, err
@@ -614,7 +773,35 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 				return OutcomeFailed, err
 			}
 		}
-		if workflowAIRun && run.ModelTurns >= maxWorkflowAIModelTurns {
+		if plannerSkillCorrection != nil && len(calls) != plannerSkillCorrectionToolCalls {
+			// Tool text is not proof of loading. Recheck this Run's persisted
+			// snapshots after tools, without accepting the rejected candidate or
+			// consuming/renewing any model correction allowance.
+			plannerSkillCorrection = l.validatePlannerCompletion(ctx, run.ID, plannerSkillCorrectionCandidate, researchGuidance.StructuredOutputSchema)
+			plannerSkillCorrectionToolCalls = len(calls)
+			if plannerSkillCorrection == nil {
+				structuredCorrection = plannerSkillsNowSatisfied
+			}
+		}
+		if workflowContractFound && researchBound && researchGuidance.StageMaterialsVersion != "" && stageSources == nil {
+			if reader, ok := l.research.(stageSourceMaterialReader); ok {
+				binding := workflow.StageMaterialRequest{ProjectID: projectID, ConversationID: run.ConversationID, WorkflowRunID: workflowContract.WorkflowRunID, WorkflowStepID: workflowContract.WorkflowStepID, ChatRunID: run.ID, Attempt: workflowContract.Attempt, InputSHA256: workflowContract.InputSHA256}
+				materials, materialErr := reader.StageMaterials(ctx, binding)
+				if materialErr != nil || materials.Binding != binding {
+					return OutcomeFailed, &apperr.Error{Code: "WORKFLOW_STAGE_MATERIAL_BINDING_INVALID", UserMessage: "无法核对阶段原文交接与当前冻结执行，已停止；原材料和已完成阶段仍保留。", Cause: materialErr}
+				}
+				stageSources = &materials
+			}
+		}
+		inputTransportTurns := stageInputTransportTurns(workflowContract, calls, materialLedger)
+		turnLimit := maxWorkflowAIModelTurns + inputTransportTurns
+		assembledImplementation := implementation != nil && implementation.draft.Complete
+		if implementation != nil && implementation.sourceOnly() {
+			// Source parts are transport units, not exploration turns. Keep the
+			// existing exploration bound and finite per-generation part bound.
+			turnLimit += 64 * (maxWorkflowContentCorrections + 1) * (chat.MaxImplementationPartCorrections + 1)
+		}
+		if workflowAIRun && !assembledImplementation && run.ModelTurns >= turnLimit {
 			return OutcomeFailed, &apperr.Error{Code: "WORKFLOW_AI_TURN_LIMIT", UserMessage: "科研阶段的 AI 工具协作超过安全轮次上限，已停止本阶段；已完成的工具结果仍保留，可重试当前阶段。"}
 		}
 		checkpoint, err := l.runs.IncrementModelTurns(context.Background(), run.ID, l.now())
@@ -622,155 +809,362 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 			return OutcomeFailed, err
 		}
 		run.ModelTurns, run.UpdatedAt = checkpoint.ModelTurns, checkpoint.UpdatedAt
-		modelDefinitions, systemContext := withoutResourceInterfaceTools(definitions), researchGuidance.SystemContext
-		// Refresh MCP registrations without widening frozen stage tool scopes.
-		if !researchBound && !workflowContractFound {
-			live, liveErr := l.registry.Definitions(ctx)
-			if liveErr != nil {
-				return OutcomeFailed, liveErr
-			}
-			modelDefinitions = append([]tool.Definition(nil), modelDefinitions...)
-			kept := modelDefinitions[:0]
-			for _, d := range modelDefinitions {
-				if !strings.HasPrefix(d.QualifiedName, "mcp.") {
-					kept = append(kept, d)
-				}
-			}
-			modelDefinitions = kept
-			for _, d := range live {
-				if strings.HasPrefix(d.QualifiedName, "mcp.") {
-					modelDefinitions = append(modelDefinitions, d)
-				}
-			}
-		}
-		modelDefinitions, discoveryEnabled := deferredMCPDefinitions(modelDefinitions, calls)
-		if !workflowAIRun {
-			for _, d := range modelDefinitions {
-				if d.QualifiedName == "builtin.web.search" {
-					systemContext += "\n" + optionalWebGuidance
-					break
-				}
-			}
-			if run.WebSearchDisabled {
-				systemContext += "\nThe user disabled general web browsing for this message. Do not work around this choice with Shell, Python, MCP, or resource tools to search or fetch webpages. This is not a request to change the research workflow or its literature-search contract."
-			}
-		}
-		dynamicState := ""
-		if workflowAIRun && researchGuidance.ExecutionSystemContext != "" {
-			systemContext = researchGuidance.ExecutionSystemContext
-			dynamicState = researchGuidance.ExecutionDynamicState
-		}
+		var request model.ChatRequest
+		finalLimit := 0
 		submissionPhase := false
-		if resourceMode {
-			modelDefinitions = resourceView.Definitions
-			modelDefinitions, discoveryEnabled = deferredMCPDefinitions(modelDefinitions, calls)
-			dynamicState += "\n" + resourceView.Context
-			progress, final := resourceStageProgress(run.ModelTurns-1, researchGuidance.SkillDiscovery, calls)
-			dynamicState += progress
-			submissionPhase = final || structuredCorrectionAttempts > 0
-			if structuredCorrectionAttempts > 0 {
-				dynamicState += "\nHost phase override: SUBMIT because the terminal response omitted the required stage result."
-			}
-		}
-		modelDefinitions = executionTaskReadDefinitions(modelDefinitions, workflowAIRun)
-		if discoveryEnabled {
-			systemContext += "\n" + mcpDiscoveryGuidance
-		}
-		contextTurns := providerTurns
-		if submissionPhase {
-			contextTurns = nil
-		}
-		request, contextInfo, err := l.builder.buildWithResearchState(ctx, messages, run.AssistantMessageID, run.UserMessageID, modelDefinitions, calls, runSkillContext, dynamicSkillRouting, systemContext, dynamicState, ContextLimits{EffectiveTokens: run.ContextBudgetTokens, AutoCompactTokens: run.AutoCompactTokenLimit, AllowProtocolRollover: resourceMode && !submissionPhase}, contextCheckpoint, contextTurns...)
-		if err != nil {
-			return OutcomeFailed, &apperr.Error{
-				Code:        "CONTEXT_BUILD_FAILED",
-				UserMessage: "无法构建本次模型上下文。已完成的工具结果仍已保存。原因：" + tool.SafeActivityText(err.Error(), 400),
-				Details:     err.Error(),
-				Cause:       err,
-			}
-		}
-
-		if contextInfo.CompactedThroughMessageID != "" && l.checkpoints == nil {
-			return OutcomeFailed, &apperr.Error{Code: "CONTEXT_COMPACTION_UNAVAILABLE", UserMessage: "无法安全压缩会话上下文，已停止本次请求以避免静默丢失历史。"}
-		}
-		if contextInfo.CompactedThroughMessageID != "" {
-			target := contextInfo.CompactedThroughMessageID
-			previousBoundary := contextCheckpoint.ThroughMessageID
-			contextCheckpoint, err = l.compactConversation(ctx, run, chatModel, contextCheckpoint, messages, target, contextInfo.StablePrefixMessages, true)
-			if err != nil {
-				return OutcomeFailed, &apperr.Error{Code: "CONTEXT_COMPACTION_FAILED", UserMessage: "无法安全压缩会话上下文，已停止本次请求以避免静默丢失历史。", Details: err.Error(), Cause: err}
-			}
-			if contextCheckpoint.ThroughMessageID == previousBoundary {
-				return OutcomeFailed, &apperr.Error{Code: "CONTEXT_COMPACTION_INCOMPLETE", UserMessage: "会话上下文压缩没有继续前进，已停止以避免循环。"}
-			}
-			if _, repeated := checkpointBoundaries[contextCheckpoint.ThroughMessageID]; repeated {
-				return OutcomeFailed, &apperr.Error{Code: "CONTEXT_COMPACTION_INCOMPLETE", UserMessage: "会话上下文压缩边界发生循环，已停止以避免丢失历史。"}
-			}
-			checkpointBoundaries[contextCheckpoint.ThroughMessageID] = struct{}{}
-			continue
-		}
-		if contextInfo.Compacted && !run.ContextCompacted {
-			run.ContextCompacted = true
-			if err := l.runs.Update(context.Background(), *run); err != nil {
-				return OutcomeFailed, err
-			}
-		}
-		if workflowAIRun {
-			for i, m := range request.Messages {
-				if m.Role == model.RoleUser && m.Content == currentUserContent {
-					request.Messages[i].HostToolReferences = true
+		optionalStageSubmission := false
+		var stageSourceIDs []string
+		discoveryEnabled := false
+		fallbackNote := ""
+		modelDefinitions := withoutResourceInterfaceTools(definitions)
+		// An already complete checkpoint needs local audit and the unchanged
+		// scientific validator, not admission to a model's context window.
+		if !assembledImplementation {
+			optionalStageSubmission = workflowContractFound && workflowStructuredOutputRequired && !nativePlannerAction && implementation == nil && questionContinuation == ""
+			systemContext := researchGuidance.SystemContext
+			// Refresh MCP registrations without widening frozen stage tool scopes.
+			if !researchBound && !workflowContractFound {
+				live, liveErr := l.registry.Definitions(ctx)
+				if liveErr != nil {
+					return OutcomeFailed, liveErr
+				}
+				modelDefinitions = append([]tool.Definition(nil), modelDefinitions...)
+				kept := modelDefinitions[:0]
+				for _, d := range modelDefinitions {
+					if !strings.HasPrefix(d.QualifiedName, "mcp.") {
+						kept = append(kept, d)
+					}
+				}
+				modelDefinitions = kept
+				for _, d := range live {
+					if strings.HasPrefix(d.QualifiedName, "mcp.") && !(run.WebSearchDisabled && isWebBrowsingTool(d.QualifiedName)) {
+						modelDefinitions = append(modelDefinitions, d)
+					}
 				}
 			}
-		}
-		request.RequestedReasoningLevel = run.RequestedReasoningLevel
-		request.ResolvedReasoningLevel = negotiatedReasoningLevel
-		request.PromptCacheKey = run.ConversationID
-		if len(currentImages) > 0 && !attachImagesToCurrentMessage(&request, currentUserContent, currentImages) {
-			return OutcomeFailed, &apperr.Error{Code: "IMAGE_CONTEXT_MISSING", UserMessage: "当前图片消息未能保留在模型上下文中。"}
-		}
-		if structuredCorrection != "" {
-			if structuredCandidate != "" {
-				request.Messages = append(request.Messages, model.Message{Role: model.RoleAssistant, Content: structuredCandidate})
+			modelDefinitions, discoveryEnabled = deferredMCPDefinitions(modelDefinitions, calls)
+			if !workflowAIRun {
+				for _, d := range modelDefinitions {
+					if d.QualifiedName == "builtin.web.search" {
+						systemContext += "\n" + optionalWebGuidance
+						break
+					}
+				}
+				if run.WebSearchDisabled {
+					systemContext += "\nThe user disabled general web browsing for this message. Do not work around this choice with Shell, Python, MCP, or resource tools to search or fetch webpages. This is not a request to change the research workflow or its literature-search contract."
+				}
 			}
-			request.Messages = append(request.Messages, model.Message{Role: model.RoleUser, Content: structuredCorrection, HostToolReferences: true})
-		}
-		fallbackNote := ""
-		if len(currentImages) > 0 && (fallbackResult != nil || l.multimodal != nil && l.multimodal.Capability(run.ModelProfileID, run.ModelID, run.APIProtocol) == multimodal.CapabilityUnsupported) {
-			if fallbackResult == nil {
-				fallbackResult, err = l.runMultimodalFallback(ctx, run, currentUserPrompt, currentImages)
+			dynamicState := ""
+			if workflowAIRun && researchGuidance.ExecutionSystemContext != "" {
+				systemContext = researchGuidance.ExecutionSystemContext
+				dynamicState = researchGuidance.ExecutionDynamicState
+			}
+			if resourceMode {
+				modelDefinitions = resourceView.Definitions
+				modelDefinitions, discoveryEnabled = deferredMCPDefinitions(modelDefinitions, calls)
+				dynamicState += "\n" + resourceView.Context
+				completedTurns := run.ModelTurns - 1 - inputTransportTurns
+				if implementation != nil {
+					completedTurns -= implementation.draft.PartCount
+				}
+				progress, final := resourceStageProgress(max(0, completedTurns), researchGuidance.SkillDiscovery, calls)
+				dynamicState += progress
+				submissionPhase = final || structuredCorrectionAttempts > 0 && !plannerStage
+				if structuredCorrectionAttempts > 0 && !plannerStage {
+					dynamicState += "\nHost phase override: SUBMIT because the terminal response omitted the required stage result."
+				}
+			}
+			if resultSubmissionPhase || workflowStructuredOutputRequired && !plannerStage && structuredCorrectionAttempts > 0 {
+				// Every rejected terminal stage result enters the same bounded,
+				// metered submission interface, even before the exploration budget
+				// or without resource tools. Parts-based implementations retain
+				// their own request override below. Never replay unpaired control
+				// calls as exploration after a later full-replacement correction.
+				submissionPhase = true
+			}
+			modelDefinitions = executionTaskReadDefinitions(modelDefinitions, workflowAIRun, researchGuidance.ExecutionTaskReadSchema)
+			if questionContinuation != "" {
+				// Restrict before building context too: this optional handoff must
+				// not spend its window on unrelated tool definitions.
+				questionDefinitions := make([]tool.Definition, 0, 1)
+				for _, d := range modelDefinitions {
+					if d.QualifiedName == userinput.ToolName {
+						questionDefinitions = append(questionDefinitions, d)
+					}
+				}
+				modelDefinitions = questionDefinitions
+			}
+			if discoveryEnabled {
+				systemContext += "\n" + mcpDiscoveryGuidance
+			}
+			contextTurns := providerTurns
+			if plannerStage || reviewSources != nil || citationSources != nil {
+				contextTurns = withoutStageSubmissionControlTurns(contextTurns)
+			}
+			if submissionPhase || implementation != nil && implementation.sourceOnly() {
+				// A source-only exchange projects durable completed calls as
+				// evidence. Never drop native-owned results at the final derivation.
+				contextTurns = nil
+			}
+			if definitionVisible(modelDefinitions, userinput.ToolName) {
+				systemContext += "\n" + userinput.Rules
+			}
+			if contextUsage != nil && !contextUsage.Matches(*run) {
+				contextUsage = nil
+			}
+			var contextInfo ContextBuildInfo
+			contextMessages := messages
+			if workflowContractFound {
+				// A stage's material view is fixed for this execution. Reprojecting
+				// it for a correction changes the measured message fingerprint,
+				// charges the old pool AND the replacement, and may hide passages
+				// after submission has disabled task-read. Corrections extend this
+				// same view; fitFinalRequest meters the actual derived interface,
+				// candidate and diagnostics, not hypothetical/duplicate menus.
+				if stageContextMessages == nil {
+					initialGrowth := reviewSources.initialGrowth() + citationSources.initialGrowth()
+					if implementation != nil {
+						initialGrowth += estimateRequestTokens(implementation.request(model.ChatRequest{}, submissionPhase))
+					}
+					stageContextMessages = budgetedStageMessages(messages, *run, workflowContract, modelDefinitions, calls, systemContext, dynamicState, dynamicSkillRouting, run.ContextBudgetTokens, run.AutoCompactTokenLimit, initialGrowth)
+				}
+				contextMessages = stageContextMessages
+			}
+			request, contextInfo, err = l.builder.buildWithResearchState(ctx, contextMessages, run.AssistantMessageID, run.UserMessageID, modelDefinitions, calls, runSkillContext, dynamicSkillRouting, systemContext, dynamicState, ContextLimits{EffectiveTokens: run.ContextBudgetTokens, AutoCompactTokens: run.AutoCompactTokenLimit, AllowProtocolRollover: (!workflowAIRun || resourceMode) && !submissionPhase && questionContinuation == "", UsageObservation: contextUsage, CurrentUserHostToolReferences: workflowAIRun}, contextCheckpoint, contextTurns...)
+			if questionContinuation != "" && ctx.Err() == nil && (err != nil || contextInfo.CompactedThroughMessageID != "") {
+				// Repair is optional. Keep the completed explanation rather than
+				// overflow, discard native state or run another compaction request.
+				return l.complete(run, withQuestionContinuationBody(questionBody, questionContinuationFallback), "stop")
+			}
+			if err != nil {
+				return OutcomeFailed, &apperr.Error{
+					Code:        "CONTEXT_BUILD_FAILED",
+					UserMessage: "无法构建本次模型上下文。已完成的工具结果仍已保存。原因：" + tool.SafeActivityText(err.Error(), 400),
+					Details:     err.Error(),
+					Cause:       err,
+				}
+			}
+
+			if contextInfo.CompactedThroughMessageID != "" && l.checkpoints == nil {
+				return OutcomeFailed, &apperr.Error{Code: "CONTEXT_COMPACTION_UNAVAILABLE", UserMessage: "无法安全压缩会话上下文，已停止本次请求以避免静默丢失历史。"}
+			}
+			if contextInfo.CompactedThroughMessageID != "" {
+				target := contextInfo.CompactedThroughMessageID
+				previousBoundary := contextCheckpoint.ThroughMessageID
+				contextCheckpoint, err = l.compactConversation(ctx, run, chatModel, contextCheckpoint, messages, target, contextInfo.StablePrefixMessages, true)
 				if err != nil {
+					return OutcomeFailed, &apperr.Error{Code: "CONTEXT_COMPACTION_FAILED", UserMessage: "无法安全压缩会话上下文，已停止本次请求以避免静默丢失历史。", Details: err.Error(), Cause: err}
+				}
+				if contextCheckpoint.ThroughMessageID == previousBoundary {
+					return OutcomeFailed, &apperr.Error{Code: "CONTEXT_COMPACTION_INCOMPLETE", UserMessage: "会话上下文压缩没有继续前进，已停止以避免循环。"}
+				}
+				if _, repeated := checkpointBoundaries[contextCheckpoint.ThroughMessageID]; repeated {
+					return OutcomeFailed, &apperr.Error{Code: "CONTEXT_COMPACTION_INCOMPLETE", UserMessage: "会话上下文压缩边界发生循环，已停止以避免丢失历史。"}
+				}
+				// Changed checkpoint contents create a different historical request.
+				// Re-anchor on its next successful conversation usage, not summary usage.
+				contextUsage = nil
+				checkpointBoundaries[contextCheckpoint.ThroughMessageID] = struct{}{}
+				continue
+			}
+			if contextInfo.ProtocolRollover {
+				// This independently constructed exchange no longer replays the
+				// measured native pool. Re-anchor on its own successful usage.
+				contextUsage = nil
+			}
+			if contextInfo.Compacted && !run.ContextCompacted {
+				run.ContextCompacted = true
+				if err := l.runs.Update(context.Background(), *run); err != nil {
 					return OutcomeFailed, err
 				}
 			}
-			request = requestWithMultimodalResult(request, currentUserPrompt, *fallbackResult)
-			fallbackNote = multimodalFallbackNote(*fallbackResult)
-		}
-		if submissionPhase {
-			schema := researchGuidance.StructuredOutputSchema
-			if quoteRepair != nil {
-				schema = quoteRepair.submissionSchema(schema)
+			request.RequestedReasoningLevel = run.RequestedReasoningLevel
+			request.ResolvedReasoningLevel = negotiatedReasoningLevel
+			request.PromptCacheKey = run.ConversationID
+			if len(currentImages) > 0 && !attachImagesToCurrentMessage(&request, currentUserContent, currentImages) {
+				return OutcomeFailed, &apperr.Error{Code: "IMAGE_CONTEXT_MISSING", UserMessage: "当前图片消息未能保留在模型上下文中。"}
 			}
-			request = stageSubmissionRequest(request, schema)
-			if quoteRepair != nil {
-				request.Messages = append(request.Messages, model.Message{Role: model.RoleSystem, Content: quoteRepair.instruction()})
+			if structuredCorrection != "" {
+				if structuredCandidate != "" {
+					request.Messages = append(request.Messages, model.Message{Role: model.RoleAssistant, Content: structuredCandidate})
+				}
+				correction := structuredCorrection
+				if submissionPhase && correction == structuredOutputContinuation() {
+					// Do not ask for exploration or a fenced response in the same
+					// request that requires the dedicated submission function.
+					correction = "The earlier response did not submit the required Workflow result. Continue the same stage now using the current dedicated submission control and its exact payload requirements. Do not repeat exploration, emit a fenced answer, or promise to submit later."
+				} else if nativePlannerAction && correction == structuredOutputContinuation() {
+					// Planning requires an action too, but can still need a real
+					// Skill load. Do not contradict that interface with the legacy
+					// fenced-answer continuation or force submission prematurely.
+					correction = plannerActionContinuation
+				} else if citationSources != nil && correction == structuredOutputContinuation() {
+					correction = citationSourceActionContinuation
+				}
+				if plannerSkillCorrection == nil {
+					request.Messages = append(request.Messages, model.Message{Role: model.RoleUser, Content: correction, HostToolReferences: true})
+				}
+			}
+			if questionContinuation != "" {
+				request = questionContinuationRequest(request, questionContinuation)
+			} else if questionContinuationUsed {
+				request = withQuestionHandoffEvidence(request, questionEvidence, calls)
+			}
+			if len(currentImages) > 0 && (fallbackResult != nil || l.multimodal != nil && l.multimodal.Capability(run.ModelProfileID, run.ModelID, run.APIProtocol) == multimodal.CapabilityUnsupported) {
+				if fallbackResult == nil {
+					fallbackResult, err = l.runMultimodalFallback(ctx, run, currentUserPrompt, currentImages)
+					if err != nil {
+						return OutcomeFailed, err
+					}
+				}
+				request = requestWithMultimodalResult(request, currentUserPrompt, *fallbackResult)
+				fallbackNote = multimodalFallbackNote(*fallbackResult)
+			}
+			deriveBaseRequest := func(candidate model.ChatRequest) model.ChatRequest {
+				if implementation != nil {
+					return implementation.request(candidate, submissionPhase)
+				}
+				if submissionPhase {
+					schema := workflow.ReviewSubmissionSchema(researchGuidance.StructuredOutputSchema)
+					if citationSources.hasFieldRepair() {
+						return stageRepairRequest(candidate, citationSources.schema, citationSources.fieldRepair.schema, citationSources.fieldRepair.instruction())
+					}
+					if identityCorrection != nil {
+						return stageRepairRequest(candidate, schema, identityCorrection.schema, identityCorrection.instruction())
+					}
+					if quoteRepair != nil {
+						return stageRepairRequest(candidate, schema, quoteRepair.schema, quoteRepair.instruction())
+					}
+					if reviewCorrection != nil {
+						return stageRepairRequest(candidate, schema, reviewCorrection.schema, reviewCorrection.instruction())
+					}
+					candidate = stageSubmissionRequest(candidate, schema)
+					if fullReviewNavigation != "" {
+						candidate.Messages[len(candidate.Messages)-1].Content += "\n" + fullReviewNavigation
+					}
+				}
+				return candidate
+			}
+			deriveRequest := func(candidate model.ChatRequest) model.ChatRequest {
+				candidate = deriveBaseRequest(candidate)
+				if plannerSkillCorrection != nil {
+					// The next turn may cross into SUBMIT. Project the rejected
+					// candidate's diagnostic only after this request's controls are
+					// finalized, and include it in the final context-budget check.
+					candidate.Messages = append(candidate.Messages, model.Message{Role: model.RoleUser, Content: plannerSkillValidationFeedback(plannerSkillCorrection, candidate, resourceView), HostToolReferences: true})
+				}
+				if submissionPhase && readConvergenceEvidence != "" {
+					candidate.Messages = append(candidate.Messages, model.Message{Role: model.RoleUser, Content: readConvergenceEvidence})
+				}
+				return candidate
+			}
+			// The builder resolves legacy/fixture zero budgets through its existing
+			// configured default; reuse that exact budget, never invent a new window.
+			finalLimit = contextInfo.ContextBudgetTokens
+			budgetCalls := calls
+			if implementation != nil {
+				request, budgetCalls = implementation.withSavedEvidence(request, calls)
+			}
+			// Admit the original exploration view first. An OPTIONAL control must
+			// never displace evidence that fits without it, even if shortening an
+			// ordinary tool preview would make room for the control's schema.
+			tryOptionalAction := optionalStageSubmission && !submissionPhase && reviewSources == nil && citationSources == nil
+			optionalStageSubmission = false
+			request, err = fitFinalRequest(request, budgetCalls, contextUsage, finalLimit, deriveRequest)
+			if err == nil && nativePlannerAction && !submissionPhase {
+				// Admit the original evidence first, then meter the mandatory
+				// action contract WITHOUT shortening any admitted tool result.
+				// If it cannot fit, stop; do not silently return to free text.
+				request, err = withPlannerStageAction(request, researchGuidance.StructuredOutputSchema, contextUsage, finalLimit)
+			}
+			if err == nil && tryOptionalAction {
+				request, optionalStageSubmission = withOptionalStageAction(request, workflow.ReviewSubmissionSchema(researchGuidance.StructuredOutputSchema), contextUsage, finalLimit)
+			}
+			if err != nil {
+				if questionContinuation != "" {
+					return l.complete(run, withQuestionContinuationBody(questionBody, questionContinuationFallback), "stop")
+				}
+				return OutcomeFailed, err
+			}
+			if workflowContractFound && workflowStructuredOutputRequired && !plannerStage && implementation == nil && !submissionPhase && questionContinuation == "" {
+				if readConvergence == nil {
+					readConvergence = newStageReadConvergence(workflowContract, run.ID)
+				}
+				addressed := materialLedger.active(request, calls)
+				converged := false
+				if addressed {
+					converged = materialLedger.inspect(request, pendingReadTurn, calls, readConvergence)
+				} else {
+					converged = readConvergence.inspect(request, pendingReadTurn, calls)
+				}
+				if converged {
+					var candidate model.ChatRequest
+					var evidence string
+					var fitErr error
+					if addressed {
+						readConvergence.streak = materialLedger.streak
+						candidate, evidence, fitErr = materialLedger.admitSubmission(request, budgetCalls, contextUsage, finalLimit, workflow.ReviewSubmissionSchema(researchGuidance.StructuredOutputSchema), readConvergence)
+					} else {
+						candidate, evidence, fitErr = readConvergence.admitSubmission(request, budgetCalls, contextUsage, finalLimit, workflow.ReviewSubmissionSchema(researchGuidance.StructuredOutputSchema))
+					}
+					if fitErr != nil {
+						return OutcomeFailed, fitErr
+					}
+					request = candidate
+					readConvergenceEvidence = evidence
+					submissionPhase, resultSubmissionPhase = true, true
+				}
+			}
+			if !submissionPhase {
+				request = materialLedger.withProgress(request, calls, contextUsage, finalLimit, readConvergence)
+			}
+			if stageSources != nil && questionContinuation == "" {
+				request, stageSourceIDs = withStageSourceHandoff(request, *stageSources, contextUsage, finalLimit)
+			}
+			request = withStageRevisionEdit(request, revisionEdit, contextUsage, finalLimit)
+			request, err = reviewSources.request(request, contextUsage, finalLimit)
+			if err != nil {
+				return OutcomeFailed, err
+			}
+			request, err = citationSources.request(request, calls, contextUsage, finalLimit)
+			if err != nil {
+				return OutcomeFailed, err
 			}
 		}
 		turnStartedAt := l.now()
-		conversationRequestAttempted := true
+		conversationRequestAttempted := !assembledImplementation
 		journalActive := false
 		if journal, ok := l.runs.(modelTurnJournal); ok {
 			journalActive = journal.BeginModelTurn(context.Background(), run.ID, run.ModelTurns, turnStartedAt) == nil
 		}
-		attempt, actualReasoningLevel, err := l.runModelStream(ctx, *run, chatModel, request, func(stream model.Stream) (streamAttempt, error) {
-			turn, receiveErr := l.receiveTurn(ctx, *run, journalActive, workflowAIRun, stream)
-			if receiveErr != nil {
-				return streamAttempt{turn: turn}, receiveErr
+		if plannerCheckpoint != nil {
+			if !journalActive {
+				return OutcomeFailed, plannerCheckpointError("WORKFLOW_PLANNER_CHECKPOINT_SAVE_FAILED", nil)
 			}
-			if terminalErr := retryableModelTurnTerminalError(turn); terminalErr != nil {
-				return streamAttempt{turn: turn}, terminalErr
+			resultSubmissionPhase = resultSubmissionPhase || submissionPhase
+			if err := savePlannerCheckpoint(true); err != nil {
+				return OutcomeFailed, err // Never send an untracked paid request.
 			}
-			return streamAttempt{turn: turn}, nil
-		})
+		}
+		var attempt streamAttempt
+		actualReasoningLevel := negotiatedReasoningLevel
+		if assembledImplementation {
+			// Revalidate durable complete parts after a crash/cancel too. This
+			// local assembly is not a new paid model request or token anchor.
+			attempt.turn = modelTurn{text: implementation.assembled(), finishReason: "stop"}
+			l.publishRuntimeActivity(*run, "implementation_validation")
+		} else {
+			attempt, actualReasoningLevel, err = l.runModelStream(ctx, *run, chatModel, request, func(stream model.Stream) (streamAttempt, error) {
+				turn, receiveErr := l.receiveTurn(ctx, *run, journalActive, workflowAIRun, stream)
+				if receiveErr != nil {
+					return streamAttempt{turn: turn}, receiveErr
+				}
+				if terminalErr := plannerModelTurnTerminalError(retryableModelTurnTerminalError(turn), nativePlannerAction || reviewSources != nil || citationSources != nil); terminalErr != nil {
+					return streamAttempt{turn: turn}, terminalErr
+				}
+				return streamAttempt{turn: turn}, nil
+			}, implementationActivityPhase(implementation))
+		}
 		if err == nil && fallbackResult == nil && requestHasImages(request) && multimodal.ResponseIndicatesImageUnavailable(attempt.turn.text) {
 			completedAt := l.now()
 			usage, reported := finalRequestUsage(attempt.turn.usages)
@@ -785,7 +1179,11 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 			l.observer.Retrying(*run, RetryStatus{Phase: "image_fallback", Attempt: 1, MaxAttempts: 1, Message: "当前模型未读取图片，正在启动识图兜底"})
 			fallbackResult, err = l.runMultimodalFallback(ctx, run, currentUserPrompt, currentImages)
 			if err == nil {
-				request = requestWithMultimodalResult(request, currentUserPrompt, *fallbackResult)
+				// Vision fallback changes the request AFTER the first budget
+				// check. Admit the complete text request before sending it too.
+				request, err = fitFinalRequest(requestWithMultimodalResult(request, currentUserPrompt, *fallbackResult), calls, contextUsage, finalLimit, unchangedRequest)
+			}
+			if err == nil {
 				fallbackNote = multimodalFallbackNote(*fallbackResult)
 				turnStartedAt = l.now()
 				conversationRequestAttempted = true
@@ -794,7 +1192,7 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 					if receiveErr != nil {
 						return streamAttempt{turn: turn}, receiveErr
 					}
-					if terminalErr := retryableModelTurnTerminalError(turn); terminalErr != nil {
+					if terminalErr := plannerModelTurnTerminalError(retryableModelTurnTerminalError(turn), nativePlannerAction || reviewSources != nil || citationSources != nil); terminalErr != nil {
 						return streamAttempt{turn: turn}, terminalErr
 					}
 					return streamAttempt{turn: turn}, nil
@@ -810,7 +1208,9 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 			}
 			fallbackResult, err = l.runMultimodalFallback(ctx, run, currentUserPrompt, currentImages)
 			if err == nil {
-				request = requestWithMultimodalResult(request, currentUserPrompt, *fallbackResult)
+				request, err = fitFinalRequest(requestWithMultimodalResult(request, currentUserPrompt, *fallbackResult), calls, contextUsage, finalLimit, unchangedRequest)
+			}
+			if err == nil {
 				fallbackNote = multimodalFallbackNote(*fallbackResult)
 				turnStartedAt = l.now()
 				conversationRequestAttempted = true
@@ -819,7 +1219,7 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 					if receiveErr != nil {
 						return streamAttempt{turn: turn}, receiveErr
 					}
-					if terminalErr := retryableModelTurnTerminalError(turn); terminalErr != nil {
+					if terminalErr := plannerModelTurnTerminalError(retryableModelTurnTerminalError(turn), nativePlannerAction || reviewSources != nil || citationSources != nil); terminalErr != nil {
 						return streamAttempt{turn: turn}, terminalErr
 					}
 					return streamAttempt{turn: turn}, nil
@@ -827,17 +1227,173 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 			}
 		}
 		if err != nil {
+			var refusal *apperr.Error
+			if errors.As(err, &refusal) && refusal.Code == "MODEL_OUTPUT_REFUSED" {
+				// An explicit empty refusal is a completed provider decision, not
+				// an interrupted response. Retain its native evidence before stopping.
+				if len(attempt.turn.providerItems) > 0 {
+					if saveErr := l.runs.SaveProviderTurn(context.Background(), run.ID, model.ProviderTurn{TurnIndex: run.ModelTurns, Protocol: run.APIProtocol, Items: attempt.turn.providerItems}, l.now()); saveErr != nil {
+						return OutcomeFailed, &apperr.Error{Code: "MODEL_PROTOCOL_STATE_SAVE_FAILED", UserMessage: "模型已拒绝请求，但拒绝协议记录保存失败；已停止，不会自动重发。", Cause: saveErr}
+					}
+				}
+				if finishErr := l.finishModelTurn(run.ID, run.ModelTurns, journalActive, chat.ModelTurnFailed, attempt.turn.finishReason, len(attempt.turn.providerItems)); finishErr != nil {
+					return OutcomeFailed, &apperr.Error{Code: "WORKFLOW_AI_SUBMISSION_AUDIT_FAILED", UserMessage: "模型已拒绝请求，但原文记录结束失败；已停止，不会自动重发。", Cause: finishErr}
+				}
+				journalActive = false
+				copy := *refusal
+				copy.Details = submissionFailureDetails(researchSubmissionDiagnostic(err), lastContentDiagnostic)
+				err = &copy
+			}
 			if conversationRequestAttempted {
-				_ = l.recordFailedRequest(run, "conversation", turnStartedAt, l.now(), attempt.turn.firstResponseAt, err)
+				if saveErr := l.recordFailedRequest(run, "conversation", turnStartedAt, l.now(), attempt.turn.firstResponseAt, err); saveErr != nil && questionContinuation != "" {
+					return OutcomeFailed, completionSaveError("record optional question request failure", saveErr)
+				}
 			}
 			turnStatus := chat.ModelTurnFailed
 			if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
 				turnStatus = chat.ModelTurnInterrupted
 			}
-			_ = l.finishModelTurn(run.ID, run.ModelTurns, journalActive, turnStatus, "", 0)
+			finishErr := l.finishModelTurn(run.ID, run.ModelTurns, journalActive, turnStatus, "", len(attempt.turn.providerItems))
+			if questionContinuation != "" && ctx.Err() == nil && !errors.Is(err, context.Canceled) && questionContinuationNetworkFailure(err) {
+				if finishErr != nil {
+					return OutcomeFailed, completionSaveError("finish optional question failure journal", finishErr)
+				}
+				return l.complete(run, withQuestionContinuationBody(questionBody, questionContinuationFallback), "stop")
+			}
 			return OutcomeFailed, err
 		}
 		turn := attempt.turn
+		// Native completeness is required before any control checkpoint path,
+		// not only before regular IO. A complete function call cannot make an
+		// otherwise incomplete signed/encrypted response safe to accept.
+		if (run.APIProtocol == modelcap.ProtocolAnthropic || run.APIProtocol == modelcap.ProtocolOpenAIResponses) && len(turn.toolCalls) > 0 && len(turn.providerItems) == 0 {
+			protocolErr := &apperr.Error{Code: "MODEL_PROTOCOL_STATE_MISSING", UserMessage: "模型工具响应缺少可回放的协议状态。"}
+			_ = l.recordFailedRequest(run, "conversation", turnStartedAt, l.now(), turn.firstResponseAt, protocolErr)
+			_ = l.finishModelTurn(run.ID, run.ModelTurns, journalActive, chat.ModelTurnFailed, turn.finishReason, 0)
+			return OutcomeFailed, protocolErr
+		}
+		if implementation != nil && implementation.sourceOnly() && !assembledImplementation && !hasImplementationPart(turn.toolCalls) && len(turn.toolCalls) > 0 {
+			// After the first source checkpoint, this is a source-only exchange.
+			// An invented previously allowed IO call is not suddenly authorized.
+			if err := l.commitTurnObservations(run, turn, turnStartedAt, l.now()); err != nil {
+				return OutcomeFailed, err
+			}
+			raw := implementationTurnRaw(turn)
+			if journal, ok := l.runs.(modelTurnJournal); ok && journalActive {
+				if err := journal.UpdateModelTurnDraft(context.Background(), run.ID, run.ModelTurns, raw, len(turn.providerItems), l.now()); err != nil {
+					return OutcomeFailed, err
+				}
+				if err := l.finishModelTurn(run.ID, run.ModelTurns, journalActive, chat.ModelTurnCompleted, turn.finishReason, len(turn.providerItems)); err != nil {
+					return OutcomeFailed, err
+				}
+			}
+			if len(turn.providerItems) > 0 {
+				if err := l.runs.SaveProviderTurn(ctx, run.ID, model.ProviderTurn{TurnIndex: run.ModelTurns, Protocol: run.APIProtocol, Items: turn.providerItems}, l.now()); err != nil {
+					return OutcomeFailed, err
+				}
+			}
+			return OutcomeFailed, &apperr.Error{Code: "IMPLEMENTATION_PART_MISSING", UserMessage: "模型未继续提交当前实现片段，已保存的源码保留；未执行额外工具或接受半成品。"}
+		}
+		if implementation != nil && (hasImplementationPart(turn.toolCalls) || implementation.sourceOnly() && !assembledImplementation && len(turn.toolCalls) == 0) {
+			if err := validateModelTurnTerminal(turn); err != nil {
+				return OutcomeFailed, err
+			}
+			value, raw, partErr := implementation.consume(turn, implementationPartSchema(request))
+			if len(turn.toolCalls) == 0 {
+				partErr = &apperr.Error{Code: "IMPLEMENTATION_PART_MISSING", UserMessage: "模型未提交当前实现片段；请按当前控制接口补交，不要重复读取或计算。"}
+			}
+			correctable := recoverableImplementationControl(turn, partErr)
+			if err := ValidateProviderToolCalls(turn.toolCalls); err != nil {
+				// A single identified control with malformed JSON is a payload
+				// correction, not authorization to execute an invalid tool batch.
+				if len(turn.toolCalls) != 1 || strings.TrimSpace(turn.toolCalls[0].ID) == "" {
+					partErr = &apperr.Error{Code: "MODEL_TOOL_CALL_INVALID", UserMessage: "模型返回了无效或重复的工具调用。", Cause: err}
+					correctable = false
+				}
+			}
+			if implementation.draft.PartCount == 0 && implementation.draft.PartCorrectionCount == 0 && implementation.draft.CorrectionCount == 0 {
+				value.SourceEvidence = request.CompletedToolEvidence
+			}
+			journal, ok := l.runs.(modelTurnJournal)
+			if !ok || !journalActive {
+				return OutcomeFailed, &apperr.Error{Code: "IMPLEMENTATION_CHECKPOINT_SAVE_FAILED", UserMessage: "无法建立实现片段原文记录，已停止，未接受草稿。"}
+			}
+			if err := journal.UpdateModelTurnDraft(ctx, run.ID, run.ModelTurns, raw, len(turn.providerItems), l.now()); err != nil {
+				return OutcomeFailed, err
+			}
+			turn.commentary = fmt.Sprintf("实现代码分段提交 · 第 %d 段（草稿，未执行）", implementation.draft.PartCount+1)
+			if len(turn.toolCalls) == 1 && turn.toolCalls[0].Name == implementationPatchTool {
+				turn.commentary = "实现代码技术返修补丁（待完整检查，未执行）"
+			}
+			if partErr != nil {
+				turn.commentary += " · 提交待纠正"
+			}
+			if err := l.saveRunStep(run, turn, turnStartedAt, l.now()); err != nil {
+				return OutcomeFailed, err
+			}
+			if err := l.finishModelTurn(run.ID, run.ModelTurns, journalActive, chat.ModelTurnCompleted, turn.finishReason, len(turn.providerItems)); err != nil {
+				return OutcomeFailed, err
+			}
+			if len(turn.providerItems) > 0 {
+				if err := l.runs.SaveProviderTurn(ctx, run.ID, model.ProviderTurn{TurnIndex: run.ModelTurns, Protocol: run.APIProtocol, Items: turn.providerItems}, l.now()); err != nil {
+					return OutcomeFailed, &apperr.Error{Code: "IMPLEMENTATION_CHECKPOINT_SAVE_FAILED", UserMessage: "无法完整保存实现片段的模型原始响应，未接受草稿。", Cause: err}
+				}
+			}
+			if err := l.commitTurnObservations(run, turn, turnStartedAt, l.now()); err != nil {
+				return OutcomeFailed, err
+			}
+			if len(turn.toolCalls) == 0 {
+				previous := submissionFailureDetails(implementation.draft.PartValidationError, implementation.validationError)
+				if refusal := stageSubmissionRefusal(turn, researchGuidance.StructuredOutputSchema, previous); refusal != nil {
+					l.submissionRejected(*run, raw, researchSubmissionDiagnostic(refusal), implementation.draft.PartCorrectionCount)
+					return OutcomeFailed, refusal
+				}
+			}
+			if partErr != nil {
+				if correctable {
+					diagnostic := researchSubmissionDiagnostic(partErr)
+					if implementation.draft.PartCorrectionCount >= chat.MaxImplementationPartCorrections {
+						message := "当前实现片段经两次格式纠正仍未通过，已停止。此前已保存的片段和材料保留，可重试当前阶段。"
+						if implementation.draft.PartCount == 0 {
+							message = "首个实现片段经两次格式纠正仍未通过，未保存本次新代码，也未执行。已有材料与历史结果保留，可重试当前阶段。"
+						}
+						return OutcomeFailed, &apperr.Error{Code: "IMPLEMENTATION_PART_REPAIR_EXHAUSTED", UserMessage: message, Details: diagnostic, Cause: partErr}
+					}
+					control := implementationPartTool
+					if implementation.canPatch() && implementation.draft.PartControlName != implementationPartTool {
+						control = implementationPatchTool
+					}
+					if len(turn.toolCalls) == 1 {
+						control = turn.toolCalls[0].Name
+					}
+					value = implementation.formatCorrection(raw, diagnostic, control)
+					if implementation.draft.PartCount == 0 && implementation.draft.PartCorrectionCount == 0 && implementation.draft.CorrectionCount == 0 {
+						value.SourceEvidence = request.CompletedToolEvidence
+					}
+					value.SourceTurnIndex, value.UpdatedAt = run.ModelTurns, l.now()
+					if err := implementation.repository.SaveImplementationDraft(ctx, value); err != nil {
+						return OutcomeFailed, &apperr.Error{Code: "IMPLEMENTATION_CHECKPOINT_SAVE_FAILED", UserMessage: "无法保存当前片段纠正记录，已停止；原代码和材料仍保留。", Cause: err}
+					}
+					implementation.draft = value
+					contextUsage = nil
+					l.observer.Retrying(*run, RetryStatus{Phase: "workflow_content_validation", Attempt: value.PartCorrectionCount, MaxAttempts: chat.MaxImplementationPartCorrections, Message: fmt.Sprintf("正在原地纠正第 %d 段提交格式（第 %d/%d 次），已保存代码不变", value.PartCount+1, value.PartCorrectionCount, chat.MaxImplementationPartCorrections)})
+					continue
+				}
+				return OutcomeFailed, partErr
+			}
+			value.SourceTurnIndex, value.UpdatedAt = run.ModelTurns, l.now()
+			if err := implementation.repository.SaveImplementationDraft(ctx, value); err != nil {
+				return OutcomeFailed, &apperr.Error{Code: "IMPLEMENTATION_CHECKPOINT_SAVE_FAILED", UserMessage: "实现片段无法完整保存，已停止；原片段保留，未执行草稿。", Details: err.Error(), Cause: err}
+			}
+			if implementation.draft.PartCorrectionCount > 0 {
+				l.observer.RetryRecovered(*run)
+			}
+			implementation.draft = value
+			run.ResolvedReasoningLevel, negotiatedReasoningLevel, reasoningNegotiated = actualReasoningLevel, actualReasoningLevel, true
+			contextUsage = nil // Never calibrate a different prefix with part usage.
+			l.implementationSaved(*run, value)
+			continue // Final part also enters the unchanged full validator next.
+		}
 		if len(currentImages) > 0 && fallbackResult == nil && l.multimodal != nil {
 			l.multimodal.MarkSupported(run.ModelProfileID, run.ModelID, run.APIProtocol)
 		}
@@ -845,18 +1401,28 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 			turn.commentary = fallbackNote + optionalSeparatedText(turn.commentary)
 		}
 		now := l.now()
-		if (run.APIProtocol == modelcap.ProtocolAnthropic || run.APIProtocol == modelcap.ProtocolOpenAIResponses) && len(turn.toolCalls) > 0 && len(turn.providerItems) == 0 {
-			protocolErr := &apperr.Error{Code: "MODEL_PROTOCOL_STATE_MISSING", UserMessage: "模型工具响应缺少可回放的协议状态。"}
-			_ = l.recordFailedRequest(run, "conversation", turnStartedAt, now, turn.firstResponseAt, protocolErr)
-			_ = l.finishModelTurn(run.ID, run.ModelTurns, journalActive, chat.ModelTurnFailed, turn.finishReason, 0)
-			return OutcomeFailed, protocolErr
-		}
-		if err := validateModelTurnTerminal(turn); err != nil {
+		if err := plannerModelTurnTerminalError(validateModelTurnTerminal(turn), nativePlannerAction || reviewSources != nil || citationSources != nil); err != nil {
 			_ = l.recordFailedRequest(run, "conversation", turnStartedAt, now, turn.firstResponseAt, err)
 			_ = l.finishModelTurn(run.ID, run.ModelTurns, journalActive, chat.ModelTurnFailed, turn.finishReason, len(turn.providerItems))
 			return OutcomeFailed, err
 		}
-		_ = l.commitTurnObservations(run, turn, turnStartedAt, now)
+		readConvergence.commit(request, calls)
+		materialLedger.commit(request, calls)
+		if !assembledImplementation {
+			_ = l.commitTurnObservations(run, turn, turnStartedAt, now)
+		}
+		usage, usageReported := finalRequestUsage(turn.usages)
+		observation := observeContextUsage(*run, request, usage, usageReported)
+		observation.StageSourceIDs = stageSourceIDs
+		// Only this completed conversation response calibrates the next turn.
+		// Failed retries, checkpoint summaries and image probes never do.
+		contextUsage = nil
+		if !assembledImplementation && observation.Matches(*run) {
+			contextUsage = &observation
+			if repository, ok := l.runs.(chat.ContextUsageRepository); ok {
+				_ = repository.SaveContextUsage(context.Background(), observation)
+			}
+		}
 		// Usage accounting returns the latest durable Run snapshot. Apply the
 		// provider-negotiated level afterwards so a final turn can persist it in
 		// the same atomic completion transaction without a redundant pre-write.
@@ -868,7 +1434,7 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 		if len(turn.providerItems) > 0 {
 			providerTurn := model.ProviderTurn{TurnIndex: run.ModelTurns, Protocol: run.APIProtocol, Items: turn.providerItems}
 			if err := l.runs.SaveProviderTurn(context.Background(), run.ID, providerTurn, now); err != nil {
-				if len(turn.toolCalls) > 0 {
+				if len(turn.toolCalls) > 0 || nativePlannerAction || reviewSources != nil || citationSources != nil {
 					_ = l.finishModelTurn(run.ID, run.ModelTurns, journalActive, chat.ModelTurnFailed, turn.finishReason, len(turn.providerItems))
 					return OutcomeFailed, &apperr.Error{Code: "MODEL_PROTOCOL_STATE_SAVE_FAILED", UserMessage: "无法保存模型协议状态。", Cause: err}
 				}
@@ -877,19 +1443,98 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 			}
 		}
 		run.FinishReason, run.UpdatedAt = turn.finishReason, now
-		if submissionPhase {
-			candidate, submitErr := stageSubmissionCandidate(turn.toolCalls, turn.text)
+		var submissionErr error
+		var submissionControl string
+		var originalSubmissionRefusal error
+		// Record native evidence BEFORE extracting controls clears toolCalls.
+		missingNativeAction := (nativePlannerAction || reviewSources != nil || citationSources != nil) && (request.RequireTool || request.ForcedTool != "") && len(turn.toolCalls) == 0
+		directSubmission := !submissionPhase && ((optionalStageSubmission || nativePlannerAction || reviewSources != nil || citationSources != nil) && hasStageSubmissionCall(turn.toolCalls) || workflowStructuredOutputRequired && hasStageEditCall(turn.toolCalls))
+		if (submissionPhase || directSubmission) && !assembledImplementation && !missingNativeAction {
+			// A native result's arguments must not erase visible commentary or
+			// hide an explicit refusal that accompanied the control call.
+			originalSubmissionRefusal = stageSubmissionRefusal(turn, researchGuidance.StructuredOutputSchema, lastContentDiagnostic)
+			if len(turn.toolCalls) > 0 && turn.text != "" {
+				journal, ok := l.runs.(modelTurnSubmissionCommentaryJournal)
+				if !ok || !journalActive {
+					return OutcomeFailed, &apperr.Error{Code: "WORKFLOW_AI_SUBMISSION_AUDIT_FAILED", UserMessage: "无法建立科研提交原文记录，已停止，未接受结果。"}
+				}
+				if err := journal.SaveModelTurnSubmissionCommentary(context.Background(), run.ID, run.ModelTurns, turn.text, now); err != nil {
+					return OutcomeFailed, &apperr.Error{Code: "WORKFLOW_AI_SUBMISSION_AUDIT_FAILED", UserMessage: "无法完整保存原生提交正文及参数，已停止，未接受结果。", Cause: err}
+				}
+			}
+			// Completion controls never enter the IO executor. Reject the entire
+			// mixed batch before ANY research call, using the same submit path.
+			candidate, submitErr := stageCorrectionCandidate(turn.toolCalls, turn.text, reviewCorrection != nil || quoteRepair != nil || identityCorrection != nil || citationSources.hasFieldRepair())
+			if hasStageEditCall(turn.toolCalls) {
+				candidate, submitErr = stageEditCandidate(request, turn.toolCalls)
+			}
 			if submitErr != nil {
-				_ = l.finishModelTurn(run.ID, run.ModelTurns, journalActive, chat.ModelTurnFailed, turn.finishReason, len(turn.providerItems))
-				return OutcomeFailed, submitErr
+				if !workflowStructuredOutputRequired || !recoverableSubmissionText(submitErr, turn.toolCalls) {
+					_ = l.finishModelTurn(run.ID, run.ModelTurns, journalActive, chat.ModelTurnFailed, turn.finishReason, len(turn.providerItems))
+					return OutcomeFailed, submitErr
+				}
+				// Preserve raw text in the same journal and consume the SAME
+				// content-correction allowance; no independent protocol retries.
+				candidate, submissionErr = turn.text, submitErr
+				var classified *apperr.Error
+				if errors.As(submitErr, &classified) && classified.Code == "MODEL_SUBMISSION_MISSING" && workflow.HasAIStageOutputCandidate(turn.text, researchGuidance.StructuredOutputSchema) {
+					// Recognizable malformed JSON still belongs to the strict
+					// parser. Preserve its precise diagnostic, not just "missing".
+					submissionErr = nil
+				}
+			}
+			if submitErr == nil && len(turn.toolCalls) == 1 {
+				// Keep the explicitly chosen native control after calls become
+				// inert journal data. A repair is not a full-result fallback.
+				submissionControl = turn.toolCalls[0].Name
 			}
 			// Candidate bytes enter exactly the existing immutable journal, normalization,
 			// frozen Schema, Skill and business-validation path. Never execute this as IO.
 			turn.text = candidate
 			turn.toolCalls = nil
+			if directSubmission && !plannerStage {
+				submissionPhase, resultSubmissionPhase = true, true
+			}
 		}
 
 		if len(turn.toolCalls) == 0 {
+			if !workflowAIRun && l.userInput != nil && definitionVisible(modelDefinitions, userinput.ToolName) {
+				if body, unfinished := unfinishedQuestionHandoff(turn.text); unfinished {
+					if !questionContinuationUsed {
+						if len([]rune(visibleModelText(turn.text))) > maxRunStepCommentaryRunes {
+							// Do not persist a truncated budget/body marker that could
+							// renew this repair or lose the explanation after restart.
+							if err := l.finishModelTurn(run.ID, run.ModelTurns, journalActive, chat.ModelTurnCompleted, turn.finishReason, len(turn.providerItems)); err != nil {
+								return OutcomeFailed, completionSaveError("finish original question handoff journal", err)
+							}
+							return l.complete(run, withQuestionContinuationBody(body, questionContinuationFallback), turn.finishReason)
+						}
+						// Audit the real provider text, then allow just one same-run
+						// continuation. No options or tool calls are created by the host.
+						turn.commentary = turn.text
+						if err := l.saveRunStep(run, turn, turnStartedAt, now); err != nil {
+							return OutcomeFailed, err
+						}
+						if err := l.finishModelTurn(run.ID, run.ModelTurns, journalActive, chat.ModelTurnCompleted, turn.finishReason, len(turn.providerItems)); err != nil {
+							return OutcomeFailed, err
+						}
+						questionBody, questionContinuationUsed = body, true
+						questionContinuation = visibleModelText(turn.text)
+						questionEvidence = questionHandoff{body: body, text: questionContinuation, runID: run.ID, turnIndex: run.ModelTurns}
+						if err := l.conversations.UpdateMessageText(context.Background(), run.AssistantMessageID, conversation.MessageStreaming, questionBody, now); err != nil {
+							return OutcomeFailed, err
+						}
+						l.observer.Retrying(*run, RetryStatus{Phase: "question_handoff", Attempt: 1, MaxAttempts: 1, Message: "正在补全本轮未展开的提问"})
+						l.observer.ContentStarted(*run)
+						l.observer.ContentDelta(*run, questionBody)
+						continue
+					}
+					// A second dangling intro is not another recovery budget and
+					// must not leave a fictitious pending card or fail the research.
+					turn.text = withQuestionContinuationBody(body, questionContinuationFallback)
+				}
+			}
+			questionContinuation = ""
 			turn.submissionCandidate = workflowStructuredOutputRequired
 			if workflowStructuredOutputRequired {
 				// DraftText is the complete, whitespace-preserving audit source;
@@ -909,12 +1554,139 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 					return OutcomeFailed, &apperr.Error{Code: "WORKFLOW_AI_SUBMISSION_AUDIT_FAILED", UserMessage: "无法完成科研提交原文记录，已停止，未接受结果。", Cause: err}
 				}
 				journalActive = false // the audited candidate is now immutable
+				refusal := originalSubmissionRefusal
+				if refusal == nil {
+					refusal = stageSubmissionRefusal(turn, researchGuidance.StructuredOutputSchema, lastContentDiagnostic)
+				}
+				if refusal != nil {
+					l.submissionRejected(*run, turn.text, researchSubmissionDiagnostic(refusal), contentCorrectionAttempts)
+					return OutcomeFailed, refusal
+				}
+				if missingNativeAction {
+					return OutcomeFailed, &apperr.Error{Code: "WORKFLOW_AI_NATIVE_ACTION_MISSING", UserMessage: "模型接口未遵守本阶段必选原生调用契约：完整响应没有工具调用。已保留原文与协议记录并停止，未进行内容修正或科学审查；原资料、已完成阶段和历史仍保留。"}
+				}
 			}
-			var patchErr error
-			if quoteRepair != nil {
+			patchErr := submissionErr
+			citationCandidateSubmitted := false
+			if reviewSources != nil && patchErr == nil && (submissionControl == stageSubmissionTool || submissionControl == stageRepairTool) {
+				var copied json.RawMessage
+				copied, patchErr = reviewSources.resolve(turn.text, submissionControl, request, calls)
+				if patchErr == nil {
+					turn.text = string(copied)
+				}
+				var unavailable *workflow.ReviewSourceVisibilityError
+				if errors.As(patchErr, &unavailable) {
+					return OutcomeFailed, &apperr.Error{Code: "WORKFLOW_REVIEW_SOURCE_NOT_VISIBLE", UserMessage: "独立审查选择的原文未完整保留在本次实际请求中，无法安全提交，已停止。未接受候选，也未要求模型在提交锁定后调用不可用的读取工具；原材料、已完成阶段和历史保留。", Details: unavailable.Error(), Cause: patchErr}
+				}
+			}
+			if citationSources != nil && patchErr == nil && submissionControl == stageSubmissionTool {
+				var copied json.RawMessage
+				citationCandidateSubmitted = true
+				copied, patchErr = citationSources.resolve(turn.text, request, calls)
+				if patchErr == nil {
+					turn.text = string(copied)
+				}
+				var unavailable *citationSourceNotVisibleError
+				if errors.As(patchErr, &unavailable) {
+					return OutcomeFailed, &apperr.Error{Code: "WORKFLOW_CITATION_SOURCE_NOT_VISIBLE", UserMessage: "文献综合选择的原文未完整保留在本次实际请求中，无法安全提交，已停止；未接受候选，原材料与已完成阶段保留。", Details: unavailable.Error(), Cause: patchErr}
+				}
+			}
+			if (submissionControl == stageEditTool || submissionControl == stageCharacterEditTool) && patchErr == nil {
+				if revisionEdit == nil {
+					return OutcomeFailed, fmt.Errorf("revision edit has no host-confirmed base")
+				}
+				var merged json.RawMessage
+				if submissionControl == stageCharacterEditTool {
+					merged, patchErr = revisionEdit.base.ApplyCharacterEdit(turn.text)
+				} else {
+					merged, patchErr = revisionEdit.base.Apply(turn.text)
+				}
+				if patchErr == nil {
+					turn.text = string(merged)
+				} else {
+					patchErr = &revisionEditSubmissionError{cause: patchErr}
+				}
+			}
+			sparseReviewPatch := false
+			var repairSchema json.RawMessage
+			switch {
+			case citationSources.hasFieldRepair():
+				repairSchema = citationSources.fieldRepair.schema
+			case identityCorrection != nil:
+				repairSchema = identityCorrection.schema
+			case quoteRepair != nil:
+				repairSchema = quoteRepair.schema
+			case reviewCorrection != nil:
+				repairSchema = reviewCorrection.schema
+			}
+			nativeRepair := submissionControl == stageRepairTool
+			var repairFormatErr error
+			if submissionControl == "" && patchErr == nil && len(repairSchema) > 0 {
+				submissionControl, _, repairFormatErr = textCorrectionControl(turn.text, researchGuidance.StructuredOutputSchema, repairSchema)
+			}
+			if nativeRepair && patchErr == nil {
+				var fields map[string]json.RawMessage
+				if err := json.Unmarshal([]byte(turn.text), &fields); err != nil || fields["baseSHA256"] == nil {
+					// A native repair cannot fall through as a full result. Once
+					// its envelope/base field is recognizable, the original merger
+					// enforces the same schema and preserves typed domain errors.
+					repairFormatErr = (tool.JSONSchemaValidator{}).Validate(repairSchema, json.RawMessage(turn.text))
+					if repairFormatErr == nil {
+						repairFormatErr = fmt.Errorf("submit_stage_repair requires an object with baseSHA256")
+					}
+				}
+			}
+			if submissionControl == stageRepairTool && patchErr == nil && repairFormatErr == nil {
+				// Use the SAME bounded envelope parser as every merger. A JSON
+				// object may fit the rune-based audit limit yet exceed its byte
+				// limit; that must not become a merger's full-result fallback.
+				_, _, repairFormatErr = workflow.NormalizeAIStageSubmission(turn.text, json.RawMessage(`{"type":"object","required":["baseSHA256"]}`))
+			}
+			if repairFormatErr != nil {
+				patchErr = fmt.Errorf("invalid correction payload: %w", repairFormatErr)
+				if citationSources.hasFieldRepair() {
+					patchErr = &citationFieldRepairFormatError{cause: patchErr}
+				} else if identityCorrection == nil && quoteRepair != nil {
+					patchErr = &citationRepairFormatError{cause: patchErr}
+				} else if identityCorrection == nil && reviewCorrection != nil {
+					patchErr = &reviewRepairFormatError{cause: patchErr}
+				}
+			}
+			if citationSources.hasFieldRepair() && patchErr == nil && submissionControl == stageRepairTool {
+				var merged string
+				merged, patchErr = citationSources.fieldRepair.merge(turn.text)
+				if patchErr == nil {
+					var copied json.RawMessage
+					citationCandidateSubmitted = true
+					copied, patchErr = citationSources.resolve(merged, request, calls)
+					if patchErr == nil {
+						turn.text = string(copied)
+					}
+				}
+				var unavailable *citationSourceNotVisibleError
+				if errors.As(patchErr, &unavailable) {
+					return OutcomeFailed, &apperr.Error{Code: "WORKFLOW_CITATION_SOURCE_NOT_VISIBLE", UserMessage: "文献综合选择的原文未完整保留在本次实际请求中，无法安全提交，已停止；未接受候选，原材料与已完成阶段保留。", Details: unavailable.Error(), Cause: patchErr}
+				}
+			}
+			if identityCorrection != nil && patchErr == nil && submissionControl != stageSubmissionTool {
+				turn.text, patchErr = identityCorrection.merge(turn.text)
+			}
+			if quoteRepair != nil && patchErr == nil && submissionControl != stageSubmissionTool {
 				// Raw patch is already journaled; only the merged full candidate
 				// reaches validation and the terminal stage answer.
 				turn.text, patchErr = quoteRepair.merge(turn.text)
+			}
+			if reviewCorrection != nil && patchErr == nil && submissionControl != stageSubmissionTool {
+				// Raw patch is already immutable in the journal. The merged
+				// full candidate alone reaches the live business validator.
+				// The actual merge owns patch provenance. Re-parsing raw provider
+				// text here disagrees with the accepted JSON transport envelopes.
+				// Only a successfully applied issue patch can claim sparse progress.
+				if reviewCorrection.issues {
+					turn.text, sparseReviewPatch, patchErr = reviewCorrection.mergeIssues(turn.text)
+				} else {
+					turn.text, patchErr = reviewCorrection.merge(turn.text)
+				}
 			}
 			// A Workflow AI stage has a frozen structured-output contract. Some
 			// gateways stop after a progress sentence even though the request was
@@ -926,14 +1698,21 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 				if structuredCorrectionAttempts < maxStructuredContinuationAttempts {
 					structuredCorrectionAttempts++
 					structuredCorrection = structuredOutputContinuation()
+					plannerSkillCorrection = nil
 					_ = l.finishModelTurn(run.ID, run.ModelTurns, journalActive, chat.ModelTurnCompleted, turn.finishReason, len(turn.providerItems))
+					if err := savePlannerCheckpoint(false); err != nil {
+						return OutcomeFailed, err
+					}
 					continue
 				}
 				_ = l.finishModelTurn(run.ID, run.ModelTurns, journalActive, chat.ModelTurnFailed, turn.finishReason, len(turn.providerItems))
 				return OutcomeFailed, &apperr.Error{Code: "WORKFLOW_AI_OUTPUT_MISSING", UserMessage: "科研阶段模型连续返回进度文本，仍未提交完整的结构化 JSON；本阶段未完成，请重试当前阶段。"}
 			}
 			structuredCorrection = ""
-			structuredCandidate = ""
+			plannerSkillCorrection = nil
+			if submissionErr == nil {
+				structuredCandidate = ""
+			}
 			validatedText := turn.text
 			if workflowStructuredOutputRequired && len(researchGuidance.StructuredOutputSchema) > 0 {
 				var normalized json.RawMessage
@@ -963,29 +1742,141 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 						return OutcomeFailed, validationErr
 					}
 					validationMessage := researchSubmissionDiagnostic(validationErr)
-					if contentCorrectionAttempts >= maxWorkflowContentCorrections {
+					if citationSources.hasFieldRepair() && citationCandidateSubmitted {
+						// Wire/source and science errors all belong to the CURRENT
+						// hash. An invalid patch envelope must not overwrite them;
+						// a new merged base must not inherit an older base's defects.
+						citationSources.fieldRepair.diagnostic = validationMessage
+						lastContentDiagnostic = validationMessage
+					}
+					if patchErr == nil {
+						validationMessage += quoteRepair.repeatedQuoteDiagnostic(turn.text)
+					}
+					if plannerCheckpoint != nil {
+						// Bound only the diagnostic, keeping the fixed correction,
+						// evidence-preservation and submission instructions intact.
+						validationMessage = boundedPlannerFeedback(validationMessage, 6_000)
+					}
+					l.submissionRejected(*run, turn.text, validationMessage, contentCorrectionAttempts)
+					currentReviewDefects := reviewProgressKeys(validationErr)
+					if contentCorrectionAttempts >= contentCorrectionLimit && contentCorrectionLimit == maxWorkflowContentCorrections && sparseReviewPatch && patchErr == nil && strictReviewProgress(previousReviewDefects, currentReviewDefects) {
+						contentCorrectionLimit++ // At most one, never a fresh five-turn loop.
+					}
+					previousReviewDefects = currentReviewDefects
+					if contentCorrectionAttempts >= contentCorrectionLimit {
 						_ = l.finishModelTurn(run.ID, run.ModelTurns, journalActive, chat.ModelTurnFailed, turn.finishReason, len(turn.providerItems))
-						return OutcomeFailed, &apperr.Error{Code: "WORKFLOW_AI_CONTENT_REPAIR_EXHAUSTED", UserMessage: researchSubmissionFailureMessage(validationErr), Details: validationMessage, Cause: validationErr}
+						message := researchSubmissionFailureMessage(validationErr)
+						if contentCorrectionLimit > maxWorkflowContentCorrections {
+							message = strings.ReplaceAll(message, "两次", "三次")
+						}
+						return OutcomeFailed, &apperr.Error{Code: "WORKFLOW_AI_CONTENT_REPAIR_EXHAUSTED", UserMessage: message, Details: submissionFailureDetails(validationMessage, lastContentDiagnostic), Cause: validationErr}
 					}
 					contentCorrectionAttempts++
-					structuredCandidate = turn.text
+					// Planning still needs its frozen exploration interface to load
+					// newly selected Skills. Never lock that prerequisite out early;
+					// once SUBMIT has begun, however, do not reopen exploration.
+					if !plannerStage || submissionPhase || reviewCorrection != nil || fullReviewNavigation != "" || evidenceScopeSubmissionSchema(researchGuidance.StructuredOutputSchema) {
+						resultSubmissionPhase = true
+					}
+					if assembledImplementation {
+						// Tombstone the rejected complete candidate before starting
+						// another generation, so restart cannot renew correction
+						// allowances or resurrect the rejected source prefix.
+						value := implementation.draft
+						value.Rejected, value.CorrectionCount, value.ValidationError = true, contentCorrectionAttempts, validationMessage
+						value.SourceTurnIndex, value.UpdatedAt = run.ModelTurns, l.now()
+						if err := implementation.repository.SaveImplementationDraft(ctx, value); err != nil {
+							return OutcomeFailed, err
+						}
+						implementation.validationError = validationMessage
+						if err := implementation.reset(run.ID, contentCorrectionAttempts); err != nil {
+							return OutcomeFailed, err
+						}
+						l.observer.Retrying(*run, RetryStatus{Phase: "workflow_content_validation", Attempt: contentCorrectionAttempts, MaxAttempts: maxWorkflowContentCorrections, Message: fmt.Sprintf("正在修正完整实现（第 %d/%d 次），已保存原提交", contentCorrectionAttempts, maxWorkflowContentCorrections)})
+						continue
+					}
+					if implementation != nil {
+						// Legacy full-envelope responses still use the original
+						// validator, but must not reset the correction allowance if
+						// they switch to parts and are cancelled during a repair.
+						value := implementation.rejectionMarker(contentCorrectionAttempts, validationMessage)
+						value.SourceEvidence = request.CompletedToolEvidence
+						value.SourceTurnIndex, value.UpdatedAt = run.ModelTurns, l.now()
+						if err := implementation.repository.SaveImplementationDraft(ctx, value); err != nil {
+							return OutcomeFailed, err
+						}
+						implementation.draft = value
+						implementation.validationError = validationMessage
+						if err := implementation.reset(run.ID, contentCorrectionAttempts); err != nil {
+							return OutcomeFailed, err
+						}
+					}
+					if submissionErr == nil {
+						structuredCandidate = turn.text
+					}
 					structuredCorrection = "The preceding assistant message is the rejected result candidate, not an accepted stage result. Host submission validation failed: " + validationMessage + ". Correct only the result against the original frozen schema and output protocol, and submit the complete corrected result. Keep the same research conclusions and evidence unless the validation error requires a change. Do not repeat completed tools, file reads, searches, calculations, or Skill loads; their results remain in this conversation. Do not return another progress report."
+					if submissionErr != nil && lastContentDiagnostic != "" {
+						structuredCorrection += "\nThe previous candidate is still rejected; its unresolved diagnostics remain: " + lastContentDiagnostic
+					}
 					if patchErr == nil {
+						lastContentDiagnostic = validationMessage
+						fullReviewNavigation = reviewFullResultNavigation(validationErr)
+						if fullReviewNavigation != "" {
+							resultSubmissionPhase = true
+						}
+						identityCorrection = newLiteratureIdentityRepair(turn.text, researchGuidance.StructuredOutputSchema, validationErr)
 						quoteRepair = nil
-						var issues *workflow.CitationQuoteErrors
-						var issue *workflow.CitationQuoteError
-						if errors.As(validationErr, &issues) {
-							quoteRepair = newCitationRepairs(turn.text, researchGuidance.StructuredOutputSchema, issues.Issues)
-						} else if errors.As(validationErr, &issue) {
-							quoteRepair = newCitationRepair(turn.text, researchGuidance.StructuredOutputSchema, issue)
+						reviewCorrection = nil
+						quoteRepair = newCitationRepairForError(turn.text, researchGuidance.StructuredOutputSchema, validationErr)
+						if citationSources.hasFieldRepair() {
+							// v2 retains the model's native-selector baseline and allows
+							// explicit scientific field edits, not canonical quote patches.
+							quoteRepair = nil
+							identityCorrection = nil
+						}
+						if quoteRepair == nil {
+							reviewCorrection = newReviewRepair(turn.text, researchGuidance.StructuredOutputSchema, validationErr)
+						}
+					}
+					if identityCorrection != nil {
+						resultSubmissionPhase = true
+						structuredCandidate = string(identityCorrection.base)
+						structuredCorrection = "Candidate identity validation failed. Use the current correction interface and its exact field-specific identity menu; preserve completed evidence."
+						if patchErr != nil {
+							structuredCorrection = "Host correction submission validation failed: " + validationMessage + ". " + structuredCorrection
 						}
 					}
 					if quoteRepair != nil {
+						resultSubmissionPhase = true
 						structuredCandidate = string(quoteRepair.base)
-						structuredCorrection += "\n" + quoteRepair.instruction()
+						// The submission interface supplies the schema and source menu
+						// once; do not duplicate it in both history and control guidance.
+						structuredCorrection = "Host submission validation failed: " + validationMessage + ". Use the current correction interface and source menu; keep completed evidence and do not repeat exploration."
+					}
+					if reviewCorrection != nil {
+						resultSubmissionPhase = true
+						structuredCandidate = string(reviewCorrection.base)
+						// The submission control appends the current source menu once.
+						// Do not duplicate it here and charge the context twice.
+						structuredCorrection = "Host submission validation failed: " + validationMessage + ". Follow the current correction interface and its current-version source menu; keep completed evidence and do not repeat exploration."
+						if submissionErr != nil && lastContentDiagnostic != "" {
+							structuredCorrection += "\nUnresolved candidate diagnostics: " + lastContentDiagnostic
+						}
+					}
+					if citationSources.hasFieldRepair() {
+						// Display exactly the native selector candidate bound by the
+						// patch hash, never the derived supportingQuote validation view.
+						structuredCandidate = string(citationSources.fieldRepair.raw)
+						baseDiagnostic := citationSources.fieldRepair.diagnostic
+						if !citationCandidateSubmitted && baseDiagnostic != "" && !strings.Contains(structuredCorrection, baseDiagnostic) {
+							structuredCorrection += "\nThe current hash-bound candidate is still rejected; unresolved complete-result diagnostics: " + baseDiagnostic
+						}
 					}
 					_ = l.finishModelTurn(run.ID, run.ModelTurns, journalActive, chat.ModelTurnCompleted, turn.finishReason, len(turn.providerItems))
-					l.observer.Retrying(*run, RetryStatus{Phase: "workflow_content_validation", Attempt: contentCorrectionAttempts, MaxAttempts: maxWorkflowContentCorrections, Message: fmt.Sprintf("正在同一科研上下文内修正提交结果（第 %d/%d 次）", contentCorrectionAttempts, maxWorkflowContentCorrections)})
+					if err := savePlannerCheckpoint(false); err != nil {
+						return OutcomeFailed, err
+					}
+					l.observer.Retrying(*run, RetryStatus{Phase: "workflow_content_validation", Attempt: contentCorrectionAttempts, MaxAttempts: contentCorrectionLimit, Message: fmt.Sprintf("正在同一科研上下文内修正提交结果（第 %d/%d 次）", contentCorrectionAttempts, contentCorrectionLimit)})
 					continue
 				}
 				// Only validation sees this projection. The original provider text is
@@ -996,12 +1887,20 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 				if skillErr := l.validatePlannerCompletion(ctx, run.ID, validatedText, researchGuidance.StructuredOutputSchema); skillErr != nil {
 					if plannerSkillCorrectionAttempts >= 2 {
 						_ = l.finishModelTurn(run.ID, run.ModelTurns, journalActive, chat.ModelTurnFailed, turn.finishReason, len(turn.providerItems))
-						return OutcomeFailed, &apperr.Error{Code: "WORKFLOW_PLANNER_SKILLS_INVALID", UserMessage: "研究规划经两次纠正后仍未通过 Skill 加载核验，本阶段未完成。" + skillErr.Error(), Details: skillErr.Error()}
+						// This Run is stopping. Its issued actions are not instructions
+						// for the user or for a future retry with a different Run.
+						return OutcomeFailed, &apperr.Error{Code: "WORKFLOW_PLANNER_SKILLS_INVALID", UserMessage: "研究规划经两次纠正后仍未通过 Skill 加载核验，本阶段未完成。" + skillErr.Error() + " 可重试当前阶段；原资料、已完成阶段和历史记录仍保留，不会自动恢复。", Details: skillErr.Error(), Cause: skillErr}
 					}
 					plannerSkillCorrectionAttempts++
 					structuredCandidate = turn.text
-					structuredCorrection = "研究规划尚未完成。宿主核验反馈：" + skillErr.Error()
+					structuredCorrection = skillErr.Error()
+					plannerSkillCorrection = skillErr
+					plannerSkillCorrectionCandidate = validatedText
+					plannerSkillCorrectionToolCalls = len(calls)
 					_ = l.finishModelTurn(run.ID, run.ModelTurns, journalActive, chat.ModelTurnCompleted, turn.finishReason, len(turn.providerItems))
+					if err := savePlannerCheckpoint(false); err != nil {
+						return OutcomeFailed, err
+					}
 					l.observer.Retrying(*run, RetryStatus{Phase: "planner_skill_validation", Attempt: plannerSkillCorrectionAttempts, MaxAttempts: 2, Message: "正在核对并补齐科研 Skill 加载"})
 					continue
 				}
@@ -1011,6 +1910,9 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 				_ = l.saveRunStep(run, turn, turnStartedAt, now)
 			}
 			answer := visibleModelText(turn.text)
+			if questionContinuationUsed {
+				answer = withQuestionContinuationBody(questionBody, answer)
+			}
 			return l.complete(run, answer, turn.finishReason)
 		}
 		if latest, err := l.runs.Get(context.Background(), run.ID); err != nil {
@@ -1024,9 +1926,15 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 		}
 		_ = l.finishModelTurn(run.ID, run.ModelTurns, journalActive, chat.ModelTurnCompleted, turn.finishReason, len(turn.providerItems))
 		if err := ValidateProviderToolCalls(turn.toolCalls); err != nil {
+			if questionContinuation != "" {
+				// Invalid call identity/JSON cannot create a pending question.
+				// Do not fail the already-produced explanation or execute it.
+				return l.complete(run, withQuestionContinuationBody(questionBody, questionContinuationFallback), "stop")
+			}
 			return OutcomeFailed, &apperr.Error{Code: "MODEL_TOOL_CALL_INVALID", UserMessage: "模型返回了无效或重复的工具调用。", Cause: err}
 		}
 		_ = l.saveRunStep(run, turn, turnStartedAt, now)
+		l.publishRuntimeActivity(*run, "tools")
 		if researchBound {
 			if err := refreshResearchGuidance(true); err != nil {
 				return OutcomeFailed, err
@@ -1067,6 +1975,14 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 				continue
 			}
 			command := tool.CreateCommand{RunID: run.ID, ProviderCallID: providerCall.ID, Arguments: providerCall.Arguments, IdempotencyKey: idempotencyKey}
+			if questionContinuation != "" && providerCall.Name != userinput.ToolName {
+				call, rejectErr := l.tools.RejectProviderCall(ctx, l.registry, providerCall.Name, command, "补问恢复仅开放 builtin.user_input.request，不能重复执行研究工具。请提出具体问题，或完整结束当前回答。")
+				if rejectErr != nil {
+					return OutcomeFailed, rejectErr
+				}
+				proposed = append(proposed, call)
+				continue
+			}
 			if discoveryEnabled && strings.HasPrefix(providerCall.Name, "mcp.") && !definitionVisible(modelDefinitions, providerCall.Name) {
 				call, rejectErr := l.tools.RejectProviderCall(ctx, tool.NewRegistry(), providerCall.Name, command, "此 MCP 工具尚未加载或已不可用。请先调用 builtin.tools.search，并在下一轮收到工具定义后再调用；搜索不授予执行权限。")
 				if rejectErr != nil {
@@ -1135,16 +2051,27 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 			}
 			proposed = append(proposed, call)
 		}
+		questionHandoffTurn := questionContinuation != ""
+		questionContinuation = ""
+		if err := savePlannerCheckpoint(false); err != nil {
+			return OutcomeFailed, err // Proposed calls remain auditable but unexecuted.
+		}
 		waiting, err := l.processCalls(ctx, run, projectID, proposed)
 		if err != nil {
 			return OutcomeFailed, err
 		} else if waiting {
 			return OutcomeWaitingApproval, nil
 		}
+		if questionHandoffTurn {
+			// A malformed/invented call has already been durably rejected. Do
+			// not renew the one-turn handoff budget or execute unrelated work.
+			return l.complete(run, withQuestionContinuationBody(questionBody, questionContinuationFallback), "stop")
+		}
 		calls, err = l.tools.ListByRun(ctx, run.ID)
 		if err != nil {
 			return OutcomeFailed, err
 		}
+		pendingReadTurn = append([]model.ToolCall(nil), turn.toolCalls...)
 	}
 }
 
@@ -1401,6 +2328,29 @@ func toolProposalFailureMessage(toolName string, proposalErr error) string {
 }
 
 func (l *Loop) processCalls(ctx context.Context, run *chat.Run, projectID string, calls []tool.Call) (bool, error) {
+	// A question is a human control boundary, not an executable tool or an
+	// approval. Pause the entire batch before any other tool can run.
+	for _, call := range calls {
+		if call.ToolName != userinput.ToolName || call.Status.Terminal() {
+			continue
+		}
+		if _, err := userinput.Decode(call.Arguments); err != nil || l.userInput == nil {
+			message := "User input is unavailable in this execution."
+			if err != nil {
+				message = err.Error()
+			}
+			if _, finishErr := l.tools.Finish(ctx, call.ID, tool.Result{Status: tool.ResultError, Text: message}, "USER_INPUT_INVALID", message); finishErr != nil {
+				return false, finishErr
+			}
+			continue
+		}
+		waiting, err := l.userInput.WaitForUserInput(ctx, run.ID, call.ID)
+		if err != nil {
+			return false, err
+		}
+		*run = waiting
+		return true, nil
+	}
 	for _, call := range calls {
 		if run.WebSearchDisabled && isWebBrowsingTool(call.ToolName) && !call.Status.Terminal() {
 			return false, &apperr.Error{Code: "WEB_SEARCH_DISABLED", UserMessage: "本次对话未开启联网搜索，已阻止联网工具执行。"}
@@ -1408,6 +2358,9 @@ func (l *Loop) processCalls(ctx context.Context, run *chat.Run, projectID string
 	}
 	ready := make([]tool.Call, 0, len(calls))
 	for _, call := range calls {
+		if call.ToolName == userinput.ToolName {
+			continue
+		}
 		if call.Status == tool.CallDenied || call.Status.Terminal() {
 			continue
 		}
@@ -1679,6 +2632,7 @@ type modelTurn struct {
 	reasoningSignatureObserved bool
 	usages                     []model.Usage
 	firstResponseAt            time.Time
+	pendingToolArgumentChars   int
 }
 
 func (l *Loop) receiveTurn(ctx context.Context, run chat.Run, journalActive, workflowAIRun bool, stream model.Stream) (modelTurn, error) {
@@ -1729,6 +2683,7 @@ func (l *Loop) receiveTurn(ctx context.Context, run chat.Run, journalActive, wor
 		event, recvErr := stream.Recv()
 		if turn.firstResponseAt.IsZero() && ((event.Type == model.EventTextDelta && event.Text != "") || event.Type == model.EventToolCall || event.Type == model.EventProviderItem) {
 			turn.firstResponseAt = l.now()
+			l.publishRuntimeActivity(run, "model_processing")
 		}
 		if event.Type == model.EventTextDelta && event.Text != "" {
 			// Workflow stages require their structured result in the visible
@@ -2039,6 +2994,26 @@ func (l *Loop) cancel(run *chat.Run) {
 	run.Status, run.ErrorCode, run.ErrorMessage, run.UpdatedAt, run.CompletedAt = chat.RunCancelled, "RUN_CANCELLED", "已停止生成", now, &now
 	_ = l.runs.Update(context.Background(), *run)
 	l.observer.RunCancelled(*run)
+}
+
+func (l *Loop) interrupt(run *chat.Run) {
+	if current, err := l.runs.Get(context.Background(), run.ID); err == nil && (isTerminalRun(current.Status) || current.Status == chat.RunWaitingUserInput) {
+		*run = current
+		return
+	}
+	if l.terminator != nil {
+		if interrupted, err := l.terminator.Interrupt(context.Background(), run.ID); err == nil {
+			*run = interrupted
+		}
+		return
+	}
+	now := l.now()
+	_ = l.conversations.UpdateMessageText(context.Background(), run.AssistantMessageID, conversation.MessageIncomplete, l.currentText(run), now)
+	run.Status, run.ErrorCode, run.ErrorMessage, run.UpdatedAt, run.CompletedAt = chat.RunInterrupted, "APP_CLOSING", "程序已关闭，本次生成已中断；已保存的内容和工具结果保留，可重新打开后重试当前阶段。", now, &now
+	_ = l.runs.Update(context.Background(), *run)
+	if observer, ok := l.observer.(interface{ RunInterrupted(chat.Run) }); ok {
+		observer.RunInterrupted(*run)
+	}
 }
 
 func isTerminalRun(status chat.RunStatus) bool {

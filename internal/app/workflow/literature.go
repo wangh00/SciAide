@@ -49,6 +49,8 @@ type literatureCheckpoint struct {
 	PageRequests        int                 `json:"pageRequests"`
 	NextSources         []string            `json:"nextSources,omitempty"`
 	FailedSearches      map[string]bool     `json:"failedSearches,omitempty"`
+	BudgetSearches      map[string]bool     `json:"budgetSearches,omitempty"`
+	SearchPlans         []json.RawMessage   `json:"searchPlans,omitempty"`
 	NextOffset          int                 `json:"nextOffset"`
 	PageQueries         []string            `json:"pageQueries"`
 	PageOffset          int                 `json:"pageOffset"`
@@ -64,20 +66,26 @@ type literatureCheckpoint struct {
 	NoGrowth            int                 `json:"noGrowth"`
 	SourceFailures      bool                `json:"sourceFailures"`
 }
+
 type literatureCandidate struct {
-	Venue          string               `json:"venue,omitempty"`
-	Identifiers    research.Identifiers `json:"identifiers,omitempty"`
-	SourceSHA256   string               `json:"sourceSha256,omitempty"`
-	Years          []int                `json:"years,omitempty"`
-	MetadataStatus string               `json:"metadataStatus,omitempty"`
-	ID             string               `json:"id"`
-	Title          string               `json:"title"`
-	Authors        []research.Author    `json:"authors"`
-	Year           int                  `json:"year"`
-	DOI            string               `json:"doi"`
-	WorkType       string               `json:"workType"`
-	Abstract       string               `json:"abstract,omitempty"`
-	SourceIDs      []string             `json:"sourceIds"`
+	SourceSHA256Version        string                          `json:"sourceSha256Version,omitempty"`
+	RecordIdentity             *research.RecordIdentity        `json:"recordIdentity,omitempty"`
+	SourceMetadata             []research.SourceMetadataRecord `json:"sourceMetadata,omitempty"`
+	SourceMetadataTotalRecords int                             `json:"sourceMetadataTotalRecords,omitempty"`
+	SourceMetadataSHA256       string                          `json:"sourceMetadataSha256,omitempty"`
+	Venue                      string                          `json:"venue,omitempty"`
+	Identifiers                research.Identifiers            `json:"identifiers,omitempty"`
+	SourceSHA256               string                          `json:"sourceSha256,omitempty"`
+	Years                      []int                           `json:"years,omitempty"`
+	MetadataStatus             string                          `json:"metadataStatus,omitempty"`
+	ID                         string                          `json:"id"`
+	Title                      string                          `json:"title"`
+	Authors                    []research.Author               `json:"authors"`
+	Year                       int                             `json:"year"`
+	DOI                        string                          `json:"doi"`
+	WorkType                   string                          `json:"workType"`
+	Abstract                   string                          `json:"abstract,omitempty"`
+	SourceIDs                  []string                        `json:"sourceIds"`
 }
 type literatureAssessment struct {
 	ImportAction string `json:"importAction,omitempty"`
@@ -195,12 +203,14 @@ func literatureCandidates(values []research.Candidate) []literatureCandidate {
 	for _, c := range values {
 		w := c.Preferred
 		sources := []string{}
+		metadata := research.SourceMetadataRecords(c.Records)
 		years := []int{w.Year}
 		years = append(years, w.PublicationYears...)
 		for _, record := range c.Records {
 			years = append(years, record.Work.Year)
 			years = append(years, record.Work.PublicationYears...)
 			sources = appendUnique(sources, record.Work.SourceID)
+
 			// A more complete publisher record must not hide an available abstract.
 			if w.Abstract == "" && record.Work.Abstract != "" {
 				w.Abstract = record.Work.Abstract
@@ -215,7 +225,11 @@ func literatureCandidates(values []research.Candidate) []literatureCandidate {
 		}
 		years = unique
 		sort.Strings(sources)
-		result = append(result, literatureCandidate{ID: c.ID, Title: w.Title, Authors: w.Authors, Year: w.Year, DOI: w.Identifiers.DOI, Venue: w.Venue, Identifiers: w.Identifiers, WorkType: w.WorkType, Abstract: w.Abstract, SourceIDs: sources, MetadataStatus: w.MetadataFetchStatus, Years: years})
+		digestVersion := ""
+		if c.RecordIdentity != nil && c.RecordIdentity.Version == research.RecordIdentityVersion {
+			digestVersion = LiteratureCandidateDigestVersion
+		}
+		result = append(result, literatureCandidate{SourceSHA256Version: digestVersion, RecordIdentity: c.RecordIdentity, ID: c.ID, Title: w.Title, Authors: w.Authors, Year: w.Year, DOI: w.Identifiers.DOI, Venue: w.Venue, Identifiers: w.Identifiers, WorkType: w.WorkType, Abstract: w.Abstract, SourceIDs: sources, MetadataStatus: w.MetadataFetchStatus, Years: years, SourceMetadata: metadata})
 	}
 	return result
 }
@@ -269,6 +283,19 @@ func (s *RuntimeService) prepareLiteratureInput(ctx context.Context, detail RunD
 	}
 	state := literatureState(detail)
 	arguments := decodeObject(rawInput)
+	var frozenSources []string
+	if node.ID == "literature_discovery" {
+		var err error
+		frozenSources, err = frozenLiteratureSourceIDs(detail)
+		if err != nil {
+			return nil, err
+		}
+		if frozenSources != nil {
+			// The accepted query plan, not a prose rationale or stale tool input,
+			// owns source selection for this compilation.
+			arguments["sourceIds"] = frozenSources
+		}
+	}
 	if node.ID == "literature_discovery" {
 		arguments["publicationYears"] = frozenLiteratureYears(detail)
 		arguments["limit"] = 20
@@ -285,14 +312,38 @@ func (s *RuntimeService) prepareLiteratureInput(ctx context.Context, detail RunD
 		if len(state.NextQueries) == 0 {
 			return nil, fmt.Errorf("literature continuation has no query")
 		}
+		var previous struct {
+			Query   string   `json:"query"`
+			Queries []string `json:"queries"`
+		}
+		_ = json.Unmarshal(mustJSON(arguments), &previous)
+		priorQueries := append([]string{previous.Query}, previous.Queries...)
+		sameQueries := len(priorQueries) == len(state.NextQueries)
+		for i := 0; sameQueries && i < len(priorQueries); i++ {
+			sameQueries = priorQueries[i] == state.NextQueries[i]
+		}
 		arguments["query"] = state.NextQueries[0]
 		arguments["queries"] = state.NextQueries[1:]
 		arguments["limit"] = 20
 		arguments["offset"] = state.NextOffset
+		// These projections belong to the original planned queries. Reusing them
+		// after replacing query/queries silently searches the old topic again.
+		if !sameQueries {
+			delete(arguments, "providerQueries")
+		}
 		if len(state.NextSources) > 0 {
+			if len(frozenSources) > 0 {
+				allowed := map[string]bool{}
+				for _, id := range frozenSources {
+					allowed[id] = true
+				}
+				for _, id := range state.NextSources {
+					if !allowed[id] {
+						return nil, fmt.Errorf("literature continuation cannot expand frozen sourceIds; replan to change source scope")
+					}
+				}
+			}
 			arguments["sourceIds"] = state.NextSources
-		} else {
-			delete(arguments, "sourceIds")
 		}
 		return json.Marshal(arguments)
 	}
@@ -338,12 +389,20 @@ func (s *RuntimeService) prepareLiteratureInput(ctx context.Context, detail RunD
 	if state.FailedSearches == nil {
 		state.FailedSearches = map[string]bool{}
 	}
+	if state.BudgetSearches == nil {
+		state.BudgetSearches = map[string]bool{}
+	}
 	var discoveryOutput struct {
 		Structured struct {
-			Sources []research.SourceSearch `json:"sources"`
+			Sources      []research.SourceSearch `json:"sources"`
+			SearchPlan   json.RawMessage         `json:"searchPlan"`
+			SearchErrors []string                `json:"searchErrors"`
 		} `json:"structured"`
 	}
 	_ = json.Unmarshal(discovery.Output, &discoveryOutput)
+	if newSearch && len(discoveryOutput.Structured.SearchPlan) > 0 && string(discoveryOutput.Structured.SearchPlan) != "null" {
+		state.SearchPlans = append(state.SearchPlans, discoveryOutput.Structured.SearchPlan)
+	}
 	// A full first page is the configured retrieval boundary, not a paging request.
 	state.Pages = nil
 	state.PageLedger = nil
@@ -352,14 +411,20 @@ func (s *RuntimeService) prepareLiteratureInput(ctx context.Context, detail RunD
 	for _, source := range discoveryOutput.Structured.Sources {
 		state.SourceLimits = state.SourceLimits || source.LimitReached
 		lastOffset = max(lastOffset, source.Offset)
-		key := fmt.Sprintf("%s:%d:%s", source.SourceID, source.Offset, source.EffectiveQuery)
-		if source.Status == research.SearchFailed {
+		key := literatureSourceAttemptKey(source)
+		if source.Status == research.SearchFailed && source.ErrorCode == research.FailureRequestBudget {
+			state.BudgetSearches[key] = true
+			delete(state.FailedSearches, key)
+		} else if source.Status == research.SearchFailed {
 			state.FailedSearches[key] = true
+			delete(state.BudgetSearches, key)
 		} else {
 			delete(state.FailedSearches, key)
+			delete(state.BudgetSearches, key)
 		}
 	}
-	state.SourceFailures = len(state.FailedSearches) > 0 || partial
+	budgetExplainsPartial := len(state.BudgetSearches) > 0 && len(discoveryOutput.Structured.SearchErrors) == 0
+	state.SourceFailures = len(state.FailedSearches) > 0 || (partial && !budgetExplainsPartial)
 	if newSearch && state.SourceLimits {
 		state.PageQueries = append([]string(nil), queries...)
 		state.PageOffset = lastOffset + 20
@@ -387,8 +452,7 @@ func (s *RuntimeService) prepareLiteratureInput(ctx context.Context, detail RunD
 	pending := []literatureCandidate{}
 	fresh := map[string]string{}
 	for _, c := range candidates {
-		encoded, _ := json.Marshal(c)
-		fingerprint := hashJSON(encoded)
+		fingerprint := literatureCandidateSHA256(c)
 		if fingerprints[c.ID] != fingerprint {
 			pending = append(pending, c)
 			fresh[c.ID] = fingerprint
@@ -431,6 +495,8 @@ func (s *RuntimeService) prepareLiteratureInput(ctx context.Context, detail RunD
 	bytes := 0
 	if len(pending) > 0 && state.Batches < literatureMaxBatches {
 		for _, c := range pending {
+			// fresh[] above hashes the full source metadata, not this bounded view.
+			c = literatureCandidateView(c)
 			encoded, _ := json.Marshal(c)
 			if len(batch) >= literatureBatchSize || bytes+len(encoded) > 100*1024 {
 				break
@@ -459,7 +525,7 @@ func (s *RuntimeService) prepareLiteratureInput(ctx context.Context, detail RunD
 	}
 	arguments["candidates"] = batch
 	arguments["_literature"] = info
-	arguments["partialDiscovery"] = state.SourceFailures
+	arguments["partialDiscovery"] = state.SourceFailures || len(state.BudgetSearches) > 0
 	arguments["publicationYears"] = frozenLiteratureYears(detail)
 	if info.Readback {
 		arguments["readbackReason"] = "全局综合请求核对该候选的原始材料；本次逐项判断将替换先前初筛，并重新生成受影响综合。检查冲突、误排和同一试验重复报告。"
@@ -472,6 +538,18 @@ func (s *RuntimeService) prepareLiteratureInput(ctx context.Context, detail RunD
 		}
 	}
 	return boundedLiteratureInput(arguments)
+}
+
+func literatureSourceAttemptKey(source research.SourceSearch) string {
+	if source.QueryProjectionVersion == "source-query-v1" && source.LogicalQuery != "" {
+		// Different logical queries can have identical ranked projections; an
+		// invalid projection has no effective query at all. Neither is evidence
+		// that another slot's earlier failure was resolved. Do not migrate or
+		// clear an ambiguous legacy key by guessing its missing provenance.
+		encoded, _ := json.Marshal([]any{source.SourceID, source.Offset, source.LogicalQuery, source.InputQuery, source.PublicationYears})
+		return "source-query-v1:" + string(encoded)
+	}
+	return fmt.Sprintf("%s:%d:%s", source.SourceID, source.Offset, source.EffectiveQuery)
 }
 
 func boundedLiteratureInput(arguments map[string]any) (json.RawMessage, error) {
@@ -545,6 +623,9 @@ func (s *RuntimeService) completeLiteratureScreening(ctx context.Context, detail
 	if state.SourceFailures {
 		status = "source_blocked"
 		stopReason = "source_failures"
+	} else if len(state.BudgetSearches) > 0 {
+		status = "request_budget_exhausted"
+		stopReason = "search_http_allocation"
 	} else if execution.ID == "" && info.Pending == 0 {
 		stopReason = "initial_relevance_screening_complete"
 	} else if literaturePagesIncomplete(state) || info.Pending > 0 || ((!screening.Coverage.Sufficient || screening.Recommendation == "expand_search") && screening.Recommendation != "narrow_scope") {
@@ -565,6 +646,9 @@ func (s *RuntimeService) completeLiteratureScreening(ctx context.Context, detail
 		return err
 	}
 	analysis["retrieval"] = map[string]any{"status": status, "stopReason": stopReason, "supplementRounds": state.Round, "screenedBatches": state.Batches, "candidateCount": info.Total, "pendingCount": info.Pending}
+	if len(state.SearchPlans) > 0 {
+		analysis["retrieval"].(map[string]any)["searchPlans"] = state.SearchPlans
+	}
 	if status != "assessed" {
 		coverage := decodeObject(mustJSON(analysis["coverage"]))
 		coverage["sufficientForClaimedScope"] = false
@@ -576,6 +660,9 @@ func (s *RuntimeService) completeLiteratureScreening(ctx context.Context, detail
 		}
 		if status == "source_blocked" {
 			message = "部分文献来源未成功返回；已完成可用来源的首页检索，来源访问限制不代表该课题缺少研究。"
+		}
+		if status == "request_budget_exhausted" {
+			message = "本轮检索或来源槽位的 HTTP 分配已用尽，部分请求未执行；已保存现有候选和逐来源记录。这不是上游接口不可用或该领域没有文献的证据。"
 		}
 		analysis["summary"] = message + "\n" + screening.Summary
 	}
@@ -597,3 +684,11 @@ func (s *RuntimeService) completeLiteratureScreening(ctx context.Context, detail
 }
 
 func mustJSON(value any) json.RawMessage { result, _ := json.Marshal(value); return result }
+
+func literatureCandidateView(c literatureCandidate) literatureCandidate {
+	c.RecordIdentity = research.PreviewRecordIdentity(c.RecordIdentity)
+	if c.SourceMetadataSHA256 == "" {
+		c.SourceMetadata, c.SourceMetadataTotalRecords, c.SourceMetadataSHA256 = research.PreviewSourceMetadataRecords(c.SourceMetadata)
+	}
+	return c
+}

@@ -2,11 +2,16 @@ import { useEffect, useState } from 'react';
 import { ResearchCard, ResearchCardFrame } from './ResearchCard';
 
 export type ResearchRevisionProposal = {
+  deliveryScope?: { summary: string; previousCriteria: string[]; successCriteria: string[] };
   id: string; runId: string; chatRunId: string; userMessageId: string;
   status: 'pending' | 'superseded' | 'confirmed'; canConfirm: boolean;
   nodeId: string; label: string; summary: string; changes: string[]; reason: string;
   affectedStages: string[]; repeatsSideEffects: boolean; createdAt: string;
   reusedStages?: string[];
+	confirmationBlockedReason?: string;
+	editTargets?: string[];
+	designWriteIsolationVersion?: string;
+	writeContract?: {version: string; objects: Array<{id: string; label: string; ownerNodeId: string; kind: string; stepId: string; attempt: number; outputSha256: string; outputPointer: string}>};
   materials?: Array<{attachmentId: string; name: string; sha256: string}>;
   dataVersion?: {previousPaths: string[]; files: Array<{relativePath: string; name: string; sha256: string; attachmentId?: string}>};
   sourceVersion?: {files: Array<{relativePath: string; name: string; sha256: string; attachmentId: string}>};
@@ -31,9 +36,24 @@ export function ResearchRevisionCards({ proposals, busy, conversationId, confirm
     {proposals.map(proposal => {
       const superseded = proposal.status === 'superseded' || invalidated.has(proposal.id);
       const pending = proposal.status === 'pending' && !superseded;
-      if (pending && !proposal.canConfirm) return <p key={proposal.id} role="status">正在整理返修方案</p>;
+      const blocked = pending && !proposal.canConfirm && Boolean(proposal.confirmationBlockedReason);
+      if (pending && !proposal.canConfirm && !blocked) return <p key={proposal.id} role="status">正在整理返修方案</p>;
       const body = <>
         <p className="research-revision-goal">{proposal.summary}</p>
+		{!!proposal.editTargets?.length && <section className="research-revision-materials" aria-label="拟修改的写入对象"><h4>拟修改的写入对象</h4><ul>{proposal.editTargets.map(id => {
+			const objects = Array.isArray(proposal.writeContract?.objects) ? proposal.writeContract.objects : [];
+			const object = objects.find(value => value && typeof value === 'object' && value.id === id);
+			const designOwner = objects.some(value => value && value.ownerNodeId === object?.ownerNodeId && ['frozen_design_material', 'design_material_collection'].includes(value.kind));
+			return <li key={id}>{object ? `${object.label} · 产出阶段 ${object.ownerNodeId}` : id}{proposal.designWriteIsolationVersion === 'design-material-isolation-v1' && object?.kind === 'stage_result' && designOwner && <strong>（整个设计输出均可修改，包括未单独选择的材料和其他字段；不限于所选材料正文）</strong>}</li>;
+		})}</ul><p>这是模型声明的修改范围，不代表修改意图或科学结论已获批准。</p></section>}
+		{proposal.designWriteIsolationVersion === 'design-material-isolation-v1' && <p>程序将核对实际设计写入范围：仅所选材料正文可改，所选集合只可尾部新增；如选择整个设计输出，则以上述宽范围授权为准。科学检查与独立审查仍须通过。</p>}
+        {proposal.deliveryScope && <section className="research-revision-materials" aria-label="交付范围变更">
+          <h4>{proposal.status === 'confirmed' ? '已确认的交付验收范围' : '本次拟修改交付验收范围'}</h4>
+          <p>{proposal.deliveryScope.summary}</p><b>本方案完整交付条件</b>
+          <ol>{proposal.deliveryScope.successCriteria.map((text, index) => <li key={index}>{text}</li>)}</ol>
+          <details><summary>原交付条件（保留历史）</summary><ol>{proposal.deliveryScope.previousCriteria.map((text, index) => <li key={index}>{text}</li>)}</ol></details>
+          <p>仅“以有限证据继续”不会作此变更；原研究问题和材料不变，不代表已完成暂缓的工作。</p>
+        </section>}
         <section className="research-revision-scope-summary" aria-label="返修执行范围">
           <div><span>返修起点</span><strong>{proposal.label}</strong></div>
           <div><span>将重新执行 · {proposal.affectedStages.length} 个阶段</span><ol className="research-revision-stage-list">{proposal.affectedStages.map((stage, index) => <li key={index}>{stage}</li>)}</ol></div>
@@ -54,11 +74,12 @@ export function ResearchRevisionCards({ proposals, busy, conversationId, confirm
         </section>}
         <details className="research-revision-reason"><summary>起点依据</summary><p>{proposal.reason}</p></details>
       </>;
-      return pending ? <ResearchCard key={proposal.id} className="research-revision-proposal pending" aria-label="返修确认方案" title="确认返修方案" eyebrow="对话协商 · 尚未执行" status="待确认" tone="pending"
+      return pending && !blocked ? <ResearchCard key={proposal.id} className="research-revision-proposal pending" aria-label="返修确认方案" title="确认返修方案" eyebrow="对话协商 · 尚未执行" status="待确认" tone="pending"
           footer={<><p>{proposal.repeatsSideEffects ? '包含重新计算或执行操作。' : ''}旧版本保留，后续审查和交付检查将重新执行，可能产生模型调用费用。</p>
             <button type="button" className="primary" disabled={busy} onClick={() => confirm(proposal.id)}>{busy ? '正在处理…' : '确认方案并开始返修'}</button>
           </>}>{body}</ResearchCard> : <ResearchCardFrame key={proposal.id} className="research-revision-proposal historical" aria-label="返修确认方案">
-        <details className="research-card-history"><summary><span className="research-card-badge">{superseded ? '旧方案已失效' : '已确认执行'}</span><span>{proposal.summary}</span></summary><div className="research-card-body">{body}</div></details>
+        {blocked && <p role="status">返修方案需要重新制定：{proposal.confirmationBlockedReason}</p>}
+        <details className="research-card-history"><summary><span className="research-card-badge">{blocked ? '需要重新制定' : superseded ? '旧方案已失效' : '已确认执行'}</span><span>{proposal.summary}</span></summary><div className="research-card-body">{body}</div></details>
       </ResearchCardFrame>;
     })}
   </div>;

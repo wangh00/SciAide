@@ -1,14 +1,16 @@
 import { ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ResearchTimelineEntry, ResearchTimelinePage } from "./App";
-import { mergeResearchTimeline } from "./researchTimelineState.js";
+import { mergeResearchTimeline, orderTimelineDialogue } from "./researchTimelineState.js";
+import { TimelineWindow } from "./TimelineWindow";
 
-export function ResearchTaskTimeline({ projectId, taskId, read, render, follow, pending = [], acknowledge }: {
+export function ResearchTaskTimeline({ projectId, taskId, read, render, follow, pending = [], acknowledge, trailing }: {
   projectId: string; taskId: string;
   read: (query: {projectId: string; taskId: string; before?: string; after?: string; limit: number}) => Promise<ResearchTimelinePage>;
   render: (entry: ResearchTimelineEntry) => ReactNode;
   follow: (value: boolean) => void;
   pending?: ResearchTimelineEntry[];
   acknowledge?: (messageIds: string[]) => void;
+  trailing?: ReactNode;
 }) {
   const [entries, setEntries] = useState<ResearchTimelineEntry[]>([]);
   const [hasMore, setHasMore] = useState(false);
@@ -103,11 +105,12 @@ export function ResearchTaskTimeline({ projectId, taskId, read, render, follow, 
     finally { current.inFlight = false; if (!current.disposed) { setLoading(false); wake.current(); } }
   }
 
-  const visibleEntries = [...entries, ...pending.filter(local => !entries.some(entry => entry.id === local.id))];
+  const visibleEntries = orderTimelineDialogue([...entries, ...pending.filter(local => !entries.some(entry => entry.id === local.id))]);
   return <div ref={root} className="message-stack research-task-timeline" aria-label="科研任务时间线">
     {hasMore && <button type="button" className="timeline-load-older" disabled={loading} onClick={() => void older()}>{loading ? "正在读取记录…" : "加载更早记录"}</button>}
     {error && <p role="alert">时间线读取失败：{error}</p>}
     {loading && !entries.length && <p role="status">正在读取科研任务…</p>}
-    {visibleEntries.map(entry => <div data-timeline-id={entry.id} key={entry.id}>{render(entry)}</div>)}
+    {visibleEntries.map((entry, index) => <TimelineWindow id={entry.id} key={entry.id} retain={index >= visibleEntries.length - 8 || entry.active || entry.message?.status === "streaming" || Boolean(entry.proposal?.canConfirm)}>{() => render(entry)}</TimelineWindow>)}
+    {trailing}
   </div>;
 }

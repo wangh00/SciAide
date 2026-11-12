@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -76,9 +77,56 @@ func TestSubmissionJournalPreservesRawAcrossPreviewAndStorageBoundaries(t *testi
 	if err := repo.UpdateModelTurnDraft(ctx, run.ID, 2, boundary+"x", 0, now); err == nil {
 		t.Fatal("oversize raw silently accepted")
 	}
+	commentary := "\t" + strings.Repeat("述", 199998) + "\n"
+	if err := repo.SaveModelTurnSubmissionCommentary(ctx, run.ID, 2, "", now); err == nil {
+		t.Fatal("empty commentary ambiguously bound the audit slot")
+	}
+	for i := 0; i < 2; i++ {
+		if err := repo.SaveModelTurnSubmissionCommentary(ctx, run.ID, 2, commentary, now); err != nil {
+			t.Fatal("independent commentary boundary or idempotent write rejected", err)
+		}
+	}
+	if err := repo.SaveModelTurnSubmissionCommentary(ctx, run.ID, 2, commentary+"x", now); err == nil {
+		t.Fatal("oversize commentary was accepted")
+	}
+	if err := repo.SaveModelTurnSubmissionCommentary(ctx, run.ID, 2, "replacement", now); err == nil {
+		t.Fatal("original commentary was overwritten")
+	}
 	journal, found, err = repo.LatestModelTurnJournal(ctx, run.ID)
-	if err != nil || !found || journal.DraftText != boundary {
+	if err != nil || !found || journal.DraftText != boundary || journal.SubmissionCommentary != commentary {
 		t.Fatal("failed oversize update destroyed previous raw")
+	}
+	if err := repo.FinishModelTurn(ctx, run.ID, 2, chat.ModelTurnCompleted, "tool_calls", 0, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveModelTurnSubmissionCommentary(ctx, run.ID, 2, "after terminal", now); err == nil {
+		t.Fatal("terminal commentary was mutable")
+	}
+	// Valid JSON containing escapes must not be encoded inside another JSON
+	// string merely to retain the accompanying visible text.
+	escaped := `{"summary":"` + strings.Repeat(`\u003c`, 30000) + `","limitations":[]}`
+	if !json.Valid([]byte(escaped)) || len(escaped) >= 200000 {
+		t.Fatal("invalid large-candidate fixture")
+	}
+	if err := repo.BeginModelTurn(ctx, run.ID, 3, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveModelTurnSubmissionCommentary(ctx, run.ID, 3, "original visible text", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.UpdateModelTurnDraft(ctx, run.ID, 3, escaped, 0, now); err != nil {
+		t.Fatal("previously admitted escaped candidate no longer fits", err)
+	}
+	encodedEnvelope, _ := json.Marshal(map[string]string{"visibleText": "x", "arguments": escaped})
+	if len(encodedEnvelope) <= 200000 {
+		t.Fatal("fixture does not reproduce old re-escaping expansion")
+	}
+	if err := repo.UpdateModelTurnDraft(ctx, run.ID, 3, string(encodedEnvelope), 0, now); err == nil {
+		t.Fatal("original journal limit was widened to hide encoding expansion")
+	}
+	journal, found, err = repo.LatestModelTurnJournal(ctx, run.ID)
+	if err != nil || !found || journal.DraftText != escaped || journal.SubmissionCommentary != "original visible text" {
+		t.Fatal("rejected expanded envelope corrupted separately stored originals", err)
 	}
 	if err := repo.SaveRunStep(ctx, chat.RunStep{RunID: run.ID, TurnIndex: 2, Commentary: strings.Repeat("x", 100001), CreatedAt: now, CompletedAt: now}); err == nil {
 		t.Fatal("RunStep no longer enforces display bound")
@@ -94,5 +142,8 @@ func TestSubmissionJournalPreservesRawAcrossPreviewAndStorageBoundaries(t *testi
 	var persisted string
 	if err := reopened.DB().QueryRowContext(ctx, `SELECT draft_text FROM model_turn_journal WHERE run_id=? AND turn_index=1`, run.ID).Scan(&persisted); err != nil || persisted != raw {
 		t.Fatal("reopen lost original whitespace or long content")
+	}
+	if err := reopened.DB().QueryRowContext(ctx, `SELECT submission_commentary FROM model_turn_journal WHERE run_id=? AND turn_index=2`, run.ID).Scan(&persisted); err != nil || persisted != commentary {
+		t.Fatal("reopen lost independent original commentary", err)
 	}
 }

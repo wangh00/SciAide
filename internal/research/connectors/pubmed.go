@@ -2,7 +2,6 @@ package connectors
 
 import (
 	"context"
-	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	"net/url"
@@ -25,27 +24,23 @@ type pubMedSearchResponse struct {
 	} `json:"esearchresult"`
 }
 
-type pubMedSummaryResponse struct {
-	Result map[string]json.RawMessage `json:"result"`
-}
-
-type jsonRawSummary struct {
-	UID             string `json:"uid"`
-	Title           string `json:"title"`
-	FullJournalName string `json:"fulljournalname"`
-	Source          string `json:"source"`
-	PubDate         string `json:"pubdate"`
-	SortPubDate     string `json:"sortpubdate"`
-	ELocationID     string `json:"elocationid"`
-	Volume          string `json:"volume"`
-	Issue           string `json:"issue"`
-	Pages           string `json:"pages"`
-	Authors         []struct {
-		Name string `json:"name"`
-	} `json:"authors"`
+func (r *pubMedSearchResponse) validateSourceResponse() error {
+	if r.Result.IDs == nil {
+		return &appresearch.SourceError{SourceID: "pubmed", Code: appresearch.FailureInvalidData, Message: "PubMed search response is missing esearchresult.idlist"}
+	}
+	seen := map[string]bool{}
+	for _, id := range r.Result.IDs {
+		key := appresearch.CanonicalSourceRecordID("pubmed", id)
+		if key == "" || seen[key] {
+			return &appresearch.SourceError{SourceID: "pubmed", Code: appresearch.FailureInvalidData, Message: "PubMed search returned invalid or duplicate PMIDs"}
+		}
+		seen[key] = true
+	}
+	return nil
 }
 
 type pubMedArticleSet struct {
+	XMLName  xml.Name
 	Articles []pubMedArticle `xml:"PubmedArticle"`
 }
 
@@ -133,94 +128,83 @@ func (c *pubMedConnector) Search(ctx context.Context, options appresearch.Search
 	if len(search.Result.IDs) == 0 {
 		return []appresearch.Work{}, nil
 	}
-	query = url.Values{"db": {"pubmed"}, "retmode": {"xml"}, "id": {strings.Join(search.Result.IDs, ",")}}
-	body, _, err := c.client.get(ctx, c.base+"/efetch.fcgi?"+query.Encode(), requestOptions{SourceID: "pubmed", Host: c.host, MinSpacing: c.spacing, Cache: true})
-	if err != nil {
-		return nil, err
+	ids := append([]string(nil), search.Result.IDs...)
+	query = url.Values{"db": {"pubmed"}, "retmode": {"xml"}, "id": {strings.Join(ids, ",")}}
+	var works []appresearch.Work
+	request := requestOptions{SourceID: "pubmed", Host: c.host, MinSpacing: c.spacing, Cache: true}
+	request.validateBody = func(body []byte) error {
+		var err error
+		works, err = validatePubMedBatch(body, ids, false)
+		return err
 	}
-	var set pubMedArticleSet
-	if err := xml.Unmarshal(body, &set); err != nil {
-		return nil, &appresearch.SourceError{SourceID: "pubmed", Code: appresearch.FailureInvalidData, Message: "PubMed returned malformed abstract XML", Cause: err}
-	}
-	byID := map[string]pubMedArticle{}
-	for _, article := range set.Articles {
-		byID[article.Citation.PMID] = article
-	}
-	works := []appresearch.Work{}
-	for _, id := range search.Result.IDs {
-		article, ok := byID[id]
-		if !ok {
-			return nil, &appresearch.SourceError{SourceID: "pubmed", Code: appresearch.FailureInvalidData, Message: "PubMed abstract response omitted a requested PMID"}
-		}
-		works = append(works, pubMedArticleWork(article))
-	}
-	return works, nil
+	_, _, err := c.client.get(ctx, c.base+"/efetch.fcgi?"+query.Encode(), request)
+	return works, err
 }
 
 func (c *pubMedConnector) Fetch(ctx context.Context, recordID string) (appresearch.Work, error) {
 	id := strings.TrimSpace(recordID)
-	for _, character := range id {
-		if character < '0' || character > '9' {
-			return appresearch.Work{}, &appresearch.SourceError{SourceID: "pubmed", Code: appresearch.FailureInvalidData, Message: "PubMed fetch requires a PMID"}
-		}
-	}
-	if id == "" {
+	if appresearch.CanonicalSourceRecordID("pubmed", id) == "" {
 		return appresearch.Work{}, &appresearch.SourceError{SourceID: "pubmed", Code: appresearch.FailureInvalidData, Message: "PubMed fetch requires a PMID"}
 	}
 	query := url.Values{"db": {"pubmed"}, "retmode": {"xml"}, "id": {id}}
-	body, _, err := c.client.get(ctx, c.base+"/efetch.fcgi?"+query.Encode(), requestOptions{SourceID: "pubmed", Host: c.host, MinSpacing: c.spacing, Cache: true})
+	var works []appresearch.Work
+	options := requestOptions{SourceID: "pubmed", Host: c.host, MinSpacing: c.spacing, Cache: true}
+	options.validateBody = func(body []byte) error {
+		var err error
+		works, err = validatePubMedBatch(body, []string{id}, true)
+		return err
+	}
+	_, _, err := c.client.get(ctx, c.base+"/efetch.fcgi?"+query.Encode(), options)
 	if err != nil {
 		return appresearch.Work{}, err
 	}
-	var set pubMedArticleSet
-	if err := xml.Unmarshal(body, &set); err != nil {
-		return appresearch.Work{}, &appresearch.SourceError{SourceID: "pubmed", Code: appresearch.FailureInvalidData, Message: "PubMed returned malformed XML", Cause: err}
-	}
-	if len(set.Articles) == 0 {
+	if len(works) == 0 {
 		return appresearch.Work{}, &appresearch.SourceError{SourceID: "pubmed", Code: appresearch.FailureNotFound, Message: "PubMed article was not found"}
 	}
-	return pubMedArticleWork(set.Articles[0]), nil
+	return works[0], nil
 }
 
-func (c *pubMedConnector) summaries(ctx context.Context, ids []string) ([]appresearch.Work, error) {
-	query := url.Values{"db": {"pubmed"}, "retmode": {"json"}, "id": {strings.Join(ids, ",")}}
-	var response pubMedSummaryResponse
-	if err := c.client.getJSON(ctx, c.base+"/esummary.fcgi?"+query.Encode(), requestOptions{SourceID: "pubmed", Host: c.host, MinSpacing: c.spacing, Cache: true}, &response); err != nil {
-		return nil, err
+func validatePubMedBatch(body []byte, ids []string, allowNotFound bool) ([]appresearch.Work, error) {
+	var set pubMedArticleSet
+	if err := decodeSourceXML(body, &set); err != nil || set.XMLName.Local != "PubmedArticleSet" {
+		return nil, &appresearch.SourceError{SourceID: "pubmed", Code: appresearch.FailureInvalidData, Message: "PubMed returned malformed abstract XML", Cause: err}
 	}
-	result := make([]appresearch.Work, 0, len(ids))
+	if len(set.Articles) == 0 && allowNotFound {
+		return []appresearch.Work{}, nil
+	}
+	if len(set.Articles) != len(ids) {
+		return nil, &appresearch.SourceError{SourceID: "pubmed", Code: appresearch.FailureInvalidData, Message: "PubMed abstract response did not match its requested batch"}
+	}
+	expected := map[string]bool{}
 	for _, id := range ids {
-		raw, exists := response.Result[id]
-		if !exists {
-			continue
-		}
-		var record jsonRawSummary
-		if err := json.Unmarshal(raw, &record); err != nil || strings.TrimSpace(record.UID) == "" {
-			continue
-		}
-		authors := make([]appresearch.Author, 0, len(record.Authors))
-		for _, author := range record.Authors {
-			if strings.TrimSpace(author.Name) != "" {
-				authors = append(authors, appresearch.Author{Name: author.Name, Source: "pubmed"})
+		expected[appresearch.CanonicalSourceRecordID("pubmed", id)] = true
+	}
+	byID := map[string]appresearch.Work{}
+	for _, article := range set.Articles {
+		work := pubMedArticleWork(article)
+		if len(ids) == 1 {
+			if err := appresearch.ValidateFetchedRecord("pubmed", ids[0], work); err != nil {
+				return nil, err
 			}
 		}
-		doi := strings.TrimSpace(record.ELocationID)
-		if index := strings.Index(strings.ToLower(doi), "doi:"); index >= 0 {
-			doi = strings.TrimSpace(doi[index+4:])
+		key := appresearch.CanonicalSourceRecordID("pubmed", work.SourceRecordID)
+		if !appresearch.IsUsableSourceRecord("pubmed", work) || !expected[key] {
+			return nil, &appresearch.SourceError{SourceID: "pubmed", Code: appresearch.FailureInvalidData, Message: "PubMed abstract response returned an invalid or unexpected record"}
 		}
-		published := record.SortPubDate
-		if published == "" {
-			published = record.PubDate
+		if _, duplicate := byID[key]; duplicate {
+			return nil, &appresearch.SourceError{SourceID: "pubmed", Code: appresearch.FailureInvalidData, Message: "PubMed abstract response repeated a requested PMID"}
 		}
-		result = append(result, appresearch.Work{
-			SourceRecordID: record.UID, Title: plainText(record.Title), Authors: authors, Year: yearFrom(published),
-			Published: dateString(published), Venue: firstNonEmpty(record.FullJournalName, record.Source), Volume: record.Volume,
-			Issue: record.Issue, Pages: record.Pages, WorkType: "journal-article",
-			Identifiers: appresearch.Identifiers{DOI: appresearch.NormalizeDOI(doi), PMID: record.UID},
-			LandingURL:  "https://pubmed.ncbi.nlm.nih.gov/" + record.UID + "/", RawSnapshot: rawSnapshot(record),
-		})
+		byID[key] = work
 	}
-	return result, nil
+	works := make([]appresearch.Work, 0, len(ids))
+	for _, id := range ids {
+		work, ok := byID[appresearch.CanonicalSourceRecordID("pubmed", id)]
+		if !ok {
+			return nil, &appresearch.SourceError{SourceID: "pubmed", Code: appresearch.FailureInvalidData, Message: "PubMed abstract response omitted a requested PMID"}
+		}
+		works = append(works, work)
+	}
+	return works, nil
 }
 
 func pubMedArticleWork(record pubMedArticle) appresearch.Work {

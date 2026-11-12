@@ -48,3 +48,15 @@ func TestActionIdentityBindsRunScopeAndSealedArguments(t *testing.T) {
 		t.Fatal("reference changed after restart")
 	}
 }
+
+func TestUnknownResourceReturnsOnlyIssuedRecoveryChoices(t *testing.T) {
+	v := View{OpenIDs: map[string]bool{"res_current": true}, RecoveryOptions: []Option{{ID: "res_foreign", Tool: OpenTool, Label: "foreign"}, {ID: "res_current", Tool: OpenTool, Label: "方法手册"}}}
+	args := json.RawMessage(`{"actionId":"res_stale"}`)
+	if v.Allows(OpenTool, args) {
+		t.Fatal("stale ID accepted")
+	}
+	message := v.RejectionMessage(OpenTool, args)
+	if !strings.Contains(message, "res_current") || strings.Contains(message, "res_foreign") || !strings.Contains(message, "并未执行") {
+		t.Fatal(message)
+	}
+}

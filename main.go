@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
+	"sync"
 
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
@@ -13,6 +15,7 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/options/windows"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 	"github.com/wangh00/SciAide/internal/bootstrap"
+	"github.com/wangh00/SciAide/internal/platform/desktopdiag"
 )
 
 //go:embed all:frontend/dist
@@ -28,13 +31,30 @@ func main() {
 	if !primaryInstance {
 		return
 	}
-
-	application, err := bootstrap.New(bootstrap.Options{})
+	diagnostics, diagnosticErr := startDesktopDiagnostics()
+	if diagnosticErr != nil {
+		log.Printf("desktop diagnostics setup failed: %v", diagnosticErr)
+	}
+	// Do not defer Finish: panic unwinding must leave the runtime crash sink
+	// installed until Go writes its fatal stack, even for a main-thread panic.
+	err = runDesktop(diagnostics)
+	diagnostics.Finish(err == nil)
 	if err != nil {
-		reportStartupError(fmt.Errorf("bootstrap SciAide: %w", err))
 		os.Exit(1)
 	}
-	defer application.Close()
+}
+
+func runDesktop(diagnostics *desktopdiag.Session) error {
+	application, err := bootstrap.New(bootstrap.Options{ConnectMCPOnStartup: true})
+	if err != nil {
+		diagnostics.Error("bootstrap", err)
+		reportStartupError(fmt.Errorf("bootstrap SciAide: %w", err))
+		return err
+	}
+	defer func() { diagnostics.Error("application_close", application.Close()) }()
+	var recoveryMu sync.Mutex
+	uiClosing := false
+	stopUIRecovery := func() {}
 
 	err = wails.Run(&options.App{
 		Title:       "SciAide",
@@ -44,10 +64,12 @@ func main() {
 		MinHeight:   640,
 		Frameless:   true,
 		StartHidden: true,
+		Logger:      desktopdiag.RuntimeLogger{Session: diagnostics},
 		Windows: &windows.Options{
 			Theme:                             windows.Light,
 			DisableFramelessWindowDecorations: false,
 			WindowClassName:                   singleInstanceWindowClass,
+			WebviewUserDataPath:               webviewUserDataPath(os.Getenv("SCIAIDE_HOME")),
 		},
 		AssetServer: &assetserver.Options{
 			Assets: assets,
@@ -57,8 +79,24 @@ func main() {
 			application.Startup(ctx)
 			applyInitialWindowSize(ctx)
 			runtime.WindowShow(ctx)
+			recoveryMu.Lock()
+			if !uiClosing {
+				stopUIRecovery = startUIRecovery(ctx, application.SystemFacade)
+				diagnostics.Phase("running")
+			}
+			recoveryMu.Unlock()
 		},
-		OnShutdown: application.Shutdown,
+		OnBeforeClose: func(context.Context) bool { diagnostics.CloseRequested(); return false },
+		OnShutdown: func(ctx context.Context) {
+			diagnostics.Phase("shutdown_started")
+			recoveryMu.Lock()
+			uiClosing = true
+			stop := stopUIRecovery
+			recoveryMu.Unlock()
+			stop()
+			application.Shutdown(ctx)
+			diagnostics.Phase("shutdown_completed")
+		},
 		Bind: []interface{}{
 			application.SystemFacade,
 			application.ProjectFacade,
@@ -78,10 +116,22 @@ func main() {
 			application.WorkflowFacade,
 		},
 	})
+	diagnostics.Phase("event_loop_returned")
 	if err != nil {
 		// OnShutdown may already have closed the application logger.
 		log.Printf("wails stopped: %v", err)
+		diagnostics.Error("wails_run", err)
 	}
+	return err
+}
+
+// An explicitly isolated application home must also isolate browser state.
+// The ordinary installation keeps Wails' existing default profile unchanged.
+func webviewUserDataPath(home string) string {
+	if home == "" {
+		return ""
+	}
+	return filepath.Join(home, "cache", "webview2")
 }
 
 const (

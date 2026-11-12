@@ -73,6 +73,19 @@ func TestProviderTimeoutExhaustionKeepsDiagnosticAtRunBoundary(t *testing.T) {
 }
 
 func TestWorkflowProviderOutageRecoveryKeepsTurnAndCompletedTools(t *testing.T) {
+	testWorkflowProviderOutageRecovery(t, false)
+}
+
+func TestWorkflowHTTP2StreamRecoveryKeepsTurnAndCompletedTools(t *testing.T) {
+	testWorkflowProviderOutageRecovery(t, true)
+}
+
+func testWorkflowProviderOutageRecovery(t *testing.T, http2 bool) {
+	t.Helper()
+	providerCode := "upstream_error"
+	if http2 {
+		providerCode = "upstream_http2_stream_error"
+	}
 	for _, mode := range []string{"recover", "exhaust", "cancel", "permanent"} {
 		t.Run(mode, func(t *testing.T) {
 			var mu sync.Mutex
@@ -95,11 +108,16 @@ func TestWorkflowProviderOutageRecoveryKeepsTurnAndCompletedTools(t *testing.T) 
 					// stream are drafts, not accepted scientific output or execution.
 					responsesFixtureEvent(w, map[string]any{"type": "response.output_text.delta", "delta": answer})
 					responsesFixtureCall(w, "discarded-call")
-					code := "upstream_error"
+					code := providerCode
 					if mode == "permanent" {
 						code = "invalid_api_key"
 					}
-					_, _ = fmt.Fprintf(w, "data: {\"type\":\"error\",\"error\":{\"type\":\"upstream_error\",\"code\":%q,\"message\":\"The service is temporarily unavailable. Please retry later.\"}}\n\n", code)
+					if http2 {
+						// Exact flat Responses error envelope observed in the failed review.
+						responsesFixtureEvent(w, map[string]any{"type": "error", "code": code, "message": "Upstream HTTP/2 stream failed", "param": nil, "sequence_number": 0})
+					} else {
+						_, _ = fmt.Fprintf(w, "data: {\"type\":\"error\",\"error\":{\"type\":\"upstream_error\",\"code\":%q,\"message\":\"The service is temporarily unavailable. Please retry later.\"}}\n\n", code)
+					}
 					return
 				}
 				text, _ := json.Marshal(answer)
@@ -150,7 +168,7 @@ func TestWorkflowProviderOutageRecoveryKeepsTurnAndCompletedTools(t *testing.T) 
 			wantRequests, wantOutcome, wantCode := 4, OutcomeCompleted, ""
 			if mode == "exhaust" {
 				wantRequests, wantOutcome, wantCode = maxStreamRetries+2, OutcomeFailed, "MODEL_UNAVAILABLE"
-				if !strings.Contains(state.run.ErrorMessage, "已停止") || !strings.Contains(state.run.ErrorDetails, "Recovery stopped after 5 stream retries") || !strings.Contains(state.run.ErrorDetails, "upstream_error") {
+				if !strings.Contains(state.run.ErrorMessage, "已停止") || !strings.Contains(state.run.ErrorDetails, "Recovery stopped after 5 stream retries") || !strings.Contains(state.run.ErrorDetails, providerCode) {
 					t.Fatal("retry exhaustion hid stopping condition or provider diagnostics")
 				}
 			} else if mode == "cancel" {
@@ -160,6 +178,12 @@ func TestWorkflowProviderOutageRecoveryKeepsTurnAndCompletedTools(t *testing.T) 
 			}
 			if got != wantOutcome || len(requests) != wantRequests || state.run.ErrorCode != wantCode {
 				t.Fatalf("requests=%d outcome=%s run=%+v", len(requests), got, state.run)
+			}
+			if mode == "exhaust" && len(observer.retrying) != maxStreamRetries {
+				t.Fatal("stream did not emit exactly five retry notifications")
+			}
+			if mode == "permanent" && len(observer.retrying) != 0 {
+				t.Fatal("permanent error unexpectedly retried")
 			}
 			if mode == "recover" {
 				if state.journalDrafts[2] != answer || state.messages[1].Parts[0].Text != answer || state.run.InputTokens != 24 || state.run.OutputTokens != 8 || len(observer.retrying) != 2 {

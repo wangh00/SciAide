@@ -233,8 +233,8 @@ func TestStreamRejectsDuplicateCompletionAndPreservesEventDetails(t *testing.T) 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = io.WriteString(w, "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_duplicate\",\"summary\":[]}}\n\n")
-		_, _ = io.WriteString(w, "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_duplicate\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"inspect\"}]}}\n\n")
-		_, _ = io.WriteString(w, "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_duplicate\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"inspect\"}]}}\n\n")
+		_, _ = io.WriteString(w, "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_duplicate\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"PRIVATE_SENTINEL\"}]}}\n\n")
+		_, _ = io.WriteString(w, "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_duplicate\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"PRIVATE_SENTINEL\"}]}}\n\n")
 	}))
 	defer server.Close()
 
@@ -249,7 +249,7 @@ func TestStreamRejectsDuplicateCompletionAndPreservesEventDetails(t *testing.T) 
 	}
 	_, err = stream.Recv()
 	var appErr *apperr.Error
-	if !errors.As(err, &appErr) || appErr.Code != "MODEL_STREAM_INVALID" || !strings.Contains(appErr.Details, "rs_duplicate") || !strings.Contains(appErr.Details, `"output_index": 1`) {
+	if !errors.As(err, &appErr) || appErr.Code != "MODEL_STREAM_INVALID" || strings.Contains(appErr.Details, "rs_duplicate") || strings.Contains(appErr.Details, "PRIVATE_SENTINEL") || !strings.Contains(appErr.Details, `"output_index": 1`) || !strings.Contains(appErr.Details, "payloadSha256") {
 		t.Fatalf("duplicate completion error = %#v", err)
 	}
 }
@@ -372,6 +372,42 @@ func TestStreamIncompleteIsTerminal(t *testing.T) {
 	}
 }
 
+func TestStreamIncompleteNeverBecomesToolCalls(t *testing.T) {
+	for _, tc := range []struct{ reason, expected string }{{"max_output_tokens", "length"}, {"content_filter", "content_filter"}, {"", "incomplete"}} {
+		t.Run(tc.expected, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				events := []any{
+					map[string]any{"type": "response.output_item.done", "output_index": 0, "item": map[string]any{"type": "function_call", "id": "item", "call_id": "call", "name": "fixture", "arguments": "{}"}},
+					map[string]any{"type": "response.incomplete", "response": map[string]any{"incomplete_details": map[string]any{"reason": tc.reason}}},
+				}
+				for _, event := range events {
+					raw, _ := json.Marshal(event)
+					fmt.Fprintf(w, "data: %s\n\n", raw)
+				}
+			}))
+			defer server.Close()
+			stream, err := New(modelprofile.Profile{BaseURL: server.URL, ModelID: "fixture", TimeoutSeconds: 5}, nil).Stream(context.Background(), model.ChatRequest{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer stream.Close()
+			for {
+				event, err := stream.Recv()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if event.Type == model.EventDone {
+					if event.FinishReason != tc.expected {
+						t.Fatal("complete function cannot override incomplete response", event)
+					}
+					break
+				}
+			}
+		})
+	}
+}
+
 func TestStreamFailurePreservesNestedProviderDetails(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -385,7 +421,7 @@ func TestStreamFailurePreservesNestedProviderDetails(t *testing.T) {
 	defer stream.Close()
 	_, err = stream.Recv()
 	var appErr *apperr.Error
-	if !errors.As(err, &appErr) || appErr.UserMessage != "Input exceeds the model context window" || !strings.Contains(appErr.Details, "context_length_exceeded") || !strings.Contains(appErr.Details, "req-fixture") {
+	if !errors.As(err, &appErr) || appErr.UserMessage != "本次请求超过模型上下文限制，请调整输入或模型配置后重试。" || !strings.Contains(appErr.Details, "context_length_exceeded") || strings.Contains(appErr.Details, "req-fixture") || !strings.Contains(appErr.Details, "payloadSha256") {
 		t.Fatalf("error = %#v", err)
 	}
 }
@@ -567,6 +603,8 @@ func TestStreamNegotiatesMaxToXHigh(t *testing.T) {
 
 func TestStreamHonorsContextCancellation(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// HTTP/1 observes peer cancellation after the request body is consumed.
+		_, _ = io.Copy(io.Discard, r.Body)
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 		if flusher, ok := w.(http.Flusher); ok {

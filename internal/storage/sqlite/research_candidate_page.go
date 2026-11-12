@@ -27,6 +27,7 @@ func (r *ResearchRepository) CandidateForTask(ctx context.Context, projectID, ca
 		if err := json.Unmarshal([]byte(encoded), &snapshot); err != nil {
 			return value, err
 		}
+		value.RecordIdentity = research.MergeRecordIdentities(value.RecordIdentity, snapshot.RecordIdentity)
 		value.Records = append(value.Records, snapshot.Records...)
 		value.Aliases = append(value.Aliases, snapshot.Aliases...)
 		value.CreatedAt = snapshot.CreatedAt

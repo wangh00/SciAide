@@ -85,7 +85,7 @@ func TestResearchClarificationAndReplanPreserveTaskResources(t *testing.T) {
 	}
 	importCSV(initial.Run.ResearchTaskID, "seedlings.csv")
 	answers := map[string][]string{"outputs": {"tables", "plots"}}
-	command := workflow.AnswerResearchClarificationCommand{ProjectID: project.ID, StarterRunID: initial.Run.ID, Answers: answers}
+	command := workflow.AnswerResearchClarificationCommand{ProjectID: project.ID, StarterRunID: initial.Run.ID, Answers: answers, FreeTextAnswers: map[string]string{"outputs": "另需方法局限说明"}}
 	answered, err := application.WorkflowFacade.AnswerResearchClarification(command)
 	if err != nil {
 		t.Fatal(err)
@@ -98,7 +98,7 @@ func TestResearchClarificationAndReplanPreserveTaskResources(t *testing.T) {
 	if input.ResourceSnapshot.AttachmentCount != 1 || !reflect.DeepEqual(input.ResourceSnapshot.TabularFiles, []string{"seedlings.csv"}) || input.ResourceSnapshot.ResourceFingerprint == "" {
 		t.Fatalf("current task resources not frozen: %#v", input.ResourceSnapshot)
 	}
-	if !reflect.DeepEqual(input.ClarificationAnswers, answers) || !strings.Contains(input.ResearchIdea, "数据表") || !strings.Contains(input.ResearchIdea, "图表") {
+	if input.ClarificationFreeText["outputs"] != "另需方法局限说明" || !strings.Contains(input.ResearchIdea, "另需方法局限说明") || !reflect.DeepEqual(input.ClarificationAnswers, answers) || !strings.Contains(input.ResearchIdea, "数据表") || !strings.Contains(input.ResearchIdea, "图表") {
 		t.Fatalf("multiple answers not preserved: %#v", input)
 	}
 	assertV5 := func(run workflow.RunDetail) {

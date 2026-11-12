@@ -233,12 +233,12 @@ func TestSubmissionInterfaceRetainsValidationAndExactCandidateAudit(t *testing.T
 
 func TestSubmissionPseudoToolAndMissingResultAreDistinct(t *testing.T) {
 	for _, item := range []struct{ text, code string }{{"<tool_call>builtin_resource_open<arg_key>actionId</arg_key></tool_call>", "MODEL_SUBMISSION_PSEUDO_TOOL"}, {"Now I will submit the complete route JSON.", "MODEL_SUBMISSION_MISSING"}} {
-		loop, state, _ := newLoopFixture(t, nil, submissionScript(item.text))
+		loop, state, provider := newLoopFixture(t, nil, submissionScript(item.text), submissionScript(item.text), submissionScript(item.text))
 		state.workflowAI = true
 		state.run.ModelTurns = 12
 		loop.resources = &resourceViewFixture{}
 		loop.research = &staticResearchGuidance{bound: true, value: workflow.ResearchGuidance{WorkflowStepID: "step", SkillDiscovery: true, AllowedToolNames: []string{resource.OpenTool}, StructuredOutputRequired: true, StructuredOutputSchema: submissionRepairSchema}}
-		if out := loop.Run(context.Background(), state.run.ID); out != OutcomeFailed || state.run.ErrorCode != item.code || len(state.calls) != 0 {
+		if out := loop.Run(context.Background(), state.run.ID); out != OutcomeFailed || state.run.ErrorCode != "WORKFLOW_AI_CONTENT_REPAIR_EXHAUSTED" || !strings.Contains(state.run.ErrorDetails, item.code) || len(state.calls) != 0 || len(provider.Requests()) != 3 {
 			t.Fatalf("%s %+v", out, state.run)
 		}
 	}

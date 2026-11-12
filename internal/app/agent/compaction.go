@@ -14,6 +14,7 @@ import (
 	"github.com/wangh00/SciAide/internal/apperr"
 	"github.com/wangh00/SciAide/internal/model"
 	"github.com/wangh00/SciAide/internal/modelcap"
+	"github.com/wangh00/SciAide/internal/modelutil"
 )
 
 const maxManualCheckpointPassesPerInvocation = 3
@@ -29,11 +30,12 @@ type checkpointSourceMessage struct {
 }
 
 type checkpointBatch struct {
-	request          model.ChatRequest
-	throughMessageID string
-	messageCount     int
-	estimatedTokens  int
-	summaryLimit     int
+	request            model.ChatRequest
+	throughMessageID   string
+	messageCount       int
+	estimatedTokens    int
+	replacedCharacters int
+	summaryLimit       int
 }
 
 func (l *Loop) CompactConversation(ctx context.Context, conversationID string) (contextmemory.CompactionResult, error) {
@@ -63,7 +65,21 @@ func (l *Loop) CompactConversation(ctx context.Context, conversationID string) (
 	if err != nil {
 		return contextmemory.CompactionResult{}, fmt.Errorf("load conversation for compaction: %w", err)
 	}
-	targetMessageID := manualCompactionTarget(messages, run)
+	// Manual compaction, like ordinary chat, summarizes human discussion only.
+	// Internal stage prompts/results remain available in the immutable audit.
+	if reader, ok := l.research.(interface {
+		DiscussionMessagesForConversation(context.Context, string) ([]conversation.Message, bool, error)
+	}); ok {
+		values, bound, loadErr := reader.DiscussionMessagesForConversation(ctx, conversationID)
+		if loadErr != nil {
+			return contextmemory.CompactionResult{}, fmt.Errorf("load research discussion for compaction: %w", loadErr)
+		}
+		if bound {
+			messages = values
+		}
+	}
+	messages = discussionConversationMessages(messages)
+	targetMessageID := manualCompactionTarget(messages)
 	if targetMessageID == "" {
 		return contextmemory.CompactionResult{}, fmt.Errorf("当前会话没有完整的消息可供压缩")
 	}
@@ -75,6 +91,12 @@ func (l *Loop) CompactConversation(ctx context.Context, conversationID string) (
 		if err := contextmemory.Verify(current); err != nil {
 			return contextmemory.CompactionResult{}, fmt.Errorf("verify conversation checkpoint: %w", err)
 		}
+		if checkpointHasInternalBoundary(current, messages) {
+			current = contextmemory.Checkpoint{}
+			exists = false
+		}
+	}
+	if exists {
 		if current.ThroughMessageID == targetMessageID {
 			if !run.ContextCompacted {
 				run.ContextCompacted = true
@@ -135,17 +157,25 @@ func (l *Loop) CompactConversation(ctx context.Context, conversationID string) (
 	return compactionResult(current, passes, current.ThroughMessageID == targetMessageID), nil
 }
 
-func manualCompactionTarget(messages []conversation.Message, run chat.Run) string {
-	wanted := run.AssistantMessageID
-	if wanted == "" {
-		wanted = run.UserMessageID
-	}
-	for _, message := range messages {
-		if message.ID == wanted && message.ConversationID == run.ConversationID && message.RunID == run.ID {
-			return message.ID
+// The final internal run may have no human content. Select the latest
+// projected discussion boundary, including earlier conversations of this task.
+func manualCompactionTarget(messages []conversation.Message) string {
+	for i := len(messages) - 1; i >= 0; i-- {
+		m := messages[i]
+		if !m.Internal && m.Role != conversation.RoleTool && strings.TrimSpace(conversationText(m)) != "" {
+			return m.ID
 		}
 	}
 	return ""
+}
+
+func checkpointHasInternalBoundary(value contextmemory.Checkpoint, messages []conversation.Message) bool {
+	for _, m := range messages {
+		if m.ID == value.ThroughMessageID {
+			return m.Internal
+		}
+	}
+	return false
 }
 
 func compactionResult(value contextmemory.Checkpoint, passes int, complete bool) contextmemory.CompactionResult {
@@ -212,7 +242,20 @@ func buildCheckpointBatch(current contextmemory.Checkpoint, messages []conversat
 	if err != nil {
 		return checkpointBatch{}, err
 	}
-	return checkpointBatch{request: request, throughMessageID: through, messageCount: len(selected), estimatedTokens: estimated, summaryLimit: summaryLimit}, nil
+	// The new checkpoint replaces both the previous summary and this batch of
+	// new messages. Do not compare a cumulative summary to only its increment,
+	// or count the entire historic source/host rules as replaceable content.
+	replaced := estimated
+	if current.ID != "" {
+		prior := checkpointContextMessage(current)
+		for _, prefix := range stablePrefix {
+			if prefix.Role == prior.Role && prefix.Content == prior.Content {
+				replaced += len([]rune(current.Summary))
+				break
+			}
+		}
+	}
+	return checkpointBatch{request: request, throughMessageID: through, messageCount: len(selected), estimatedTokens: estimated, replacedCharacters: replaced, summaryLimit: summaryLimit}, nil
 }
 
 func checkpointRequest(stablePrefix []model.Message, selected []checkpointSourceMessage, summaryLimit int) (model.ChatRequest, error) {
@@ -283,7 +326,7 @@ func (l *Loop) compactConversation(ctx context.Context, run *chat.Run, chatModel
 		attempt, _, err = l.runModelStream(ctx, *run, chatModel, batch.request, func(stream model.Stream) (streamAttempt, error) {
 			summary, usages, firstResponseAt, receiveErr := l.receiveCheckpointSummary(ctx, stream, batch.summaryLimit)
 			return streamAttempt{checkpointSummary: summary, usages: usages, turn: modelTurn{firstResponseAt: firstResponseAt}}, receiveErr
-		})
+		}, "compaction")
 		if err == nil {
 			break
 		}
@@ -308,8 +351,8 @@ func (l *Loop) compactConversation(ctx context.Context, run *chat.Run, chatModel
 	// Usage accounting is auxiliary. A complete, validated checkpoint must not
 	// be discarded only because its telemetry row could not be written.
 	_ = l.recordRequestUsage(run, "compaction", startedAt, completedAt, attempt.turn.firstResponseAt, usage, reported, 200, "", "")
-	if len([]rune(attempt.checkpointSummary)) >= batch.estimatedTokens {
-		return contextmemory.Checkpoint{}, fmt.Errorf("context checkpoint is not smaller than its source (%d >= %d estimated tokens)", len([]rune(attempt.checkpointSummary)), batch.estimatedTokens)
+	if len([]rune(attempt.checkpointSummary)) >= batch.replacedCharacters {
+		return contextmemory.Checkpoint{}, fmt.Errorf("context checkpoint is not smaller than the previous summary plus new source (%d >= %d Unicode characters)", len([]rune(attempt.checkpointSummary)), batch.replacedCharacters)
 	}
 	checkpoint, err := l.checkpoints.Save(context.Background(), contextmemory.Checkpoint{
 		ConversationID:        run.ConversationID,
@@ -331,6 +374,7 @@ func (l *Loop) compactConversation(ctx context.Context, run *chat.Run, chatModel
 			return contextmemory.Checkpoint{}, err
 		}
 	}
+	l.publishRuntimeActivity(*run, "compaction_completed")
 	return checkpoint, nil
 }
 
@@ -394,6 +438,9 @@ func (l *Loop) receiveCheckpointSummary(ctx context.Context, stream model.Stream
 	if overflow {
 		return "", usages, firstResponseAt, &apperr.Error{Code: "CONTEXT_CHECKPOINT_TRUNCATED", UserMessage: "上下文摘要超过本地安全上限，未替换原历史。"}
 	}
+	if err := modelutil.StandaloneGatewayError(summary.String()); err != nil {
+		return "", usages, firstResponseAt, err
+	}
 	value := strings.TrimSpace(summary.String())
 	if value == "" {
 		return "", nil, firstResponseAt, fmt.Errorf("model returned an empty context checkpoint")
@@ -444,6 +491,12 @@ func (l *Loop) recordFailedRequest(run *chat.Run, kind string, startedAt, comple
 }
 
 func requestFailureDetails(err error) (int, string, string) {
+	// The internal recovery deadline is not an upstream HTTP 500 or a user
+	// cancellation, even if its cause is context.DeadlineExceeded.
+	var recoveryErr *apperr.Error
+	if errors.As(err, &recoveryErr) && recoveryErr.Code == "MODEL_RECOVERY_TIMEOUT" {
+		return 408, recoveryErr.Code, truncateRunes(recoveryErr.UserMessage+"\n\n"+recoveryErr.Details, 8_192)
+	}
 	if errors.Is(err, context.Canceled) {
 		return 499, "REQUEST_INTERRUPTED", "请求已由用户取消或被新消息中断。"
 	}
@@ -488,7 +541,7 @@ func requestStatusForErrorCode(code string) int {
 		return 408
 	case "MODEL_RATE_LIMITED":
 		return 429
-	case "MODEL_REQUEST_REJECTED":
+	case "MODEL_REQUEST_REJECTED", "MODEL_PROMPT_REJECTED", "MODEL_OUTPUT_REFUSED", "WORKFLOW_AI_MODEL_REFUSED":
 		return 400
 	case "REQUEST_INTERRUPTED":
 		return 499

@@ -37,6 +37,7 @@ import (
 	"github.com/wangh00/SciAide/internal/app/workflowai"
 	mcpadapter "github.com/wangh00/SciAide/internal/mcp"
 	"github.com/wangh00/SciAide/internal/model/gateway"
+	"github.com/wangh00/SciAide/internal/model/responses"
 	"github.com/wangh00/SciAide/internal/network"
 	"github.com/wangh00/SciAide/internal/observability"
 	"github.com/wangh00/SciAide/internal/opensciskill"
@@ -57,9 +58,18 @@ import (
 const Version = "1.0.3"
 
 type Options struct {
-	RootDir            string
-	ResearchConnectors []research.Connector
-	EventPublisher     chat.Publisher
+	ConnectMCPOnStartup bool // Desktop opts in; fixture/bindings construction never networks.
+	RootDir             string
+	ResearchConnectors  []research.Connector
+	EventPublisher      chat.Publisher
+	// Optional local development/test admission; nil leaves desktop unchanged.
+	// Runs before each primary model HTTP attempt, including negotiation.
+	ModelRequestGate                 func(context.Context) error
+	DebugResponseErrorObserver       func(responses.DebugProviderError)
+	DebugResponseStreamFaultObserver func(responses.DebugStreamFault)
+	DebugResponseHTTPObserver        func(responses.DebugHTTPResponse)
+	ModelProfileOverlay              func(modelprofile.Repository) modelprofile.Repository
+	DisableAuxiliaryModels           bool
 }
 
 type Application struct {
@@ -81,19 +91,29 @@ type Application struct {
 	PythonFacade         *wailstransport.PythonFacade
 	WorkflowFacade       *wailstransport.WorkflowFacade
 
-	lifecycle     *wailstransport.LifecycleContext
-	chat          *chat.Service
-	knowledge     *knowledge.Service
-	tools         *tool.Executor
-	localexec     *localexec.Runner
-	pythonexec    *localexec.Runner
-	pythonkernel  *pythonenv.KernelService
-	workflow      *workflow.RuntimeService
-	mcp           *mcpadapter.Manager
-	store         *sqlite.Store
-	transientRoot string
-	closeOnce     sync.Once
-	closeErr      error
+	lifecycle         *wailstransport.LifecycleContext
+	chat              *chat.Service
+	knowledge         *knowledge.Service
+	tools             *tool.Executor
+	localexec         *localexec.Runner
+	pythonexec        *localexec.Runner
+	pythonkernel      *pythonenv.KernelService
+	workflow          *workflow.RuntimeService
+	mcp               *mcpadapter.Manager
+	mcpService        *mcpserver.Service
+	mcpAutoStart      bool
+	startupMu         sync.Mutex
+	startupCancel     context.CancelFunc
+	startupDone       chan struct{}
+	startupClosed     bool
+	maintenanceMu     sync.Mutex
+	maintenanceCancel context.CancelFunc
+	maintenanceDone   chan struct{}
+	maintenanceClosed bool
+	store             *sqlite.Store
+	transientRoot     string
+	closeOnce         sync.Once
+	closeErr          error
 }
 
 func New(options Options) (*Application, error) {
@@ -177,7 +197,10 @@ func New(options Options) (*Application, error) {
 	knowledgeService := knowledge.NewService(sqlite.NewKnowledgeRepository(store.DB()), projectService, attachmentService)
 	conversationService := conversation.NewService(conversationRepository)
 	contextCheckpointService := contextmemory.NewService(sqlite.NewContextCheckpointRepository(store.DB()))
-	profileRepository := sqlite.NewModelProfileRepository(store.DB())
+	var profileRepository modelprofile.Repository = sqlite.NewModelProfileRepository(store.DB())
+	if options.ModelProfileOverlay != nil {
+		profileRepository = options.ModelProfileOverlay(profileRepository)
+	}
 	secrets := secretstore.NewNative("SciAide")
 	networkService, err := network.New(context.Background(), secrets)
 	if err != nil {
@@ -232,7 +255,7 @@ func New(options Options) (*Application, error) {
 	pythonProcessRunner := localexec.NewRunner(localexec.Options{MaxOutputBytes: 512 * 1024})
 	pythonEnvironmentService, err := pythonenv.NewService(
 		sqlite.NewPythonEnvironmentRepository(store.DB()), projectService,
-		pythonruntime.New(pythonProcessRunner), dirs.PythonEnvs,
+		pythonruntime.NewWithPackageCache(pythonProcessRunner, filepath.Join(dirs.Cache, "python-packages")), dirs.PythonEnvs,
 	)
 	if err != nil {
 		_ = pythonProcessRunner.Close()
@@ -344,6 +367,9 @@ func New(options Options) (*Application, error) {
 		return fail(fmt.Errorf("configure Workflows: %w", err))
 	}
 	workflowRuntimeRepository := sqlite.NewWorkflowRuntimeRepository(store.DB())
+	workflowRuntimeRepository.SetDeletionObserver(func(runID, phase string, elapsed time.Duration) {
+		logger.Info("research deletion timing", "runId", runID, "phase", phase, "durationMillis", elapsed.Milliseconds())
+	})
 	resourceActions := builtin.NewResourceActions(sqlite.NewModelResourceRepository(store.DB()), toolRegistry, tool.CompositeProjectResolver{Runs: runRepository, Workflows: workflowRuntimeRepository}, dynamicSkills)
 	for _, resourceTool := range []tool.Tool{resourceActions.OpenTool(), resourceActions.SearchTool()} {
 		if err := toolRegistry.Register(context.Background(), resourceTool); err != nil {
@@ -399,6 +425,14 @@ func New(options Options) (*Application, error) {
 		_ = store.Close()
 		return fail(fmt.Errorf("configure research starter: %w", err))
 	}
+	if err := toolRegistry.Register(context.Background(), builtin.NewResearchPlanPrepare(workflowStarter)); err != nil {
+		_ = store.Close()
+		return fail(fmt.Errorf("register research planning tool: %w", err))
+	}
+	if err := toolRegistry.Register(context.Background(), builtin.NewUserInputRequest()); err != nil {
+		_ = store.Close()
+		return fail(fmt.Errorf("register user input tool: %w", err))
+	}
 	approvalCoordinator := permission.NewCoordinator(permissionEngine, toolService, runRepository)
 	var publisher chat.Publisher = options.EventPublisher
 	if publisher == nil {
@@ -423,7 +457,19 @@ func New(options Options) (*Application, error) {
 		_ = store.Close()
 		return fail(fmt.Errorf("configure chat run steps: %w", err))
 	}
-	modelResolver := gateway.NewResolver(profileService)
+	modelResolver := gateway.NewResolver(profileService, options.ModelRequestGate)
+	if err := modelResolver.SetDebugErrorObserver(options.DebugResponseErrorObserver); err != nil {
+		_ = store.Close()
+		return fail(fmt.Errorf("configure developer model observation: %w", err))
+	}
+	if err := modelResolver.SetDebugStreamFaultObserver(options.DebugResponseStreamFaultObserver); err != nil {
+		_ = store.Close()
+		return fail(fmt.Errorf("configure developer stream observation: %w", err))
+	}
+	if err := modelResolver.SetDebugHTTPResponseObserver(options.DebugResponseHTTPObserver); err != nil {
+		_ = store.Close()
+		return fail(fmt.Errorf("configure developer HTTP observation: %w", err))
+	}
 	discoveryScope := func(ctx context.Context, runID string) (map[string]bool, error) {
 		run, err := runRepository.Get(ctx, runID)
 		if err != nil {
@@ -473,8 +519,12 @@ func New(options Options) (*Application, error) {
 		}
 	}
 	multimodalService := multimodal.NewService(sqlite.NewVisionFallbackRepository(store.DB()), secrets, multimodal.NewProtocolResolver())
+	var multimodalFallback agent.MultimodalFallback = multimodalService
+	if options.DisableAuxiliaryModels {
+		multimodalFallback = nil
+	}
 	historicalSkills := skill.NewHistoricalRunContexts(sqlite.NewSkillRepository(store.DB()))
-	agentLoop := agent.NewLoop(runRepository, conversationRepository, toolService, toolRegistry, approvalCoordinator, toolExecutor, modelResolver, agent.NewEventObserver(chatService), agent.Options{Terminator: terminator, Checkpoints: contextCheckpointService, SkillContexts: historicalSkills, SkillRouter: dynamicSkills, Images: attachmentService, Multimodal: multimodalService, Research: workflowRuntime, Resources: resourceActions})
+	agentLoop := agent.NewLoop(runRepository, conversationRepository, toolService, toolRegistry, approvalCoordinator, toolExecutor, modelResolver, agent.NewEventObserver(chatService), agent.Options{UserInput: chatService, Terminator: terminator, Checkpoints: contextCheckpointService, SkillContexts: historicalSkills, SkillRouter: dynamicSkills, Images: attachmentService, Multimodal: multimodalFallback, Research: workflowRuntime, Resources: resourceActions})
 	agentLoop.SetBrowserAvailability(browserService.Available)
 	if err := chatService.SetRunner(agent.NewRunner(agentLoop)); err != nil {
 		_ = store.Close()
@@ -548,7 +598,7 @@ func New(options Options) (*Application, error) {
 	}
 	application := &Application{
 		Logger:               logger,
-		SystemFacade:         wailstransport.NewSystemFacade(Version),
+		SystemFacade:         wailstransport.NewSystemFacadeWithLogger(Version, logger.Logger),
 		ProjectFacade:        wailstransport.NewProjectFacade(lifecycle, projectService, pythonEnvironmentService),
 		ProjectArchiveFacade: wailstransport.NewProjectArchiveFacade(lifecycle, projectArchiveService, projectService),
 		ConversationFacade:   wailstransport.NewConversationFacade(lifecycle, conversationService),
@@ -573,6 +623,8 @@ func New(options Options) (*Application, error) {
 		pythonkernel:         pythonKernelService,
 		workflow:             workflowRuntime,
 		mcp:                  mcpManager,
+		mcpService:           mcpService,
+		mcpAutoStart:         options.ConnectMCPOnStartup,
 		store:                store,
 		transientRoot:        transientRoot,
 	}
@@ -618,6 +670,8 @@ func retireBuiltinSkillPackages(ctx context.Context, db *sql.DB, skillsRoot, bac
 func (a *Application) Startup(ctx context.Context) {
 	a.lifecycle.Set(ctx)
 	a.Logger.InfoContext(ctx, "SciAide started", "version", Version)
+	a.startMCP(ctx)
+	a.startEventCleanup(ctx)
 }
 
 func (a *Application) Shutdown(ctx context.Context) {
@@ -627,11 +681,22 @@ func (a *Application) Shutdown(ctx context.Context) {
 	}
 }
 
+// BeginShutdown only broadcasts the host stop signal to the actual owners of
+// detached Chat/Workflow/process contexts. It does not wait, close storage, or
+// release the workspace; cancelling Startup's lifecycle context is not enough.
+func (a *Application) BeginShutdown() {
+	a.workflow.BeginShutdown()
+	a.chat.BeginShutdown()
+	a.localexec.BeginShutdown()
+	a.pythonexec.BeginShutdown()
+}
+
 func (a *Application) Close() error {
 	a.closeOnce.Do(func() {
-		a.workflow.BeginShutdown()
-		a.localexec.BeginShutdown()
-		a.pythonexec.BeginShutdown()
+		a.Logger.Info("application shutdown started", "pid", os.Getpid())
+		a.stopMCPStartup()
+		a.stopEventCleanup()
+		a.BeginShutdown()
 		a.chat.Close()
 		if err := a.pythonkernel.Close(); err != nil {
 			a.closeErr = fmt.Errorf("close project Python Kernels: %w", err)
@@ -646,7 +711,7 @@ func (a *Application) Close() error {
 		if err := a.mcp.Close(); err != nil {
 			a.closeErr = fmt.Errorf("close MCP connections: %w", err)
 		}
-		// Workflow drivers can still persist their final cancellation state while
+		// Workflow drivers can still persist their final interruption state while
 		// process runners, Kernels, and MCP transports are being closed above.
 		a.workflow.Wait()
 		if _, err := sqlite.NewRunRepository(a.store.DB()).InterruptActive(context.Background(), time.Now().UTC()); err != nil {
@@ -657,6 +722,7 @@ func (a *Application) Close() error {
 				a.closeErr = fmt.Errorf("close storage: %w", err)
 			}
 		}
+		a.Logger.Info("application shutdown completed", "pid", os.Getpid(), "clean", a.closeErr == nil)
 		if err := a.Logger.Close(); err != nil && a.closeErr == nil {
 			a.closeErr = fmt.Errorf("close logger: %w", err)
 		}

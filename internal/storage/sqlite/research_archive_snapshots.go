@@ -29,6 +29,20 @@ func rewriteDiscoverySnapshots(ctx context.Context, tx *sql.Tx, maps *archiveIDM
 		for i := range value.Records {
 			value.Records[i].ID = maps.get("research_source_records", value.Records[i].ID)
 			value.Records[i].ProjectID = projectID
+			if d := value.Records[i].Grouping; d != nil {
+				d.CandidateID = maps.get("research_candidates", d.CandidateID)
+				for j := range d.Matches {
+					d.Matches[j].CandidateID = maps.get("research_candidates", d.Matches[j].CandidateID)
+				}
+				for j := range d.Conflicts {
+					d.Conflicts[j].CandidateID = maps.get("research_candidates", d.Conflicts[j].CandidateID)
+				}
+			}
+		}
+		if value.RecordIdentity != nil {
+			for i := range value.RecordIdentity.Relations {
+				value.RecordIdentity.Relations[i].TargetCandidateID = maps.get("research_candidates", value.RecordIdentity.Relations[i].TargetCandidateID)
+			}
 		}
 		encoded, err := json.Marshal(value)
 		if err != nil {

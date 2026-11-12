@@ -44,8 +44,7 @@ func TestForcedSubmissionToolOnWire(t *testing.T) {
 			t.Error(err)
 			return
 		}
-		choice, ok := body["tool_choice"].(map[string]any)
-		if !ok || choice["type"] != "function" || choice["name"] != "submit_stage_result" {
+		if body["tool_choice"] != "required" {
 			t.Errorf("choice=%v", body["tool_choice"])
 		}
 		if body["parallel_tool_calls"] != false {

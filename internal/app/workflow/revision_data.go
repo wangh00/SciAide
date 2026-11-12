@@ -116,7 +116,7 @@ func researchDataInputsRecord(d RunDetail) (json.RawMessage, error) {
 			versions = append(versions, map[string]any{"revisionId": saved.Proposal.ID, "confirmedAt": event.CreatedAt, "data": saved.Proposal.DataVersion})
 		}
 	}
-	return rawObject(map[string]any{"originalPaths": exactWorkflowInputPaths(d.Run.Inputs), "currentPaths": exactWorkflowInputPaths(inputs), "versions": versions,
+	return rawObject(map[string]any{"originalPaths": exactWorkflowInputPaths(d.Run.Inputs), "currentPaths": exactWorkflowInputPaths(inputs), "versions": versions, "dataBinding": currentResearchDataBinding(d),
 		"instruction": "Only confirmed versions are effective. A dataInputs proposal specifies the complete data set: retainedPaths from currentPaths plus attachmentIds from user-sent supplemental_materials. Unlisted old files are not used, but remain preserved. Tables are not auto-merged; describe their roles and any joins in changes. Confirmation replays from data_preflight."}), nil
 }
 
@@ -211,11 +211,7 @@ func (s *RuntimeService) prepareRevisionData(ctx context.Context, d RunDetail, c
 		version.Files = append(version.Files, file)
 	}
 	if len(selection.AttachmentIDs) > 0 {
-		repo, ok := s.repository.(discussionMaterialsRepository)
-		if !ok {
-			return nil, fmt.Errorf("discussion material storage unavailable")
-		}
-		allowed, err := repo.DiscussionAttachmentIDs(ctx, d.Run.ID)
+		allowed, err := s.discussionAttachmentIDs(ctx, d)
 		if err != nil {
 			return nil, err
 		}
@@ -251,7 +247,11 @@ func (s *RuntimeService) stageRevisionData(ctx context.Context, d RunDetail, id 
 	if !ok {
 		return RevisionDataFile{}, fmt.Errorf("revision data service unavailable")
 	}
-	v, source, err := loader.OpenRevisionData(ctx, d.Run.ProjectID, d.Run.ConversationID, id)
+	owner, err := s.discussionAttachmentOwner(ctx, d, id)
+	if err != nil {
+		return RevisionDataFile{}, err
+	}
+	v, source, err := loader.OpenRevisionData(ctx, d.Run.ProjectID, owner, id)
 	if err != nil {
 		return RevisionDataFile{}, err
 	}

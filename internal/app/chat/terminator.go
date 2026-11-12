@@ -13,8 +13,45 @@ import (
 
 type TerminationRepository interface {
 	CancelRun(ctx context.Context, runID, errorCode, errorMessage string, at time.Time, event events.Envelope) (Run, bool, error)
+	InterruptRun(ctx context.Context, runID, errorCode, errorMessage string, at time.Time, event events.Envelope) (Run, bool, error)
 	FailRun(ctx context.Context, runID, errorCode, errorMessage string, at time.Time, event events.Envelope) (Run, bool, error)
 	ListToolCallIDs(ctx context.Context, runID string) ([]string, error)
+}
+
+// Interrupt commits the lifecycle outcome before cancelling execution resources.
+// Otherwise a finishing tool could race shutdown and label it a user cancel.
+func (t *Terminator) Interrupt(ctx context.Context, runID string) (Run, error) {
+	if t == nil || t.repository == nil {
+		return Run{}, fmt.Errorf("run terminator is not configured")
+	}
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return Run{}, fmt.Errorf("run id is required")
+	}
+	callIDs, err := t.repository.ListToolCallIDs(ctx, runID)
+	if err != nil {
+		return Run{}, err
+	}
+	at := t.now()
+	payload, _ := json.Marshal(map[string]any{"runId": runID, "status": RunInterrupted, "errorCode": "APP_CLOSING"})
+	eventID, err := id.New()
+	if err != nil {
+		return Run{}, err
+	}
+	event := events.New(eventID, runID, "run", "run.interrupted", 0, payload)
+	event.Timestamp = at
+	run, changed, err := t.repository.InterruptRun(ctx, runID, "APP_CLOSING", "程序已关闭，本次生成已中断；已保存的内容和工具结果保留，可重新打开后重试当前阶段。", at, event)
+	if err == nil && changed {
+		if t.cancelTool != nil {
+			for _, callID := range callIDs {
+				t.cancelTool(callID)
+			}
+		}
+		if t.publisher != nil {
+			t.publisher.Publish(ctx, t.persistedEvent(ctx, event))
+		}
+	}
+	return run, err
 }
 
 type terminationEventReader interface {

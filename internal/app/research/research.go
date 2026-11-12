@@ -15,6 +15,8 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/wangh00/SciAide/internal/researchsources"
 )
 
 const (
@@ -25,15 +27,23 @@ const (
 	MaxRawSnapshotBytes = 128 << 10
 )
 
+type SourceCapabilities struct {
+	PublicationYears       bool   `json:"publicationYears"`
+	QueryMode              string `json:"queryMode"`
+	SearchIncludesMetadata bool   `json:"searchIncludesMetadata"`
+	ExplicitSelection      bool   `json:"explicitSelection"`
+}
+
 type Source struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	Domain      string `json:"domain"`
-	Description string `json:"description"`
-	Homepage    string `json:"homepage"`
-	Host        string `json:"host"`
-	KeyFree     bool   `json:"keyFree"`
-	FullText    bool   `json:"fullText"`
+	Capabilities *SourceCapabilities `json:"capabilities,omitempty"`
+	ID           string              `json:"id"`
+	Name         string              `json:"name"`
+	Domain       string              `json:"domain"`
+	Description  string              `json:"description"`
+	Homepage     string              `json:"homepage"`
+	Host         string              `json:"host"`
+	KeyFree      bool                `json:"keyFree"`
+	FullText     bool                `json:"fullText"`
 }
 
 type Author struct {
@@ -52,34 +62,46 @@ type Identifiers struct {
 	SemanticID string `json:"semanticScholar,omitempty"`
 }
 
+type SourceMetadata struct {
+	SourceCitation   string   `json:"sourceCitation,omitempty"`
+	Subjects         []string `json:"subjects,omitempty"`
+	EducationLevels  []string `json:"educationLevels,omitempty"`
+	PublicationTypes []string `json:"publicationTypes,omitempty"`
+	PeerReviewed     *bool    `json:"peerReviewed,omitempty"`
+	License          string   `json:"license,omitempty"`
+	AccessNotice     string   `json:"accessNotice,omitempty"`
+}
+
 // Work is a normalized source record. RawSnapshot is bounded source evidence,
 // not an instruction and not a trusted Citation.
 type Work struct {
-	PublicationYears    []int           `json:"publicationYears,omitempty"`
-	MetadataFetchStatus string          `json:"metadataFetchStatus,omitempty"`
-	MetadataFetchError  string          `json:"metadataFetchError,omitempty"`
-	SourceID            string          `json:"sourceId"`
-	SourceRecordID      string          `json:"sourceRecordId"`
-	Title               string          `json:"title"`
-	Abstract            string          `json:"abstract,omitempty"`
-	Authors             []Author        `json:"authors"`
-	Year                int             `json:"year,omitempty"`
-	Published           string          `json:"published,omitempty"`
-	Venue               string          `json:"venue,omitempty"`
-	Volume              string          `json:"volume,omitempty"`
-	Issue               string          `json:"issue,omitempty"`
-	Pages               string          `json:"pages,omitempty"`
-	Publisher           string          `json:"publisher,omitempty"`
-	WorkType            string          `json:"workType,omitempty"`
-	Language            string          `json:"language,omitempty"`
-	Identifiers         Identifiers     `json:"identifiers"`
-	LandingURL          string          `json:"landingUrl,omitempty"`
-	PDFURL              string          `json:"pdfUrl,omitempty"`
-	PDFURLs             []string        `json:"pdfUrls,omitempty"`
-	OpenAccess          bool            `json:"openAccess"`
-	CitedByCount        int             `json:"citedByCount,omitempty"`
-	Score               float64         `json:"score,omitempty"`
-	RawSnapshot         json.RawMessage `json:"rawSnapshot,omitempty"`
+	SourceMetadataPreview *SourceMetadataPreview `json:"sourceMetadataPreview,omitempty"`
+	SourceMetadata        *SourceMetadata        `json:"sourceMetadata,omitempty"`
+	PublicationYears      []int                  `json:"publicationYears,omitempty"`
+	MetadataFetchStatus   string                 `json:"metadataFetchStatus,omitempty"`
+	MetadataFetchError    string                 `json:"metadataFetchError,omitempty"`
+	SourceID              string                 `json:"sourceId"`
+	SourceRecordID        string                 `json:"sourceRecordId"`
+	Title                 string                 `json:"title"`
+	Abstract              string                 `json:"abstract,omitempty"`
+	Authors               []Author               `json:"authors"`
+	Year                  int                    `json:"year,omitempty"`
+	Published             string                 `json:"published,omitempty"`
+	Venue                 string                 `json:"venue,omitempty"`
+	Volume                string                 `json:"volume,omitempty"`
+	Issue                 string                 `json:"issue,omitempty"`
+	Pages                 string                 `json:"pages,omitempty"`
+	Publisher             string                 `json:"publisher,omitempty"`
+	WorkType              string                 `json:"workType,omitempty"`
+	Language              string                 `json:"language,omitempty"`
+	Identifiers           Identifiers            `json:"identifiers"`
+	LandingURL            string                 `json:"landingUrl,omitempty"`
+	PDFURL                string                 `json:"pdfUrl,omitempty"`
+	PDFURLs               []string               `json:"pdfUrls,omitempty"`
+	OpenAccess            bool                   `json:"openAccess"`
+	CitedByCount          int                    `json:"citedByCount,omitempty"`
+	Score                 float64                `json:"score,omitempty"`
+	RawSnapshot           json.RawMessage        `json:"rawSnapshot,omitempty"`
 }
 
 type SearchOptions struct {
@@ -98,12 +120,14 @@ type Connector interface {
 type FailureCode string
 
 const (
-	FailureRateLimited FailureCode = "rate_limited"
-	FailureTimeout     FailureCode = "timeout"
-	FailureUnavailable FailureCode = "unavailable"
-	FailureInvalidData FailureCode = "invalid_data"
-	FailureNotFound    FailureCode = "not_found"
-	FailureSource      FailureCode = "source_error"
+	FailureRateLimited  FailureCode = "rate_limited"
+	FailureTimeout      FailureCode = "timeout"
+	FailureUnavailable  FailureCode = "unavailable"
+	FailureInvalidData  FailureCode = "invalid_data"
+	FailureInvalidQuery FailureCode = "invalid_query"
+	FailureNotFound     FailureCode = "not_found"
+	FailureSource       FailureCode = "source_error"
+	FailureAccessDenied FailureCode = "access_denied"
 )
 
 type SourceError struct {
@@ -142,19 +166,26 @@ const (
 )
 
 type SourceSearch struct {
-	PublicationYears  PublicationYears   `json:"publicationYears"`
-	YearFilterApplied bool               `json:"yearFilterApplied"`
-	Offset            int                `json:"offset,omitempty"`
-	EffectiveQuery    string             `json:"effectiveQuery,omitempty"`
-	ProviderQuery     string             `json:"providerQuery,omitempty"`
-	QueryMode         string             `json:"queryMode,omitempty"`
-	LimitReached      bool               `json:"limitReached,omitempty"`
-	SourceID          string             `json:"sourceId"`
-	Status            SourceSearchStatus `json:"status"`
-	Count             int                `json:"count"`
-	ErrorCode         FailureCode        `json:"errorCode,omitempty"`
-	Message           string             `json:"message,omitempty"`
-	Retryable         bool               `json:"retryable"`
+	PublicationYears PublicationYears `json:"publicationYears"`
+	// Legacy field name: filter parameters constructed, not proof of an HTTP
+	// attempt, cache miss, or the provider enforcing the requested constraint.
+	YearFilterApplied      bool               `json:"yearFilterApplied"`
+	Offset                 int                `json:"offset,omitempty"`
+	EffectiveQuery         string             `json:"effectiveQuery,omitempty"`
+	ProviderQuery          string             `json:"providerQuery,omitempty"`
+	QueryMode              string             `json:"queryMode,omitempty"`
+	InputQuery             string             `json:"inputQuery,omitempty"`
+	LogicalQuery           string             `json:"logicalQuery,omitempty"`
+	QueryOrigin            string             `json:"queryOrigin,omitempty"`
+	QueryProjectionVersion string             `json:"queryProjectionVersion,omitempty"`
+	QueryLimitations       []string           `json:"queryLimitations,omitempty"`
+	LimitReached           bool               `json:"limitReached,omitempty"`
+	SourceID               string             `json:"sourceId"`
+	Status                 SourceSearchStatus `json:"status"`
+	Count                  int                `json:"count"`
+	ErrorCode              FailureCode        `json:"errorCode,omitempty"`
+	Message                string             `json:"message,omitempty"`
+	Retryable              bool               `json:"retryable"`
 }
 
 type SearchCommand struct {
@@ -209,7 +240,14 @@ func (s *Service) Catalog() []Source {
 	if s == nil {
 		return []Source{}
 	}
-	return append([]Source(nil), s.ordered...)
+	result := append([]Source(nil), s.ordered...)
+	for i := range result {
+		if result[i].Capabilities != nil {
+			capabilities := *result[i].Capabilities
+			result[i].Capabilities = &capabilities
+		}
+	}
+	return result
 }
 
 func (s *Service) Search(ctx context.Context, command SearchCommand) (SearchResult, error) {
@@ -238,62 +276,89 @@ func (s *Service) Search(ctx context.Context, command SearchCommand) (SearchResu
 		return SearchResult{}, err
 	}
 	type outcome struct {
-		index    int
-		works    []Work
-		err      error
-		returned int
+		index      int
+		works      []Work
+		err        error
+		returned   int
+		projection SourceSearch
 	}
-	outcomes := make(chan outcome, len(ids))
-	semaphore := make(chan struct{}, 3)
-	for index, sourceID := range ids {
-		connector := s.byID[sourceID]
-		go func(index int, sourceID string, connector Connector) {
-			select {
-			case semaphore <- struct{}{}:
-			case <-ctx.Done():
-				outcomes <- outcome{index: index, err: ctx.Err()}
-				return
+	searchOne := func(ctx context.Context, index int, sourceID string, connector Connector) outcome {
+		projection, err := compileSourceQuery(sourceID, query, command.ProviderQueries, command.Years)
+		if err != nil {
+			return outcome{index: index, projection: projection, err: &SourceError{SourceID: sourceID, Code: FailureInvalidQuery, Message: err.Error(), Cause: err}}
+		}
+		works, err := connector.Search(ctx, SearchOptions{Query: projection.EffectiveQuery, Limit: limit, Offset: command.Offset, Years: command.Years})
+		returned := len(works)
+		if err == nil {
+			works = normalizeWorks(sourceID, works, limit)
+			if returned > 0 && len(works) == 0 {
+				return outcome{index: index, returned: returned, projection: projection, err: &SourceError{
+					SourceID: sourceID, Code: FailureInvalidData, Message: "source returned records but none survived identity/title normalization",
+				}}
 			}
-			defer func() { <-semaphore }()
-			effective := query
-			if sourceID == "crossref" || sourceID == "semantic-scholar" {
-				effective = RankedBibliographicQuery(query)
-			}
-			if projected := strings.TrimSpace(command.ProviderQueries[sourceID]); projected != "" {
-				effective = projected
-			}
-			works, err := connector.Search(ctx, SearchOptions{Query: effective, Limit: limit, Offset: command.Offset, Years: command.Years})
-			returned := len(works)
-			if err == nil {
-				works = normalizeWorks(sourceID, works, limit)
-				if command.EnrichMetadata {
-					fetchCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
-					blocked := false
-					for i := range works {
-						if ctx.Err() != nil {
-							err = ctx.Err()
-							break
-						}
-						if works[i].Abstract != "" || works[i].WorkType == "peer-review" {
-							continue
-						}
-						if blocked || fetchCtx.Err() != nil {
-							works[i].MetadataFetchStatus = "not_completed"
-							continue
-						}
-						works[i] = s.enrichMetadata(fetchCtx, works[i])
-						blocked = works[i].MetadataFetchStatus == "failed"
+			if command.EnrichMetadata {
+				fetchCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+				blocked := false
+				for i := range works {
+					if ctx.Err() != nil {
+						err = ctx.Err()
+						break
 					}
-					cancel()
+					if works[i].Abstract != "" || works[i].WorkType == "peer-review" {
+						continue
+					}
+					if spec, ok := researchsources.Lookup(sourceID); ok && spec.SearchIncludesMetadata {
+						works[i].MetadataFetchStatus = "unavailable"
+						continue
+					}
+					if blocked || fetchCtx.Err() != nil {
+						works[i].MetadataFetchStatus = "not_completed"
+						continue
+					}
+					works[i] = s.enrichMetadata(fetchCtx, works[i])
+					blocked = works[i].MetadataFetchStatus == "failed"
 				}
+				cancel()
 			}
-			outcomes <- outcome{index: index, works: works, err: err, returned: returned}
-		}(index, sourceID, connector)
+		}
+		return outcome{index: index, works: works, err: err, returned: returned, projection: projection}
 	}
 	collected := make([]outcome, len(ids))
-	for range ids {
-		item := <-outcomes
-		collected[item.index] = item
+	if schedule, ok := ctx.Value(retrievalScheduleKey{}).(retrievalSchedule); ok {
+		expected := schedule.plan.SourcesForQuery(schedule.query)
+		if command.EnrichMetadata || strings.Join(ids, ",") != strings.Join(expected, ",") {
+			return SearchResult{}, fmt.Errorf("retrieval sources or enrichment differ from the frozen schedule")
+		}
+		for index, sourceID := range ids {
+			callCtx, allocation, slot, err := schedule.allocate(ctx, sourceID)
+			if err != nil {
+				return SearchResult{}, err
+			}
+			collected[index] = searchOne(callCtx, index, sourceID, s.byID[sourceID])
+			slot.UsedHTTP, slot.BudgetDenied = allocation.Usage()
+			if err := ctx.Err(); err != nil {
+				return SearchResult{}, err
+			}
+		}
+	} else {
+		outcomes := make(chan outcome, len(ids))
+		semaphore := make(chan struct{}, 3)
+		for index, sourceID := range ids {
+			go func(index int, sourceID string) {
+				select {
+				case semaphore <- struct{}{}:
+				case <-ctx.Done():
+					outcomes <- outcome{index: index, err: ctx.Err()}
+					return
+				}
+				defer func() { <-semaphore }()
+				outcomes <- searchOne(ctx, index, sourceID, s.byID[sourceID])
+			}(index, sourceID)
+		}
+		for range ids {
+			item := <-outcomes
+			collected[item.index] = item
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		return SearchResult{}, err
@@ -301,29 +366,13 @@ func (s *Service) Search(ctx context.Context, command SearchCommand) (SearchResu
 	result := SearchResult{Query: query, Works: []Work{}, Sources: make([]SourceSearch, 0, len(ids))}
 	for index, sourceID := range ids {
 		item := collected[index]
-		status := SourceSearch{SourceID: sourceID, Count: len(item.works)}
+		status := item.projection
+		status.Count = len(item.works)
 		status.PublicationYears = command.Years
-		switch sourceID {
-		case "pubmed", "crossref", "openalex", "europepmc", "semantic-scholar":
-			status.YearFilterApplied = command.Years.Active()
+		if source, ok := researchsources.Lookup(sourceID); ok {
+			status.YearFilterApplied = status.ProviderQuery != "" && source.PublicationYears && command.Years.Active()
 		}
 		status.Offset = command.Offset
-		status.EffectiveQuery = query
-		status.QueryMode = "native_query"
-		if sourceID == "crossref" || sourceID == "semantic-scholar" {
-			status.EffectiveQuery = RankedBibliographicQuery(query)
-			status.QueryMode = "ranked_bibliographic"
-		}
-		if sourceID == "arxiv" {
-			if expression, err := ArXivQuery(query); err == nil {
-				status.ProviderQuery = expression
-				status.QueryMode = "arxiv_boolean"
-			}
-		}
-		if projected := strings.TrimSpace(command.ProviderQueries[sourceID]); projected != "" {
-			status.ProviderQuery = projected
-			status.QueryMode = "planned_provider_query"
-		}
 		status.LimitReached = item.err == nil && item.returned >= limit
 		switch {
 		case item.err == nil && len(item.works) > 0:
@@ -358,6 +407,9 @@ func (s *Service) Fetch(ctx context.Context, command FetchCommand) (Work, error)
 	if err != nil {
 		return Work{}, err
 	}
+	if err := ValidateFetchedRecord(sourceID, recordID, value); err != nil {
+		return Work{}, err
+	}
 	values := normalizeWorks(sourceID, []Work{value}, 1)
 	if len(values) != 1 {
 		return Work{}, &SourceError{SourceID: sourceID, Code: FailureInvalidData, Message: "source returned an invalid record"}
@@ -370,9 +422,12 @@ func (s *Service) resolveSourceIDs(values []string) ([]string, error) {
 		return nil, fmt.Errorf("too many research sources")
 	}
 	if len(values) == 0 {
-		result := make([]string, len(s.ordered))
-		for index := range s.ordered {
-			result[index] = s.ordered[index].ID
+		result := make([]string, 0, len(s.ordered))
+		for _, source := range s.ordered {
+			if source.Capabilities != nil && source.Capabilities.ExplicitSelection {
+				continue
+			}
+			result = append(result, source.ID)
 		}
 		return result, nil
 	}
@@ -407,13 +462,16 @@ func normalizeWorks(sourceID string, values []Work, limit int) []Work {
 	result := make([]Work, 0, len(values))
 	seen := map[string]struct{}{}
 	for _, value := range values {
+		if !IsUsableSourceRecord(sourceID, value) {
+			continue
+		}
 		value.SourceID = sourceID
-		value.SourceRecordID = boundedText(strings.TrimSpace(value.SourceRecordID), MaxRecordIDRunes)
+		value.SourceRecordID = strings.TrimSpace(value.SourceRecordID)
 		value.Title = boundedText(collapseSpace(value.Title), 2000)
 		if value.SourceRecordID == "" || value.Title == "" {
 			continue
 		}
-		key := strings.ToLower(value.SourceRecordID)
+		key := CanonicalSourceRecordID(sourceID, value.SourceRecordID)
 		if _, duplicate := seen[key]; duplicate {
 			continue
 		}
@@ -427,6 +485,16 @@ func normalizeWorks(sourceID string, values []Work, limit int) []Work {
 		value.Publisher = boundedText(collapseSpace(value.Publisher), 1000)
 		value.WorkType = boundedText(collapseSpace(value.WorkType), 200)
 		value.Language = boundedText(strings.TrimSpace(value.Language), 32)
+		if value.SourceMetadata != nil {
+			metadata := *value.SourceMetadata
+			metadata.Subjects = normalizeMetadataTerms(metadata.Subjects)
+			metadata.EducationLevels = normalizeMetadataTerms(metadata.EducationLevels)
+			metadata.PublicationTypes = normalizeMetadataTerms(metadata.PublicationTypes)
+			metadata.SourceCitation = boundedText(collapseSpace(metadata.SourceCitation), 1000)
+			metadata.License = boundedText(collapseSpace(metadata.License), 1000)
+			metadata.AccessNotice = boundedText(collapseSpace(metadata.AccessNotice), 1000)
+			value.SourceMetadata = &metadata
+		}
 		value.Identifiers.DOI = NormalizeDOI(value.Identifiers.DOI)
 		value.Identifiers.PMID = digitsOnly(value.Identifiers.PMID)
 		value.Identifiers.PMCID = strings.ToUpper(strings.TrimSpace(value.Identifiers.PMCID))
@@ -489,6 +557,10 @@ func NormalizeDOI(value string) string {
 }
 
 func NormalizeArXiv(value string) string {
+	return CanonicalSourceRecordID("arxiv", value)
+}
+
+func normalizeArXivRecordID(value string) string {
 	value = strings.TrimSpace(value)
 	for _, prefix := range []string{"https://arxiv.org/abs/", "http://arxiv.org/abs/", "arxiv:"} {
 		if strings.HasPrefix(strings.ToLower(value), prefix) {
@@ -501,11 +573,14 @@ func NormalizeArXiv(value string) string {
 			value = value[:index]
 		}
 	}
-	return boundedText(strings.TrimSpace(value), 100)
+	return strings.TrimSpace(value)
 }
 
 func normalizeSource(value Source) Source {
 	value.ID = strings.ToLower(strings.TrimSpace(value.ID))
+	if spec, ok := researchsources.Lookup(value.ID); ok {
+		value.Capabilities = &SourceCapabilities{PublicationYears: spec.PublicationYears, QueryMode: spec.QueryMode, ExplicitSelection: spec.ExplicitSelection, SearchIncludesMetadata: spec.SearchIncludesMetadata}
+	}
 	value.Name = collapseSpace(value.Name)
 	value.Domain = strings.ToLower(strings.TrimSpace(value.Domain))
 	value.Description = collapseSpace(value.Description)
@@ -574,4 +649,20 @@ func boundedText(value string, maximum int) string {
 	}
 	runes := []rune(value)
 	return string(runes[:maximum])
+}
+
+func normalizeMetadataTerms(values []string) []string {
+	result := []string{}
+	seen := map[string]bool{}
+	for _, value := range values {
+		value = boundedText(collapseSpace(value), 300)
+		if value != "" && !seen[value] {
+			result = append(result, value)
+			seen[value] = true
+		}
+		if len(result) == 100 {
+			break
+		}
+	}
+	return result
 }

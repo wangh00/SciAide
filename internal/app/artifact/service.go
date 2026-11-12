@@ -227,6 +227,18 @@ func (s *Service) SaveWorkflowDeliverable(ctx context.Context, cmd WorkflowDeliv
 // PublishWorkflowReport is the narrow trusted entry used by SciAide's fixed
 // research report tool. Citation identity must be verified before this method
 // is called; this layer freezes provenance and creates deterministic exports.
+// LegacyWorkflowReportPublication reads only the old stable-operation receipt.
+// ResearchWorkflow must verify its persisted ToolCall before reusing it.
+func (s *Service) LegacyWorkflowReportPublication(ctx context.Context, projectID, operationKey string) (Version, bool, error) {
+	reader, ok := s.repository.(interface {
+		VersionForSourceKey(context.Context, string, string) (Version, bool, error)
+	})
+	if !ok {
+		return Version{}, false, fmt.Errorf("legacy publication lookup is unavailable")
+	}
+	return reader.VersionForSourceKey(ctx, projectID, "workflow-report-operation:"+operationKey)
+}
+
 func (s *Service) PublishWorkflowReport(ctx context.Context, cmd WorkflowReportCommand) (WorkflowReportResult, error) {
 	cmd.ProjectID, cmd.WorkflowRunID, cmd.ToolCallID = strings.TrimSpace(cmd.ProjectID), strings.TrimSpace(cmd.WorkflowRunID), strings.TrimSpace(cmd.ToolCallID)
 	cmd.ResearchTaskID = strings.TrimSpace(cmd.ResearchTaskID)

@@ -23,8 +23,19 @@ export function singleFlight() {
   };
 }
 
-export function conditionalViews(capacity = 8) {
+// Estimate retained data without creating another serialized copy of a large
+// report. The budget is a cache budget, not a limit on any returned view.
+export function snapshotWeight(value) {
+  if (typeof value === 'string') return value.length * 2;
+  if (!value || typeof value !== 'object') return 8;
+  let size = 32;
+  for (const key of Object.keys(value)) size += key.length * 2 + snapshotWeight(value[key]);
+  return size;
+}
+
+export function conditionalViews(capacity = 8, maxBytes = 16 * 1024 * 1024) {
   const cache = new Map();
+  let bytes = 0;
   const read = singleFlight();
   return (key, load) => read(key, async () => {
     const prior = cache.get(key);
@@ -37,9 +48,20 @@ export function conditionalViews(capacity = 8) {
       for (const key of update.removed ?? []) delete next[key];
     }
     const value = update.unchanged ? prior.value : shareSnapshot(prior?.value, next);
+    // Another read can evict this baseline while load() is pending. The
+    // captured baseline still decodes its response, but is no longer counted.
+    const retained = cache.get(key);
+    if (retained) bytes -= retained.weight;
     cache.delete(key);
-    cache.set(key, {revision: update.revision, value});
-    while (cache.size > capacity) cache.delete(cache.keys().next().value);
+    const weight = update.unchanged ? prior.weight : snapshotWeight(value);
+    if (capacity > 0 && weight <= maxBytes) {
+      cache.set(key, {revision: update.revision, value, weight}); bytes += weight;
+    }
+    while (cache.size > capacity || bytes > maxBytes) {
+      const oldest = cache.keys().next().value;
+      bytes -= cache.get(oldest).weight;
+      cache.delete(oldest);
+    }
     return value;
   });
 }

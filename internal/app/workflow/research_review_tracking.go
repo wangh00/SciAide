@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -28,12 +29,15 @@ type trackedReviewFinding struct {
 }
 
 type reviewHistory struct {
-	IssuePrefix          string                 `json:"issuePrefix"`
-	PreviousAttempt      int                    `json:"previousAttempt"`
-	PreviousInputSHA256  string                 `json:"previousInputSha256,omitempty"`
-	PreviousOutputSHA256 string                 `json:"previousOutputSha256,omitempty"`
-	Findings             []trackedReviewFinding `json:"findings"`
-	VerifiedClaims       []string               `json:"verifiedClaims"`
+	IssuePrefix          string                     `json:"issuePrefix"`
+	PreviousAttempt      int                        `json:"previousAttempt"`
+	PreviousInputSHA256  string                     `json:"previousInputSha256,omitempty"`
+	PreviousOutputSHA256 string                     `json:"previousOutputSha256,omitempty"`
+	Findings             []trackedReviewFinding     `json:"findings"`
+	VerifiedClaims       []string                   `json:"verifiedClaims"`
+	AcceptanceChecks     []ResearchAcceptanceCheck  `json:"acceptanceChecks,omitempty"`
+	RequiredCorrections  []string                   `json:"requiredCorrections,omitempty"`
+	RevisionPlan         []researchRevisionPlanItem `json:"revisionPlan,omitempty"`
 }
 
 // New dynamic routes opt in; frozen schemas and historical outputs stay intact.
@@ -75,25 +79,24 @@ func trackedReviewHistory(detail RunDetail, node CompiledNode) (reviewHistory, e
 		return history, fmt.Errorf("上一轮审查不符合当前冻结契约：%w", err)
 	}
 	var previous struct {
-		Findings       []trackedReviewFinding `json:"reviewFindings"`
-		VerifiedClaims []string               `json:"verifiedClaims"`
-		InputHash      string                 `json:"reviewedInputSha256"`
+		Findings            []trackedReviewFinding     `json:"reviewFindings"`
+		VerifiedClaims      []string                   `json:"verifiedClaims"`
+		InputHash           string                     `json:"reviewedInputSha256"`
+		AcceptanceChecks    []ResearchAcceptanceCheck  `json:"acceptanceChecks"`
+		RequiredCorrections []string                   `json:"requiredCorrections"`
+		RevisionPlan        []researchRevisionPlanItem `json:"revisionPlan"`
 	}
 	if json.Unmarshal(latest.Output, &previous) != nil || previous.InputHash != latest.InputSHA256 {
 		return history, fmt.Errorf("上一轮审查与所审输入不一致")
 	}
 	history.PreviousAttempt, history.PreviousInputSHA256, history.PreviousOutputSHA256 = latest.Attempt, latest.InputSHA256, latest.OutputSHA256
 	history.Findings, history.VerifiedClaims = previous.Findings, previous.VerifiedClaims
+	history.AcceptanceChecks, history.RequiredCorrections, history.RevisionPlan = previous.AcceptanceChecks, previous.RequiredCorrections, previous.RevisionPlan
 	return history, nil
 }
 
 // Resolve RFC 6901 pointers only in current scientific inputs, never in prior
 // opinions. An exact quote proves location, not the scientific inference.
-func reviewEvidenceAt(input map[string]any, pointer string) (any, bool) {
-	value, _, err := reviewBasisAt(input, pointer)
-	return value, err == nil
-}
-
 // Requirements explain what must be checked, never what the research proves.
 // Keep the frozen output schema unchanged; the host derives the basis role
 // from an allowlisted path, not from a model-supplied classification.
@@ -102,7 +105,22 @@ func reviewBasisAt(input map[string]any, pointer string) (any, bool, error) {
 	if len(parts) < 2 || parts[0] != "" {
 		return nil, false, fmt.Errorf("依据路径格式无效：%s；请使用当前输入的 RFC 6901 路径", pointer)
 	}
-	allowed := map[string]bool{"context": true, "evidenceContext": true, "evidenceScreening": true, "evidenceSelectionAudit": true, "researchContract": true, "researchSourceContext": true, "methodContext": true, "implementationContext": true, "computedResults": true, "dataPreflight": true, "sourceArtifacts": true, "designContext": true, "acceptanceCriteria": true}
+	allowed := map[string]bool{"context": true, "evidenceContext": true, "evidenceScreening": true, "evidenceSelectionAudit": true, "researchContract": true, "researchSourceContext": true, "methodContext": true, "implementationContext": true, "computedResults": true, "dataPreflight": true, "sourceArtifacts": true, "designContext": true, "acceptanceCriteria": true, "originalRequest": true, "routeContext": true}
+	// New host records and analysis content may be located, but their identity
+	// and explanatory metadata cannot alone establish scientific facts.
+	allowed["researchRecordAudit"] = true
+	allowed["evidenceWork"] = true
+	// Separated record text remains reviewable, not its provenance metadata.
+	if parts[1] == "reportRecordAppendices" && len(parts) == 3 {
+		var composition reportComposition
+		_ = json.Unmarshal(mustJSON(input["reportComposition"]), &composition)
+		allowed[parts[1]] = composition.ViewVersion == reportReviewPartsVersion
+	}
+	// Only the original decision text is evidence of a saved screening action.
+	// Navigation, host observations and repair ownership never prove science.
+	if parts[1] == "researchHandoff" && len(parts) == 5 && parts[2] == "excludedRecords" && (parts[4] == "reason" || parts[4] == "candidateId") {
+		allowed["researchHandoff"] = true
+	}
 	for i := 1; i < len(parts); i++ {
 		for j := 0; j < len(parts[i]); j++ {
 			if parts[i][j] == '~' {
@@ -114,7 +132,16 @@ func reviewBasisAt(input map[string]any, pointer string) (any, bool, error) {
 		}
 		parts[i] = strings.ReplaceAll(strings.ReplaceAll(parts[i], "~1", "/"), "~0", "~")
 	}
-	requirement := parts[1] == "researchContract" || parts[1] == "acceptanceCriteria"
+	// Authorization may be quoted as workflow state, never scientific support.
+	allowed["implementationDecision"] = true
+	allowed["dataBinding"] = true
+	requirement := strings.HasPrefix(pointer, "/researchSourceContext/indexedReadRanges/") || parts[1] == "implementationDecision" || parts[1] == "dataBinding" || parts[1] == "researchContract" || parts[1] == "acceptanceCriteria" || parts[1] == "originalRequest" || parts[1] == "routeContext"
+	if parts[1] == "evidenceWork" {
+		requirement = len(parts) < 3 || parts[2] != "documentAnalyses"
+	}
+	if parts[1] == "researchRecordAudit" {
+		requirement = len(parts) < 3 || parts[2] != "queries"
+	}
 	if parts[1] == "_userRevision" {
 		// Deliberately exclude reason, priorOutput and arbitrary nested content.
 		if len(parts) != 4 || parts[2] != "changes" {
@@ -126,6 +153,9 @@ func reviewBasisAt(input map[string]any, pointer string) (any, bool, error) {
 		}
 		requirement = true
 	} else if !allowed[parts[1]] {
+		if parts[1] == "researchHandoff" {
+			return nil, false, fmt.Errorf("依据路径不允许：%s；researchHandoff 仅可引用 /researchHandoff/excludedRecords/数字下标/reason 或 candidateId 的原筛选记录。attributionObservations、navigation 和 repairResultRoots 只提供定位，不能充当事实证据；请引用 /context 当前交付稿或 /researchSourceContext 的原始书目、来源摘录", pointer)
+		}
 		return nil, false, fmt.Errorf("依据路径不允许：%s；历史审查意见不能充当事实证据，请改引 /context 的当前交付稿或当前证据字段；返修要求只允许 /_userRevision/changes/数字下标", pointer)
 	}
 	var current any = input
@@ -162,6 +192,11 @@ func validateTrackedReview(output, input json.RawMessage) error {
 	if json.Unmarshal(input, &stage) != nil || stage.History == nil || stage.History.IssuePrefix == "" || json.Unmarshal(output, &value) != nil {
 		return fmt.Errorf("审查问题跟踪缺少冻结输入或输出")
 	}
+	checks := []error{reviewBasisDiagnostics(value.Findings, input), reviewFindingStateDiagnostics(value.Findings, stage.History)}
+	problems := []string{}
+	addProblem := func(format string, values ...any) {
+		problems = append(problems, fmt.Sprintf(format, values...))
+	}
 	previous := map[string]trackedReviewFinding{}
 	for _, finding := range stage.History.Findings {
 		previous[finding.ID] = finding
@@ -178,65 +213,40 @@ func validateTrackedReview(output, input json.RawMessage) error {
 	open := 0
 	for _, finding := range value.Findings {
 		if seen[finding.ID] || strings.TrimSpace(finding.Summary) == "" || strings.TrimSpace(finding.Reason) == "" || strings.TrimSpace(finding.Location) == "" {
-			return fmt.Errorf("审查问题编号重复或缺少定位、理由")
+			addProblem("审查问题 %s 编号重复或缺少定位、理由", finding.ID)
 		}
 		seen[finding.ID] = true
-		prior, exists := previous[finding.ID]
-		if !exists {
-			if !strings.HasPrefix(finding.ID, stage.History.IssuePrefix) || finding.Origin != "new" || finding.Status != "open" || strings.TrimSpace(finding.ChangeReason) == "" {
-				return fmt.Errorf("新增问题 %s 必须使用本轮编号、说明新增依据并标为 open/new", finding.ID)
-			}
-		} else {
-			expected := "existing"
-			if prior.Status != "open" && finding.Status == "open" {
-				expected = "reopened"
-			}
-			if finding.Origin != expected || (finding.Status != prior.Status && strings.TrimSpace(finding.ChangeReason) == "") {
-				return fmt.Errorf("问题 %s 的状态变化或重新打开必须说明依据", finding.ID)
-			}
-		}
 		if len(finding.Basis) == 0 {
-			return fmt.Errorf("问题 %s 缺少当前输入依据", finding.ID)
+			addProblem("问题 %s 缺少当前输入依据", finding.ID)
 		}
 		hasRequirement, hasEvidence, hasDeliverable := false, false, false
+		basisValid := len(finding.Basis) > 0
 		for _, basis := range finding.Basis {
 			located, requirement, err := reviewBasisAt(root, basis.Pointer)
-			if err != nil {
-				return fmt.Errorf("问题 %s：%w", finding.ID, err)
-			}
-			text, scalar := located.(string)
-			if !scalar {
-				switch located.(type) {
-				case json.Number, float64, bool:
-					text = string(mustJSON(located))
-				default:
-					return fmt.Errorf("问题 %s 的依据路径 %s 指向对象或数组；请定位具体文本、数字或布尔值", finding.ID, basis.Pointer)
-				}
-			}
-			matches := strings.Contains(text, basis.Quote)
-			if !scalar {
-				matches = text == basis.Quote
-			}
-			if strings.TrimSpace(basis.Quote) == "" || !matches {
-				return fmt.Errorf("问题 %s 的引文不匹配：路径 %s 存在，但 quote=%q 不是该字段连续原文；请从该路径重新摘录，不改写或拼接，数字/布尔值必须完全一致", finding.ID, basis.Pointer, basis.Quote)
+			if err != nil || !reviewBasisQuoteMatches(located, basis.Quote) {
+				// Already diagnosed with the exact source/path. Still check
+				// independent IDs, correspondence and verdict in this turn.
+				basisValid = false
+				continue
 			}
 			hasRequirement = hasRequirement || requirement
 			hasEvidence = hasEvidence || !requirement
-			hasDeliverable = hasDeliverable || strings.HasPrefix(basis.Pointer, "/context/")
+			hasDeliverable = hasDeliverable || strings.HasPrefix(basis.Pointer, "/context/") || strings.HasPrefix(basis.Pointer, "/reportRecordAppendices/")
 		}
-		if hasRequirement && !hasEvidence {
-			return fmt.Errorf("问题 %s 仅引用了验收/返修要求；要求不是科学事实，也不能证明已落实。请补充当前交付稿 /context 或当前证据字段的原文依据", finding.ID)
+		if basisValid && hasRequirement && !hasEvidence {
+			addProblem("问题 %s 仅引用了验收/返修要求；要求不是科学事实，也不能证明已落实。请补充当前交付稿 /context、分离记录 /reportRecordAppendices/数字下标或当前证据字段的原文依据", finding.ID)
 		}
-		if finding.Status == "resolved" && !hasDeliverable {
-			return fmt.Errorf("问题 %s 判定已解决时，必须同时引用 /context 中当前交付稿的原文；不能仅凭要求或来源材料宣称已改正", finding.ID)
+		if basisValid && finding.Status == "resolved" && !hasDeliverable {
+			addProblem("问题 %s 判定已解决时，必须同时引用 /context 正文或 /reportRecordAppendices/数字下标当前记录的原文；不能仅凭要求或来源材料宣称已改正", finding.ID)
 		}
 		if finding.Status == "open" {
 			open++
 			i := finding.CorrectionIndex
 			if i < 0 || i >= len(value.Corrections) || corrections[i] {
-				return fmt.Errorf("问题 %s 必须唯一对应一项 requiredCorrections", finding.ID)
+				addProblem("问题 %s 必须唯一对应一项 requiredCorrections", finding.ID)
+			} else {
+				corrections[i] = true
 			}
-			corrections[i] = true
 			items := classified[finding.Category]
 			matched := false
 			for index, item := range items {
@@ -247,31 +257,88 @@ func validateTrackedReview(output, input json.RawMessage) error {
 				}
 			}
 			if !matched {
-				return fmt.Errorf("问题 %s 的 summary 必须与对应分类问题原文一致", finding.ID)
+				addProblem("问题 %s 的 summary 必须与对应分类问题原文一致", finding.ID)
 			}
 		} else if (finding.Status != "resolved" && finding.Status != "withdrawn") || finding.CorrectionIndex != -1 {
-			return fmt.Errorf("已解决或撤回的问题 %s 不得要求返修", finding.ID)
+			addProblem("已解决或撤回的问题 %s 不得要求返修", finding.ID)
 		}
 	}
 	for id := range previous {
 		if !seen[id] {
-			return fmt.Errorf("必须逐项核对上一轮问题 %s，不能遗漏已解决或未解决项", id)
+			checks = append(checks, &ReviewMissingFindingError{ID: id})
 		}
 	}
 	for _, items := range classified {
 		if len(items) > 0 {
-			return fmt.Errorf("每条阻断意见必须有可追踪问题及当前依据")
+			addProblem("每条阻断意见必须有可追踪问题及当前依据")
+			break
 		}
 	}
 	if len(corrections) != len(value.Corrections) || value.Approved != (open == 0) {
-		return fmt.Errorf("审查结论、未解决问题和必改清单不一致")
+		addProblem("审查结论、未解决问题和必改清单不一致")
+	}
+	if len(problems) > 0 {
+		checks = append(checks, fmt.Errorf("审查问题对应关系需要一并修正：\n%s", strings.Join(problems, "\n")))
+	}
+	return errors.Join(checks...)
+}
+
+// Carries identity only. The reviewer must supply a current decision and
+// evidence; the host must never copy a historical judgment to fill this gap.
+type ReviewMissingFindingError struct{ ID string }
+
+func (e *ReviewMissingFindingError) Error() string {
+	return fmt.Sprintf("必须逐项核对上一轮问题 %s，不能遗漏已解决或未解决项；只需补交该问题的当前判断，保留其它问题", e.ID)
+}
+
+// State explanation and evidence attribution are independent defects. Report
+// all of them in the same correction rather than spending one turn on each.
+// Never synthesize changeReason: it is the reviewer's accountable assessment.
+type ReviewFindingStateErrors struct {
+	Problems    []string
+	RepairPaths []string
+}
+
+func (e *ReviewFindingStateErrors) Error() string {
+	return "审查问题状态需要一并修正：\n" + strings.Join(e.Problems, "\n")
+}
+
+func reviewFindingStateDiagnostics(findings []trackedReviewFinding, history *reviewHistory) error {
+	previous := map[string]trackedReviewFinding{}
+	for _, finding := range history.Findings {
+		previous[finding.ID] = finding
+	}
+	result := &ReviewFindingStateErrors{}
+	for i, finding := range findings {
+		prior, exists := previous[finding.ID]
+		if !exists {
+			if !strings.HasPrefix(finding.ID, history.IssuePrefix) || finding.Origin != "new" || finding.Status != "open" {
+				result.Problems = append(result.Problems, fmt.Sprintf("新增问题 %s 必须使用本轮编号并标为 open/new", finding.ID))
+			}
+		} else {
+			expected := "existing"
+			if prior.Status != "open" && finding.Status == "open" {
+				expected = "reopened"
+			}
+			if finding.Origin != expected {
+				result.Problems = append(result.Problems, fmt.Sprintf("问题 %s 的 origin 必须为 %s，按当前依据说明状态变化", finding.ID, expected))
+			}
+		}
+		if (!exists || finding.Status != prior.Status) && strings.TrimSpace(finding.ChangeReason) == "" {
+			result.Problems = append(result.Problems, fmt.Sprintf("问题 %s 的 changeReason 为空；请说明本轮新增依据或状态变化的当前依据，保留已正确的 basis", finding.ID))
+			result.RepairPaths = append(result.RepairPaths, fmt.Sprintf("/reviewFindings/%d/changeReason", i))
+		}
+	}
+	if len(result.Problems) != 0 {
+		return result
 	}
 	return nil
 }
 
 const trackedReviewInstruction = `
-Basis path policy: /_userRevision/changes/<zero-based index> may be quoted ONLY as a user-confirmed requirement, never as scientific evidence. /researchContract and /acceptanceCriteria are also requirements. Whenever citing a requirement, include a separate exact quote from the current deliverable /context or current scientific evidence. To mark ANY finding resolved, an exact quote from the current deliverable /context is mandatory; a request to change something is not proof it was changed. Do not cite other _userRevision fields (including reason or priorOutput). Allowed current evidence roots: context, evidenceContext, evidenceScreening, evidenceSelectionAudit, researchSourceContext, methodContext, implementationContext, computedResults, dataPreflight, sourceArtifacts, designContext. Pointer existence, allowed source, scalar type and exact quotation are checked separately. Exact textual matching proves only provenance, not the scientific validity of a conclusion.
-Track reviewFindings against stage_input.reviewHistory. Return every prior finding exactly once with its stable id and current status open/resolved/withdrawn. History is prior opinion, not scientific truth. Recheck the current deliverable independently, including previously passed claims. Each finding needs category, summary, location, reason, and 1-4 basis entries: RFC 6901 pointer to a current input string (or scalar number/bool), plus an exact quote from that value. Do not use reviewHistory, revisionTargets or prior reviewer opinions as evidence. For missing content, quote the applicable requirement/current method and explain the absence; never invent a missing quote.
+Current /dataBinding scalar fields may be quoted only as host file-adoption state, not scientific evidence. Pair them with current deliverable/method/result evidence; binding is not proof of calculation or scientific validity. A /dataBinding pointer is available only when that field actually occurs in the frozen input.
+Basis path policy: /_userRevision/changes/<zero-based index> may be quoted ONLY as a user-confirmed requirement, never as scientific evidence. /researchContract, /acceptanceCriteria, /originalRequest and /routeContext are also requirements. Whenever citing a requirement, include a separate exact quote from the current deliverable /context or current scientific evidence. To mark ANY finding resolved, an exact quote from the current deliverable /context or a separated /reportRecordAppendices/N record is mandatory; a request to change something is not proof it was changed. Do not cite other _userRevision fields (including reason or priorOutput). Allowed current evidence roots: context, evidenceContext, evidenceScreening, evidenceSelectionAudit, researchSourceContext, methodContext, implementationContext, computedResults, dataPreflight, sourceArtifacts, designContext; evidenceWork/documentAnalyses is analysis to verify, not original evidence; researchRecordAudit/queries only proves saved record grouping, not trial independence. Their other metadata is host state and must be paired with actual evidence. reportRecordAppendices/N only in the host-bound separated report view. Pointer existence, allowed source, scalar type and exact quotation are checked separately. Exact textual matching proves only provenance, not the scientific validity of a conclusion.
+Track reviewFindings against stage_input.reviewHistory. Return every prior finding exactly once with its stable id and current status open/resolved/withdrawn. History is prior opinion, not scientific truth. Recheck the current deliverable independently, including previously passed claims. Each finding needs category, summary, location, reason, and 1-4 basis entries: RFC 6901 pointer to a current input string (or scalar number/bool), plus an exact quote from that value. In the separated report view, /context contains the authored body and /reportRecordAppendices/N contains current host-managed record text; both are valid current-deliverable bases, not proof of scientific validity. Do not use reviewHistory, revisionTargets or prior reviewer opinions as evidence. For missing content, quote the applicable requirement/current method and explain the absence; never invent a missing quote.
 New findings use reviewHistory.issuePrefix plus a positive integer, origin=new, status=open and changeReason explaining first detection, prior omission or a revision-introduced defect. Existing findings use origin=existing; reopening a closed finding uses origin=reopened. Explain every status change and every reversal of a previously passed judgment with concrete current evidence. A shared research team does not establish overlapping samples; distinct registrations alone do not establish independence either.
-Only unresolved defects affecting correctness, provenance, reproducibility or frozen acceptance criteria block delivery. Each open finding must correspond to exactly one requiredCorrections entry via correctionIndex, and copy its summary verbatim to exactly one category issue array. Closed findings use correctionIndex=-1 and must not appear in those arrays. Put optional wording/style improvements in suggestions, not blockers; preserve scientific caveats in limitations. Do not lower acceptance criteria or excuse missing core evidence. Do not rename a repeated problem to make it new. Do not demand a fresh search for a missing description when actual retrieval logs already supply it.
+Only unresolved defects affecting correctness, provenance, reproducibility or frozen acceptance criteria block delivery. Each open finding must correspond to exactly one requiredCorrections entry via correctionIndex, the host derives category issue arrays from these findings. Closed findings use correctionIndex=-1 and must not appear in those arrays. Put optional wording/style improvements in suggestions, not blockers; preserve scientific caveats in limitations. Do not lower acceptance criteria or excuse missing core evidence. Do not rename a repeated problem to make it new. Do not demand a fresh search for a missing description when actual retrieval logs already supply it.
 Resolved means the current result fixes the defect. Withdrawn means the prior objection was unsound, not that it was inconvenient; explain and support withdrawal. Finding reasons/statuses stay in the review audit, never in the research report. Do not claim certainty beyond the supplied evidence.`

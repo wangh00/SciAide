@@ -49,16 +49,16 @@ func instructionSections(body string) []InstructionSection {
 
 func structuredInstructionChunk(name string, origin Origin, body, section string, offset, limit int) (Chunk, error) {
 	if offset < 0 {
-		return Chunk{}, fmt.Errorf("Skill offset must not be negative")
+		return Chunk{}, &UsageError{Kind: UsageOffset, Name: name, Maximum: len([]rune(body))}
 	}
 	if limit == 0 {
 		limit = DefaultReadRunes
 	}
 	if limit < 1 || limit > MaxReadRunes {
-		return Chunk{}, fmt.Errorf("Skill read limit must be between 1 and %d runes", MaxReadRunes)
+		return Chunk{}, &UsageError{Kind: UsageLimit, Name: name, Maximum: MaxReadRunes}
 	}
 	sections, bodyRunes := instructionSections(body), []rune(body)
-	if section == "" && len(bodyRunes) <= limit {
+	if section == "" && offset == 0 && len(bodyRunes) <= limit {
 		return Chunk{Name: name, Origin: origin, Mode: "full", Content: body, NextOffset: len(bodyRunes), TotalRunes: len(bodyRunes), Sections: publicSections(sections)}, nil
 	}
 	if section == "" && offset == 0 && len(sections) > 0 {
@@ -73,12 +73,12 @@ func structuredInstructionChunk(name string, origin Origin, body, section string
 		}
 		sectionRunes := bodyRunes[item.start:item.end]
 		if offset > len(sectionRunes) {
-			return Chunk{}, fmt.Errorf("Skill section offset exceeds its length")
+			return Chunk{}, &UsageError{Kind: UsageOffset, Name: name, Section: item.ID, Maximum: len(sectionRunes)}
 		}
 		end := min(len(sectionRunes), offset+limit)
 		return Chunk{Name: name, Origin: origin, Mode: "section", Section: item.ID, Content: string(sectionRunes[offset:end]), Offset: offset, NextOffset: end, TotalRunes: len(sectionRunes), Truncated: end < len(sectionRunes), Sections: publicSections(sections)}, nil
 	}
-	return Chunk{}, fmt.Errorf("Skill section %q was not found", section)
+	return Chunk{}, &UsageError{Kind: UsageSection, Name: name, Section: section, Sections: publicSections(sections)}
 }
 
 func publicSections(values []InstructionSection) []InstructionSection {

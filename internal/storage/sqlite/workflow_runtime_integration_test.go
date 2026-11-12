@@ -1116,7 +1116,11 @@ func TestWorkflowUpstreamRevisionResetsOnlyProducerThroughFailure(t *testing.T) 
 	now := time.Now().UTC()
 	repository := NewWorkflowRuntimeRepository(h.store.DB())
 	event := workflow.RuntimeEvent{ID: "upstream-revision-event", WorkflowRunID: completed.Run.ID, Type: "workflow.upstream_revision_queued", Payload: json.RawMessage(`{"producerStepId":"` + completed.Steps[1].ID + `"}`), CreatedAt: now}
-	if err := repository.ResetStepsForUpstreamRetry(context.Background(), completed.Run.ID, completed.Steps[1].ID, completed.Steps[3].ID, nil, now, event); err != nil {
+	current, err := repository.GetRun(context.Background(), h.project.ID, completed.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.ResetStepsForUpstreamRetry(context.Background(), completed.Run.ID, completed.Steps[1].ID, completed.Steps[3].ID, nil, now, event, workflow.NewRetryGuard(current, current.Steps[3], &current.Steps[1])); err != nil {
 		t.Fatal(err)
 	}
 	reset, err := repository.GetRun(context.Background(), h.project.ID, completed.Run.ID)

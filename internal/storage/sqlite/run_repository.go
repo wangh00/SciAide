@@ -3,6 +3,7 @@ package sqlite
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -24,8 +25,49 @@ type RunRepository struct{ db *sql.DB }
 
 func NewRunRepository(db *sql.DB) *RunRepository { return &RunRepository{db: db} }
 
+func (r *RunRepository) LatestModelRetryStatus(ctx context.Context, runID string) (chat.ModelRetryStatus, int64, bool, error) {
+	var kind string
+	var payload []byte
+	var sequence int64
+	err := r.db.QueryRowContext(ctx, `SELECT event_type,payload_json,sequence FROM run_events WHERE aggregate_id=? AND event_type IN ('run.retrying','run.retry.recovered','run.completed','run.failed','run.cancelled','run.interrupted') ORDER BY sequence DESC LIMIT 1`, runID).Scan(&kind, &payload, &sequence)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && kind != "run.retrying") {
+		return chat.ModelRetryStatus{}, sequence, false, nil
+	}
+	if err != nil {
+		return chat.ModelRetryStatus{}, 0, false, err
+	}
+	var value struct {
+		Retry chat.ModelRetryStatus `json:"retry"`
+	}
+	if err := json.Unmarshal(payload, &value); err != nil {
+		return chat.ModelRetryStatus{}, 0, false, err
+	}
+	if value.Retry.Attempt < 1 || value.Retry.MaxAttempts < value.Retry.Attempt || value.Retry.Message == "" {
+		return chat.ModelRetryStatus{}, sequence, false, nil
+	}
+	return value.Retry, sequence, true, nil
+}
+
+func (r *RunRepository) LatestRuntimeActivity(ctx context.Context, runID string) (chat.RuntimeActivity, bool, error) {
+	var payload []byte
+	err := r.db.QueryRowContext(ctx, `SELECT payload_json FROM run_events WHERE aggregate_id=? AND event_type='run.activity' ORDER BY sequence DESC LIMIT 1`, runID).Scan(&payload)
+	if errors.Is(err, sql.ErrNoRows) {
+		return chat.RuntimeActivity{}, false, nil
+	}
+	if err != nil {
+		return chat.RuntimeActivity{}, false, err
+	}
+	var value struct {
+		Activity chat.RuntimeActivity `json:"activity"`
+	}
+	if err := json.Unmarshal(payload, &value); err != nil {
+		return chat.RuntimeActivity{}, false, err
+	}
+	return value.Activity, true, nil
+}
+
 func (r *RunRepository) ListConversationActivity(ctx context.Context, projectID string) ([]chat.ConversationActivity, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT r.conversation_id,r.status FROM runs r
+	rows, err := r.db.QueryContext(ctx, `SELECT r.conversation_id,CASE WHEN r.pending_user_input_call_id<>'' THEN 'waiting_user_input' ELSE r.status END FROM runs r
 		JOIN conversations c ON c.id=r.conversation_id
 		WHERE c.project_id=? AND r.status IN ('queued','running','waiting_approval')
 		AND NOT EXISTS (SELECT 1 FROM workflow_conversations w WHERE w.conversation_id=c.id)`, projectID)
@@ -103,13 +145,31 @@ func (r *RunRepository) UpdateModelTurnDraft(ctx context.Context, runID string, 
 	return nil
 }
 
+// Native commentary and candidate each retain the existing per-text limit.
+// Keeping them separate avoids re-escaping a valid large JSON candidate and
+// leaves the existing streaming/UI DraftText projection unchanged.
+func (r *RunRepository) SaveModelTurnSubmissionCommentary(ctx context.Context, runID string, turnIndex int, text string, at time.Time) error {
+	if strings.TrimSpace(runID) == "" || turnIndex <= 0 || at.IsZero() || text == "" || len([]rune(text)) > maxModelTurnDraftRunes {
+		return fmt.Errorf("invalid model turn submission commentary")
+	}
+	result, err := r.db.ExecContext(ctx, `UPDATE model_turn_journal SET submission_commentary=?,updated_at=? WHERE run_id=? AND turn_index=? AND status='streaming' AND (submission_commentary='' OR submission_commentary=?)`,
+		text, formatTime(at), strings.TrimSpace(runID), turnIndex, text)
+	if err != nil {
+		return fmt.Errorf("save model turn submission commentary: %w", err)
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return fmt.Errorf("submission commentary journal is missing, immutable or already bound to different text")
+	}
+	return nil
+}
+
 func (r *RunRepository) LatestModelTurnJournal(ctx context.Context, runID string) (chat.ModelTurnJournal, bool, error) {
 	var value chat.ModelTurnJournal
 	var completedAt sql.NullString
 	var startedAt, updatedAt string
 	var status chat.ModelTurnStatus
-	err := r.db.QueryRowContext(ctx, `SELECT run_id,turn_index,status,draft_text,finish_reason,provider_item_count,started_at,completed_at,updated_at FROM model_turn_journal WHERE run_id=? ORDER BY turn_index DESC LIMIT 1`, strings.TrimSpace(runID)).Scan(
-		&value.RunID, &value.TurnIndex, &status, &value.DraftText, &value.FinishReason, &value.ProviderItemCount, &startedAt, &completedAt, &updatedAt)
+	err := r.db.QueryRowContext(ctx, `SELECT run_id,turn_index,status,draft_text,submission_commentary,finish_reason,provider_item_count,started_at,completed_at,updated_at FROM model_turn_journal WHERE run_id=? ORDER BY turn_index DESC LIMIT 1`, strings.TrimSpace(runID)).Scan(
+		&value.RunID, &value.TurnIndex, &status, &value.DraftText, &value.SubmissionCommentary, &value.FinishReason, &value.ProviderItemCount, &startedAt, &completedAt, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return chat.ModelTurnJournal{}, false, nil
 	}
@@ -363,6 +423,26 @@ func (r *RunRepository) CreateWorkflowAIWithMessages(ctx context.Context, value 
 }
 
 func (r *RunRepository) createWithMessages(ctx context.Context, value chat.Run, userMessage, assistantMessage conversation.Message, workflowAI *chat.WorkflowAIExecution) error {
+	// Validate before opening a transaction. The prompt is Unicode text, not a
+	// byte-limited JSON snapshot; use the same contract as StartWorkflowAI.
+	if workflowAI != nil {
+		if err := chat.ValidateWorkflowPrompt(workflowAI.PromptText); err != nil {
+			return fmt.Errorf("invalid Workflow AI execution snapshot: prompt_text: %w", err)
+		}
+		for _, field := range []struct{ name, value string }{
+			{"prompt_sha256", workflowAI.PromptSHA256}, {"input_sha256", workflowAI.InputSHA256}, {"output_schema_sha256", workflowAI.OutputSchemaSHA256},
+		} {
+			if len(field.value) != 64 {
+				return fmt.Errorf("invalid Workflow AI execution snapshot: %s must have 64 characters", field.name)
+			}
+		}
+		if !json.Valid(workflowAI.AllowedTools) {
+			return fmt.Errorf("invalid Workflow AI execution snapshot: allowed_tools_json is invalid JSON")
+		}
+		if !json.Valid(workflowAI.OutputSchema) {
+			return fmt.Errorf("invalid Workflow AI execution snapshot: output_schema_json is invalid JSON")
+		}
+	}
 	if !value.PermissionMode.Valid() {
 		value.PermissionMode = conversation.PermissionPlan
 	}
@@ -422,9 +502,6 @@ func (r *RunRepository) createWithMessages(ctx context.Context, value chat.Run, 
 		}
 	}
 	if workflowAI != nil {
-		if len(workflowAI.PromptText) == 0 || len(workflowAI.PromptText) > 262144 || len(workflowAI.PromptSHA256) != 64 || len(workflowAI.InputSHA256) != 64 || len(workflowAI.OutputSchemaSHA256) != 64 || !json.Valid(workflowAI.AllowedTools) || !json.Valid(workflowAI.OutputSchema) {
-			return fmt.Errorf("invalid Workflow AI execution snapshot")
-		}
 		_, err = tx.ExecContext(ctx, `INSERT INTO workflow_ai_executions(
 			id,workflow_run_id,workflow_step_id,attempt,node_kind,model_profile_id,model_id,reasoning_level,
 			prompt_version,prompt_text,prompt_sha256,input_sha256,allowed_tools_json,output_schema_json,output_schema_sha256,
@@ -480,6 +557,18 @@ func (r *RunRepository) LatestForConversation(ctx context.Context, conversationI
 	return value, true, nil
 }
 
+// LatestOrdinaryForConversation excludes durable Workflow stage bindings in
+// SQL, not by filtering a capped message page or just the newest Run.
+func (r *RunRepository) LatestOrdinaryForConversation(ctx context.Context, conversationID string) (chat.Run, bool, error) {
+	value, err := scanRun(r.db.QueryRowContext(ctx, runSelect+` WHERE conversation_id=?
+		AND NOT EXISTS (SELECT 1 FROM workflow_ai_chat_runs b WHERE b.chat_run_id=runs.id)
+		ORDER BY created_at DESC,id DESC LIMIT 1`, conversationID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return chat.Run{}, false, nil
+	}
+	return value, err == nil, err
+}
+
 // IsWorkflowAIRun identifies host-created Workflow stage requests from their
 // durable binding. Prompt text is untrusted and must never be used for this
 // decision.
@@ -502,13 +591,15 @@ func (r *RunRepository) WorkflowAIContract(ctx context.Context, runID string) (c
 	}
 	var value chat.WorkflowAIExecution
 	var allowedTools, outputSchema, createdAt string
-	err := r.db.QueryRowContext(ctx, `SELECT execution.id,execution.workflow_run_id,execution.workflow_step_id,execution.attempt,execution.node_kind,execution.prompt_version,execution.prompt_text,execution.prompt_sha256,execution.input_sha256,execution.allowed_tools_json,execution.output_schema_json,execution.output_schema_sha256,execution.created_at
+	var frozenInput sql.NullString
+	err := r.db.QueryRowContext(ctx, `SELECT execution.id,execution.workflow_run_id,execution.workflow_step_id,execution.attempt,execution.node_kind,execution.prompt_version,execution.prompt_text,execution.prompt_sha256,execution.input_sha256,execution.allowed_tools_json,execution.output_schema_json,execution.output_schema_sha256,execution.created_at,step.node_id,CASE WHEN step.input_sha256=execution.input_sha256 THEN step.input_json END
 		FROM workflow_ai_chat_runs binding
 		JOIN workflow_ai_executions execution ON execution.id=binding.execution_id
+		JOIN workflow_steps step ON step.id=execution.workflow_step_id
 		WHERE binding.chat_run_id=?`, runID).Scan(
 		&value.ID, &value.WorkflowRunID, &value.WorkflowStepID, &value.Attempt, &value.NodeKind,
 		&value.PromptVersion, &value.PromptText, &value.PromptSHA256, &value.InputSHA256,
-		&allowedTools, &outputSchema, &value.OutputSchemaSHA256, &createdAt)
+		&allowedTools, &outputSchema, &value.OutputSchemaSHA256, &createdAt, &value.NodeID, &frozenInput)
 	if errors.Is(err, sql.ErrNoRows) {
 		return chat.WorkflowAIExecution{}, false, nil
 	}
@@ -520,6 +611,16 @@ func (r *RunRepository) WorkflowAIContract(ctx context.Context, runID string) (c
 	}
 	value.AllowedTools = json.RawMessage(allowedTools)
 	value.OutputSchema = json.RawMessage(outputSchema)
+	if frozenInput.Valid {
+		valid := json.Valid([]byte(frozenInput.String)) && fmt.Sprintf("%x", sha256.Sum256([]byte(frozenInput.String))) == value.InputSHA256
+		if valid {
+			value.Input = json.RawMessage(frozenInput.String)
+		} else if strings.Contains(value.PromptVersion, chat.ImplementationPatchVersion) {
+			return chat.WorkflowAIExecution{}, false, fmt.Errorf("Workflow AI frozen input digest mismatch")
+		}
+		// Optional model projection must not add a new hard failure to legacy
+		// executions. An unverified input is never projected or used for patches.
+	}
 	if value.CreatedAt, err = parseTime(createdAt); err != nil {
 		return chat.WorkflowAIExecution{}, false, fmt.Errorf("parse Workflow AI contract timestamp: %w", err)
 	}
@@ -832,8 +933,12 @@ func (r *RunRepository) FailRun(ctx context.Context, runID, errorCode, errorMess
 	return r.terminateRun(ctx, runID, chat.RunFailed, errorCode, errorMessage, at, event)
 }
 
+func (r *RunRepository) InterruptRun(ctx context.Context, runID, errorCode, errorMessage string, at time.Time, event events.Envelope) (chat.Run, bool, error) {
+	return r.terminateRun(ctx, runID, chat.RunInterrupted, errorCode, errorMessage, at, event)
+}
+
 func (r *RunRepository) terminateRun(ctx context.Context, runID string, next chat.RunStatus, errorCode, errorMessage string, at time.Time, event events.Envelope) (chat.Run, bool, error) {
-	if next != chat.RunCancelled && next != chat.RunFailed {
+	if next != chat.RunCancelled && next != chat.RunFailed && next != chat.RunInterrupted {
 		return chat.Run{}, false, fmt.Errorf("invalid run termination status %q", next)
 	}
 	tx, err := r.db.BeginTx(ctx, nil)
@@ -842,13 +947,14 @@ func (r *RunRepository) terminateRun(ctx context.Context, runID string, next cha
 	}
 	defer tx.Rollback()
 	var status chat.RunStatus
-	if err := tx.QueryRowContext(ctx, `SELECT status FROM runs WHERE id=?`, runID).Scan(&status); err != nil {
+	var pendingUserInput string
+	if err := tx.QueryRowContext(ctx, `SELECT status,pending_user_input_call_id FROM runs WHERE id=?`, runID).Scan(&status, &pendingUserInput); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return chat.Run{}, false, fmt.Errorf("run not found")
 		}
 		return chat.Run{}, false, err
 	}
-	if isTerminalRunStatus(status) {
+	if isTerminalRunStatus(status) || next == chat.RunInterrupted && pendingUserInput != "" {
 		if err := tx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
 			return chat.Run{}, false, err
 		}
@@ -881,6 +987,8 @@ func (r *RunRepository) terminateRun(ctx context.Context, runID string, next cha
 	toolStatus, toolCode := "interrupted", "RUN_FAILED"
 	if next == chat.RunCancelled {
 		toolStatus, toolCode = "cancelled", "TOOL_CANCELLED"
+	} else if next == chat.RunInterrupted {
+		toolCode = errorCode
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE tool_calls SET status=?, error_code=?, error_message=?, completed_at=?, updated_at=? WHERE run_id=? AND status IN ('pending','awaiting_approval','running')`, toolStatus, toolCode, errorMessage, formatTime(at), formatTime(at), runID); err != nil {
 		return chat.Run{}, false, fmt.Errorf("cancel run tool calls: %w", err)
@@ -890,6 +998,8 @@ func (r *RunRepository) terminateRun(ctx context.Context, runID string, next cha
 	if next == chat.RunFailed {
 		resultStatus = "error"
 		turnStatus = chat.ModelTurnFailed
+	} else if next == chat.RunInterrupted {
+		resultStatus = "error"
 	}
 	for _, callID := range affectedCalls {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO tool_results(tool_call_id,status,text_content,artifacts_json,citations_json,truncated,meta_json,created_at) VALUES (?,?,?,'[]','[]',0,'{}',?) ON CONFLICT(tool_call_id) DO NOTHING`, callID, resultStatus, errorMessage, formatTime(at)); err != nil {
@@ -915,7 +1025,7 @@ func (r *RunRepository) terminateRun(ctx context.Context, runID string, next cha
 	if _, err := tx.ExecContext(ctx, `UPDATE messages SET status=?, updated_at=? WHERE id=(SELECT assistant_message_id FROM runs WHERE id=?)`, messageStatus, formatTime(at), runID); err != nil {
 		return chat.Run{}, false, fmt.Errorf("cancel assistant message: %w", err)
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE runs SET status=?, error_code=?, error_message=?, completed_at=?, updated_at=? WHERE id=? AND status IN ('queued','running','waiting_approval')`, next, errorCode, errorMessage, formatTime(at), formatTime(at), runID)
+	result, err := tx.ExecContext(ctx, `UPDATE runs SET status=?, pending_user_input_call_id='', error_code=?, error_message=?, completed_at=?, updated_at=? WHERE id=? AND status IN ('queued','running','waiting_approval')`, next, errorCode, errorMessage, formatTime(at), formatTime(at), runID)
 	if err != nil {
 		return chat.Run{}, false, fmt.Errorf("cancel run: %w", err)
 	}
@@ -1040,7 +1150,7 @@ func (r *RunRepository) InterruptActive(ctx context.Context, at time.Time) (int6
 		return 0, fmt.Errorf("begin interrupt active runs: %w", err)
 	}
 	defer tx.Rollback()
-	rows, err := tx.QueryContext(ctx, `SELECT id FROM runs WHERE status IN ('queued','running','waiting_approval') ORDER BY created_at,id`)
+	rows, err := tx.QueryContext(ctx, `SELECT id FROM runs WHERE status IN ('queued','running','waiting_approval') AND pending_user_input_call_id='' ORDER BY created_at,id`)
 	if err != nil {
 		return 0, fmt.Errorf("list active runs for recovery: %w", err)
 	}
@@ -1068,10 +1178,10 @@ func (r *RunRepository) InterruptActive(ctx context.Context, at time.Time) (int6
 			return 0, fmt.Errorf("record recovered run context: %w", err)
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE messages SET status='incomplete', updated_at=? WHERE id IN (SELECT assistant_message_id FROM runs WHERE status IN ('queued', 'running', 'waiting_approval'))`, formatTime(at)); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE messages SET status='incomplete', updated_at=? WHERE id IN (SELECT assistant_message_id FROM runs WHERE status IN ('queued', 'running', 'waiting_approval') AND pending_user_input_call_id='')`, formatTime(at)); err != nil {
 		return 0, fmt.Errorf("interrupt assistant messages: %w", err)
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE runs SET status='interrupted', error_code='APP_RESTARTED', error_message='应用退出时运行尚未完成', completed_at=?, updated_at=? WHERE status IN ('queued', 'running', 'waiting_approval')`, formatTime(at), formatTime(at))
+	result, err := tx.ExecContext(ctx, `UPDATE runs SET status='interrupted', error_code='APP_RESTARTED', error_message='应用退出时运行尚未完成', completed_at=?, updated_at=? WHERE status IN ('queued', 'running', 'waiting_approval') AND pending_user_input_call_id=''`, formatTime(at), formatTime(at))
 	if err != nil {
 		return 0, fmt.Errorf("interrupt active runs: %w", err)
 	}
@@ -1390,7 +1500,7 @@ func scanRun(row rowScanner) (chat.Run, error) {
 	var createdAt, updatedAt string
 	var startedAt, completedAt sql.NullString
 	if err := row.Scan(&value.ID, &value.ConversationID, &value.UserMessageID, &value.AssistantMessageID, &value.ModelProfileID, &value.ModelID, &value.APIProtocol, &value.RequestedReasoningLevel, &value.ResolvedReasoningLevel, &value.ContextWindowTokens, &value.ContextBudgetTokens, &value.AutoCompactTokenLimit, &value.ContextWindowSource, &value.ContextCompacted, &value.PermissionMode, &value.Status,
-		&value.ErrorCode, &value.ErrorMessage, &value.ErrorDetails, &value.InputTokens, &value.FreshInputTokens, &value.OutputTokens, &value.ReasoningTokens, &value.ReasoningObserved, &value.ReasoningSignatureObserved, &value.ReasoningSummary, &value.CachedInputTokens, &value.CacheWriteTokens, &value.CacheReportedTurns, &value.CacheReportedFreshInputTokens, &value.CacheHitTurns, &value.ModelTurns, &value.FinishReason, &createdAt, &startedAt, &completedAt, &updatedAt, &value.WebSearchDisabled); err != nil {
+		&value.ErrorCode, &value.ErrorMessage, &value.ErrorDetails, &value.InputTokens, &value.FreshInputTokens, &value.OutputTokens, &value.ReasoningTokens, &value.ReasoningObserved, &value.ReasoningSignatureObserved, &value.ReasoningSummary, &value.CachedInputTokens, &value.CacheWriteTokens, &value.CacheReportedTurns, &value.CacheReportedFreshInputTokens, &value.CacheHitTurns, &value.ModelTurns, &value.FinishReason, &createdAt, &startedAt, &completedAt, &updatedAt, &value.WebSearchDisabled, &value.PendingUserInputCallID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return chat.Run{}, fmt.Errorf("run not found: %w", sql.ErrNoRows)
 		}
@@ -1419,10 +1529,13 @@ func scanRun(row rowScanner) (chat.Run, error) {
 		}
 		value.CompletedAt = &parsed
 	}
+	if value.PendingUserInputCallID != "" && value.Status == chat.RunWaitingApproval {
+		value.Status = chat.RunWaitingUserInput
+	}
 	return value, nil
 }
 
-const runSelect = `SELECT id, conversation_id, user_message_id, COALESCE(assistant_message_id, ''), model_profile_id, model_id, api_protocol, requested_reasoning_level, resolved_reasoning_level, context_window_tokens, context_budget_tokens, auto_compact_token_limit, context_window_source, context_compacted, permission_mode, status, error_code, error_message, error_details, input_tokens, fresh_input_tokens, output_tokens, reasoning_tokens, reasoning_observed, reasoning_signature_observed, reasoning_summary, cached_input_tokens, cache_write_tokens, cache_reported_turns, cache_reported_fresh_input_tokens, cache_hit_turns, model_turns, finish_reason, created_at, started_at, completed_at, updated_at, web_search_disabled FROM runs`
+const runSelect = `SELECT id, conversation_id, user_message_id, COALESCE(assistant_message_id, ''), model_profile_id, model_id, api_protocol, requested_reasoning_level, resolved_reasoning_level, context_window_tokens, context_budget_tokens, auto_compact_token_limit, context_window_source, context_compacted, permission_mode, status, error_code, error_message, error_details, input_tokens, fresh_input_tokens, output_tokens, reasoning_tokens, reasoning_observed, reasoning_signature_observed, reasoning_summary, cached_input_tokens, cache_write_tokens, cache_reported_turns, cache_reported_fresh_input_tokens, cache_hit_turns, model_turns, finish_reason, created_at, started_at, completed_at, updated_at, web_search_disabled, pending_user_input_call_id FROM runs`
 
 func nullableString(value string) any {
 	if value == "" {

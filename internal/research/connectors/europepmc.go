@@ -17,10 +17,53 @@ type europePMCConnector struct {
 }
 
 type europePMCResponse struct {
-	NextCursor string `json:"nextCursorMark"`
-	Results    struct {
+	requestCursor string
+	needNext      bool
+	searchLimit   int
+	fetchRecordID string
+	NextCursor    string `json:"nextCursorMark"`
+	Results       struct {
 		Items []europePMCRecord `json:"result"`
 	} `json:"resultList"`
+}
+
+func (r *europePMCResponse) validateSourceResponse() error {
+	if r.Results.Items == nil {
+		return &appresearch.SourceError{SourceID: "europepmc", Code: appresearch.FailureInvalidData, Message: "Europe PMC response is missing resultList.result"}
+	}
+	if r.fetchRecordID != "" {
+		if len(r.Results.Items) == 0 {
+			return nil // Cache legitimate empty lookups; Fetch reports not_found.
+		}
+		if len(r.Results.Items) != 1 {
+			return &appresearch.SourceError{SourceID: "europepmc", Code: appresearch.FailureInvalidData, Message: "Europe PMC exact-id lookup did not return one record"}
+		}
+		return validateFetchedRecords("europepmc", r.fetchRecordID, europePMCWorks(r.Results.Items))
+	}
+	if len(r.Results.Items) == 0 {
+		return nil
+	}
+	if r.needNext && (r.NextCursor == "" || r.NextCursor == r.requestCursor) {
+		return &appresearch.SourceError{SourceID: "europepmc", Code: appresearch.FailureInvalidData, Message: "Europe PMC pagination did not advance"}
+	}
+	admitted := 0
+	for _, record := range r.Results.Items {
+		if strings.TrimSpace(record.ID) == "" {
+			continue
+		}
+		if r.searchLimit > 0 && admitted >= r.searchLimit {
+			break
+		}
+		admitted++
+		id := strings.TrimSpace(record.ID)
+		if record.Source != "" {
+			id = record.Source + "/" + id
+		}
+		if usableSearchRecord("europepmc", id, plainText(record.Title)) {
+			return nil
+		}
+	}
+	return &appresearch.SourceError{SourceID: "europepmc", Code: appresearch.FailureInvalidData, Message: "Europe PMC returned records but no usable identity/title pair"}
 }
 
 type europePMCRecord struct {
@@ -67,21 +110,15 @@ func (c *europePMCConnector) Search(ctx context.Context, options appresearch.Sea
 	cursor := "*"
 	for offset := 0; offset <= options.Offset; offset += options.Limit {
 		query.Set("cursorMark", cursor)
-		var response europePMCResponse
+		response := europePMCResponse{searchLimit: options.Limit, requestCursor: cursor, needNext: offset < options.Offset}
 		if err := c.client.getJSON(ctx, c.base+"/search?"+query.Encode(), requestOptions{SourceID: "europepmc", Host: c.host, Cache: true}, &response); err != nil {
 			return nil, err
 		}
 		if offset == options.Offset {
-			if response.Results.Items == nil {
-				return nil, fmt.Errorf("Europe PMC response is missing resultList.result")
-			}
 			return europePMCWorks(response.Results.Items), nil
 		}
 		if len(response.Results.Items) == 0 {
 			return []appresearch.Work{}, nil
-		}
-		if response.NextCursor == "" || response.NextCursor == cursor {
-			return nil, &appresearch.SourceError{SourceID: "europepmc", Code: appresearch.FailureInvalidData, Message: "Europe PMC pagination did not advance"}
 		}
 		cursor = response.NextCursor
 	}
@@ -95,7 +132,7 @@ func (c *europePMCConnector) Fetch(ctx context.Context, recordID string) (appres
 		queryText = "EXT_ID:" + value + " AND SRC:" + source
 	}
 	query := url.Values{"query": {queryText}, "format": {"json"}, "resultType": {"core"}, "pageSize": {"1"}}
-	var response europePMCResponse
+	response := europePMCResponse{searchLimit: 1, fetchRecordID: id}
 	if err := c.client.getJSON(ctx, c.base+"/search?"+query.Encode(), requestOptions{SourceID: "europepmc", Host: c.host, Cache: true}, &response); err != nil {
 		return appresearch.Work{}, err
 	}

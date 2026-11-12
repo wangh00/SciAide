@@ -64,7 +64,10 @@ func (c *Compiler) Compile(ctx context.Context, definition Definition) (Compilat
 		if _, exists := drafts[node.ID]; exists {
 			continue
 		}
-		draft := &compiledDraft{node: CompiledNode{ID: node.ID, Name: node.Name, Kind: node.Kind, Arguments: nonEmptyObject(node.Arguments), Prompt: node.Prompt, PromptVersion: node.PromptVersion, SkillRouting: node.SkillRouting, ReviewPolicy: node.ReviewPolicy, Dependencies: []string{}}, inputs: map[string]DataType{}, outputs: map[string]DataType{}, required: map[string]bool{}}
+		draft := &compiledDraft{node: CompiledNode{ID: node.ID, Name: node.Name, Kind: node.Kind, Arguments: nonEmptyObject(node.Arguments), Prompt: node.Prompt, PromptVersion: node.PromptVersion, SkillRouting: node.SkillRouting, StageMaterialsVersion: node.StageMaterialsVersion, ReviewPolicy: node.ReviewPolicy, Dependencies: []string{}}, inputs: map[string]DataType{}, outputs: map[string]DataType{}, required: map[string]bool{}}
+		if node.StageMaterialsVersion != "" && (node.Kind != NodeAgentStage || node.StageMaterialsVersion != stageMaterialHandoffVersion) {
+			diagnostics = append(diagnostics, diagnostic("error", "invalid_stage_materials", path+".stageMaterialsVersion", "Stage source handoff requires an Agent Stage and a supported version"))
+		}
 		switch node.Kind {
 		case NodeTool, NodeShell, NodePython:
 			name := strings.TrimSpace(node.ToolName)
@@ -157,6 +160,7 @@ func (c *Compiler) Compile(ctx context.Context, definition Definition) (Compilat
 			draft.inputs["documentCoverage"] = TypeAny
 			draft.inputs["importedMaterials"] = TypeAny
 			draft.inputs["partialDiscovery"] = TypeAny
+			draft.inputs["searchPlan"] = TypeAny
 			draft.outputs["analysis"] = TypeObject
 			draft.outputs["text"] = TypeString
 			if len(decodeObject(node.Arguments)) != 0 {

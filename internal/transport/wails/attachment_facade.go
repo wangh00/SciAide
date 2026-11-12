@@ -44,11 +44,21 @@ func (f *AttachmentFacade) ImportTaskDocumentPaths(projectID, taskID string, pat
 	return f.service.ImportPathsForTask(f.lifecycle.Context(), projectID, paths, taskID)
 }
 
-func (f *AttachmentFacade) ChooseAndImportConversationDocuments(projectID, conversationID string) (attachment.ImportBatch, error) {
+// ChooseConversationDocumentPaths only prepares the entry draft. No conversation,
+// task, attachment row or project-shared material is created by choosing files.
+func (f *AttachmentFacade) ChooseConversationDocumentPaths() ([]string, error) {
 	paths, err := runtime.OpenMultipleFilesDialog(f.lifecycle.Context(), runtime.OpenDialogOptions{
-		Title:   "添加到当前对话",
+		Title:   "选择对话附件",
 		Filters: []runtime.FileFilter{{DisplayName: "科研文档、源码与图片 (*.py;*.r;*.jl;*.m;*.sql;*.pdf;*.docx;*.xlsx;*.txt;*.md;*.csv;*.tsv;*.jpg;*.png;*.webp)", Pattern: "*.py;*.r;*.jl;*.m;*.sql;*.pdf;*.docx;*.xlsx;*.txt;*.md;*.markdown;*.csv;*.tsv;*.jpg;*.jpeg;*.png;*.webp"}},
 	})
+	if paths == nil {
+		paths = []string{}
+	}
+	return paths, err
+}
+
+func (f *AttachmentFacade) ChooseAndImportConversationDocuments(projectID, conversationID string) (attachment.ImportBatch, error) {
+	paths, err := f.ChooseConversationDocumentPaths()
 	if err != nil || len(paths) == 0 {
 		return attachment.ImportBatch{Attachments: []attachment.Attachment{}, Errors: []attachment.ImportError{}}, err
 	}

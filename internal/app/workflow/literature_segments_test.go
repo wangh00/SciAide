@@ -70,3 +70,30 @@ func TestLiteratureReportsMultipleQuoteErrorsTogether(t *testing.T) {
 		t.Fatal("only one repair defect was exposed", err)
 	}
 }
+
+func TestLiteratureQuoteDiagnosticsDoNotHideCellsBeyondEight(t *testing.T) {
+	_, input, text := literatureQuoteFixture(t)
+	var in struct {
+		Literature literatureInput       `json:"_literature"`
+		Candidates []literatureCandidate `json:"candidates"`
+	}
+	_ = json.Unmarshal(input, &in)
+	var out literatureScreening
+	_ = json.Unmarshal([]byte(text), &out)
+	c, a, n := in.Candidates[0], out.CandidateAssessments[0], out.EvidenceNotes[0]
+	in.Candidates = nil
+	out.CandidateAssessments = nil
+	out.EvidenceNotes = nil
+	for i := 0; i < 12; i++ {
+		id := strings.Repeat("c", i+1)
+		c.ID, a.CandidateID, n.CandidateID = id, id, id
+		n.Quotes = []literatureQuote{{Field: "abstract", Quote: "not in original"}}
+		in.Candidates = append(in.Candidates, c)
+		out.CandidateAssessments = append(out.CandidateAssessments, a)
+		out.EvidenceNotes = append(out.EvidenceNotes, n)
+	}
+	e := validateLiteratureHierarchy(mustJSON(map[string]any{"phase": "batch", "summary": out.Summary, "candidateAssessments": out.CandidateAssessments, "evidenceNotes": out.EvidenceNotes}), mustJSON(in))
+	if e == nil || !strings.Contains(e.Error(), "evidenceNotes[11].quotes[0]") || strings.Contains(e.Error(), "first 8") {
+		t.Fatal("hidden diagnostic", e)
+	}
+}

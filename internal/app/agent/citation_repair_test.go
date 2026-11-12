@@ -107,11 +107,11 @@ func TestCitationRepairStrictScope(t *testing.T) {
 		t.Fatal("missing repair")
 	}
 	patch := quotePatch(r, "Exact evidence.")
-	if err := (tool.JSONSchemaValidator{}).ValidateSchema(r.submissionSchema(quoteRepairSchema)); err != nil {
+	if err := (tool.JSONSchemaValidator{}).ValidateSchema(r.schema); err != nil {
 		t.Fatal(err)
 	}
-	for _, candidate := range []string{patch, quoteRepairBase} {
-		if err := (tool.JSONSchemaValidator{}).Validate(r.submissionSchema(quoteRepairSchema), json.RawMessage(candidate)); err != nil {
+	for candidate, schema := range map[string]json.RawMessage{patch: r.schema, quoteRepairBase: quoteRepairSchema} {
+		if err := (tool.JSONSchemaValidator{}).Validate(schema, json.RawMessage(candidate)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -234,10 +234,10 @@ func TestCitationRepairLoopAuditsPatchAndValidatesFullResult(t *testing.T) {
 		}
 		req := provider.Requests()[1]
 		if dedicated {
-			if req.ForcedTool != stageSubmissionTool || len(req.Tools) != 1 {
+			if req.ForcedTool != "" || len(req.Tools) != 2 {
 				t.Fatal("repair escaped submission interface")
 			}
-			if err := (tool.JSONSchemaValidator{}).Validate(req.Tools[0].InputSchema, json.RawMessage(patch)); err != nil {
+			if err := (tool.JSONSchemaValidator{}).Validate(req.Tools[1].InputSchema, json.RawMessage(patch)); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -273,7 +273,7 @@ func TestCitationBatchRepairChangesOnlyRejectedQuotes(t *testing.T) {
 	if err != nil || !strings.Contains(merged, "9007199254740993") || !strings.Contains(merged, "Already correct.") || !strings.Contains(merged, "Correct A.") || !strings.Contains(merged, "Correct B.") {
 		t.Fatalf("batch merge: %s %v", merged, err)
 	}
-	if err := (tool.JSONSchemaValidator{}).Validate(r.submissionSchema(quoteRepairSchema), json.RawMessage(patch)); err != nil {
+	if err := (tool.JSONSchemaValidator{}).Validate(r.schema, json.RawMessage(patch)); err != nil {
 		t.Fatal(err)
 	}
 	for _, bad := range []string{
@@ -321,6 +321,7 @@ func TestCitationBatchRepairLoopRepairsAllInOneTurn(t *testing.T) {
 		first, next := submissionScript(quoteRepairBase), submissionScript("```json\n"+patch+"\n```")
 		if dedicated {
 			first, next = submissionToolScript(quoteRepairBase), submissionToolScript(patch)
+			next[0].Event.ToolCall.Name = stageRepairTool
 		}
 		loop, state, provider := newLoopFixture(t, nil, first, next)
 		state.workflowAI = true
@@ -353,11 +354,11 @@ func TestCitationBatchRepairLoopRepairsAllInOneTurn(t *testing.T) {
 				t.Fatal("batch feedback omitted a remaining issue")
 			}
 		}
-		if dedicated && (req.ForcedTool != stageSubmissionTool || len(req.Tools) != 1) {
+		if dedicated && (req.ForcedTool != "" || len(req.Tools) != 2) {
 			t.Fatal("batch repair escaped dedicated submission")
 		}
 		if dedicated {
-			if err := (tool.JSONSchemaValidator{}).Validate(req.Tools[0].InputSchema, json.RawMessage(patch)); err != nil {
+			if err := (tool.JSONSchemaValidator{}).Validate(req.Tools[1].InputSchema, json.RawMessage(patch)); err != nil {
 				t.Fatal(err)
 			}
 		}

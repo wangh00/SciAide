@@ -28,7 +28,7 @@ func reviewRevisionFixture() RunDetail {
 		Steps: []Step{
 			{ID: "producer-step", NodeID: "design", Ordinal: 0, NodeKind: NodeAgentStage, Status: StepCompleted, Attempt: 1, Output: json.RawMessage(`{"analysis":{"title":"prior design","limitations":[]}}`)},
 			{ID: "review-step", NodeID: "review", Ordinal: 1, NodeKind: NodeAIAnalysis, Status: StepCompleted, Attempt: 1, Output: json.RawMessage(`{"analysis":{"approved":false}}`)},
-			{ID: "gate-step", NodeID: "review_gate", Ordinal: 2, NodeKind: NodeTool, Status: StepFailed, Attempt: 1, Input: gateInput},
+			{ID: "gate-step", NodeID: "review_gate", Ordinal: 2, NodeKind: NodeTool, Status: StepFailed, ErrorCode: "RESEARCH_REVIEW_NOT_APPROVED", Attempt: 1, Input: gateInput},
 		},
 	}
 }
@@ -179,6 +179,12 @@ func TestReviewGateInputCarriesIndependentReviewSnapshot(t *testing.T) {
 		{ID: "review-step", NodeID: "independent_review", Status: StepCompleted, Input: reviewInput, Output: json.RawMessage(`{"analysis":{"approved":true}}`)},
 		{ID: "gate-step", NodeID: "delivery_gate", Status: StepQueued},
 	}}
+	detail.Run.Compilation.Nodes[1].OutputSchema = independentReviewSchema()
+	_, full := acceptanceFixture(t)
+	delete(full, "acceptanceChecks")
+	full["reviewedInputSha256"] = hashJSON(reviewInput)
+	detail.Steps[1].Output = rawObject(map[string]any{"analysis": full})
+	freezeReviewExecutionFixture(t, &detail, 1)
 	input, err := bindNodeInput(detail, detail.Run.Compilation.Nodes[2])
 	if err != nil {
 		t.Fatal(err)

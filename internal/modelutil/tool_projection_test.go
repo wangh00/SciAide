@@ -50,6 +50,19 @@ func TestToolNameProjectionChangesOnlyHostReferences(t *testing.T) {
 		t.Fatal("native history corrupted")
 	}
 }
+
+func TestToolProjectionPreservesReviewSourceAndSharedPathData(t *testing.T) {
+	name := "builtin.research.task.read"
+	menu := `{"sources":[["/context/builtin.research.task.read",1,[12],0,40,55]],"citationAliases":{"[K-123456789ABC]":"[K-23456789ABCD]"}}`
+	paths := `["/context/builtin.research.task.read"]`
+	for _, role := range []model.Role{model.RoleSystem, model.RoleUser} {
+		req := model.ChatRequest{Messages: []model.Message{{Role: role, HostToolReferences: true, Content: "Call " + name + " now.\n<review_submission_sources>" + menu + "</review_submission_sources>\n<stage_input_shared_paths>" + paths + "</stage_input_shared_paths>"}}}
+		got := ProjectToolReferences(req, map[string]string{name: "research_task_read"}).Messages[0].Content
+		if !strings.Contains(got, "Call research_task_read now.") || !strings.Contains(got, "<review_submission_sources>"+menu+"</review_submission_sources>") || !strings.Contains(got, "<stage_input_shared_paths>"+paths+"</stage_input_shared_paths>") {
+			t.Fatal("tool alias projection modified frozen source coordinates", got)
+		}
+	}
+}
 func TestToolProjectionDoesNotRestoreLegacyNames(t *testing.T) {
 	for _, canonical := range []string{"builtin.resource.open", "builtin.resource.search"} {
 		alias := ProviderToolName(canonical)

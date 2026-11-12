@@ -12,6 +12,7 @@ import (
 	"github.com/wangh00/SciAide/internal/app/attachment"
 	"github.com/wangh00/SciAide/internal/app/conversation"
 	"github.com/wangh00/SciAide/internal/app/knowledge"
+	"github.com/wangh00/SciAide/internal/app/userinput"
 	"github.com/wangh00/SciAide/internal/document"
 	"github.com/wangh00/SciAide/internal/modelcap"
 	"github.com/wangh00/SciAide/internal/skillrun"
@@ -74,17 +75,24 @@ type ResourceSnapshot struct {
 }
 
 type ResearchStarterContext struct {
-	Capabilities      []ResearchCapability          `json:"capabilities,omitempty"`
-	SelectedMaterials []attachment.MessageReference `json:"selectedMaterials,omitempty"`
-	ResearchIdea      string                        `json:"researchIdea"`
-	ResourceSnapshot  ResourceSnapshot              `json:"resourceSnapshot"`
-	StageCatalog      []ResearchStage               `json:"stageCatalog"`
-	PlannerVersion    string                        `json:"plannerVersion"`
+	UserRequests             []string                      `json:"userRequests,omitempty"`
+	TimeContext              *ResearchTimeContext          `json:"researchTimeContext,omitempty"`
+	DiscussionRecord         *ResearchPlanningDiscussion   `json:"discussionRecord,omitempty"`
+	DiscussionConversationID string                        `json:"discussionConversationId,omitempty"`
+	DiscussionUserMessageID  string                        `json:"discussionUserMessageId,omitempty"`
+	DiscussionHistory        []conversation.Message        `json:"discussionHistory,omitempty"`
+	Capabilities             []ResearchCapability          `json:"capabilities,omitempty"`
+	SelectedMaterials        []attachment.MessageReference `json:"selectedMaterials,omitempty"`
+	ResearchIdea             string                        `json:"researchIdea"`
+	ResourceSnapshot         ResourceSnapshot              `json:"resourceSnapshot"`
+	StageCatalog             []ResearchStage               `json:"stageCatalog"`
+	PlannerVersion           string                        `json:"plannerVersion"`
 	// ClarificationAnswers is populated only on a replanning attempt. Keeping
 	// the option IDs in the frozen input makes the hand-off auditable without
 	// relying on the rendered labels or reparsing the planner prompt.
-	ClarificationAnswers map[string][]string `json:"clarificationAnswers,omitempty"`
-	PriorStarterRunID    string              `json:"priorStarterRunId,omitempty"`
+	ClarificationFreeText map[string]string   `json:"clarificationFreeText,omitempty"`
+	ClarificationAnswers  map[string][]string `json:"clarificationAnswers,omitempty"`
+	PriorStarterRunID     string              `json:"priorStarterRunId,omitempty"`
 }
 
 type ResearchStage struct {
@@ -203,18 +211,22 @@ type StarterSkillLoader interface {
 }
 
 type StartResearchCommand struct {
-	ReferenceAttachmentIDs []string                `json:"referenceAttachmentIds,omitempty"`
-	ProjectID              string                  `json:"projectId"`
-	ResearchIdea           string                  `json:"researchIdea"`
-	ModelProfileID         string                  `json:"modelProfileId"`
-	ModelID                string                  `json:"modelId"`
-	ReasoningLevel         modelcap.ReasoningLevel `json:"reasoningLevel,omitempty"`
+	PermissionMode         conversation.PermissionMode `json:"permissionMode,omitempty"`
+	ReferenceAttachmentIDs []string                    `json:"referenceAttachmentIds,omitempty"`
+	ProjectID              string                      `json:"projectId"`
+	ResearchIdea           string                      `json:"researchIdea"`
+	ModelProfileID         string                      `json:"modelProfileId"`
+	ModelID                string                      `json:"modelId"`
+	ReasoningLevel         modelcap.ReasoningLevel     `json:"reasoningLevel,omitempty"`
+	// DiscussionOnly creates a durable conversation, not a model/planner run.
+	DiscussionOnly bool `json:"discussionOnly,omitempty"`
 }
 
 type AnswerResearchClarificationCommand struct {
-	ProjectID    string              `json:"projectId"`
-	StarterRunID string              `json:"starterRunId"`
-	Answers      map[string][]string `json:"answers"`
+	FreeTextAnswers map[string]string   `json:"freeTextAnswers,omitempty"`
+	ProjectID       string              `json:"projectId"`
+	StarterRunID    string              `json:"starterRunId"`
+	Answers         map[string][]string `json:"answers"`
 }
 
 type AdoptResearchRouteCommand struct {
@@ -303,23 +315,36 @@ func (s *StarterService) Start(ctx context.Context, command StartResearchCommand
 		}
 	}
 	starter := ResearchStarterTemplate()
+	if command.DiscussionOnly {
+		starter = researchDiscussionTemplate()
+	}
 	saved, err := s.workflows.save(ctx, SaveCommand{ProjectID: command.ProjectID, Definition: starter.Definition}, PurposeResearchStarter)
 	if err != nil {
 		return RunDetail{}, fmt.Errorf("prepare research starter: %w", err)
 	}
-	inputs, err := json.Marshal(map[string]any{"starter_context": ResearchStarterContext{
+	values := map[string]any{"starter_context": ResearchStarterContext{
 		ResearchIdea: command.ResearchIdea, ResourceSnapshot: snapshot,
+		UserRequests: []string{command.ResearchIdea}, TimeContext: newResearchTimeContext(command.ResearchIdea, s.runtime.now()),
 		SelectedMaterials: references,
 		Capabilities:      researchCapabilities(),
 		StageCatalog:      dynamicResearchStageCatalog(), PlannerVersion: dynamicResearchPlannerVersion,
-	}})
+	}}
+	if command.DiscussionOnly {
+		values["discussion_only"] = true
+	}
+	inputs, err := json.Marshal(values)
 	if err != nil {
 		return RunDetail{}, err
 	}
+	permissionMode := command.PermissionMode
+	if permissionMode == "" {
+		permissionMode = conversation.PermissionFullAccess
+	}
 	return s.runtime.Start(ctx, StartCommand{
 		ProjectID: command.ProjectID, ResearchTaskID: NewResearchTaskID, WorkflowID: saved.Workflow.ID, WorkflowVersionID: saved.Version.ID,
-		Inputs: inputs, PermissionMode: conversation.PermissionFullAccess,
+		Inputs: inputs, PermissionMode: permissionMode,
 		ModelProfileID: command.ModelProfileID, ModelID: command.ModelID, ReasoningLevel: command.ReasoningLevel,
+		DiscussionOnly: command.DiscussionOnly,
 	})
 }
 
@@ -335,7 +360,7 @@ func (s *StarterService) AnswerClarification(ctx context.Context, command Answer
 	if command.ProjectID == "" || command.StarterRunID == "" {
 		return RunDetail{}, fmt.Errorf("project and starter Run are required")
 	}
-	if len(command.Answers) > 32 {
+	if len(command.Answers) > 32 || len(command.FreeTextAnswers) > 32 {
 		return RunDetail{}, fmt.Errorf("too many clarification answers")
 	}
 	prior, err := s.runtime.Get(ctx, command.ProjectID, command.StarterRunID)
@@ -355,11 +380,22 @@ func (s *StarterService) AnswerClarification(ctx context.Context, command Answer
 	if err := validateResearchClarification(*plan.Clarification); err != nil {
 		return RunDetail{}, err
 	}
-	answers, err := normalizeResearchClarificationAnswers(*plan.Clarification, command.Answers)
+	normalized, err := userinput.NormalizeAnswers(clarificationQuestions(*plan.Clarification), clarificationResponses(command.Answers, command.FreeTextAnswers))
 	if err != nil {
 		return RunDetail{}, err
 	}
+	answers := map[string][]string{}
+	freeText := map[string]string{}
+	for key, answer := range normalized {
+		answers[key] = answer.OptionIDs
+		if answer.Text != "" {
+			freeText[key] = answer.Text
+		}
+	}
 	idea := clarifiedResearchIdea(starterContext.ResearchIdea, *plan.Clarification, answers)
+	if len(freeText) > 0 {
+		idea += "\n\n" + userinput.AnswerText(clarificationQuestions(*plan.Clarification), normalized)
+	}
 	taskID := strings.TrimSpace(prior.Run.ResearchTaskID)
 	if taskID == "" {
 		return RunDetail{}, fmt.Errorf("research starter has no durable task identity; create a new research task")
@@ -368,7 +404,7 @@ func (s *StarterService) AnswerClarification(ctx context.Context, command Answer
 	if err != nil {
 		return RunDetail{}, err
 	}
-	return s.startReplannedResearch(ctx, prior, execution, idea, snapshot, answers, "answer")
+	return s.startReplannedResearch(ctx, prior, execution, idea, snapshot, answers, "answer", freeText)
 }
 
 func validateResearchClarification(value ResearchClarification) error {
@@ -419,50 +455,6 @@ func validClarificationID(value string) bool {
 	return true
 }
 
-func normalizeResearchClarificationAnswers(clarification ResearchClarification, answers map[string][]string) (map[string][]string, error) {
-	if err := validateResearchClarification(clarification); err != nil {
-		return nil, err
-	}
-	result := make(map[string][]string, len(clarification.Questions))
-	known := make(map[string]ResearchClarificationQuestion, len(clarification.Questions))
-	for _, question := range clarification.Questions {
-		known[question.ID] = question
-	}
-	for questionID := range answers {
-		if _, ok := known[questionID]; !ok {
-			return nil, fmt.Errorf("clarification contains an unknown question")
-		}
-	}
-	for _, question := range clarification.Questions {
-		values := answers[question.ID]
-		if question.Required && len(values) == 0 {
-			return nil, fmt.Errorf("clarification question %q requires an answer", question.ID)
-		}
-		if question.SelectionMode != "multiple" && len(values) > 1 {
-			return nil, fmt.Errorf("clarification questions accept one option")
-		}
-		allowed := make(map[string]bool, len(question.Options))
-		for _, option := range question.Options {
-			allowed[option.ID] = true
-		}
-		seen := map[string]bool{}
-		for _, value := range values {
-			value = strings.TrimSpace(value)
-			if !allowed[value] || seen[value] {
-				return nil, fmt.Errorf("clarification answer contains an invalid option")
-			}
-			seen[value] = true
-		}
-		// Canonical option order makes equivalent multi-select answers replayable.
-		for _, option := range question.Options {
-			if seen[option.ID] {
-				result[question.ID] = append(result[question.ID], option.ID)
-			}
-		}
-	}
-	return result, nil
-}
-
 func clarifiedResearchIdea(original string, clarification ResearchClarification, answers map[string][]string) string {
 	var result strings.Builder
 	result.WriteString(strings.TrimSpace(original))
@@ -489,6 +481,9 @@ func clarifiedResearchIdea(original string, clarification ResearchClarification,
 // still calls the same validator immediately before creating a formal Run;
 // this method is only an early, truthful UI projection.
 func (s *StarterService) ProjectPlan(ctx context.Context, detail RunDetail) (*ResearchStarterPlan, error) {
+	if isResearchDiscussion(detail.Run) {
+		return nil, nil
+	}
 	if detail.Run.WorkflowPurpose != PurposeResearchStarter || detail.Run.Status != RunCompleted {
 		return nil, nil
 	}
@@ -508,6 +503,11 @@ func (s *StarterService) ProjectPlan(ctx context.Context, detail RunDetail) (*Re
 	plan.LoadedSkills = append([]skillrun.Snapshot(nil), loaded...)
 	if err := annotateStarterRoutesForSelection(&plan, starterContext, loaded); err != nil {
 		return nil, err
+	}
+	if err := s.checkDiscussionPlanCurrent(ctx, detail, starterContext); err != nil {
+		for i := range plan.Routes {
+			markInvalidResearchRoute(&plan.Routes[i], err.Error())
+		}
 	}
 	return &plan, nil
 }
@@ -611,6 +611,9 @@ func (s *StarterService) Adopt(ctx context.Context, command AdoptResearchRouteCo
 		}
 	}
 	if err := s.ensureCurrentStarter(ctx, detail); err != nil {
+		return AdoptResearchRouteResult{}, err
+	}
+	if err := s.checkDiscussionPlanCurrent(ctx, detail, starterContext); err != nil {
 		return AdoptResearchRouteResult{}, err
 	}
 	saved, err := s.workflows.Save(ctx, SaveCommand{ProjectID: command.ProjectID, Definition: template.Definition})
@@ -864,6 +867,7 @@ func (s *StarterService) StartAdoptedResearchRoute(ctx context.Context, command 
 func templateRouteContext(route ResearchRoute) json.RawMessage {
 	value, _ := json.Marshal(map[string]any{
 		"routeId": route.RouteID, "title": route.Title, "reason": route.Reason,
+		"deliverables": route.Deliverables, "stageIds": route.StageIDs,
 		"layers": route.Layers, "selectedSkills": route.SelectedSkills,
 		"reviewCheckpoints": route.ReviewCheckpoints, "planningNotes": route.PlanningNotes,
 	})
@@ -1169,6 +1173,11 @@ func decodeStarterResult(detail RunDetail) (ResearchStarterContext, ResearchStar
 	if err := json.Unmarshal(detail.Run.Inputs, &inputs); err != nil || strings.TrimSpace(inputs.StarterContext.ResearchIdea) == "" {
 		return ResearchStarterContext{}, ResearchStarterPlan{}, nil, fmt.Errorf("研究启动任务的冻结输入无效")
 	}
+	if inputs.StarterContext.DiscussionRecord != nil && inputs.StarterContext.DiscussionRecord.SourcePlannerRunID == "" {
+		ref := *inputs.StarterContext.DiscussionRecord
+		ref.SourcePlannerRunID = detail.Run.ID
+		inputs.StarterContext.DiscussionRecord = &ref
+	}
 	if len(detail.Steps) != 1 || detail.Steps[0].Status != StepCompleted {
 		return ResearchStarterContext{}, ResearchStarterPlan{}, nil, fmt.Errorf("研究启动任务没有已完成的规划步骤")
 	}
@@ -1253,4 +1262,30 @@ func routeDefinition(route ResearchRoute, starter ResearchStarterContext) (Templ
 	// current research question, so it must never promote an AI-blocked route.
 	available := route.AvailableNow && hostAvailable
 	return dynamicResearchRouteTemplate(route, starter, available)
+}
+
+// Old planner snapshots keep their schema; only the question interaction uses
+// the shared protocol, including free text that is never an invented option ID.
+func clarificationQuestions(value ResearchClarification) []userinput.Question {
+	result := []userinput.Question{}
+	for _, q := range value.Questions {
+		question := userinput.Question{ID: q.ID, Question: q.Text, Required: q.Required, SelectionMode: q.SelectionMode}
+		for _, o := range q.Options {
+			question.Options = append(question.Options, userinput.Option{ID: o.ID, Label: o.Label})
+		}
+		result = append(result, question)
+	}
+	return result
+}
+func clarificationResponses(options map[string][]string, text map[string]string) userinput.Answers {
+	result := userinput.Answers{}
+	for key, values := range options {
+		result[key] = userinput.Answer{OptionIDs: values}
+	}
+	for key, value := range text {
+		answer := result[key]
+		answer.Text = value
+		result[key] = answer
+	}
+	return result
 }

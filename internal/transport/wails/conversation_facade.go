@@ -43,7 +43,7 @@ func (f *ConversationFacade) GetConversation(conversationID string) (conversatio
 	return f.service.Get(f.lifecycle.Context(), conversationID)
 }
 func (f *ConversationFacade) ListMessages(conversationID string) ([]conversation.Message, error) {
-	return f.service.Messages(f.lifecycle.Context(), conversationID)
+	return f.service.VisibleMessages(f.lifecycle.Context(), conversationID)
 }
 func (f *ConversationFacade) RemoveConversation(conversationID string) error {
 	return f.service.Remove(f.lifecycle.Context(), conversationID)

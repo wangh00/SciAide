@@ -64,6 +64,18 @@ func TestResearchSystemContextStartsWithTrustedResearchModeRules(t *testing.T) {
 	}
 }
 
+func TestResearchDiscussionPolicyDoesNotImposeStageExecution(t *testing.T) {
+	value := researchDiscussionSystemContext("<workflow_state>{\"workflowStatus\":\"completed\"}</workflow_state>")
+	if !strings.HasPrefix(value, ResearchDiscussionSystemRules) || strings.Contains(value, "return a structured clarification object") || strings.Contains(value, "When a required resource is missing, mark the route unavailable") {
+		t.Fatal("discussion inherited stage planning/output rules")
+	}
+	for _, required := range []string{"latest human request", "do not require a research route", "existing pending confirmation card", "host-issued citation", "untrusted evidence", "<workflow_state>"} {
+		if !strings.Contains(value, required) {
+			t.Fatal("discussion lost conversational or provenance boundary", required)
+		}
+	}
+}
+
 func TestWithoutSkillReadToolsRemovesEverySkillContentReader(t *testing.T) {
 	values := withoutSkillReadTools([]string{
 		"builtin.workspace.read_text",

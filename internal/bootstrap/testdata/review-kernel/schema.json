@@ -1,0 +1,279 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "acceptanceChecks": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "basis": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "type": "string"
+          },
+          "criterionId": {
+            "pattern": "^criterion-[1-9][0-9]*$",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "met",
+              "not_met"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "criterionId",
+          "status",
+          "basis"
+        ],
+        "type": "object"
+      },
+      "maxItems": 32,
+      "minItems": 1,
+      "type": "array"
+    },
+    "approved": {
+      "type": "boolean"
+    },
+    "citationIssues": {
+      "items": {
+        "maxLength": 2000,
+        "type": "string"
+      },
+      "maxItems": 100,
+      "type": "array"
+    },
+    "confidence": {
+      "enum": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "type": "string"
+    },
+    "limitations": {
+      "items": {
+        "maxLength": 2000,
+        "type": "string"
+      },
+      "maxItems": 100,
+      "type": "array"
+    },
+    "methodIssues": {
+      "items": {
+        "maxLength": 2000,
+        "type": "string"
+      },
+      "maxItems": 100,
+      "type": "array"
+    },
+    "numericIssues": {
+      "items": {
+        "maxLength": 2000,
+        "type": "string"
+      },
+      "maxItems": 100,
+      "type": "array"
+    },
+    "requiredCorrections": {
+      "items": {
+        "maxLength": 2000,
+        "type": "string"
+      },
+      "maxItems": 100,
+      "type": "array"
+    },
+    "reviewFindings": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "basis": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "pointer": {
+                  "maxLength": 500,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "quote": {
+                  "maxLength": 2000,
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "pointer",
+                "quote"
+              ],
+              "type": "object"
+            },
+            "maxItems": 4,
+            "minItems": 1,
+            "type": "array"
+          },
+          "category": {
+            "enum": [
+              "unsupportedClaims",
+              "citationIssues",
+              "numericIssues",
+              "methodIssues"
+            ],
+            "type": "string"
+          },
+          "changeReason": {
+            "maxLength": 2000,
+            "type": "string"
+          },
+          "correctionIndex": {
+            "maximum": 99,
+            "minimum": -1,
+            "type": "integer"
+          },
+          "id": {
+            "maxLength": 80,
+            "pattern": "^issue-[1-9][0-9]*-[1-9][0-9]*$",
+            "type": "string"
+          },
+          "location": {
+            "maxLength": 1000,
+            "minLength": 1,
+            "type": "string"
+          },
+          "origin": {
+            "enum": [
+              "new",
+              "existing",
+              "reopened"
+            ],
+            "type": "string"
+          },
+          "reason": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "open",
+              "resolved",
+              "withdrawn"
+            ],
+            "type": "string"
+          },
+          "summary": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "category",
+          "summary",
+          "location",
+          "basis",
+          "reason",
+          "origin",
+          "changeReason",
+          "correctionIndex"
+        ],
+        "type": "object"
+      },
+      "maxItems": 100,
+      "type": "array"
+    },
+    "reviewedInputSha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "revisionPlan": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "correctionIndex": {
+            "maximum": 99,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "needsUserInput": {
+            "type": "boolean"
+          },
+          "nodeId": {
+            "maxLength": 200,
+            "type": "string"
+          },
+          "reason": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "type": "string"
+          },
+          "requiredInput": {
+            "maxLength": 2000,
+            "type": "string"
+          },
+          "whyNotLater": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "correctionIndex",
+          "nodeId",
+          "reason",
+          "whyNotLater",
+          "needsUserInput",
+          "requiredInput"
+        ],
+        "type": "object"
+      },
+      "maxItems": 100,
+      "type": "array"
+    },
+    "suggestions": {
+      "items": {
+        "maxLength": 2000,
+        "minLength": 1,
+        "type": "string"
+      },
+      "maxItems": 30,
+      "type": "array"
+    },
+    "unsupportedClaims": {
+      "items": {
+        "maxLength": 2000,
+        "type": "string"
+      },
+      "maxItems": 100,
+      "type": "array"
+    },
+    "verifiedClaims": {
+      "items": {
+        "maxLength": 2000,
+        "type": "string"
+      },
+      "maxItems": 100,
+      "type": "array"
+    }
+  },
+  "required": [
+    "approved",
+    "reviewedInputSha256",
+    "verifiedClaims",
+    "unsupportedClaims",
+    "citationIssues",
+    "numericIssues",
+    "methodIssues",
+    "requiredCorrections",
+    "confidence",
+    "limitations",
+    "acceptanceChecks",
+    "reviewFindings",
+    "suggestions",
+    "revisionPlan"
+  ],
+  "type": "object"
+}

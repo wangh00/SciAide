@@ -39,12 +39,23 @@ func (c literatureConnectorFixture) Search(_ context.Context, o research.SearchO
 	values := []research.Work{}
 	for i := 0; i < count; i++ {
 		id := fmt.Sprintf("%s-%d", c.name, start+i)
+		// These named sources must use IDs accepted by their production Fetch
+		// contract; the independent fixture label still drives titles and DOI.
+		recordID := id
+		switch c.name {
+		case "pubmed":
+			recordID = fmt.Sprint(start + i + 1)
+		case "openalex":
+			recordID = fmt.Sprintf("W%d", start+i+1)
+		case "crossref":
+			recordID = "10.5555/" + id
+		}
 		title := "Unrelated " + id
 		if c.name == "pubmed" && (i == 14 || start == 100) {
 			title = "Eligible " + id
 		}
 		title += " time\u2010restricted eating"
-		values = append(values, research.Work{SourceID: c.name, SourceRecordID: id, Title: title, Abstract: "Complete source abstract", Authors: []research.Author{{Name: "Author " + id}}, Year: 2024, Identifiers: research.Identifiers{DOI: "10.5555/" + id}, WorkType: "journal-article"})
+		values = append(values, research.Work{SourceID: c.name, SourceRecordID: recordID, Title: title, Abstract: "Complete source abstract", Authors: []research.Author{{Name: "Author " + id}}, Year: 2024, Identifiers: research.Identifiers{DOI: "10.5555/" + id}, WorkType: "journal-article"})
 	}
 	return values, nil
 }

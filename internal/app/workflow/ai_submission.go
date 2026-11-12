@@ -127,6 +127,10 @@ func (s *RuntimeService) ValidateResearchSubmission(ctx context.Context, convers
 	if err := ValidateAIStageSchema(node.OutputSchema); err != nil {
 		return nil, err
 	}
+	writeMask, writeErr := s.designWriteMask(ctx, detail, *step)
+	if writeErr != nil {
+		return nil, writeBaselineError(writeErr)
+	}
 	value, _, err := normalizeWorkflowAIStageSubmissionForInput(text, node, step.Input)
 	if err != nil {
 		return nil, &apperr.Error{Code: "WORKFLOW_AI_SUBMISSION_INVALID", UserMessage: "科研阶段提交未通过输出检查", Details: err.Error(), Cause: err}
@@ -150,6 +154,28 @@ func (s *RuntimeService) ValidateResearchSubmission(ctx context.Context, convers
 	} else {
 		value = canonicalCitationSubmission(value, detail, *step, node, chatRunID)
 	}
+	if usesReportProvenance(node) {
+		value, _, err = enrichReportProvenance(value, validationInput)
+		if err != nil {
+			return nil, &apperr.Error{Code: "WORKFLOW_AI_SUBMISSION_INVALID", UserMessage: "科研报告记录交接未完成", Details: err.Error(), Cause: err}
+		}
+	}
+	if writeMask != nil {
+		// Match final completion/human adoption: material owners can receive
+		// reversible current-Chat citation aliases in authorized source pages.
+		refs, seedErr := s.workflowAICitationSeeds(ctx, detail, *step)
+		if seedErr != nil {
+			return nil, seedErr
+		}
+		value = restoreWorkflowCitationMarkers(value, refs, chatRunID)
+		if err := writeMask.validate(value); err != nil {
+			var classified *apperr.Error
+			if errors.As(err, &classified) && classified.Code == revisionWriteBaselineInvalid {
+				return nil, err
+			}
+			return nil, &apperr.Error{Code: "WORKFLOW_AI_SUBMISSION_INVALID", UserMessage: "科研返修越过已确认的设计写入范围", Details: err.Error(), Cause: err}
+		}
+	}
 	changes, refreshErr := s.changedEvidenceMaterials(ctx, detail, *step, node)
 	if refreshErr != nil {
 		return nil, refreshErr
@@ -160,40 +186,94 @@ func (s *RuntimeService) ValidateResearchSubmission(ctx context.Context, convers
 		return value, nil
 	}
 	if err := validateWorkflowAIStageOutput(node, value, validationInput); err != nil {
-		// Only a genuinely new-content collection draft needs another input;
-		// evicted old blocks do not suppress real submission errors.
-		added, readErr := s.newIndexedEvidence(ctx, detail, *step, node, currentExecution)
-		if readErr != nil {
-			return nil, readErr
-		}
-		if len(added) > 0 {
-			return value, nil
+		// Current-Chat reads are already included in validationInput. They do
+		// not make a complete but invalid submission successful: return the
+		// real issues to this same Chat's bounded correction loop. Only the
+		// citation-free collection draft can defer to a new-source checkpoint;
+		// the terminal handler still rejects it as a scientific result.
+		if selectedEvidenceCollectionOnly(node, value, err) {
+			added, readErr := s.newIndexedEvidence(ctx, detail, *step, node, currentExecution)
+			if readErr != nil {
+				return nil, readErr
+			}
+			if len(added) > 0 {
+				return value, nil
+			}
 		}
 		refs := append(workflowCitationSeeds(detail, *step), currentReads...)
-		var quoteErrors *CitationQuoteErrors
-		var quoteErr *CitationQuoteError
-		if errors.As(err, &quoteErrors) {
-			err = modelVisibleQuoteErrors(quoteErrors, refs, chatRunID)
-		} else if errors.As(err, &quoteErr) {
-			err = modelVisibleQuoteError(quoteErr, refs, chatRunID)
-		}
+		err = modelVisibleEvidenceSubmissionError(err, refs, chatRunID)
 		return nil, &apperr.Error{Code: "WORKFLOW_AI_SUBMISSION_INVALID", UserMessage: "科研阶段提交未通过业务检查", Details: err.Error(), Cause: err}
 	}
 	return value, nil
 }
 
+func selectedEvidenceCollectionOnly(node CompiledNode, value json.RawMessage, validationErr error) bool {
+	if node.ID != "evidence_screening" || node.PromptVersion != selectedEvidenceVersion {
+		return false
+	}
+	// An aggregate can contain additional scope/document defects. Do not
+	// unwrap and accidentally suppress those alongside the missing decision.
+	issues, ok := validationErr.(*CitationAssessmentErrors)
+	if !ok || len(issues.Issues) != 1 || len(issues.QuoteIssues) != 0 || issues.Issues[0].Path != "recommendation" {
+		return false
+	}
+	var output struct {
+		Recommendation string            `json:"recommendation"`
+		References     []string          `json:"recommendedReferences"`
+		Assessments    []json.RawMessage `json:"citationAssessments"`
+	}
+	return json.Unmarshal(value, &output) == nil && output.Recommendation == "proceed" && len(output.References) == 0 && len(output.Assessments) == 0
+}
+
 func normalizeWorkflowAIStageSubmissionForInput(text string, node CompiledNode, input json.RawMessage) (json.RawMessage, []AIStageNormalization, error) {
-	value, changes, err := normalizeWorkflowAIStageSubmission(text, node)
+	bound, bindings, bindErr := bindReviewSubmissionInput(text, node, input)
+	if bindErr != nil {
+		return nil, nil, bindErr
+	}
+	text = bound
+	projections, detached, projectionChanges := computationRecordParsingProjection(node, input)
+	value, changes, err := normalizeWorkflowAIStageSubmission(text, node, projections...)
+	if err == nil && detached(value) {
+		value = restoreComputationRecordAfterParsing(value, input)
+		changes = append(changes, projectionChanges()...)
+	}
+	changes = append(bindings, changes...)
+	if err != nil && usesTrackedReview(node) {
+		var hostError *apperr.Error
+		if !errors.As(err, &hostError) || hostError.Code != aiSchemaInvalidCode {
+			if basisErr := rejectedReviewBasisDiagnostics(text, input); basisErr != nil {
+				err = errors.Join(err, basisErr)
+			}
+		}
+	}
+	if err == nil && usesTrackedReview(node) {
+		var additions []AIStageNormalization
+		value, additions = canonicalReviewReadPaths(value, input)
+		changes = append(changes, additions...)
+	}
 	if err == nil && usesReportProvenance(node) {
 		var additions []AIStageNormalization
-		value, additions, err = enrichReportProvenance(value, input)
+		value, additions, err = enrichDesignMaterials(value, input)
 		changes = append(changes, additions...)
+		if err != nil {
+			return value, changes, err
+		}
+		// New frozen handoffs use citation identities restored AFTER this syntax
+		// pass. Bibliography generation must run in that canonical domain in all
+		// three commit paths (precommit, final execution and human adoption).
+		if _, _, handoff := parseResearchHandoff(input); !handoff {
+			value, additions, err = enrichReportProvenance(value, input)
+			changes = append(changes, additions...)
+		}
 		if err == nil {
-			err = (tool.JSONSchemaValidator{}).Validate(node.OutputSchema, value)
+			err = validateReportOutputSchema(node, value, input)
 		}
 		return value, changes, err
 	}
 	if err != nil || node.ID != "candidate_screening" || node.PromptVersion != literatureScreeningVersion {
+		return value, changes, err
+	}
+	if err := validateLiteratureIdentities(value, input); err != nil {
 		return value, changes, err
 	}
 	value, quoteChanges, err := normalizeLiteratureQuotes(value, input)
@@ -204,13 +284,17 @@ func normalizeWorkflowAIStageSubmissionForInput(text string, node CompiledNode, 
 	return value, changes, err
 }
 
-func normalizeWorkflowAIStageSubmission(text string, node CompiledNode) (json.RawMessage, []AIStageNormalization, error) {
+func normalizeWorkflowAIStageSubmission(text string, node CompiledNode, projections ...stageJSONProjection) (result json.RawMessage, normalizations []AIStageNormalization, resultErr error) {
+	defer func() { resultErr = markAIStageOutputFormatError(resultErr) }()
 	if err := ValidateAIStageSchema(node.OutputSchema); err != nil {
 		return nil, nil, err
 	}
+	if usesTrackedReview(node) {
+		return projectReviewSubmission(text, node)
+	}
 	// Keep all accepted historical protocol forms stable. In particular, do not
 	// canonicalize a value that already satisfies its enum or schema.
-	value, originalErr := extractWorkflowAIStageOutputStrict(text, node)
+	value, originalErr := extractWorkflowAIStageOutputStrict(text, node, projections...)
 	if originalErr == nil {
 		return value, nil, nil
 	}
@@ -240,7 +324,7 @@ func normalizeWorkflowAIStageSubmission(text string, node CompiledNode) (json.Ra
 		// The existing envelope parser still owns syntax, size, suffix, and
 		// nested-fence checks; only field representation is relaxed here.
 		var err error
-		candidate, err = extractStageJSON(text, raw(`{"type":"object","additionalProperties":true}`))
+		candidate, err = extractStageJSON(text, raw(`{"type":"object","additionalProperties":true}`), projections...)
 		if err != nil {
 			return nil, nil, originalErr
 		}
@@ -253,7 +337,7 @@ func normalizeWorkflowAIStageSubmission(text string, node CompiledNode) (json.Ra
 	if len(changes) == 0 {
 		return nil, nil, originalErr
 	}
-	if err := (tool.JSONSchemaValidator{}).Validate(node.OutputSchema, normalized); err != nil {
+	if err := (tool.JSONSchemaValidator{}).ValidateWithDiagnostics(node.OutputSchema, normalized); err != nil {
 		return normalized, changes, fmt.Errorf("AI 阶段输出不符合 Schema: %w", err)
 	}
 	return normalized, changes, nil

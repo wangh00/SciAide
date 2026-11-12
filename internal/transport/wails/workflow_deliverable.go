@@ -17,21 +17,27 @@ type SaveWorkflowDeliverableRequest struct {
 	OutputName string `json:"outputName"`
 }
 
+type workflowDesignMaterial struct {
+	Title    string `json:"title"`
+	Markdown string `json:"markdown"`
+}
+
 type workflowResearchDesign struct {
-	Title                 string   `json:"title"`
-	ResearchQuestion      string   `json:"researchQuestion"`
-	Objectives            []string `json:"objectives"`
-	Hypotheses            []string `json:"hypotheses"`
-	PopulationAndSampling []string `json:"populationAndSampling"`
-	VariablesOrMaterials  []string `json:"variablesOrMaterials"`
-	DataCollectionPlan    []string `json:"dataCollectionPlan"`
-	AnalysisPlan          []string `json:"analysisPlan"`
-	QualityControls       []string `json:"qualityControls"`
-	EthicsAndRisks        []string `json:"ethicsAndRisks"`
-	Milestones            []string `json:"milestones"`
-	EvidenceGaps          []string `json:"evidenceGaps"`
-	Limitations           []string `json:"limitations"`
-	Status                string   `json:"status"`
+	Deliverables          []workflowDesignMaterial `json:"deliverables,omitempty"`
+	Title                 string                   `json:"title"`
+	ResearchQuestion      string                   `json:"researchQuestion"`
+	Objectives            []string                 `json:"objectives"`
+	Hypotheses            []string                 `json:"hypotheses"`
+	PopulationAndSampling []string                 `json:"populationAndSampling"`
+	VariablesOrMaterials  []string                 `json:"variablesOrMaterials"`
+	DataCollectionPlan    []string                 `json:"dataCollectionPlan"`
+	AnalysisPlan          []string                 `json:"analysisPlan"`
+	QualityControls       []string                 `json:"qualityControls"`
+	EthicsAndRisks        []string                 `json:"ethicsAndRisks"`
+	Milestones            []string                 `json:"milestones"`
+	EvidenceGaps          []string                 `json:"evidenceGaps"`
+	Limitations           []string                 `json:"limitations"`
+	Status                string                   `json:"status"`
 }
 
 type workflowDeliveryGate struct {
@@ -168,6 +174,9 @@ func renderWorkflowResearchDesign(design workflowResearchDesign) string {
 	result.WriteString(strings.TrimSpace(design.Title))
 	result.WriteString("\n\n> 交付类型：研究设计。该文档不是数据采集、模型训练或统计分析后的实证结果。\n")
 	writeWorkflowDesignText(&result, "研究问题", design.ResearchQuestion)
+	for _, material := range design.Deliverables {
+		writeWorkflowDesignText(&result, material.Title, material.Markdown)
+	}
 	writeWorkflowDesignList(&result, "研究目标", design.Objectives)
 	writeWorkflowDesignList(&result, "研究假设", design.Hypotheses)
 	writeWorkflowDesignList(&result, "研究人群与采样", design.PopulationAndSampling)

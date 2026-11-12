@@ -116,12 +116,12 @@ func TestTrackedReviewSnapshotBindingAndGateProjection(t *testing.T) {
 
 func TestReviewEvidencePointerEscapesAndArrayBounds(t *testing.T) {
 	input := decodeObject(raw(`{"context":{"a/b":[{"x~y":"exact"}]}}`))
-	value, ok := reviewEvidenceAt(input, "/context/a~1b/0/x~0y")
-	if !ok || value != "exact" {
-		t.Fatal(value, ok)
+	value, _, err := reviewBasisAt(input, "/context/a~1b/0/x~0y")
+	if err != nil || value != "exact" {
+		t.Fatal(value, err)
 	}
 	for _, path := range []string{"/context/a~1b/-1", "/context/a~1b/01", "/context/a~1b/3", "/_reviewRevision/anything", "context"} {
-		if _, ok := reviewEvidenceAt(input, path); ok {
+		if _, _, err := reviewBasisAt(input, path); err == nil {
 			t.Fatal(path)
 		}
 	}
@@ -153,7 +153,7 @@ func TestTrackedReviewLiveSubmissionCanonicalizesChatCitationQuotes(t *testing.T
 	output["methodIssues"], output["requiredCorrections"] = []string{"Missing method"}, []string{"Describe method"}
 	output["reviewFindings"] = []trackedReviewFinding{{ID: "issue-3-1", Status: "open", Category: "methodIssues", Summary: "Missing method", Location: "Methods", Basis: []reviewBasis{{"/context/markdown", "Finding " + chatReference}}, Reason: "Method not described", Origin: "new", ChangeReason: "First detection", CorrectionIndex: 0}}
 	output["suggestions"] = []string{}
-	output["revisionPlan"] = []researchRevisionPlanItem{{0, "report_drafting", "Missing description", "This is the report", false, ""}}
+	output["revisionPlan"] = []researchRevisionPlanItem{{0, "report_drafting", "Missing description", "This is the report", false, "", nil}}
 	text := string(mustJSON(output))
 	value, err := s.ValidateResearchSubmission(context.Background(), "conversation", "run", step.ID, text)
 	if err != nil {

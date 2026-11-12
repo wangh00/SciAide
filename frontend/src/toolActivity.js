@@ -144,6 +144,7 @@ export function activityDurationLabel(name, durationMillis) {
 
 export function toolPresentation(call) {
   const name = String(call?.toolName ?? "");
+  if (name === "builtin.user_input.request") return {kind:"提问", icon:"chat", title:"向你询问信息", summary:"选择建议或自由填写，提交后继续原对话"};
   const args = record(call?.arguments);
   if (name === "builtin.mcp.list" || name === "builtin.tools.search") {
     return { kind: "MCP", icon: "server", title: name === "builtin.mcp.list" ? "查看 MCP 状态" : "查找 MCP 工具", summary: compactText(args.query || args.server || "", 100) };

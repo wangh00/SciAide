@@ -23,3 +23,20 @@ func TestWorkflowPromptHasSeparateBoundWithoutTruncation(t *testing.T) {
 		}
 	}
 }
+
+func TestWorkflowPromptUnicodeValidation(t *testing.T) {
+	for _, unit := range []string{"a", "数", "🧪", "e\u0301"} {
+		text := strings.Repeat(unit, MaxWorkflowPromptChars/len([]rune(unit)))
+		if err := ValidateWorkflowPrompt(text); err != nil {
+			t.Fatal(err)
+		}
+		if err := ValidateWorkflowPrompt(text + "a"); err == nil {
+			t.Fatal("character bound ignored")
+		}
+	}
+	for _, text := range []string{"", string([]byte{0xff})} {
+		if ValidateWorkflowPrompt(text) == nil {
+			t.Fatal("invalid prompt accepted")
+		}
+	}
+}

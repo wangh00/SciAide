@@ -15,6 +15,10 @@ test('saved-plan batch deletion retains confirmation and backend safety boundary
 });
 test('saved-plan selection is scoped to visible project plans',()=>{
  assert.match(source,/setPlanSelection\(\[\]\);setSelectingPlans\(false\);\},\[project.id\]/);
- assert.match(source,/aria-label="全选研究方案"/);
- assert.match(source,/visibleWorkflows.map\(v=>v.id\) : \[\]/);
+ const history=readFileSync(new URL('./ResearchPlanHistory.tsx',import.meta.url),'utf8');
+ assert.match(source,/plans=\{visibleWorkflows\}/);
+ assert.match(history,/aria-label="全选历史方案"/);
+ assert.match(history,/plans.map\(plan => plan.id\) : \[\]/);
+ assert.match(history,/const selected = plans.filter\(plan => selection.includes\(plan.id\)\)/);
+ assert.match(history,/disabled=\{disabled \|\| !selected.length\}/);
 });

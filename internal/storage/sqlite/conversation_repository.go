@@ -223,6 +223,14 @@ func (r *ConversationRepository) ListMessages(ctx context.Context, conversationI
 	return r.listMessagesWhere(ctx, "m.conversation_id = ?", []any{conversationID}, limit)
 }
 
+func (r *ConversationRepository) ListVisibleMessages(ctx context.Context, conversationID string, limit int) ([]conversation.Message, error) {
+	// Exclude only the original stage prompt. Answers to stage questions are
+	// human messages in the same run and must remain visible and complete.
+	return r.readMessagesWhere(ctx, `m.conversation_id = ? AND NOT (m.role='user' AND EXISTS (
+		SELECT 1 FROM workflow_ai_chat_runs binding JOIN runs stage ON stage.id=binding.chat_run_id
+		WHERE stage.id=m.run_id AND stage.user_message_id=m.id))`, []any{conversationID}, limit, true)
+}
+
 func (r *ConversationRepository) ListMessagesForRun(ctx context.Context, conversationID, runID string) ([]conversation.Message, error) {
 	return r.listMessagesWhere(ctx, "m.conversation_id = ? AND m.run_id = ?", []any{conversationID, runID}, -1)
 }
@@ -239,6 +247,14 @@ func (r *ConversationRepository) GetTimelineMessage(ctx context.Context, message
 }
 
 func (r *ConversationRepository) listMessagesWhere(ctx context.Context, condition string, args []any, limit int) ([]conversation.Message, error) {
+	return r.readMessagesWhere(ctx, condition, args, limit, false)
+}
+
+func (r *ConversationRepository) readMessagesWhere(ctx context.Context, condition string, args []any, limit int, visible bool) ([]conversation.Message, error) {
+	internal := `EXISTS(SELECT 1 FROM workflow_ai_chat_runs binding WHERE binding.chat_run_id=selected.run_id)`
+	if visible {
+		internal = `(` + internal + ` AND (selected.role<>'user' OR selected.id=r.user_message_id))`
+	}
 	if limit < 0 {
 		// Agent context and checkpoint construction must see the complete durable
 		// history; SQLite still streams rows so this does not require one giant
@@ -256,7 +272,7 @@ func (r *ConversationRepository) listMessagesWhere(ctx context.Context, conditio
 				JOIN workflow_ai_executions execution ON execution.id=binding.execution_id
 				JOIN workflow_runs workflow_run ON workflow_run.id=execution.workflow_run_id
 				WHERE binding.chat_run_id=selected.run_id LIMIT 1), ''),
-			EXISTS(SELECT 1 FROM workflow_ai_chat_runs binding WHERE binding.chat_run_id=selected.run_id)
+			`+internal+`
 		FROM (
 			SELECT m.*,
 				CASE WHEN m.role = 'user' THEN 0 WHEN m.role = 'assistant' THEN 1 ELSE 2 END AS role_order
@@ -270,6 +286,7 @@ func (r *ConversationRepository) listMessagesWhere(ctx context.Context, conditio
 	if err != nil {
 		return nil, fmt.Errorf("list messages: %w", err)
 	}
+	defer rows.Close()
 	values := make([]conversation.Message, 0)
 	for rows.Next() {
 		var value conversation.Message

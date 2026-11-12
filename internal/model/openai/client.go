@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/wangh00/SciAide/internal/app/modelprofile"
 	"github.com/wangh00/SciAide/internal/apperr"
@@ -48,6 +49,11 @@ func New(profile modelprofile.Profile, secret []byte, recorders ...modelcap.Reas
 		recorder = recorders[0]
 	}
 	return &Client{profile: profile, secret: append([]byte(nil), secret...), http: modelutil.NewStreamingHTTPClient(timeout), recorder: recorder}
+}
+
+// Called once, before sharing a newly constructed client.
+func (c *Client) SetRequestGate(gate func(context.Context) error) {
+	c.http = modelutil.WithRequestGate(c.http, gate)
 }
 
 func NewWithHTTPClient(profile modelprofile.Profile, secret []byte, client *http.Client) *Client {
@@ -223,6 +229,14 @@ func (c *Client) open(ctx context.Context, request model.ChatRequest) (model.Str
 	if request.DisableTools {
 		payload.ToolChoice = "none"
 	}
+	if request.RequireTool {
+		if request.DisableTools || len(request.Tools) == 0 {
+			return nil, 0, fmt.Errorf("invalid required tool contract")
+		}
+		payload.ToolChoice = "required"
+		disabled := false
+		payload.ParallelToolCalls = &disabled
+	}
 	if request.ForcedTool != "" {
 		name := qualifiedNames[request.ForcedTool]
 		if name == "" || request.DisableTools {
@@ -254,6 +268,9 @@ func (c *Client) open(ctx context.Context, request model.ChatRequest) (model.Str
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		responseBody, _ := io.ReadAll(io.LimitReader(response.Body, maxErrorBodyBytes))
 		response.Body.Close()
+		if err := modelutil.HTTPGatewayIdentityError(response.StatusCode, responseBody); err != nil {
+			return nil, 0, err
+		}
 		if request.ResolvedReasoningLevel.Valid() {
 			if kind := modelutil.ClassifyReasoningRejection(response.StatusCode, responseBody); kind != modelutil.ReasoningRejectionNone {
 				classified := classifyStatus(response.StatusCode, response.Header, responseBody)
@@ -263,25 +280,32 @@ func (c *Client) open(ctx context.Context, request model.ChatRequest) (model.Str
 		return nil, parseRetryAfter(response.Header.Get("Retry-After")), classifyStatus(response.StatusCode, response.Header, responseBody)
 	}
 	if !streaming {
+		response.Body = newBufferedResponseBody(ctx, response.Body, c.profile.TimeoutSeconds, request.StreamInactivityTimeout, request.StreamRecoveryDeadline)
 		stream, err := openBufferedResponse(response, providerNames)
 		return stream, 0, err
 	}
-	scanner := modelutil.NewSSEDecoder(response.Body, maxStreamLineBytes)
-	return &stream{body: response.Body, scanner: scanner, toolCalls: make(map[int]*toolCallAccumulator), providerNames: providerNames}, 0, nil
+	scanner, guardedBody := modelutil.NewProgressSSEDecoder(ctx, response.Body, maxStreamLineBytes, modelutil.StreamInactivityTimeout(c.profile.TimeoutSeconds, request.StreamInactivityTimeout), request.StreamRecoveryDeadline)
+	return &stream{body: guardedBody, scanner: scanner, toolCalls: make(map[int]*toolCallAccumulator), providerNames: providerNames}, 0, nil
+}
+
+func newBufferedResponseBody(ctx context.Context, body io.ReadCloser, seconds int, ceiling time.Duration, deadline time.Time) io.ReadCloser {
+	// Without SSE there is no verifiable incremental progress signal.
+	_, guarded := modelutil.NewProgressSSEDecoder(ctx, body, maxStreamLineBytes, modelutil.StreamInactivityTimeout(seconds, ceiling), deadline)
+	return guarded
 }
 
 func openBufferedResponse(response *http.Response, providerNames map[string]string) (model.Stream, error) {
 	defer response.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBodyBytes+1))
 	if err != nil {
-		return nil, modelutil.Error("MODEL_UNAVAILABLE", "模型响应读取失败，SciAide 将自动重试。", true, err)
+		return nil, modelutil.ClassifySSEReadError(err)
 	}
 	if len(body) > maxResponseBodyBytes {
 		return nil, modelError("MODEL_RESPONSE_INVALID", "模型返回内容过大，无法安全处理。", false, nil)
 	}
 	var payload bufferedResponse
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return nil, modelutil.ErrorWithDetails("MODEL_RESPONSE_INVALID", "模型返回了无法解析的数据。", modelutil.ProviderErrorDetails("Chat Completions response", response.StatusCode, body), false, err)
+		return nil, modelutil.ErrorWithDetails("MODEL_RESPONSE_INVALID", "模型返回了无法解析的数据。", modelutil.ProtocolDecodeErrorDetails("Chat Completions response", body, err), false, modelutil.ProviderJSONErrorCause(err))
 	}
 	if payload.Error != nil {
 		message := strings.TrimSpace(payload.Error.Message)
@@ -295,10 +319,15 @@ func openBufferedResponse(response *http.Response, providerNames map[string]stri
 	finishReason := ""
 	textObserved := false
 	toolObserved := false
+	refusalObserved := false
 	for _, choice := range payload.Choices {
 		if choice.Message.Content != "" {
 			events = append(events, model.Event{Type: model.EventTextDelta, Text: choice.Message.Content})
 			textObserved = textObserved || strings.TrimSpace(choice.Message.Content) != ""
+		}
+		if choice.Message.Refusal != nil {
+			refusalObserved = true
+			events = append(events, model.Event{Type: model.EventTextDelta, Text: *choice.Message.Refusal})
 		}
 		for _, call := range choice.Message.ToolCalls {
 			name := call.Function.Name
@@ -313,6 +342,9 @@ func openBufferedResponse(response *http.Response, providerNames map[string]stri
 		if choice.FinishReason != nil {
 			finishReason = *choice.FinishReason
 		}
+	}
+	if refusalObserved {
+		finishReason = "refusal"
 	}
 	if finishReason == "" {
 		switch {
@@ -490,15 +522,24 @@ type toolCallAccumulator struct {
 }
 
 type stream struct {
-	body          io.ReadCloser
-	scanner       *modelutil.SSEDecoder
-	queue         []model.Event
-	done          bool
-	finishReason  string
-	textObserved  bool
-	usage         *responseUsage
-	toolCalls     map[int]*toolCallAccumulator
-	providerNames map[string]string
+	body            io.ReadCloser
+	scanner         *modelutil.SSEDecoder
+	queue           []model.Event
+	done            bool
+	finishReason    string
+	textObserved    bool
+	refusalObserved bool
+	usage           *responseUsage
+	toolCalls       map[int]*toolCallAccumulator
+	providerNames   map[string]string
+}
+
+func (s *stream) PendingToolArgumentChars() int {
+	count := 0
+	for _, call := range s.toolCalls {
+		count += utf8.RuneCountInString(call.arguments.String())
+	}
+	return count
 }
 
 type bufferedStream struct {
@@ -531,6 +572,9 @@ func (s *stream) Recv() (model.Event, error) {
 	for s.scanner.Scan() {
 		data := s.scanner.Text()
 		if strings.TrimSpace(data) == "[DONE]" {
+			if s.refusalObserved {
+				s.finishReason = "refusal"
+			}
 			if s.finishReason == "" {
 				switch {
 				case len(s.toolCalls) > 0:
@@ -557,27 +601,40 @@ func (s *stream) Recv() (model.Event, error) {
 		}
 		var chunk responseChunk
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-			return model.Event{}, modelutil.ClassifySSEJSONError("Chat Completions stream event", "模型返回了无法解析的流数据。", []byte(data), err)
+			return model.Event{}, modelutil.ClassifySSEJSONError("Chat Completions stream event", "模型返回了无法解析的流数据。", []byte(data), err, s.scanner.EventComplete())
 		}
 		if chunk.Error != nil {
 			message := strings.TrimSpace(chunk.Error.Message)
 			if message == "" {
 				message = "Chat Completions 请求未完成。"
 			}
-			return model.Event{}, modelutil.ClassifyStreamError(chunk.Error.Type, chunk.Error.Code, message, modelutil.ProviderErrorDetails("Chat Completions stream event", 0, []byte(data)))
+			return model.Event{}, modelutil.ClassifyStreamError(chunk.Error.Type, chunk.Error.Code, message, modelutil.StreamEventErrorDetails("Chat Completions stream event", []byte(data)))
 		}
+		progress := false
 		for _, choice := range chunk.Choices {
 			if choice.Delta.Content != "" {
+				progress = true
 				s.queue = append(s.queue, model.Event{Type: model.EventTextDelta, Text: choice.Delta.Content})
 				if strings.TrimSpace(choice.Delta.Content) != "" {
 					s.textObserved = true
+				}
+			}
+			if choice.Delta.Refusal != nil {
+				s.refusalObserved = true
+				if *choice.Delta.Refusal != "" {
+					progress = true
+					s.queue = append(s.queue, model.Event{Type: model.EventTextDelta, Text: *choice.Delta.Refusal})
 				}
 			}
 			for _, fragment := range choice.Delta.ToolCalls {
 				if err := s.appendToolCall(fragment); err != nil {
 					return model.Event{}, err
 				}
+				if fragment.Function.Arguments != "" {
+					progress = true
+				}
 			}
+			progress = progress || choice.Delta.ReasoningContent != "" || choice.Delta.Reasoning != ""
 			if choice.FinishReason != nil {
 				s.finishReason = *choice.FinishReason
 				if s.finishReason == "tool_calls" {
@@ -590,12 +647,18 @@ func (s *stream) Recv() (model.Event, error) {
 		if chunk.Usage != nil {
 			s.usage = mergeResponseUsage(s.usage, *chunk.Usage)
 		}
+		if progress {
+			s.scanner.MarkProgress()
+		}
 		if len(s.queue) > 0 {
 			return s.pop(), nil
 		}
 	}
 	if err := s.scanner.Err(); err != nil {
 		return model.Event{}, modelutil.ClassifySSEReadError(err)
+	}
+	if s.refusalObserved {
+		s.finishReason = "refusal"
 	}
 	if s.finishReason != "" {
 		if err := s.finalizeToolCalls(); err != nil {
@@ -732,6 +795,8 @@ func wrapUntrusted(label, value string) string {
 
 func (s *stream) Close() error { s.done = true; return s.body.Close() }
 
+func (s *stream) LastProgressAt() time.Time { return s.scanner.LastProgressAt() }
+
 type responseError struct {
 	Type    string `json:"type"`
 	Code    string `json:"code"`
@@ -743,8 +808,11 @@ type responseChunk struct {
 	Error   *responseError `json:"error"`
 	Choices []struct {
 		Delta struct {
-			Content   string             `json:"content"`
-			ToolCalls []responseToolCall `json:"tool_calls"`
+			Content          string             `json:"content"`
+			Refusal          *string            `json:"refusal"`
+			ToolCalls        []responseToolCall `json:"tool_calls"`
+			ReasoningContent string             `json:"reasoning_content"`
+			Reasoning        string             `json:"reasoning"`
 		} `json:"delta"`
 		FinishReason *string `json:"finish_reason"`
 	} `json:"choices"`
@@ -755,7 +823,8 @@ type bufferedResponse struct {
 	Error   *responseError `json:"error"`
 	Choices []struct {
 		Message struct {
-			Content   string `json:"content"`
+			Content   string  `json:"content"`
+			Refusal   *string `json:"refusal"`
 			ToolCalls []struct {
 				ID       string `json:"id"`
 				Function struct {

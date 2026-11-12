@@ -42,11 +42,48 @@ print(json.dumps({
     "has_pip": has_pip,
 }, ensure_ascii=True))`
 
+// Use only stdlib plus pip's normal module entry point. Resolve cache aliases
+// in the same Python process that pip uses; file URLs discard extended prefixes.
+const installWindowsPackagesScript = `import os, runpy, sys
+def logical(path):
+    if path[:8].lower() == '\\\\?\\unc\\':
+        return '\\\\' + path[8:]
+    if path.startswith('\\\\?\\') and len(path) >= 7 and path[5] == ':':
+        return path[4:]
+    return path
+candidates = [logical(os.path.realpath(path)) for path in sys.argv[1:3]]
+cache = min(candidates, key=lambda path: len(path.encode('utf-16-le')))
+os.environ['PIP_CACHE_DIR'] = ('\\\\?\\UNC\\' + cache[2:]) if cache.startswith('\\\\') else ('\\\\?\\' + cache)
+sys.argv = ['pip', 'install', '--disable-pip-version-check', '--no-input'] + sys.argv[3:]
+runpy.run_module('pip', run_name='__main__', alter_sys=True)
+`
+
 type Adapter struct {
-	runner *localexec.Runner
+	runner       *localexec.Runner
+	packageCache string
+	cachePathErr error
 }
 
 func New(runner *localexec.Runner) *Adapter { return &Adapter{runner: runner} }
+
+// Prefer an application-scoped cache over nesting wheels in a deep staging
+// venv. Pin relative roots now, just as the environment service does.
+func NewWithPackageCache(runner *localexec.Runner, packageCache string) *Adapter {
+	absolute, err := filepath.Abs(packageCache)
+	return &Adapter{runner: runner, packageCache: absolute, cachePathErr: err}
+}
+
+func (a *Adapter) packageCachePath(executablePath string) (string, error) {
+	if a.cachePathErr != nil {
+		return "", fmt.Errorf("resolve Python package cache: %w", a.cachePathErr)
+	}
+	legacy := filepath.Join(filepath.Dir(filepath.Dir(executablePath)), ".pip-cache")
+	cache := a.packageCache
+	if cache == "" {
+		return legacy, nil
+	}
+	return cache, nil
+}
 
 func (a *Adapter) Discover(ctx context.Context, preferredPath string) (pythonenv.Discovery, error) {
 	if a == nil || a.runner == nil {
@@ -106,7 +143,7 @@ func (a *Adapter) Probe(ctx context.Context, executablePath string) (pythonenv.I
 	}
 	environment, _ := localexec.CoreEnvironment(map[string]string{"PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1", "NO_COLOR": "1"})
 	result, err := a.runner.Execute(ctx, localexec.Request{
-		Program: executablePath,
+		Program: CommandPath(executablePath),
 		Args:    []string{"-I", "-u", "-X", "utf8", "-c", probeScript},
 		Dir:     filepath.Dir(executablePath),
 		Env:     environment,
@@ -141,7 +178,7 @@ func (a *Adapter) Probe(ctx context.Context, executablePath string) (pythonenv.I
 	}
 	return pythonenv.Interpreter{
 		ExecutablePath: executablePath, Version: payload.Version, Architecture: payload.Architecture,
-		Implementation: payload.Implementation, Prefix: filepath.Clean(payload.Prefix), BasePrefix: filepath.Clean(payload.BasePrefix),
+		Implementation: payload.Implementation, Prefix: logicalPythonPath(payload.Prefix), BasePrefix: logicalPythonPath(payload.BasePrefix),
 		ExecutableSHA256: hash, HasVenv: payload.HasVenv, HasPip: payload.HasPip,
 	}, nil
 }
@@ -154,16 +191,32 @@ func (a *Adapter) CreateEnvironment(ctx context.Context, baseExecutablePath, des
 	if strings.TrimSpace(destination) == "" || !filepath.IsAbs(destination) {
 		return fmt.Errorf("Python environment staging path must be absolute")
 	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
 	environment, _ := localexec.CoreEnvironment(map[string]string{"PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1", "PIP_DISABLE_PIP_VERSION_CHECK": "1", "NO_COLOR": "1"})
+	args := []string{"-I", "-u", "-X", "utf8", "-m", "venv"}
+	if runtime.GOOS == "windows" {
+		args = append(args, "--without-pip")
+	}
+	args = append(args, CommandPath(destination))
 	result, runErr := a.runner.Execute(ctx, localexec.Request{
-		Program: baseExecutablePath,
-		Args:    []string{"-I", "-u", "-X", "utf8", "-m", "venv", destination},
+		Program: CommandPath(baseExecutablePath),
+		Args:    args,
 		Dir:     filepath.Dir(destination),
 		Env:     environment,
 		Timeout: 5 * time.Minute,
 	})
 	if runErr != nil || result.ExitCode != 0 {
 		return executionError("create Python virtual environment", result, runErr)
+	}
+	if runtime.GOOS == "windows" {
+		// venv resolves env_exec_cmd back to a short spelling, dropping the
+		// extended prefix before its ensurepip subprocess. Bootstrap explicitly
+		// through the newly created interpreter, never global pip or the network.
+		result, runErr = a.runner.Execute(ctx, localexec.Request{Program: CommandPath(filepath.Join(destination, "Scripts", "python.exe")), Args: []string{"-I", "-u", "-X", "utf8", "-m", "ensurepip", "--upgrade", "--default-pip"}, Dir: destination, Env: environment, Timeout: 5 * time.Minute})
+		if runErr != nil || result.ExitCode != 0 {
+			return executionError("bootstrap Python virtual environment pip", result, runErr)
+		}
 	}
 	return nil
 }
@@ -175,7 +228,7 @@ func (a *Adapter) Freeze(ctx context.Context, environmentPythonPath string) ([]s
 	}
 	environment, _ := localexec.CoreEnvironment(map[string]string{"PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1", "PIP_DISABLE_PIP_VERSION_CHECK": "1", "NO_COLOR": "1"})
 	result, runErr := a.runner.Execute(ctx, localexec.Request{
-		Program: executablePath,
+		Program: CommandPath(executablePath),
 		Args:    []string{"-I", "-u", "-X", "utf8", "-m", "pip", "freeze", "--all", "--disable-pip-version-check"},
 		Dir:     filepath.Dir(executablePath),
 		Env:     environment,
@@ -209,10 +262,18 @@ func (a *Adapter) InstallPackages(ctx context.Context, environmentPythonPath str
 	if len(packages) > 512 {
 		return fmt.Errorf("too many Python package specifications")
 	}
+	cache, err := a.packageCachePath(executablePath)
+	if err != nil {
+		return err
+	}
 	args := []string{"-I", "-u", "-X", "utf8", "-m", "pip", "install", "--disable-pip-version-check", "--no-input"}
+	if runtime.GOOS == "windows" {
+		legacyCache := filepath.Join(filepath.Dir(filepath.Dir(executablePath)), ".pip-cache")
+		args = []string{"-I", "-u", "-X", "utf8", "-c", installWindowsPackagesScript, cache, legacyCache}
+	}
 	args = append(args, packages...)
-	environment, _ := localexec.CoreEnvironment(map[string]string{"PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1", "PIP_DISABLE_PIP_VERSION_CHECK": "1", "PIP_NO_INPUT": "1", "NO_COLOR": "1", "PIP_CONFIG_FILE": os.DevNull, "PIP_CACHE_DIR": filepath.Join(filepath.Dir(filepath.Dir(executablePath)), ".pip-cache")})
-	result, runErr := a.runner.Execute(ctx, localexec.Request{Program: executablePath, Args: args, Dir: filepath.Dir(executablePath), Env: environment, Timeout: 10 * time.Minute})
+	environment, _ := localexec.CoreEnvironment(map[string]string{"PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1", "PIP_DISABLE_PIP_VERSION_CHECK": "1", "PIP_NO_INPUT": "1", "NO_COLOR": "1", "PIP_CONFIG_FILE": os.DevNull, "PIP_CACHE_DIR": CommandPath(cache)})
+	result, runErr := a.runner.Execute(ctx, localexec.Request{Program: CommandPath(executablePath), Args: args, Dir: filepath.Dir(executablePath), Env: environment, Timeout: 10 * time.Minute})
 	if runErr != nil || result.ExitCode != 0 {
 		return executionError("install Python packages", result, runErr)
 	}
@@ -227,18 +288,17 @@ func secureExecutablePath(path string) (string, error) {
 	if path == "" || !filepath.IsAbs(path) {
 		return "", fmt.Errorf("Python executable path must be absolute")
 	}
-	resolved, err := filepath.EvalSymlinks(path)
-	if err != nil {
-		return "", fmt.Errorf("resolve Python executable: %w", err)
-	}
-	info, err := os.Stat(resolved)
+	// Stat follows links and verifies the selected executable's actual type.
+	// EvalSymlinks is not an authorization boundary here (no resolved-root
+	// allowlist), and may reject otherwise usable Windows directory aliases.
+	info, err := os.Stat(path)
 	if err != nil {
 		return "", fmt.Errorf("inspect Python executable: %w", err)
 	}
 	if !info.Mode().IsRegular() {
 		return "", fmt.Errorf("Python executable is not a regular file")
 	}
-	// Validate the resolved file, but execute through the selected venv path.
+	// Validate the followed file, but execute through the selected venv path.
 	// On POSIX, venv/bin/python commonly points at the base interpreter; using
 	// the resolved path would silently discard the virtual environment.
 	return filepath.Clean(path), nil

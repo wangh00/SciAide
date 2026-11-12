@@ -179,6 +179,7 @@ func TestRejectedUpstreamDefectPersistsAndReachesDeliveryGate(t *testing.T) {
 		t.Fatal("valid rejection scheduled repair or was lost", err, repo.failure)
 	}
 	d.Steps[0].Status, d.Steps[0].Output = StepCompleted, repo.output
+	freezeReviewExecutionFixture(t, &d, 0)
 	bound, err := bindNodeInput(d, gate)
 	if err != nil {
 		t.Fatal("rejection cannot reach delivery gate", err)

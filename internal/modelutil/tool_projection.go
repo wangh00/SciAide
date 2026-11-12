@@ -98,7 +98,7 @@ func (p toolNameProjection) text(text string) string {
 
 // These blocks are values/contracts, not executable tool instructions. Keep
 // them byte-for-byte; rewriting a const/enum, path or quoted paper is wrong.
-var toolProjectionBlocks = []string{"output_schema", "metadata_output_schema", "stage_input", "workflow_state", "trusted_workflow_citations", "resource_actions"}
+var toolProjectionBlocks = []string{"output_schema", "metadata_output_schema", "stage_input", "stage_input_shared_paths", "review_submission_sources", "review_basis_sources", "workflow_state", "trusted_workflow_citations", "resource_actions"}
 
 func (p toolNameProjection) hostText(text string) string {
 	var out strings.Builder

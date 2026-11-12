@@ -1,14 +1,17 @@
-// Package browserhttp provides browser TLS and HTTP/2 profiles without changing
-// application retry, redirect, timeout, or response streaming policy.
+// Package browserhttp provides browser profiles and explicitly single-attempt
+// standard transports with bounded connection establishment, not body deadlines.
 package browserhttp
 
 import (
 	"context"
+	"crypto/tls"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/imroc/req/v3"
 	"github.com/wangh00/SciAide/internal/httpua"
@@ -17,6 +20,9 @@ import (
 
 type Transport struct {
 	profiles [3]*req.Transport
+	standard *http.Transport
+	setup    *connectionSetup
+	single   *http.Transport
 	mu       sync.Mutex
 	base     *http.Transport
 	module   string
@@ -49,7 +55,7 @@ func pinnedBase(base *http.Transport, module string, p network.Proxy) *http.Tran
 					proxyHost = net.JoinHostPort(u.Hostname(), port)
 				}
 				if strings.EqualFold(addr, proxyHost) {
-					return (&net.Dialer{}).DialContext(ctx, n, addr)
+					return (&net.Dialer{Timeout: setupTimeout(base), KeepAlive: 30 * time.Second}).DialContext(ctx, n, addr)
 				}
 				return oldDial(ctx, n, addr)
 			}
@@ -58,8 +64,18 @@ func pinnedBase(base *http.Transport, module string, p network.Proxy) *http.Tran
 	return base
 }
 func NewScoped(base *http.Transport, module string) *Transport {
+	return newScoped(base, module, false)
+}
+
+// NewSingleAttemptScoped uses standard TLS + HTTP/1.1 on fresh connections.
+// No implicit connection-reuse/HTTP2 request replay may bypass host admission.
+// Proxy selection, establishment bounds and live config refresh are shared.
+func NewSingleAttemptScoped(base *http.Transport, module string) *Transport {
+	return newScoped(base, module, true)
+}
+func newScoped(base *http.Transport, module string, standard bool) *Transport {
 	p, revision := network.Resolve(module)
-	t := NewFixed(pinnedBase(base, module, p))
+	t := newFixed(pinnedBase(base, module, p), standard)
 	t.base = base.Clone()
 	t.module = module
 	t.revision = revision
@@ -68,7 +84,21 @@ func NewScoped(base *http.Transport, module string) *Transport {
 
 // NewFixed preserves an explicitly resolved proxy for an entire browser-bound request.
 func NewFixed(base *http.Transport) *Transport {
-	t := &Transport{}
+	return newFixed(base, false)
+}
+func newFixed(base *http.Transport, standard bool) *Transport {
+	base = base.Clone()
+	setup := newConnectionSetup(setupTimeout(base))
+	// Lifecycle ownership is request-scoped only on the non-reusing path.
+	// Browser pools may hand an in-flight dial to a different request before
+	// GotConn; do not cancel those shared dials with the originating request.
+	singleBase := base.Clone()
+	singleBase.DialContext = setup.dial(base.DialContext)
+	t := &Transport{single: newSingleAttemptTransport(singleBase), setup: setup}
+	if standard {
+		t.standard = t.single
+		return t
+	}
 	for i := range t.profiles {
 		c := req.C()
 		switch i {
@@ -92,6 +122,22 @@ func NewFixed(base *http.Transport) *Transport {
 		if base.TLSClientConfig != nil {
 			c.SetTLSClientConfig(base.TLSClientConfig.Clone())
 		}
+		// req/v3 strips a final colon segment even when its input is already
+		// an unported IPv6 literal. Adapt only that case; never skip verification.
+		handshake := p.TLSHandshakeContext
+		p.TLSHandshakeContext = func(ctx context.Context, addr string, plain net.Conn) (net.Conn, *tls.ConnectionState, error) {
+			host := addr
+			if h, _, err := net.SplitHostPort(addr); err == nil {
+				host = h
+			}
+			if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+				host = host[1 : len(host)-1]
+			}
+			if ip, err := netip.ParseAddr(host); err == nil && ip.Is6() {
+				addr = ip.WithZone("").String() + ":0"
+			}
+			return handshake(ctx, addr, plain)
+		}
 		t.profiles[i] = p
 	}
 	return t
@@ -107,28 +153,56 @@ func (t *Transport) RoundTrip(r *http.Request) (*http.Response, error) {
 		httpua.Apply(c)
 	}
 	t.mu.Lock()
+	t.refreshLocked()
+	var profile http.RoundTripper = t.profiles[index]
+	if t.standard != nil {
+		profile = t.standard
+	}
+	setup := t.setup
+	single := t.standard != nil
+	t.mu.Unlock()
+	if single {
+		return setup.roundTrip(c, profile)
+	}
+	return profile.RoundTrip(c)
+}
+
+func (t *Transport) refreshLocked() {
 	if t.base != nil {
 		p, revision := network.Resolve(t.module)
 		if revision != t.revision {
 			previous := t.profiles
-			t.profiles = NewFixed(pinnedBase(t.base, t.module, p)).profiles
+			replacement := newFixed(pinnedBase(t.base, t.module, p), t.standard != nil)
+			t.profiles = replacement.profiles
+			if t.standard != nil {
+				t.standard.CloseIdleConnections()
+			}
+			t.standard = replacement.standard
+			t.setup = replacement.setup
+			t.single.CloseIdleConnections()
+			t.single = replacement.single
 			t.revision = revision
 			for _, tr := range previous {
-				tr.CloseIdleConnections()
+				if tr != nil {
+					tr.CloseIdleConnections()
+				}
 			}
 		}
 	}
-	profile := t.profiles[index]
-	t.mu.Unlock()
-	return profile.RoundTrip(c)
 }
 
 func (t *Transport) CloseIdleConnections() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	for _, p := range t.profiles {
-		p.CloseIdleConnections()
+		if p != nil {
+			p.CloseIdleConnections()
+		}
 	}
+	if t.standard != nil {
+		t.standard.CloseIdleConnections()
+	}
+	t.single.CloseIdleConnections()
 }
 
 type sessionUAKey struct{}

@@ -1,6 +1,10 @@
 package workflow
 
-import "encoding/json"
+import (
+	"encoding/json"
+
+	"github.com/wangh00/SciAide/internal/app/userinput"
+)
 
 // ReferenceTemplates returns fresh copies of SciAide-owned Workflow
 // definitions. Templates are still untrusted data at execution time and must
@@ -11,8 +15,9 @@ func ReferenceTemplates() []Template {
 
 func independentReviewNode(id, name, promptVersion string) Node {
 	return Node{
-		ID: id, Name: name, Kind: NodeAIAnalysis, Arguments: raw(`{}`), PromptVersion: promptVersion, ReviewPolicy: AIReviewAuto,
-		Prompt:       "你是独立的科研交付审查者，不是上一阶段结果的续写者。逐项核对当前冻结输入与 Workflow 中已完成的证据、Python 结果、方法约束和产物快照。检查不受支持的主张、不可追溯数字、无效或越界引用、方法错误、因果夸大和遗漏局限。问题数组只能写尚未解决且可执行修正的实质缺陷；不得把‘未发现问题’、已通过检查、一般提醒或已接受的局限写进问题数组。通过项写入 verifiedClaims，残余局限写入 limitations。approved=true 时所有问题数组和 requiredCorrections 必须为空；任一问题数组非空时 approved 必须为 false，并在 requiredCorrections 中归纳对应修正动作。reviewedInputSha256 必须原样复制宿主在当前阶段指令中给出的 stage_input SHA-256。不要用行文流畅度代替事实核验。",
+		ID: id, Name: name, Kind: NodeAgentStage, Arguments: raw(`{}`), PromptVersion: promptVersion + "-qi1", ReviewPolicy: AIReviewAuto,
+		AllowedTools: []string{userinput.ToolName},
+		Prompt:       "你是独立的科研交付审查者，不是上一阶段结果的续写者。逐项核对当前冻结输入与 Workflow 中已完成的证据、Python 结果、方法约束和产物快照。检查不受支持的主张、不可追溯数字、无效或越界引用、方法错误、因果夸大和遗漏局限。问题数组只能写尚未解决且可执行修正的实质缺陷；不得把‘未发现问题’、已通过检查、一般提醒或已接受的局限写进问题数组。通过项写入 verifiedClaims，残余局限写入 limitations。approved=true 时所有问题数组和 requiredCorrections 必须为空；任一问题数组非空时 approved 必须为 false，并在 requiredCorrections 中归纳对应修正动作。reviewedInputSha256 是宿主管理字段，提交时省略，由程序绑定本阶段冻结输入；科学判断仍由你独立完成。不要用行文流畅度代替事实核验。",
 		OutputSchema: withRevisionPlanSchema(independentReviewSchema()),
 	}
 }

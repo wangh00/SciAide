@@ -318,6 +318,11 @@ func (s *Service) verifyRecordedEnvironment(ctx context.Context, value Environme
 		return value, err
 	}
 	base := Interpreter{ExecutablePath: value.BaseExecutablePath, Version: value.BaseExecutableVersion, Architecture: value.Architecture, Implementation: value.Implementation, ExecutableSHA256: value.BaseExecutableSHA256}
+	if value.Kind == KindExternal {
+		// Binding records the selected interpreter itself as the base. Recheck
+		// its actual bytes too, rather than hashing the old saved executable.
+		base.ExecutableSHA256 = created.ExecutableSHA256
+	}
 	fingerprint, freezeHash := environmentHashes(base, created, lock)
 	if fingerprint != value.EnvironmentFingerprint || freezeHash != value.FreezeSHA256 {
 		return value, fmt.Errorf("on-disk interpreter or dependency lock differs from the committed fingerprint")
@@ -673,15 +678,27 @@ func (s *Service) Install(ctx context.Context, projectID string, packages []stri
 	if previous.State != StateReady {
 		return Environment{}, fmt.Errorf("project Python environment is not ready")
 	}
-	if previous.Kind == KindExternal {
-		return Environment{}, fmt.Errorf("SciAide does not install packages into a user-owned external Python environment")
-	}
 	locked, err := normalizeLockedPackages(previous.Lock)
 	if err != nil {
 		return Environment{}, fmt.Errorf("saved Python dependency lock is not reproducible: %w", err)
 	}
 	if packageRequirementsSatisfied(requested, locked) {
+		if previous.Kind == KindExternal {
+			// Direct tool calls do not necessarily go through workflow ensure.
+			// This read-only helper avoids reentering Verify's project lock and
+			// never accepts a stale lock or rewrites the committed fingerprint.
+			verified, verifyErr := s.verifyRecordedEnvironment(ctx, previous, previous.EnvironmentPythonPath)
+			if verifyErr != nil {
+				return Environment{}, fmt.Errorf("cannot reuse recorded dependencies in a user-owned external Python environment: %w; verify the project environment before retrying", verifyErr)
+			}
+			return verified, nil
+		}
 		return previous, nil
+	}
+	// A dependency declaration is not necessarily an installation. Reusing
+	// already satisfied requirements never mutates a user-owned environment.
+	if previous.Kind == KindExternal {
+		return Environment{}, fmt.Errorf("SciAide does not install packages into a user-owned external Python environment")
 	}
 	operationID, err := id.New()
 	if err != nil {
@@ -822,6 +839,16 @@ func (s *Service) Verify(ctx context.Context, projectID string) (Environment, er
 		return fail(err)
 	}
 	base := Interpreter{ExecutablePath: value.BaseExecutablePath, Version: value.BaseExecutableVersion, Architecture: value.Architecture, Implementation: value.Implementation, ExecutableSHA256: value.BaseExecutableSHA256}
+	if value.Kind == KindExternal {
+		// Explicit verification may accept a deliberately changed external
+		// interpreter. Refresh its full identity, unlike read-only reuse.
+		base = created
+		value.BaseExecutablePath = created.ExecutablePath
+		value.BaseExecutableVersion = created.Version
+		value.BaseExecutableSHA256 = created.ExecutableSHA256
+		value.Architecture, value.Implementation = created.Architecture, created.Implementation
+		value.EnvironmentPythonPath = created.ExecutablePath
+	}
 	fingerprint, freezeHash := environmentHashes(base, created, lock)
 	verified := s.now()
 	value.State, value.Lock, value.FreezeSHA256 = StateReady, lock, freezeHash
@@ -1083,6 +1110,10 @@ func packageRequirementsSatisfied(requested, locked []string) bool {
 		installed[normalizePackageName(parts[0])] = parts[1]
 	}
 	for _, requirement := range requested {
+		// A version lock alone does not establish optional extra dependencies.
+		if strings.Contains(requirement, "[") {
+			return false
+		}
 		parts := requestedPackageParts.FindStringSubmatch(requirement)
 		if len(parts) != 4 {
 			return false
@@ -1115,6 +1146,11 @@ func normalizePackageName(value string) string {
 
 func pythonVersionSatisfies(installed, operator, requested string) bool {
 	if operator == "" {
+		return true
+	}
+	// A byte-identical frozen version pin is valid even for prerelease/local
+	// versions that the conservative stable-version comparator cannot order.
+	if operator == "==" && installed == requested {
 		return true
 	}
 	comparison, ok := compareStablePythonVersions(installed, requested)

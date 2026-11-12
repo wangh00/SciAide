@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -83,12 +84,14 @@ func (r *ResearchRepository) SaveSearch(ctx context.Context, projectID, queryKey
 			return appresearch.Query{}, err
 		}
 		candidateID := existingCandidateID
+		grouping := appresearch.RecordGrouping{Version: appresearch.RecordGroupingVersion, Action: "reuse_source_record", CandidateID: candidateID}
 		if candidateID == "" {
-			candidateID, err = findOrCreateResearchCandidate(ctx, tx, projectID, work, aliases, at)
+			candidateID, grouping, err = findOrCreateResearchCandidate(ctx, tx, projectID, work, aliases, at)
 			if err != nil {
 				return appresearch.Query{}, err
 			}
 		}
+		grouping.InputOrdinal = ordinal
 		if err := linkResearchCandidateRecord(ctx, tx, candidateID, recordID); err != nil {
 			return appresearch.Query{}, err
 		}
@@ -96,7 +99,7 @@ func (r *ResearchRepository) SaveSearch(ctx context.Context, projectID, queryKey
 		snapshot := snapshots[candidateID]
 		snapshot.ID, snapshot.ProjectID = candidateID, projectID
 		snapshot.CreatedAt, snapshot.UpdatedAt = at, at
-		snapshot.Records = append(snapshot.Records, appresearch.SourceRecord{ID: recordID, ProjectID: projectID, Work: work, FirstSeenAt: at, UpdatedAt: at})
+		snapshot.Records = append(snapshot.Records, appresearch.SourceRecord{ID: recordID, ProjectID: projectID, Work: work, FirstSeenAt: at, UpdatedAt: at, Grouping: &grouping})
 		snapshot.Aliases = append(snapshot.Aliases, aliases...)
 		snapshot.Preferred = appresearch.PreferredWork(snapshot.Records)
 		snapshots[candidateID] = snapshot
@@ -109,7 +112,22 @@ func (r *ResearchRepository) SaveSearch(ctx context.Context, projectID, queryKey
 			return appresearch.Query{}, fmt.Errorf("save research query result: %w", err)
 		}
 	}
-	for candidateID, snapshot := range snapshots {
+	// Freeze query-local identity hints before pagination. Older query snapshots
+	// are immutable and never gain freshly inferred relationships.
+	ordered := make([]appresearch.Candidate, 0, len(snapshots))
+	keys := make([]string, 0, len(snapshots))
+	for candidateID := range snapshots {
+		keys = append(keys, candidateID)
+	}
+	sort.Strings(keys)
+	for _, candidateID := range keys {
+		ordered = append(ordered, snapshots[candidateID])
+	}
+	if err := appresearch.AnnotateRecordIdentitiesContext(ctx, ordered); err != nil {
+		return appresearch.Query{}, err
+	}
+	for _, snapshot := range ordered {
+		candidateID := snapshot.ID
 		encoded, err := json.Marshal(snapshot)
 		if err != nil {
 			return appresearch.Query{}, err
@@ -390,50 +408,92 @@ func saveResearchSourceRecord(ctx context.Context, tx researchSQLExecutor, proje
 	return recordID, existingCandidateID, appresearch.CandidateAliases(work), nil
 }
 
-func findOrCreateResearchCandidate(ctx context.Context, tx researchSQLExecutor, projectID string, work appresearch.Work, aliases []appresearch.CandidateAlias, at time.Time) (string, error) {
+func findOrCreateResearchCandidate(ctx context.Context, tx researchSQLExecutor, projectID string, work appresearch.Work, aliases []appresearch.CandidateAlias, at time.Time) (string, appresearch.RecordGrouping, error) {
+	decision := appresearch.RecordGrouping{Version: appresearch.RecordGroupingVersion, Action: "create_unmatched"}
 	candidates := map[string]struct{}{}
-	hasStrongIdentifier := false
 	for _, alias := range aliases {
-		if alias.Kind != "title_year" {
-			hasStrongIdentifier = true
-			break
-		}
-	}
-	for _, alias := range aliases {
-		if hasStrongIdentifier && alias.Kind == "title_year" {
+		if alias.Kind == "title_year" {
 			continue
 		}
-		rows, err := queryRows(ctx, tx, `SELECT candidate_id FROM research_candidate_aliases WHERE project_id=? AND alias_kind=? AND alias_value=? ORDER BY candidate_id`, projectID, alias.Kind, alias.Value)
+		decision.ComparedAliases = append(decision.ComparedAliases, alias)
+		var total int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM research_candidate_aliases WHERE project_id=? AND alias_kind=? AND alias_value=?`, projectID, alias.Kind, alias.Value).Scan(&total); err != nil {
+			return "", decision, err
+		}
+		retained := total
+		if retained > 2 {
+			retained = 2
+		}
+		decision.MatchCounts = append(decision.MatchCounts, appresearch.RecordGroupingAliasCount{Kind: alias.Kind, Value: alias.Value, Total: total, Retained: retained})
+		rows, err := queryRows(ctx, tx, `SELECT candidate_id FROM research_candidate_aliases WHERE project_id=? AND alias_kind=? AND alias_value=? ORDER BY candidate_id LIMIT 2`, projectID, alias.Kind, alias.Value)
 		if err != nil {
-			return "", fmt.Errorf("find research candidate alias: %w", err)
+			return "", decision, fmt.Errorf("find research candidate alias: %w", err)
 		}
 		for rows.Next() {
 			var candidateID string
 			if err := rows.Scan(&candidateID); err != nil {
 				_ = rows.Close()
-				return "", err
+				return "", decision, err
 			}
 			candidates[candidateID] = struct{}{}
+			decision.Matches = append(decision.Matches, appresearch.RecordGroupingMatch{CandidateID: candidateID, Kind: alias.Kind, Value: alias.Value})
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return "", decision, err
 		}
 		_ = rows.Close()
 	}
-	if len(candidates) > 1 {
+	// Two witnesses already establish ambiguity. Only a unique candidate needs
+	// contradiction checks; one conflicting value per kind proves rejection.
+	if len(candidates) == 1 {
+		for candidateID := range candidates {
+			for _, incoming := range decision.ComparedAliases {
+				var value string
+				err := tx.QueryRowContext(ctx, `SELECT alias_value FROM research_candidate_aliases WHERE candidate_id=? AND alias_kind=? AND alias_value<>? ORDER BY alias_value LIMIT 1`, candidateID, incoming.Kind, incoming.Value).Scan(&value)
+				if err == nil {
+					decision.Conflicts = append(decision.Conflicts, appresearch.RecordGroupingMatch{CandidateID: candidateID, Kind: incoming.Kind, Value: value})
+				} else if !errors.Is(err, sql.ErrNoRows) {
+					return "", decision, err
+				}
+			}
+		}
+	}
+	sort.Slice(decision.Conflicts, func(i, j int) bool {
+		a, b := decision.Conflicts[i], decision.Conflicts[j]
+		if a.CandidateID != b.CandidateID {
+			return a.CandidateID < b.CandidateID
+		}
+		if a.Kind != b.Kind {
+			return a.Kind < b.Kind
+		}
+		return a.Value < b.Value
+	})
+	if len(candidates) > 1 || len(decision.Conflicts) > 0 {
 		// Conflicting identifiers are evidence of ambiguous records. Preserve the
 		// record independently instead of silently merging existing candidates.
 		candidates = map[string]struct{}{}
+		decision.Action = "create_conflict"
 	}
 	for candidateID := range candidates {
-		return candidateID, nil
+		decision.Action, decision.CandidateID = "match_alias", candidateID
+		return candidateID, decision, nil
 	}
 	candidateID, err := id.New()
 	if err != nil {
-		return "", err
+		return "", decision, err
 	}
 	key := appresearch.CandidateKey(work)
-	if _, err := tx.ExecContext(ctx, `INSERT INTO research_candidates(id,project_id,candidate_key,created_at,updated_at) VALUES (?,?,?,?,?)`, candidateID, projectID, key, formatTime(at), formatTime(at)); err != nil {
-		return "", fmt.Errorf("create research candidate: %w", err)
+	if decision.Action == "create_conflict" {
+		// Reusing the conflicting DOI's key violates the unique candidate key
+		// and rolls back discovery instead of preserving the ambiguous record.
+		key = fmt.Sprintf("%x", sha256.Sum256([]byte("ambiguous-source\x00"+work.SourceID+"\x00"+work.SourceRecordID)))
 	}
-	return candidateID, nil
+	if _, err := tx.ExecContext(ctx, `INSERT INTO research_candidates(id,project_id,candidate_key,created_at,updated_at) VALUES (?,?,?,?,?)`, candidateID, projectID, key, formatTime(at), formatTime(at)); err != nil {
+		return "", decision, fmt.Errorf("create research candidate: %w", err)
+	}
+	decision.CandidateID = candidateID
+	return candidateID, decision, nil
 }
 
 func linkResearchCandidateRecord(ctx context.Context, tx researchSQLExecutor, candidateID, recordID string) error {

@@ -7,6 +7,7 @@ package researchworkflow
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"sort"
@@ -19,6 +20,7 @@ import (
 	"github.com/wangh00/SciAide/internal/app/pythonenv"
 	"github.com/wangh00/SciAide/internal/app/research"
 	"github.com/wangh00/SciAide/internal/app/researchtask"
+	"github.com/wangh00/SciAide/internal/app/reviewcontract"
 	"github.com/wangh00/SciAide/internal/app/tool"
 )
 
@@ -27,6 +29,12 @@ const (
 	ReportToolVersion     = "3"
 	ReviewGateToolName    = "builtin.research.workflow.review.gate"
 	ReviewGateToolVersion = "1"
+)
+
+var (
+	ErrReviewReportMismatch  = errors.New("report independent review gate does not cover the current frozen analysis")
+	ErrReviewReportInvalid   = errors.New("completed independent review gate has an invalid subject snapshot")
+	ErrReviewGateUnavailable = errors.New("report independent review gate was not returned by a completed review in this Workflow Run")
 )
 
 type Discovery interface {
@@ -65,6 +73,7 @@ type ToolCalls interface {
 
 type Artifacts interface {
 	PublishWorkflowReport(ctx context.Context, command artifact.WorkflowReportCommand) (artifact.WorkflowReportResult, error)
+	LegacyWorkflowReportPublication(context.Context, string, string) (artifact.Version, bool, error)
 }
 
 type Service struct {
@@ -148,7 +157,10 @@ func (s *Service) SearchPage(ctx context.Context, projectID, query string, sourc
 }
 
 func (s *Service) SearchScopedPage(ctx context.Context, c research.DiscoverySearchCommand) (research.DiscoverySearchResult, error) {
-	c.EnrichMetadata = true
+	_, bounded := research.SourceHTTPBudgetFromContext(ctx)
+	// A bounded discovery pass does not spend its search allocation on per-record
+	// enrichment. Missing abstracts stay missing; selection/fetch remains explicit.
+	c.EnrichMetadata = !bounded
 	return s.discovery.Search(ctx, c)
 }
 
@@ -172,6 +184,7 @@ func (s *Service) LiteratureCandidates(ctx context.Context, projectID string, qu
 			for _, candidate := range page.Items {
 				if index, exists := seen[candidate.ID]; exists {
 					// Merge only the issued queries, not the project-wide latest record.
+					candidate.RecordIdentity = research.MergeRecordIdentities(result[index].RecordIdentity, candidate.RecordIdentity)
 					candidate.Records = append(result[index].Records, candidate.Records...)
 					candidate.Preferred = research.PreferredWork(candidate.Records)
 					result[index] = candidate
@@ -193,14 +206,19 @@ func (s *Service) LiteratureCandidates(ctx context.Context, projectID string, qu
 }
 
 type ImportedMaterial struct {
-	AttachmentSHA256     string              `json:"attachmentSha256,omitempty"`
-	MaterialOrigin       string              `json:"materialOrigin,omitempty"`
-	FullTextAvailability string              `json:"fullTextAvailability,omitempty"`
-	Warning              string              `json:"warning,omitempty"`
-	CandidateID          string              `json:"candidateId"`
-	Title                string              `json:"title"`
-	ImportKind           research.ImportKind `json:"importKind"`
-	AttachmentID         string              `json:"attachmentId"`
+	RecordIdentity             *research.RecordIdentityOverview `json:"recordIdentity,omitempty"`
+	SourceMetadata             []research.SourceMetadataRecord  `json:"sourceMetadata,omitempty"`
+	SourceMetadataTotalRecords int                              `json:"sourceMetadataTotalRecords,omitempty"`
+	SourceMetadataSHA256       string                           `json:"sourceMetadataSha256,omitempty"`
+	AttachmentSHA256           string                           `json:"attachmentSha256,omitempty"`
+	MaterialOrigin             string                           `json:"materialOrigin,omitempty"`
+	FullTextAvailability       string                           `json:"fullTextAvailability,omitempty"`
+	Warning                    string                           `json:"warning,omitempty"`
+	CandidateID                string                           `json:"candidateId"`
+	Title                      string                           `json:"title"`
+	TitlePreview               *ImportedTitlePreview            `json:"titlePreview,omitempty"`
+	ImportKind                 research.ImportKind              `json:"importKind"`
+	AttachmentID               string                           `json:"attachmentId"`
 }
 
 func (s *Service) ImportSelected(ctx context.Context, projectID string, candidateIDs []string, mode research.MaterializeMode) ([]ImportedMaterial, error) {
@@ -270,7 +288,8 @@ func (s *Service) ImportSelectedForTask(ctx context.Context, projectID string, c
 		}); ok {
 			availability = reader.FullTextAvailability(candidate)
 		}
-		result = append(result, ImportedMaterial{FullTextAvailability: availability, CandidateID: candidate.ID, Title: candidate.Preferred.Title, ImportKind: candidate.ImportKind, AttachmentID: attachmentID, Warning: imported.Warning})
+		metadata, total, metadataSHA := research.ImportSourceMetadataRecords(research.SourceMetadataRecords(candidate.Records))
+		result = append(result, importedCandidateMaterialView(ImportedMaterial{RecordIdentity: research.ImportRecordIdentity(candidate.RecordIdentity), SourceMetadata: metadata, SourceMetadataTotalRecords: total, SourceMetadataSHA256: metadataSHA, FullTextAvailability: availability, CandidateID: candidate.ID, Title: candidate.Preferred.Title, ImportKind: candidate.ImportKind, AttachmentID: attachmentID, Warning: imported.Warning}))
 	}
 	if len(failures) > 0 {
 		return result, &ImportBatchError{Succeeded: len(result), Failed: len(failures), Details: failures}
@@ -430,6 +449,13 @@ func (s *Service) PublishReport(ctx context.Context, request ReportRequest) (art
 	if len(request.Citations) == 0 || len(request.Citations) > 256 {
 		return artifact.WorkflowReportResult{}, fmt.Errorf("research Workflow report requires 1-256 selected citations")
 	}
+	if len(request.ReviewGate) == 0 || !json.Valid(request.ReviewGate) {
+		return artifact.WorkflowReportResult{}, fmt.Errorf("research Workflow report requires a valid independent review gate")
+	}
+	reviewKey, err := reviewcontract.Key(request.ReviewGate)
+	if err != nil {
+		return artifact.WorkflowReportResult{}, err
+	}
 	calls, err := s.toolCalls.ListBySubject(ctx, tool.SubjectWorkflowRun, request.WorkflowRunID)
 	if err != nil {
 		return artifact.WorkflowReportResult{}, err
@@ -438,7 +464,7 @@ func (s *Service) PublishReport(ctx context.Context, request ReportRequest) (art
 	offered := map[string][]string{}
 	searchCalls := map[string]tool.Call{}
 	availableArtifacts := map[string]struct{}{}
-	verifiedReviewGates := map[string]string{}
+	verifiedReviewGates := map[string]json.RawMessage{}
 	userMaterials := map[string]ImportedMaterial{}
 	for _, call := range calls {
 		if call.ID == request.ToolCallID || call.RunID != request.WorkflowRunID || tool.NormalizeSubjectKind(call.SubjectKind) != tool.SubjectWorkflowRun || call.Status != tool.CallCompleted || call.Result == nil || call.Result.Status != tool.ResultSuccess {
@@ -486,31 +512,29 @@ func (s *Service) PublishReport(ctx context.Context, request ReportRequest) (art
 			availableArtifacts[key] = struct{}{}
 		}
 		if call.ToolName == ReviewGateToolName && len(call.Result.Structured) > 0 {
-			key, marshalErr := snapshotKey(json.RawMessage(call.Result.Structured))
+			key, marshalErr := reviewcontract.Key(call.Result.Structured)
 			if marshalErr != nil {
 				return artifact.WorkflowReportResult{}, marshalErr
+			}
+			// Other completed attempts are history, not the selected approval.
+			// An obsolete view must not invalidate the current matching gate.
+			if key != reviewKey {
+				continue
 			}
 			var gateInput struct {
 				Subject json.RawMessage `json:"subject"`
 			}
 			if json.Unmarshal(call.Arguments, &gateInput) != nil || len(gateInput.Subject) == 0 || !json.Valid(gateInput.Subject) {
-				return artifact.WorkflowReportResult{}, fmt.Errorf("completed independent review gate has an invalid subject snapshot")
+				return artifact.WorkflowReportResult{}, ErrReviewReportInvalid
 			}
-			// New runtime bindings store the exact independent-review stage input
-			// in subject. Its context member is the report/result projection used
-			// by publication; legacy calls stored that projection directly.
-			subjectForPublication := gateInput.Subject
-			var subjectObject map[string]json.RawMessage
-			if json.Unmarshal(gateInput.Subject, &subjectObject) == nil {
-				if contextSnapshot, ok := subjectObject["context"]; ok && len(contextSnapshot) > 0 && json.Valid(contextSnapshot) {
-					subjectForPublication = contextSnapshot
-				}
+			// Reconstruct the same exact report used by Workflow dependency
+			// checks before projecting context. The frozen gate itself is never
+			// rewritten; its identity remains bound to the original review input.
+			subjectForPublication, assemblyErr := reviewcontract.Result(gateInput.Subject)
+			if assemblyErr != nil {
+				return artifact.WorkflowReportResult{}, fmt.Errorf("%w: %v", ErrReviewReportInvalid, assemblyErr)
 			}
-			subjectKey, marshalErr := semanticSnapshotKey(subjectForPublication)
-			if marshalErr != nil {
-				return artifact.WorkflowReportResult{}, marshalErr
-			}
-			verifiedReviewGates[key] = subjectKey
+			verifiedReviewGates[key] = subjectForPublication
 		}
 	}
 	if len(completed) == 0 {
@@ -535,20 +559,12 @@ func (s *Service) PublishReport(ctx context.Context, request ReportRequest) (art
 			}
 		}
 	}
-	if len(request.ReviewGate) == 0 || !json.Valid(request.ReviewGate) {
-		return artifact.WorkflowReportResult{}, fmt.Errorf("research Workflow report requires a valid independent review gate")
-	}
-	reviewKey, err := snapshotKey(request.ReviewGate)
-	if err != nil {
-		return artifact.WorkflowReportResult{}, err
-	}
 	reviewedSubject, verified := verifiedReviewGates[reviewKey]
 	if !verified {
-		return artifact.WorkflowReportResult{}, fmt.Errorf("report independent review gate was not returned by a completed review in this Workflow Run")
+		return artifact.WorkflowReportResult{}, ErrReviewGateUnavailable
 	}
-	analysisKey, analysisErr := semanticSnapshotKey(request.Analysis)
-	if analysisErr != nil || reviewedSubject != analysisKey {
-		return artifact.WorkflowReportResult{}, fmt.Errorf("report independent review gate does not cover the current frozen analysis")
+	if !reviewcontract.Equal(reviewedSubject, request.Analysis) {
+		return artifact.WorkflowReportResult{}, ErrReviewReportMismatch
 	}
 
 	verifiedCitations := make([]artifact.Citation, 0, len(request.Citations))
@@ -603,9 +619,13 @@ func (s *Service) PublishReport(ctx context.Context, request ReportRequest) (art
 	for _, call := range completed {
 		callIDs = append(callIDs, call.ID)
 	}
+	operationKey, err := s.reportPublicationOperationKey(ctx, request, calls)
+	if err != nil {
+		return artifact.WorkflowReportResult{}, err
+	}
 	return s.artifacts.PublishWorkflowReport(ctx, artifact.WorkflowReportCommand{
 		ProjectID: request.ProjectID, WorkflowRunID: request.WorkflowRunID, ResearchTaskID: request.ResearchTaskID, ToolCallID: request.ToolCallID,
-		ToolName: ReportToolName, ToolVersion: ReportToolVersion, OperationKey: request.IdempotencyKey,
+		ToolName: ReportToolName, ToolVersion: ReportToolVersion, OperationKey: operationKey,
 		Name: request.Name, Markdown: request.Markdown, Citations: verifiedCitations,
 		SourceToolCallIDs: callIDs, SourceWorkspaceFiles: paths,
 	})
@@ -735,18 +755,6 @@ func uniqueIDs(values []string, maximum int, label string) ([]string, error) {
 
 func snapshotKey(value any) (string, error) {
 	encoded, err := json.Marshal(value)
-	if err != nil {
-		return "", fmt.Errorf("encode frozen Workflow snapshot: %w", err)
-	}
-	return string(encoded), nil
-}
-
-func semanticSnapshotKey(value json.RawMessage) (string, error) {
-	var decoded any
-	if len(value) == 0 || json.Unmarshal(value, &decoded) != nil {
-		return "", fmt.Errorf("frozen Workflow snapshot is invalid")
-	}
-	encoded, err := json.Marshal(decoded)
 	if err != nil {
 		return "", fmt.Errorf("encode frozen Workflow snapshot: %w", err)
 	}

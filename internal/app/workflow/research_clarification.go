@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-
-	"github.com/wangh00/SciAide/internal/app/conversation"
 )
 
 func validateClarificationSelection(question ResearchClarificationQuestion) error {
@@ -89,7 +87,7 @@ func (s *StarterService) Replan(ctx context.Context, command ReplanResearchStart
 	return s.startReplannedResearch(ctx, prior, execution, starter.ResearchIdea, snapshot, nil, "refresh")
 }
 
-func (s *StarterService) startReplannedResearch(ctx context.Context, prior RunDetail, execution *AIExecution, idea string, snapshot ResourceSnapshot, answers map[string][]string, reason string) (RunDetail, error) {
+func (s *StarterService) startReplannedResearch(ctx context.Context, prior RunDetail, execution *AIExecution, idea string, snapshot ResourceSnapshot, answers map[string][]string, reason string, freeText ...map[string]string) (RunDetail, error) {
 	if _, err := s.runtime.resolveResearchTaskForRun(ctx, prior.Run.ProjectID, prior.Run); err != nil {
 		return RunDetail{}, err
 	}
@@ -102,11 +100,24 @@ func (s *StarterService) startReplannedResearch(ctx context.Context, prior RunDe
 	if err := json.Unmarshal(prior.Run.Inputs, &priorInput); err != nil {
 		return RunDetail{}, err
 	}
+	if priorInput.Starter.DiscussionRecord != nil && priorInput.Starter.DiscussionRecord.SourcePlannerRunID == "" {
+		ref := *priorInput.Starter.DiscussionRecord
+		ref.SourcePlannerRunID = prior.Run.ID
+		priorInput.Starter.DiscussionRecord = &ref
+	}
+	var freeTextAnswers map[string]string
+	if len(freeText) > 0 {
+		freeTextAnswers = freeText[0]
+	}
 	inputs, err := json.Marshal(map[string]any{"starter_context": ResearchStarterContext{
+		DiscussionRecord:         priorInput.Starter.DiscussionRecord,
+		DiscussionHistory:        priorInput.Starter.DiscussionHistory,
+		DiscussionConversationID: priorInput.Starter.DiscussionConversationID, DiscussionUserMessageID: priorInput.Starter.DiscussionUserMessageID,
 		SelectedMaterials: priorInput.Starter.SelectedMaterials,
-		Capabilities:      researchCapabilities(),
-		ResearchIdea:      idea, ResourceSnapshot: snapshot, StageCatalog: dynamicResearchStageCatalog(), PlannerVersion: dynamicResearchPlannerVersion,
-		ClarificationAnswers: answers, PriorStarterRunID: prior.Run.ID,
+		UserRequests:      priorInput.Starter.UserRequests, TimeContext: priorInput.Starter.TimeContext,
+		Capabilities: researchCapabilities(),
+		ResearchIdea: idea, ResourceSnapshot: snapshot, StageCatalog: dynamicResearchStageCatalog(), PlannerVersion: dynamicResearchPlannerVersion,
+		ClarificationFreeText: freeTextAnswers, ClarificationAnswers: answers, PriorStarterRunID: prior.Run.ID,
 	}})
 	if err != nil {
 		return RunDetail{}, err
@@ -130,7 +141,7 @@ func (s *StarterService) startReplannedResearch(ctx context.Context, prior RunDe
 	}
 	return s.runtime.Start(ctx, StartCommand{
 		ProjectID: prior.Run.ProjectID, ResearchTaskID: prior.Run.ResearchTaskID, WorkflowID: saved.Workflow.ID, WorkflowVersionID: saved.Version.ID,
-		Inputs: inputs, PermissionMode: conversation.PermissionFullAccess,
+		Inputs: inputs, PermissionMode: prior.Run.PermissionMode,
 		ModelProfileID: execution.ModelProfileID, ModelID: execution.ModelID, ReasoningLevel: execution.ReasoningLevel, CreationKey: key,
 	})
 }

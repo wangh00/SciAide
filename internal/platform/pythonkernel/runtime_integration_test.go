@@ -83,6 +83,73 @@ func TestKernelTerminalResultAssignmentDoesNotReuseOldResult(t *testing.T) {
 	}
 }
 
+func TestKernelExplicitPrerequisiteStopsCodeAndDoesNotPoisonNextExecution(t *testing.T) {
+	python, err := exec.LookPath("python")
+	if err != nil {
+		t.Skip("Python unavailable")
+	}
+	python, _ = filepath.Abs(python)
+	runner := localexec.NewRunner(localexec.Options{})
+	kernels := New(runner)
+	defer func() { _ = kernels.Close(); _ = runner.Close() }()
+	workspace := t.TempDir()
+	request := pythonenv.KernelExecuteRequest{ProjectID: "explicit-blocker", Environment: pythonenv.Environment{EnvironmentPythonPath: python, EnvironmentFingerprint: "fixture"}, Timeout: 15 * time.Second, Code: `stopped_attempt_global = "must not enter repaired calculation"
+SCIAIDE_REQUIRE_INPUT("measurement precision is unavailable")
+raise RuntimeError("must not continue")`}
+	result, err := kernels.Execute(context.Background(), request, workspace)
+	if err != nil || result.Status != "error" || result.Exception == nil || result.Exception.Type != "SciAideResearchBlocked" || result.Exception.Message != "measurement precision is unavailable" {
+		t.Fatal(result, err)
+	}
+	previousKernel := result.KernelID
+	request.Code = `{"partial": True, "association": None, "status": "no_effect", "stale": "stopped_attempt_global" in globals()}`
+	result, err = kernels.Execute(context.Background(), request, workspace)
+	value, _ := result.Value.(map[string]any)
+	if err != nil || result.Status != "success" || result.KernelID == previousKernel || value["stale"] != false {
+		t.Fatal("valid partial/negative result stopped", result, err)
+	}
+}
+
+func TestPrerequisiteReplayDoesNotPublishStoppedFigureWithoutAppRestart(t *testing.T) {
+	python, err := exec.LookPath("python")
+	if err != nil {
+		t.Skip("Python unavailable")
+	}
+	python, _ = filepath.Abs(python)
+	runner := localexec.NewRunner(localexec.Options{})
+	kernels := New(runner)
+	defer func() { _ = kernels.Close(); _ = runner.Close() }()
+	workspace := t.TempDir()
+	// A stdlib-only Matplotlib surface isolates cross-attempt ownership. The
+	// actual runtime/bootstrap and Python process are used, not a mocked Go result.
+	request := pythonenv.KernelExecuteRequest{ProjectID: "blocked-figure", Environment: pythonenv.Environment{EnvironmentPythonPath: python, EnvironmentFingerprint: "fixture"}, Timeout: 15 * time.Second, Code: `import sys
+import types
+from pathlib import Path
+fake_module = types.ModuleType("matplotlib")
+fake_module.__path__ = []
+fake_plot = types.ModuleType("matplotlib.pyplot")
+open_figures = {1: "BLOCKED-ATTEMPT-FIGURE"}
+class FakeFigure:
+    def savefig(self, path, **kwargs):
+        Path(path).write_text(open_figures[1], encoding="utf-8")
+fake_plot.get_fignums = lambda: list(open_figures)
+fake_plot.figure = lambda n: FakeFigure()
+fake_plot.close = lambda mode: open_figures.clear()
+fake_module.pyplot = fake_plot
+sys.modules["matplotlib"] = fake_module
+sys.modules["matplotlib.pyplot"] = fake_plot
+SCIAIDE_REQUIRE_INPUT("resolve an actual measurement choice")`}
+	blocked, err := kernels.Execute(context.Background(), request, workspace)
+	if err != nil || blocked.Status != "error" || blocked.Exception == nil || blocked.Exception.Type != "SciAideResearchBlocked" || len(blocked.Images) != 0 {
+		t.Fatal("blocker not preserved", blocked, err)
+	}
+	request.Code = `{"completed": True, "stale_globals": "open_figures" in globals()}`
+	repaired, err := kernels.Execute(context.Background(), request, workspace)
+	value, _ := repaired.Value.(map[string]any)
+	if err != nil || repaired.Status != "success" || repaired.KernelID == blocked.KernelID || len(repaired.Images) != 0 || value["stale_globals"] != false {
+		t.Fatal("stopped figure/global entered repaired result", repaired, err)
+	}
+}
+
 func TestRuntimeImportsConfiguredNumericStackUnderMemoryBudget(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows Job Object numeric stack test")

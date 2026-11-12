@@ -44,6 +44,7 @@ func TestDirectEvidenceSubmissionCompletesAndRecoversWithoutRepair(t *testing.T)
 	output := raw(`{"summary":"Evidence is limited","recommendedReferences":[],"citationAssessments":[],"coverage":{"strength":"insufficient","sufficientForClaimedScope":false,"independentStudyEstimate":0,"directPopulationEvidence":false,"fullTextEvidenceAvailable":false,"gaps":["No result evidence"]},"recommendedScope":"Limited draft only","recommendation":"proceed_limited","limitations":["Metadata only"]}`)
 	value := decodeObject(output)
 	value["documentAnalyses"] = notes
+	notes[0]["workProduct"] = "|领域|判断|依据|\n|分配过程|未知|当前摘录未提供|"
 	output = mustJSON(value)
 	base := CompiledNode{ID: "evidence_screening", Kind: NodeAgentStage, ReviewPolicy: AIReviewAuto, PromptVersion: selectedEvidenceVersion, OutputSchema: selectedEvidenceSchema()}
 	node := selectedEvidencePhaseNode(base, input)
@@ -68,6 +69,9 @@ func TestDirectEvidenceSubmissionCompletesAndRecoversWithoutRepair(t *testing.T)
 	}
 	if recovered.failure != "" || !rawJSONEqual(recovered.output, r.output) || len(recovered.repairs) != 0 {
 		t.Fatalf("recovery changed output: %+v", recovered)
+	}
+	if !strings.Contains(string(recovered.output), "分配过程") {
+		t.Fatal("actual work lost during completion/recovery")
 	}
 	delete(value, "documentAnalyses")
 	if _, _, err := normalizeWorkflowAIStageSubmissionForInput(string(mustJSON(value)), node, input); err == nil {
@@ -106,7 +110,7 @@ func TestSelectedEvidenceBatchesRestoreAndCoverMissingDocument(t *testing.T) {
 			if id != "6" {
 				refs = append(refs, "K-"+id)
 			}
-			notes = append(notes, map[string]any{"documentId": id, "finding": "unknown", "applicability": "source context", "limitations": "excerpt only", "references": refs})
+			notes = append(notes, map[string]any{"documentId": id, "finding": "unknown", "applicability": "source context", "limitations": "excerpt only", "references": refs, "workProduct": "Actual appraisal for " + id})
 		}
 		output := mustJSON(map[string]any{"documentAnalyses": notes})
 		node := selectedEvidencePhaseNode(CompiledNode{ID: "evidence_screening", PromptVersion: selectedEvidenceVersion, OutputSchema: selectedEvidenceSchema()}, input)
@@ -116,7 +120,7 @@ func TestSelectedEvidenceBatchesRestoreAndCoverMissingDocument(t *testing.T) {
 		if err := validateSelectedEvidence(output, input); err != nil {
 			t.Fatal(err)
 		}
-		e := AIExecution{ID: fmt.Sprint(batch), WorkflowStepID: detail.Steps[1].ID, Status: "completed", Output: output}
+		e := AIExecution{ID: fmt.Sprint(batch), WorkflowRunID: detail.Run.ID, WorkflowStepID: detail.Steps[1].ID, Status: "completed", Output: output, OutputSHA256: hashJSON(output)}
 		step := detail.Steps[1]
 		step.Input = input
 		if err := s.completeSelectedEvidenceBatch(context.Background(), detail, step, e); err != nil {
@@ -135,6 +139,11 @@ func TestSelectedEvidenceBatchesRestoreAndCoverMissingDocument(t *testing.T) {
 	json.Unmarshal(input, &in)
 	if in.Info.Phase != "coverage" || len(in.Info.Analyses) != 7 {
 		t.Fatal(string(input))
+	}
+	for _, id := range docs {
+		if !strings.Contains(string(input), "Actual appraisal for "+id) {
+			t.Fatal("batch checkpoint lost actual work", id)
+		}
 	}
 	if err := validateSelectedEvidence(raw(`{"recommendation":"proceed","recommendedReferences":[],"coverage":{"sufficientForClaimedScope":true}}`), input); err == nil {
 		t.Fatal("missing document passed coverage")

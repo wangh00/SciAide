@@ -79,7 +79,7 @@ func TestCapturedProviderUnavailableEvent(t *testing.T) {
 	defer stream.Close()
 	_, err = stream.Recv()
 	var appErr *apperr.Error
-	if !errors.As(err, &appErr) || !appErr.Retryable || appErr.Code != "MODEL_UNAVAILABLE" || !strings.Contains(appErr.Details, "upstream_error") || !strings.Contains(appErr.Details, "temporarily unavailable") || strings.Contains(appErr.Details, "HTTP status:") {
+	if !errors.As(err, &appErr) || !appErr.Retryable || appErr.Code != "MODEL_UNAVAILABLE" || !strings.Contains(appErr.Details, "upstream_error") || !strings.Contains(appErr.Details, "payloadSha256") || strings.Contains(appErr.Details, "temporarily unavailable") || strings.Contains(appErr.Details, "HTTP status:") {
 		t.Fatalf("observed temporary outage was treated as permanent or lost diagnostics: %#v", err)
 	}
 }
@@ -125,6 +125,8 @@ func TestProtocolsClassifyUpstreamStreamErrors(t *testing.T) {
 			retryable bool
 		}{
 			{"stream_read_error", true},
+			{"upstream_stream_read_error", true},
+			{"upstream_http2_stream_error", true},
 			{"gateway_concurrency_limit", true},
 			{"invalid_api_key", false},
 			{"context_length_exceeded", false},
@@ -147,7 +149,16 @@ func TestProtocolsClassifyUpstreamStreamErrors(t *testing.T) {
 				if test.retryable {
 					wantCode = "MODEL_UNAVAILABLE"
 				}
-				wantMessage := test.code
+				wantMessage := "模型服务拒绝了本次请求，请核对模型服务配置并查看诊断。"
+				if test.retryable {
+					wantMessage = "模型服务暂时不可用，SciAide 将按现有恢复预算重试。"
+				}
+				if test.code == "invalid_api_key" {
+					wantMessage = "模型服务认证或权限检查失败，请核对服务配置后重试。"
+				}
+				if test.code == "context_length_exceeded" {
+					wantMessage = "本次请求超过模型上下文限制，请调整输入或模型配置后重试。"
+				}
 				if test.code == "gateway_concurrency_limit" {
 					wantCode, wantMessage = "MODEL_RATE_LIMITED", "模型服务账户并发已达上限，请稍后重试。"
 				}
@@ -205,7 +216,7 @@ func TestAllProviderEnvelopesRecoverGenericTemporaryOutage(t *testing.T) {
 						_, err = stream.Recv()
 					}
 					var appErr *apperr.Error
-					if !errors.As(err, &appErr) || appErr.Retryable == permanent || !strings.Contains(appErr.Details, code) || !strings.Contains(appErr.Details, "temporarily unavailable") {
+					if !errors.As(err, &appErr) || appErr.Retryable == permanent || !strings.Contains(appErr.Details, code) || !strings.Contains(appErr.Details, "payloadSha256") || strings.Contains(appErr.Details, "temporarily unavailable") {
 						t.Fatalf("protocol branch has divergent recovery: %#v", err)
 					}
 				})

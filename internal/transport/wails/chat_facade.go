@@ -2,12 +2,15 @@ package wails
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/wangh00/SciAide/internal/app/chat"
 	"github.com/wangh00/SciAide/internal/app/contextmemory"
 	"github.com/wangh00/SciAide/internal/app/permission"
 	"github.com/wangh00/SciAide/internal/app/tool"
+	"github.com/wangh00/SciAide/internal/app/userinput"
+	"github.com/wangh00/SciAide/internal/apperr"
 )
 
 type RunSnapshot struct {
@@ -39,11 +42,25 @@ func (f *ChatFacade) CancelRun(runID string) error {
 	return f.service.Cancel(f.lifecycle.Context(), runID)
 }
 
+func (f *ChatFacade) RespondToUserInput(response userinput.Response) (RunSnapshot, error) {
+	run, err := f.service.RespondToUserInput(f.lifecycle.Context(), response)
+	if err != nil {
+		// Wails renders Error(), while the debug API projects apperr.Public.
+		// Keep both the safe desktop explanation and the typed conflict code.
+		var stateErr *apperr.Error
+		if errors.As(err, &stateErr) && stateErr.Code == "USER_INPUT_EXPIRED" {
+			return RunSnapshot{}, fmt.Errorf("%s: %w", stateErr.UserMessage, err)
+		}
+		return RunSnapshot{}, err
+	}
+	return f.GetRunSnapshot(run.ID)
+}
+
 func (f *ChatFacade) ListConversationActivity(projectID string) ([]chat.ConversationActivity, error) {
 	return f.service.ListConversationActivity(f.lifecycle.Context(), projectID)
 }
 func (f *ChatFacade) GetRunSnapshot(runID string) (RunSnapshot, error) {
-	base, err := f.service.Snapshot(f.lifecycle.Context(), runID)
+	base, err := f.service.UISnapshot(f.lifecycle.Context(), runID)
 	if err != nil {
 		return RunSnapshot{}, err
 	}
@@ -58,7 +75,16 @@ func (f *ChatFacade) GetRunSnapshot(runID string) (RunSnapshot, error) {
 }
 
 func (f *ChatFacade) GetLatestRunSnapshot(conversationID string) (*RunSnapshot, error) {
-	base, err := f.service.LatestSnapshot(f.lifecycle.Context(), conversationID)
+	base, err := f.service.LatestUISnapshot(f.lifecycle.Context(), conversationID)
+	return f.latestRunSnapshot(base, err)
+}
+
+func (f *ChatFacade) GetLatestOrdinaryRunSnapshot(conversationID string) (*RunSnapshot, error) {
+	base, err := f.service.LatestOrdinaryUISnapshot(f.lifecycle.Context(), conversationID)
+	return f.latestRunSnapshot(base, err)
+}
+
+func (f *ChatFacade) latestRunSnapshot(base *chat.Snapshot, err error) (*RunSnapshot, error) {
 	if err != nil || base == nil {
 		return nil, err
 	}
