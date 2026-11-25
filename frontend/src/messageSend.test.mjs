@@ -3,6 +3,8 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import test from 'node:test';
 import ts from 'typescript';
+import {loadTsx} from './testTsxLoader.mjs';
+const {researchDiscussionAvailable, researchDiscussionConversation} = loadTsx(new URL('./researchDiscussion.ts', import.meta.url));
 
 const source=fs.readFileSync(new URL('./App.tsx',import.meta.url),'utf8');
 const start=source.indexOf('  async function send(event?: FormEvent)');
@@ -61,12 +63,13 @@ test('direct repair has no second chat dispatch or composer injection',()=>{
 test('late pre-retry poll cannot overwrite the new attempt during or after mutation',async()=>{
  const start=source.indexOf('  const loadRun = useCallback('),end=source.indexOf('\n  useEffect(() => {',start);
  assert.ok(start>0&&end>start);
- const fn=source.slice(start,end).replace('  const loadRun = useCallback(', 'const loadRun = ').replace(/, \[project.id, selectConversation\]\);\s*$/, ';');
+ const fn=source.slice(start,end);
  for(const during of [true,false]) {
   let finish;
   const response=new Promise(resolve=>{finish=resolve});
   const state={changes:[]};
   const context={activeRunIdRef:{current:'r'},activeWorkflowIdRef:{current:'w'},mutationRef:{current:''},runLoadsInFlightRef:{current:new Set()},runRequestRef:{current:0},project:{id:'p'},backend:()=>response,normalizeWorkflowRunDetail:v=>v,setRunDetail:v=>state.changes.push(v),setProjectRuns:()=>{},shareSnapshot:(_a,b)=>b,setBusy:()=>{},setFeedback:()=>{},errorText:String,selectConversation:async()=>{}};
+  Object.assign(context,{useCallback:f=>f,conversationNavigation:()=>()=>true,researchDiscussionAvailable,researchDiscussionConversation});
   vm.createContext(context);vm.runInContext(ts.transpileModule(fn+'\nglobalThis.poll=loadRun;',{}).outputText,context);
   const work=context.poll('r',true);
   context.mutationRef.current='retry:gate';
@@ -240,6 +243,7 @@ test('automatic candidate follow waits for pending files and in-flight imports',
   for(const blocked of [true,false]) {
     let refresh;const selected=[],calls=[];
     const context={runDetail:{run:{id:'old',researchTaskId:'task',workflowPurpose:'research_starter',status:'completed',conversationId:'old-c',inputs:{}}},project:{id:'p'},conversationBusy:blocked,mutationRef:{current:''},activeRunIdRef:{current:'old'},activeWorkflowIdRef:{current:'old-w'},runRequestRef:{current:0},setDetail:()=>{},setRunDetail:()=>{},setStarterPlan:()=>{},setPlanningDiscussionVersion:()=>{},shareSnapshot:(_a,b)=>b,normalizeWorkflowDetail:v=>v,normalizeWorkflowRunDetail:v=>v,selectConversation:async id=>selected.push(id),loadProjectRuns:async()=>{},backend:async(_f,m)=>{calls.push(m);if(m==='GetCurrentResearchTaskRun')return {run:{id:'new',workflowId:'new-w',conversationId:'new-c'}};if(m==='GetLatestRunSnapshot')return null;return {workflow:{id:'new-w'}}},useEffect:fn=>fn(),window:{addEventListener:()=>{},removeEventListener:()=>{},clearInterval:()=>{},setInterval:fn=>{refresh=fn;return 1}},document:{hidden:false}};
+    Object.assign(context,{researchDiscussionAvailable,researchDiscussionConversation});
     vm.createContext(context);vm.runInContext(ts.transpileModule(source.slice(start,end),{}).outputText,context);
     refresh();await new Promise(resolve=>setTimeout(resolve,0));
     assert.equal(selected.length,blocked?0:1);if(blocked)assert.equal(calls.length,0);

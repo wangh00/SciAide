@@ -43,6 +43,18 @@ func (f *WorkflowFacade) ResearchTimeline(query workflow.ResearchTimelineQuery) 
 	return f.runtime.ResearchTimeline(f.lifecycle.Context(), query)
 }
 
+func (f *WorkflowFacade) GetResearchWorkingState(projectID, taskID string) (*workflow.ResearchWorkingState, error) {
+	return f.runtime.GetResearchWorkingState(f.lifecycle.Context(), projectID, taskID)
+}
+
+func (f *WorkflowFacade) GetResearchWorkingStateProvenance(projectID, taskID string, expectedVersion int) (workflow.ResearchWorkingStateProvenance, error) {
+	return f.runtime.GetResearchWorkingStateProvenance(f.lifecycle.Context(), projectID, taskID, expectedVersion)
+}
+
+func (f *WorkflowFacade) GetResearchWorkingStateBasis(projectID, taskID string, expectedVersion int, field, readCallID string) (workflow.ResearchWorkingBasisRead, error) {
+	return f.runtime.GetResearchWorkingStateBasis(f.lifecycle.Context(), projectID, taskID, expectedVersion, field, readCallID)
+}
+
 func (f *WorkflowFacade) GetPendingResearchAdoption(projectID, runID string) (*workflow.AdoptResearchRouteResult, error) {
 	if f.starter == nil {
 		return nil, fmt.Errorf("research starter is not configured")
@@ -95,6 +107,24 @@ func (f *WorkflowFacade) StartResearch(command workflow.StartResearchCommand) (w
 		return workflow.RunDetail{}, fmt.Errorf("research starter is not configured")
 	}
 	return f.starter.Start(f.lifecycle.Context(), command)
+}
+
+// StartResearchDiscussion returns a real task/conversation identity. Unlike
+// the removed legacy DiscussionOnly StartResearch branch, it creates no
+// Workflow Run; existing records keep their immutable read-only history.
+func (f *WorkflowFacade) StartResearchDiscussion(command workflow.StartResearchDiscussionCommand) (workflow.ResearchDiscussionEntry, error) {
+	if f.starter == nil {
+		return workflow.ResearchDiscussionEntry{}, fmt.Errorf("research starter is not configured")
+	}
+	return f.starter.StartDiscussion(f.lifecycle.Context(), command)
+}
+
+func (f *WorkflowFacade) GetResearchTaskSession(projectID, taskID string) (workflow.ResearchTaskSession, error) {
+	return f.runtime.ResearchTaskSession(f.lifecycle.Context(), projectID, taskID)
+}
+
+func (f *WorkflowFacade) GetResearchTaskSessionByConversation(conversationID string) (*workflow.ResearchTaskSession, error) {
+	return f.runtime.ResearchTaskSessionByConversation(f.lifecycle.Context(), conversationID)
 }
 
 func (f *WorkflowFacade) GetCurrentResearchTaskRun(projectID, taskID string) (workflow.RunDetail, error) {

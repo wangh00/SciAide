@@ -99,12 +99,12 @@ func TestResearchReasoningPreferencesAndMaxUpgradeRetry(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			entry, err := app.WorkflowFacade.StartResearch(workflow.StartResearchCommand{ProjectID: p.ID, ResearchIdea: "想研究大学生睡眠", ModelProfileID: profile.ID, ModelID: workflowAITestModelID, ReasoningLevel: level, DiscussionOnly: true})
+			entry, err := app.WorkflowFacade.StartResearchDiscussion(workflow.StartResearchDiscussionCommand{ProjectID: p.ID, ResearchIdea: "想研究大学生睡眠", ModelProfileID: profile.ID, ModelID: workflowAITestModelID, ReasoningLevel: level})
 			if err != nil {
 				t.Fatal(err)
 			}
 			client, _ := id.New()
-			ordinary, err := app.ChatFacade.StartChat(chat.StartCommand{ConversationID: entry.Run.ConversationID, Text: "一次性问卷，课堂清醒程度；先设计课程论文的方案、问卷初稿和分析计划，不招募", ClientMessageID: client, ModelProfileID: profile.ID, ModelID: workflowAITestModelID, ReasoningLevel: level})
+			ordinary, err := app.ChatFacade.StartChat(chat.StartCommand{ConversationID: entry.ConversationID, Text: "一次性问卷，课堂清醒程度；先设计课程论文的方案、问卷初稿和分析计划，不招募", ClientMessageID: client, ModelProfileID: profile.ID, ModelID: workflowAITestModelID, ReasoningLevel: level})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -122,8 +122,8 @@ func TestResearchReasoningPreferencesAndMaxUpgradeRetry(t *testing.T) {
 				}
 				time.Sleep(20 * time.Millisecond)
 			}
-			planning, err := app.WorkflowFacade.GetCurrentResearchTaskRun(p.ID, entry.Run.ResearchTaskID)
-			if err != nil || planning.Run.ID == entry.Run.ID {
+			planning, err := app.WorkflowFacade.GetCurrentResearchTaskRun(p.ID, entry.ResearchTaskID)
+			if err != nil || planning.Run.ID == "" || planning.Run.ID == entry.ResearchTaskID {
 				t.Fatal("discussion tool did not prepare same task", err)
 			}
 			if level == modelcap.ReasoningMax {
@@ -151,7 +151,7 @@ func TestResearchReasoningPreferencesAndMaxUpgradeRetry(t *testing.T) {
 				}
 			}
 			completed := waitForWorkflowState(t, app, p.ID, planning.Run.ID, workflow.RunCompleted, 20*time.Second)
-			if completed.Run.ResearchTaskID != entry.Run.ResearchTaskID || len(completed.AIExecutions) != 1 || completed.AIExecutions[0].ReasoningLevel != level || completed.AIExecutions[0].Status != "completed" {
+			if completed.Run.ResearchTaskID != entry.ResearchTaskID || len(completed.AIExecutions) != 1 || completed.AIExecutions[0].ReasoningLevel != level || completed.AIExecutions[0].Status != "completed" {
 				t.Fatalf("planner effort/task not preserved: %+v", completed)
 			}
 			if level == modelcap.ReasoningMax && (completed.Steps[0].ID != planning.Steps[0].ID || completed.AIExecutions[0].Attempt != 2) {
@@ -170,7 +170,7 @@ func TestResearchReasoningPreferencesAndMaxUpgradeRetry(t *testing.T) {
 				t.Fatal("explicit adoption failed", err)
 			}
 			result := waitForWorkflowState(t, app, p.ID, adopted.Run.Run.ID, workflow.RunCompleted, 25*time.Second)
-			if len(result.AIExecutions) == 0 || result.Run.ResearchTaskID != entry.Run.ResearchTaskID {
+			if len(result.AIExecutions) == 0 || result.Run.ResearchTaskID != entry.ResearchTaskID {
 				t.Fatal("adopted route did not execute same-task AI stages")
 			}
 			for _, execution := range result.AIExecutions {

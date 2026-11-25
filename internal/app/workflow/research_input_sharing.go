@@ -20,6 +20,8 @@ Only researchSourceContext may use {"$same":N} for an EXACTLY IDENTICAL repeated
 </stage_input_encoding>
 `
 
+const researchInputReviewSharingNote = "\nReview shared-path targets may also point to literal current context/evidenceContext/evidenceScreening/researchHandoff values. They remain exact same-input copies, not missing data or new scientific evidence.\n"
+
 func researchInputSharedProjection(input json.RawMessage, review ...bool) (json.RawMessage, string) {
 	projected, instruction := researchInputSharedProjectionMode(input, len(review) > 0 && review[0])
 	if len(review) > 0 && review[0] {
@@ -206,7 +208,7 @@ func researchInputSharedProjectionMode(input json.RawMessage, review bool) (json
 	paths, _ := json.Marshal(sharedPaths)
 	instruction := researchInputSharingInstruction + "\n<stage_input_shared_paths>\n" + string(paths) + "\n</stage_input_shared_paths>\n"
 	if review {
-		instruction += "\nReview shared-path targets may also point to literal current context/evidenceContext/evidenceScreening/researchHandoff values. They remain exact same-input copies, not missing data or new scientific evidence.\n"
+		instruction += researchInputReviewSharingNote
 	}
 	if err != nil || len([]rune(string(input)))-len([]rune(string(encoded))) < len([]rune(instruction))+1024 {
 		return input, ""

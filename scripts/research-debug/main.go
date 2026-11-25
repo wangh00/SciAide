@@ -13,6 +13,7 @@ import (
 	"github.com/wangh00/SciAide/internal/debugapi"
 	"github.com/wangh00/SciAide/internal/events"
 	"github.com/wangh00/SciAide/internal/model/responses"
+	"github.com/wangh00/SciAide/internal/modelutil"
 )
 
 type quietPublisher struct{}
@@ -38,6 +39,7 @@ func run() error {
 	captureErrors := flag.Bool("capture-provider-errors", false, "opt in to bounded local Responses error text, with configured key/header values redacted; never share the capture")
 	captureFaults := flag.Bool("capture-stream-faults", false, "opt in to bounded sensitive malformed Responses event and wire-tail evidence; requires an access-restricted root (no ACL enforcement); never share the capture")
 	captureHTTP := flag.Bool("capture-http-responses", false, "opt in to bounded private Responses status/allowlisted response-header evidence; requires an access-restricted root (no ACL enforcement); never share the capture")
+	captureRequests := flag.Bool("capture-request-snapshots", false, "opt in to bounded private three-protocol request shape inventories; no plaintext prompts/headers/URLs, no additional model calls; never share the capture")
 	flag.Parse()
 	if flag.NArg() != 0 {
 		return fmt.Errorf("unexpected positional arguments")
@@ -96,7 +98,19 @@ func run() error {
 		defer capture.Close()
 		observeHTTP = capture.recordHTTPResponse
 	}
-	app, err := bootstrap.New(bootstrap.Options{RootDir: workspace.Root, EventPublisher: quietPublisher{}, ModelRequestGate: workspace.Gate, ModelProfileOverlay: workspace.ProfileOverlay, DisableAuxiliaryModels: true, DebugResponseErrorObserver: observe, DebugResponseStreamFaultObserver: observeFault, DebugResponseHTTPObserver: observeHTTP})
+	var requestSnapshots *modelutil.RequestSnapshotObserver
+	if *captureRequests {
+		capture, e := openRequestSnapshotCapture(workspace.Root)
+		if e != nil {
+			return e
+		}
+		defer capture.Close()
+		requestSnapshots, e = modelutil.NewRequestSnapshotObserver(capture.recordRequestSnapshot)
+		if e != nil {
+			return e
+		}
+	}
+	app, err := bootstrap.New(bootstrap.Options{RootDir: workspace.Root, EventPublisher: quietPublisher{}, ModelRequestGate: workspace.Gate, ModelProfileOverlay: workspace.ProfileOverlay, DisableAuxiliaryModels: true, DebugResponseErrorObserver: observe, DebugResponseStreamFaultObserver: observeFault, DebugResponseHTTPObserver: observeHTTP, DebugRequestSnapshotObserver: requestSnapshots})
 	if err != nil {
 		return err
 	}

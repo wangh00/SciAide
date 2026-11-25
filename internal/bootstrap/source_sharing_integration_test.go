@@ -27,12 +27,29 @@ import (
 // and same-run schema repair. Missing provider usage makes admission exercise
 // first-turn accounting, not borrowed measurements. The model is scripted.
 func TestRepeatedSourcesHTTPReadRestartRetryAndFullSubmission(t *testing.T) {
+	testRepeatedSourcesWireViews(t, false)
+}
+
+func TestSharedInventoryHTTPPagingPreservesFrozenSourceAcrossRestart(t *testing.T) {
+	testRepeatedSourcesWireViews(t, true)
+}
+
+func testRepeatedSourcesWireViews(t *testing.T, wideSmallFields bool) {
+	t.Helper()
 	for _, protocol := range []modelprofile.APIProtocol{modelprofile.ProtocolOpenAIChat, modelprofile.ProtocolOpenAIResponses, modelprofile.ProtocolAnthropic} {
 		t.Run(string(protocol), func(t *testing.T) {
 			query := "FIRST-QUERY-" + strings.Repeat("完整检索与来源范围😀", 110) + "-LAST-QUERY"
 			entries := []any{}
 			for i := 0; i < 60; i++ {
-				entries = append(entries, map[string]any{"documentId": fmt.Sprintf("document-%d", i), "queries": []string{query}, "fullTextRead": false})
+				row := map[string]any{"documentId": fmt.Sprintf("document-%d", i), "queries": []string{query}, "fullTextRead": false}
+				if wideSmallFields {
+					metadata := map[string]string{}
+					for j := 0; j < 12; j++ {
+						metadata[fmt.Sprintf("attribute%02d", j)] = fmt.Sprintf("记录%d字段%d：保留原始元数据、范围和未核实状态；不是科学批准或已核读全文。", i, j)
+					}
+					row["metadata"] = metadata
+				}
+				entries = append(entries, row)
 			}
 			inputs := mustBootstrapJSON(t, map[string]any{"sources": map[string]any{"coverage": entries}, "goal": "完整用户目标不能代换", "report": "当前交付不能截断或代换"})
 			var requests atomic.Int32
@@ -57,10 +74,16 @@ func TestRepeatedSourcesHTTPReadRestartRetryAndFullSubmission(t *testing.T) {
 				// This fixture reads one relevant original page, not every duplicate.
 				switch coverage := source["retrievedEvidence"].(map[string]any)["coverage"].(type) {
 				case []any:
+					if wideSmallFields {
+						t.Error("wide shared inventory was not actually lowered to original pages")
+					}
 					if !strings.Contains(prompt, "source-sharing-v1") || !strings.Contains(prompt, "stage_input_shared_paths") || len(coverage) != 60 || coverage[0].(map[string]any)["queries"].([]any)[0] != query || coverage[59].(map[string]any)["queries"].(map[string]any)["$same"] != float64(0) {
 						t.Error("literal source/shared reference missing")
 					}
 				case map[string]any:
+					if wideSmallFields && (strings.Contains(prompt, `<stage_input_encoding version="source-sharing-v1">`) || strings.Contains(prompt, "<stage_input_shared_paths>\n")) {
+						t.Error("paged inventory left live sharing metadata")
+					}
 					link, ok := coverage["$read"].(map[string]any)
 					if !ok || coverage["items"] != float64(60) || link["pointer"] != "/researchSourceContext/retrievedEvidence/coverage" || link["section"] != "stage_input" || !strings.Contains(prompt, "stage-input-pages-v1") {
 						t.Error("original source inventory page link missing")
@@ -113,7 +136,11 @@ func TestRepeatedSourcesHTTPReadRestartRetryAndFullSubmission(t *testing.T) {
 			}
 			defer func() { _ = app.Close() }()
 			app.Startup(context.Background())
-			profile, err := app.ModelFacade.SaveModelProfile(modelprofile.SaveCommand{Name: "source sharing fixture", APIProtocol: protocol, BaseURL: server.URL + "/v1", ModelID: workflowAITestModelID, Models: []modelprofile.ProfileModel{{ID: workflowAITestModelID, Enabled: true, IsDefault: true, ContextWindowTokens: 42000, AutoCompactTokenLimit: 25000}}, TimeoutSeconds: 10, Enabled: true, IsDefault: true})
+			window, automatic := 42000, 25000
+			if wideSmallFields {
+				window, automatic = 80000, 72000
+			} // A distinct fixture; before/after overlays use these identical limits.
+			profile, err := app.ModelFacade.SaveModelProfile(modelprofile.SaveCommand{Name: "source sharing fixture", APIProtocol: protocol, BaseURL: server.URL + "/v1", ModelID: workflowAITestModelID, Models: []modelprofile.ProfileModel{{ID: workflowAITestModelID, Enabled: true, IsDefault: true, ContextWindowTokens: window, AutoCompactTokenLimit: automatic}}, TimeoutSeconds: 10, Enabled: true, IsDefault: true})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -161,6 +188,9 @@ func TestRepeatedSourcesHTTPReadRestartRetryAndFullSubmission(t *testing.T) {
 				t.Fatal(err)
 			}
 			failed := waitForWorkflowState(t, app, project.ID, started.Run.ID, workflow.RunFailed, 25*time.Second)
+			if wideSmallFields && requests.Load() == 0 {
+				t.Fatalf("wide inventory stopped before HTTP: %s: %s; executions=%d", failed.Run.ErrorCode, failed.Run.ErrorMessage, len(failed.AIExecutions))
+			}
 			if len(failed.AIExecutions) == 1 {
 				var result string
 				if err := app.store.DB().QueryRow(`SELECT r.structured_json FROM tool_results r JOIN tool_calls c ON c.id=r.tool_call_id WHERE c.run_id=? AND c.tool_name=?`, failed.AIExecutions[0].ChatRunID, workflow.ResearchTaskReadTool).Scan(&result); err != nil {
@@ -178,7 +208,7 @@ func TestRepeatedSourcesHTTPReadRestartRetryAndFullSubmission(t *testing.T) {
 			if err := app.store.DB().QueryRow(`SELECT input_json,input_sha256 FROM workflow_steps WHERE id=?`, failedStep.ID).Scan(&firstRawInput, &firstRawHash); err != nil {
 				t.Fatal(err)
 			}
-			if len([]rune(firstRawInput)) < 42000 || strings.Contains(firstRawInput, "$same") || !strings.Contains(failed.AIExecutions[0].PromptVersion, "source-sharing-v1") {
+			if len([]rune(firstRawInput)) < window || strings.Contains(firstRawInput, "$same") || !strings.Contains(failed.AIExecutions[0].PromptVersion, "source-sharing-v1") {
 				t.Fatal("fixture did not distinguish original overflow from projected input")
 			}
 			var original struct {
@@ -244,7 +274,7 @@ func TestRepeatedSourcesHTTPReadRestartRetryAndFullSubmission(t *testing.T) {
 			if string(before) != string(after) {
 				t.Fatal("retry mutated old completed read")
 			}
-			t.Logf("%s: raw input=%d chars >42000; requests=6; original task reader, restart, explicit retry, full submission and schema correction passed", protocol, len([]rune(firstRawInput)))
+			t.Logf("%s: raw input=%d chars >%d; requests=6; original task reader, restart, explicit retry, full submission and schema correction passed", protocol, len([]rune(firstRawInput)), window)
 		})
 	}
 }

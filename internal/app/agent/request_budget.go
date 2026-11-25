@@ -1,8 +1,6 @@
 package agent
 
 import (
-	"fmt"
-
 	"github.com/wangh00/SciAide/internal/app/chat"
 	"github.com/wangh00/SciAide/internal/app/tool"
 	"github.com/wangh00/SciAide/internal/app/userinput"
@@ -13,7 +11,8 @@ import (
 func fitFinalRequest(source model.ChatRequest, calls []tool.Call, observation *chat.ContextUsageObservation, limit int, derive func(model.ChatRequest) model.ChatRequest) (model.ChatRequest, error) {
 	request, used, fits := fitDerivedRequest(source, calls, observation, limit, derive)
 	if !fits {
-		return request, &apperr.Error{Code: "CONTEXT_BUILD_FAILED", UserMessage: "本次输入、输出格式或修正内容超出模型上下文预算；已完成的工具结果和原始要求均保留，可重试当前请求或阶段。", Details: fmt.Sprintf("final request exceeds effective context budget: required=%d available=%d; fixed input, schemas and human answers were not truncated", used, limit)}
+		diagnostic := finalContextBudgetError(request, observation, limit, used)
+		return request, &apperr.Error{Code: "CONTEXT_BUILD_FAILED", UserMessage: diagnostic.userMessage(), Details: diagnostic.Error(), Cause: diagnostic}
 	}
 	return request, nil
 }

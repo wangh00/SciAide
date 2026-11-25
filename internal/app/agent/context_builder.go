@@ -166,6 +166,9 @@ func (b *ContextBuilder) buildWithRuntimeContext(ctx context.Context, messages [
 				fallback.AutoCompactTokens = max(1, limits.AutoCompactTokens-uplift)
 				fallback.EffectiveTokens = max(1, limits.EffectiveTokens-uplift)
 				request, selected, err := b.buildCharacterContext(ctx, messages, excludedMessageID, currentUserMessageID, definitions, calls, skillContext, runtimeSkillRouting, trustedSystemContext, dynamicState, fallback, checkpoint, persistedTurns...)
+				if err != nil {
+					err = withObservedBudgetReservation(err, limits, uplift)
+				}
 				if err == nil {
 					selected.CharacterEstimate = selected.EstimatedTokens
 					selected.EstimatedTokens += uplift
@@ -237,7 +240,7 @@ func (b *ContextBuilder) buildCharacterContext(ctx context.Context, messages []c
 		return model.ChatRequest{}, ContextBuildInfo{}, fmt.Errorf("current user message is missing from conversation context")
 	}
 	if baseTokens+latestConversationTokens > limits.EffectiveTokens {
-		return model.ChatRequest{}, ContextBuildInfo{}, fmt.Errorf("system, tool definitions and latest conversation message exceed context window")
+		return model.ChatRequest{}, ContextBuildInfo{}, fixedContextBudgetError(request, limits, baseTokens, latestConversationTokens, 0, "fixed_input", "system, tool definitions and latest conversation message exceed context window")
 	}
 
 	// Keep at least the latest user-visible message, then spend the remaining
@@ -272,7 +275,7 @@ func (b *ContextBuilder) buildCharacterContext(ctx context.Context, messages []c
 		}
 	}
 	if normalizedProtocolTokens > protocolBudget {
-		return model.ChatRequest{}, ContextBuildInfo{}, fmt.Errorf("工具协议超出有效输入预算：协议估算=%d，可用=%d，固定上下文估算=%d，当前输入估算=%d，有效输入预算=%d，自动压缩阈值=%d；以上为估算占用量，非工具调用次数，原始记录未删除", normalizedProtocolTokens, protocolBudget, baseTokens, latestConversationTokens, limits.EffectiveTokens, limits.AutoCompactTokens)
+		return model.ChatRequest{}, ContextBuildInfo{}, fixedContextBudgetError(request, limits, baseTokens, latestConversationTokens, normalizedProtocolTokens, "tool_protocol", "工具协议超出有效输入预算；协议估算非工具调用次数，原始记录未删除")
 	}
 	previewLimit := toolResultPreviewLimit(limits)
 	providerResultBudget := min(protocolBudget, previewLimit)
@@ -293,6 +296,12 @@ func (b *ContextBuilder) buildCharacterContext(ctx context.Context, messages []c
 				normalizedReserve += min(len([]rune(toolCallContext(call))), tool.MinimumContextPreviewRunes)
 			}
 		}
+	}
+	if normalizedReserve > protocolBudget {
+		// This is a normalized call/result reservation failure, even when no
+		// native turns exist. Do not pass a negative native allowance and then
+		// misclassify zero native bytes as a native-history overflow.
+		return model.ChatRequest{}, ContextBuildInfo{}, fixedContextBudgetError(request, limits, baseTokens, latestConversationTokens, normalizedReserve, "tool_protocol", "归一化工具协议及完成返回最低回放预留超出有效输入预算；原始记录未删除")
 	}
 	providerTurns, providerOwnedCalls, providerTokens, providerResultTokens, selectedProviderResults, providerCompacted, err := newestProviderTurns(persistedTurns, calls, protocolBudget-normalizedReserve, providerResultBudget)
 	var overflow *providerHistoryBudgetError
@@ -357,6 +366,13 @@ func minimumToolResultTokens(call tool.Call) int {
 // This is budget planning, not validation or permission to omit audit records.
 func minimumToolProtocolTokens(calls []tool.Call, turns []model.ProviderTurn) int {
 	total := 0
+	latest := -1
+	for i := len(calls) - 1; i >= 0; i-- {
+		if calls[i].Result != nil {
+			latest = i
+			break
+		}
+	}
 	owned := map[string]bool{}
 	for _, turn := range turns {
 		for _, item := range turn.Items {
@@ -366,14 +382,24 @@ func minimumToolProtocolTokens(calls []tool.Call, turns []model.ProviderTurn) in
 			}
 		}
 	}
-	for _, call := range calls {
+	for i, call := range calls {
 		if call.Result == nil {
 			continue
 		}
 		if !owned[call.ProviderCallID] {
 			total += estimateMessageTokens(model.Message{Role: model.RoleAssistant, ToolCalls: []model.ToolCall{{Name: call.ToolName, Arguments: call.Arguments}}})
 		}
-		total += minimumToolResultTokens(call)
+		resultTokens := minimumToolResultTokens(call)
+		if i == latest {
+			value := toolCallContext(call)
+			size := len([]rune(value))
+			// Automatic compaction targets reducible history, not a new bounded
+			// result. Use existing effective headroom before hiding that result.
+			if size <= maxToolResultContextTokens && completeToolContext(value) {
+				resultTokens = max(resultTokens, size)
+			}
+		}
+		total += resultTokens
 	}
 	return total
 }
@@ -433,7 +459,7 @@ func estimateRequestTokens(request model.ChatRequest) int {
 		used += estimateMessageTokens(message)
 	}
 	for _, definition := range request.Tools {
-		used += len([]rune(definition.Name)) + len([]rune(definition.Description)) + len([]rune(string(definition.InputSchema)))
+		used += toolDefinitionEstimate(definition)
 	}
 	for _, turn := range request.ProviderTurns {
 		for _, item := range turn.Items {
@@ -481,7 +507,9 @@ func requiredConversationMessageTokens(messages []conversation.Message, excluded
 	return 0, true
 }
 
-func newestProviderTurns(turns []model.ProviderTurn, calls []tool.Call, maxTokens, maxResultTokens int) ([]model.ProviderTurn, map[string]struct{}, int, int, int, bool, error) {
+// The same identity/order/pairing contract protects native replay and a fresh
+// completed-evidence window; budget entry order must not bypass validation.
+func validatedProviderTurnCalls(turns []model.ProviderTurn, calls []tool.Call) (map[string]tool.Call, map[string]struct{}, error) {
 	resultByCallID := make(map[string]tool.Call, len(calls))
 	for _, call := range calls {
 		if call.ProviderCallID != "" && call.Result != nil {
@@ -492,24 +520,40 @@ func newestProviderTurns(turns []model.ProviderTurn, calls []tool.Call, maxToken
 	previousTurnIndex := 0
 	for _, turn := range turns {
 		if turn.TurnIndex <= previousTurnIndex || len(turn.Items) == 0 {
-			return nil, nil, 0, 0, 0, false, fmt.Errorf("provider turns are not strictly ordered")
+			return nil, nil, fmt.Errorf("provider turns are not strictly ordered")
 		}
 		previousTurnIndex = turn.TurnIndex
 		previousOrdinal := -1
 		for _, item := range turn.Items {
 			if item.Ordinal <= previousOrdinal {
-				return nil, nil, 0, 0, 0, false, fmt.Errorf("provider turn items are not strictly ordered")
+				return nil, nil, fmt.Errorf("provider turn items are not strictly ordered")
 			}
 			previousOrdinal = item.Ordinal
 			if item.CallID != "" {
 				if _, duplicate := providerOwned[item.CallID]; duplicate {
-					return nil, nil, 0, 0, 0, false, fmt.Errorf("provider call id %q is duplicated", item.CallID)
+					return nil, nil, fmt.Errorf("provider call id %q is duplicated", item.CallID)
 				}
 				providerOwned[item.CallID] = struct{}{}
 			}
 		}
 	}
+	for _, turn := range turns {
+		for _, item := range turn.Items {
+			if item.CallID != "" {
+				if _, exists := resultByCallID[item.CallID]; !exists {
+					return nil, nil, fmt.Errorf("provider turn %d is missing tool result for %q", turn.TurnIndex, item.CallID)
+				}
+			}
+		}
+	}
+	return resultByCallID, providerOwned, nil
+}
 
+func newestProviderTurns(turns []model.ProviderTurn, calls []tool.Call, maxTokens, maxResultTokens int) ([]model.ProviderTurn, map[string]struct{}, int, int, int, bool, error) {
+	resultByCallID, providerOwned, err := validatedProviderTurnCalls(turns, calls)
+	if err != nil {
+		return nil, nil, 0, 0, 0, false, err
+	}
 	result := make([]model.ProviderTurn, len(turns))
 	callIDs := make([]string, 0)
 	contexts := make([]string, 0)
@@ -524,10 +568,7 @@ func newestProviderTurns(turns []model.ProviderTurn, calls []tool.Call, maxToken
 			if item.CallID == "" {
 				continue
 			}
-			call, exists := resultByCallID[item.CallID]
-			if !exists {
-				return nil, nil, 0, 0, 0, false, fmt.Errorf("provider turn %d is missing tool result for %q", persisted.TurnIndex, item.CallID)
-			}
+			call := resultByCallID[item.CallID]
 			callIDs = append(callIDs, item.CallID)
 			contexts = append(contexts, toolCallContext(call))
 			protected = append(protected, call.ToolName == userinput.ToolName)
@@ -629,14 +670,27 @@ func fitToolContexts(values []string, limit int) []string {
 		remaining[index] = struct{}{}
 	}
 	budget := limit
-	// A newly fetched exact task page must remain usable; spreading all space
-	// uniformly across old results can otherwise hide the same page forever.
+	minimums := make([]int, len(values))
+	minimumTotal := 0
+	for i, value := range values {
+		preview := truncateToolContext(value, tool.MinimumContextPreviewRunes)
+		if preview != "" {
+			minimums[i] = len([]rune(preview))
+		} else {
+			minimums[i] = min(256, len([]rune(value)))
+		}
+		minimumTotal += minimums[i]
+	}
+	// The latest complete result must remain usable when it fits, regardless
+	// of tool name or page format. Fairly sharing with older large results can
+	// otherwise hide each new result forever. Pairing and total budgets stay
+	// unchanged; older evidence still gets explicit bounded omission markers.
 	for i := len(values) - 1; i >= 0; i-- {
-		if _, page := fitTaskPagePreview(values[i], 256); !page && !tool.IsWorkspaceReadContext(values[i]) {
+		if _, page := fitTaskPagePreview(values[i], 256); !page && !tool.IsWorkspaceReadContext(values[i]) && !completeToolContext(values[i]) {
 			continue
 		}
 		size := len([]rune(values[i]))
-		if size <= maxToolResultContextTokens && budget >= size+256*(len(values)-1) {
+		if size <= maxToolResultContextTokens && budget >= size+minimumTotal-minimums[i] {
 			result[i] = values[i]
 			budget -= size
 			delete(remaining, i)
@@ -673,6 +727,19 @@ func fitToolContexts(values []string, limit int) []string {
 		break
 	}
 	return result
+}
+
+func completeToolContext(value string) bool {
+	var envelope map[string]json.RawMessage
+	if json.Unmarshal([]byte(value), &envelope) != nil || envelope["status"] == nil || (envelope["text"] == nil && envelope["structured"] == nil) {
+		return false
+	}
+	for _, key := range []string{"contentNotShown", "structuredNotShown", "contextPreviewTruncated"} {
+		if string(envelope[key]) == "true" {
+			return false
+		}
+	}
+	return true
 }
 
 func toolContextsDiffer(left, right []string) bool {

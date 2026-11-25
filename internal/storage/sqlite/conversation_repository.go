@@ -263,6 +263,9 @@ func (r *ConversationRepository) readMessagesWhere(ctx context.Context, conditio
 	} else if limit == 0 {
 		limit = 200
 	}
+	// formatTime stores UTC RFC3339Nano with a variable-width fraction. The
+	// terminating Z makes e.g. .1Z sort after .100000001Z as raw text. Apply
+	// the same chronological key both before LIMIT and when replaying the slice.
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT selected.id, selected.conversation_id, COALESCE(selected.run_id, ''), selected.role, selected.status, selected.created_at, selected.updated_at,
 			COALESCE(r.status, ''), COALESCE(r.requested_reasoning_level, ''), COALESCE(r.resolved_reasoning_level, ''),
@@ -275,14 +278,15 @@ func (r *ConversationRepository) readMessagesWhere(ctx context.Context, conditio
 			`+internal+`
 		FROM (
 			SELECT m.*,
+				RTRIM(m.created_at, 'Z') AS chronological_at,
 				CASE WHEN m.role = 'user' THEN 0 WHEN m.role = 'assistant' THEN 1 ELSE 2 END AS role_order
 			FROM messages m
 			WHERE `+condition+`
-			ORDER BY m.created_at DESC, role_order DESC, m.id DESC
+			ORDER BY chronological_at DESC, role_order DESC, m.id DESC
 			LIMIT ?
 		) selected
 		LEFT JOIN runs r ON r.id = selected.run_id
-		ORDER BY selected.created_at, selected.role_order, selected.id`, append(args, limit)...)
+		ORDER BY selected.chronological_at, selected.role_order, selected.id`, append(args, limit)...)
 	if err != nil {
 		return nil, fmt.Errorf("list messages: %w", err)
 	}

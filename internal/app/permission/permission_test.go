@@ -371,6 +371,42 @@ func TestRequestApprovalRejectsForgedEvaluation(t *testing.T) {
 	}
 }
 
+func TestPlanToolHistoryPreservesPolicyBoundaries(t *testing.T) {
+	for _, change := range []string{"none", "risk", "not_idempotent", "permission", "workflow", "foreign"} {
+		t.Run(change, func(t *testing.T) {
+			call := testCall(tool.RiskLow)
+			call.ToolName, call.Idempotent = "builtin.context.tool_history", true
+			request := EvaluationRequest{ProjectID: "project-1", RunID: "run-1", Call: call}
+			switch change {
+			case "risk":
+				request.Call.Risk = tool.RiskModerate
+			case "not_idempotent":
+				request.Call.Idempotent = false
+			case "permission":
+				request.Call.Permissions = []tool.PermissionRequirement{{Kind: tool.PermissionWorkspaceWrite, Resource: "."}}
+			case "workflow":
+				request.SubjectKind, request.Call.SubjectKind = tool.SubjectWorkflowRun, tool.SubjectWorkflowRun
+			case "foreign":
+				request.Call.RunID = "other"
+			}
+			result, err := NewEngine(newMemoryRepository()).EvaluateCall(context.Background(), request, conversation.PermissionPlan)
+			if change == "foreign" {
+				if err == nil {
+					t.Fatal("foreign call passed policy")
+				}
+				return
+			}
+			want := DecisionAsk
+			if change == "none" {
+				want = DecisionAllow
+			}
+			if err != nil || result.Decision != want {
+				t.Fatal("history classification widened another contract", change, result.Decision, err)
+			}
+		})
+	}
+}
+
 func TestPlanDiscoveryIsReadOnlyNotMCPExecutionApproval(t *testing.T) {
 	engine := NewEngine(newMemoryRepository())
 	for _, name := range []string{"builtin.mcp.list", "builtin.tools.search", "mcp.browser.tabs"} {

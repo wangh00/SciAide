@@ -76,7 +76,8 @@ func (r *ResearchTaskRepository) List(ctx context.Context, projectID string, lim
 		limit = 200
 	}
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT t.id,t.project_id,t.title,t.research_question,t.origin_kind,t.status,
+		SELECT t.id,t.project_id,t.title,t.research_question,t.origin_kind,
+		       CASE WHEN t.discussion_phase='exploring' AND t.status<>'archived' AND t.archived_at IS NULL THEN 'active' ELSE t.status END,
 		       t.latest_run_id,t.latest_run_status,
 		       (SELECT COUNT(*) FROM attachments a WHERE a.project_id=t.project_id AND a.scope_kind='task' AND a.research_task_id=t.id),
 		       (SELECT COUNT(*) FROM knowledge_documents d WHERE d.project_id=t.project_id AND d.scope_kind='task' AND d.research_task_id=t.id),
@@ -85,7 +86,7 @@ func (r *ResearchTaskRepository) List(ctx context.Context, projectID string, lim
 		       (SELECT COUNT(*) FROM research_bibliography_materials m WHERE m.project_id=t.project_id AND m.research_task_id=t.id),
 		       t.created_at,t.updated_at,t.archived_at
 		FROM research_tasks t WHERE t.project_id=?
-		ORDER BY CASE t.status WHEN 'active' THEN 0 ELSE 1 END,t.updated_at DESC,t.id DESC LIMIT ?`, projectID, limit)
+		ORDER BY CASE WHEN t.status='active' OR (t.discussion_phase='exploring' AND t.status<>'archived' AND t.archived_at IS NULL) THEN 0 ELSE 1 END,t.updated_at DESC,t.id DESC LIMIT ?`, projectID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list research tasks: %w", err)
 	}

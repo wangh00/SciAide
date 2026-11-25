@@ -200,8 +200,13 @@ func observedContextReserve(value chat.ContextUsageObservation) int {
 }
 
 func observedRequestTokens(request model.ChatRequest, value chat.ContextUsageObservation) int {
+	used, _ := observedRequestEstimate(request, value)
+	return used
+}
+
+func observedRequestEstimate(request model.ChatRequest, value chat.ContextUsageObservation) (int, bool) {
 	if requestHasImages(request) || !requestHasValidUTF8(request) {
-		return estimateRequestTokens(request)
+		return estimateRequestTokens(request), false
 	}
 	remaining := make(map[string]int, len(value.Components))
 	for key, count := range value.Components {
@@ -221,9 +226,9 @@ func observedRequestTokens(request model.ChatRequest, value chat.ContextUsageObs
 		used += component.bytes + 32
 	}
 	if !matched {
-		return estimateRequestTokens(request)
+		return estimateRequestTokens(request), false
 	}
-	return used
+	return used, true
 }
 
 func currentRequestBudgetTokens(request model.ChatRequest, observation *chat.ContextUsageObservation) int {

@@ -150,7 +150,7 @@ func TestResearchSkillCorrectionsReachRealQuestionAndResumeSameRun(t *testing.T)
 	if _, err := app.SkillFacade.WriteUserSkill("sleep-methods", "---\nname: sleep-methods\ndescription: 研究设计夹具\ncategory: research\n---\n# Overview\n讨论变量与设计，不虚构数据\n## Boundaries\n先明确产物，未确认路线不执行研究"); err != nil {
 		t.Fatal(err)
 	}
-	entry, err := app.WorkflowFacade.StartResearch(workflow.StartResearchCommand{ProjectID: project.ID, ResearchIdea: "睡眠与学习状态", ModelProfileID: profile.ID, ModelID: workflowAITestModelID, DiscussionOnly: true})
+	entry, err := app.WorkflowFacade.StartResearchDiscussion(workflow.StartResearchDiscussionCommand{ProjectID: project.ID, ResearchIdea: "睡眠与学习状态", ModelProfileID: profile.ID, ModelID: workflowAITestModelID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,7 +174,7 @@ func TestResearchSkillCorrectionsReachRealQuestionAndResumeSameRun(t *testing.T)
 		return wailstransport.RunSnapshot{}
 	}
 	clientID, _ := id.New()
-	run, err := app.ChatFacade.StartChat(chat.StartCommand{ConversationID: entry.Run.ConversationID, Text: "我想研究大学生睡眠和学习状态的关系，但还没想好怎么做，你帮我看看。", ClientMessageID: clientID, ModelProfileID: profile.ID, ModelID: workflowAITestModelID})
+	run, err := app.ChatFacade.StartChat(chat.StartCommand{ConversationID: entry.ConversationID, Text: "我想研究大学生睡眠和学习状态的关系，但还没想好怎么做，你帮我看看。", ClientMessageID: clientID, ModelProfileID: profile.ID, ModelID: workflowAITestModelID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,9 +206,10 @@ func TestResearchSkillCorrectionsReachRealQuestionAndResumeSameRun(t *testing.T)
 	if completed.Run.ModelTurns != 6 || requests.Load() != 6 {
 		t.Fatalf("unexpected retries/new run: %+v requests=%d", completed.Run, requests.Load())
 	}
-	current, err := app.WorkflowFacade.GetCurrentResearchTaskRun(project.ID, entry.Run.ResearchTaskID)
-	if err != nil || current.Run.ID != entry.Run.ID {
-		t.Fatal("answer adopted/prepared a route without model call", err)
+	// With a direct task the answer must not silently prepare a candidate:
+	// the task still owns no Workflow Run at all after the human reply.
+	if current, currentErr := app.WorkflowFacade.GetCurrentResearchTaskRun(project.ID, entry.ResearchTaskID); currentErr == nil || current.Run.ID != "" {
+		t.Fatal("answer adopted/prepared a route without model call", current.Run.ID, currentErr)
 	}
 	calls, err := sqlite.NewToolRepository(app.store.DB()).ListByRun(context.Background(), run.ID)
 	if err != nil || len(calls) != 5 {
@@ -221,7 +222,7 @@ func TestResearchSkillCorrectionsReachRealQuestionAndResumeSameRun(t *testing.T)
 		}
 	}
 	clientID, _ = id.New()
-	greeting, err := app.ChatFacade.StartChat(chat.StartCommand{ConversationID: entry.Run.ConversationID, Text: "你好", ClientMessageID: clientID, ModelProfileID: profile.ID, ModelID: workflowAITestModelID})
+	greeting, err := app.ChatFacade.StartChat(chat.StartCommand{ConversationID: entry.ConversationID, Text: "你好", ClientMessageID: clientID, ModelProfileID: profile.ID, ModelID: workflowAITestModelID})
 	if err != nil {
 		t.Fatal(err)
 	}

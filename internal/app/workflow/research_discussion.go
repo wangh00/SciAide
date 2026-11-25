@@ -377,6 +377,30 @@ func (s *RuntimeService) ReadResearchTask(ctx context.Context, chatRunID string,
 	if err != nil {
 		return nil, err
 	}
+	// Human exploration reads the task's current candidate, independently of
+	// which immutable planner originally owned this conversation. Formal
+	// execution and post-delivery revision retain their exact original owner.
+	if reader, ok := s.repository.(interface {
+		ResearchDiscussionForChat(context.Context, string) (ResearchDiscussionContext, bool, error)
+		GetLatestTaskRun(context.Context, string, string) (Run, error)
+	}); ok {
+		discussion, found, err := reader.ResearchDiscussionForChat(ctx, chatRunID)
+		if err != nil {
+			return nil, err
+		}
+		if found && discussion.CanExplore {
+			latest, err := reader.GetLatestTaskRun(ctx, discussion.ProjectID, discussion.ResearchTaskID)
+			if err != nil {
+				return nil, err
+			}
+			if detail, err = s.repository.GetRun(ctx, discussion.ProjectID, latest.ID); err != nil {
+				return nil, err
+			}
+			if detail.Run.ResearchTaskID != discussion.ResearchTaskID || detail.Run.WorkflowPurpose != PurposeResearchStarter {
+				return nil, fmt.Errorf("科研讨论已进入正式路线，请刷新当前任务后读取对应记录")
+			}
+		}
+	}
 	return s.readResearchTaskDetail(ctx, detail, command)
 }
 

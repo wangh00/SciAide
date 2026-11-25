@@ -28,6 +28,15 @@ import (
 )
 
 func TestResearchOpeningDiscussesThenPreparesWithoutExecuting(t *testing.T) {
+	testResearchOpeningDiscussesThenPrepares(t, false)
+}
+
+func TestResearchOpeningPreparesFromHostDiscussionWithoutModelRewrite(t *testing.T) {
+	testResearchOpeningDiscussesThenPrepares(t, true)
+}
+
+func testResearchOpeningDiscussesThenPrepares(t *testing.T, hostDiscussion bool) {
+	t.Helper()
 	var discussionRequests atomic.Int32
 	var frozenDiscussionReads atomic.Int32
 	stage := newResearchStarterOutputTestServer(t, func(output map[string]any, prompt string) {
@@ -119,6 +128,9 @@ func TestResearchOpeningDiscussesThenPreparesWithoutExecuting(t *testing.T) {
 				t.Error("discussion lost earlier constraints across runs")
 			}
 			args := `{"researchIdea":"研究手机与睡眠的关系；不要进行招募，先要可执行方案"}`
+			if hostDiscussion {
+				args = `{}`
+			}
 			delta = map[string]any{"tool_calls": []any{map[string]any{"index": 0, "id": fmt.Sprintf("prepare-%d", discussionRequests.Load()), "function": map[string]any{"name": planning, "arguments": args}}}}
 			finish = "tool_calls"
 		} else {
@@ -140,11 +152,11 @@ func TestResearchOpeningDiscussesThenPreparesWithoutExecuting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	entry, err := app.WorkflowFacade.StartResearch(workflow.StartResearchCommand{ProjectID: project.ID, ResearchIdea: "我还没想好", ModelProfileID: profile.ID, ModelID: workflowAITestModelID, DiscussionOnly: true})
+	entry, err := app.WorkflowFacade.StartResearchDiscussion(workflow.StartResearchDiscussionCommand{ProjectID: project.ID, ResearchIdea: "我还没想好", ModelProfileID: profile.ID, ModelID: workflowAITestModelID})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if entry.Run.Status != workflow.RunCompleted || len(entry.AIExecutions) != 0 || discussionRequests.Load() != 0 {
+	if discussionRequests.Load() != 0 {
 		t.Fatal("entry executed a model/stage", entry)
 	}
 	var chats int
@@ -180,29 +192,84 @@ func TestResearchOpeningDiscussesThenPreparesWithoutExecuting(t *testing.T) {
 	if err := os.WriteFile(file, []byte("Discussion-only file: inspect without adopting."), 0600); err != nil {
 		t.Fatal(err)
 	}
-	batch, err := app.AttachmentFacade.ImportConversationDocumentPaths(project.ID, entry.Run.ConversationID, []string{file})
+	batch, err := app.AttachmentFacade.ImportConversationDocumentPaths(project.ID, entry.ConversationID, []string{file})
 	if err != nil || len(batch.Attachments) != 1 {
 		t.Fatal("import", err, batch)
 	}
 	attachmentIDs = []string{batch.Attachments[0].ID}
-	for _, text := range []string{"你好", "只是解释一下，不要进行招募"} {
-		run := start(entry.Run.ConversationID, text)
+	constraints := "只是解释一下，不要进行招募"
+	if hostDiscussion {
+		constraints += "；比较分散练习与集中练习，保持目标从一周改为两天，同等总学习时长、同一材料难度，尚无真实数据。"
+	}
+	for _, text := range []string{"你好", constraints} {
+		run := start(entry.ConversationID, text)
 		if run.ModelTurns != 1 {
 			t.Fatal("ordinary discussion replanned")
 		}
 	}
-	latest, _ := app.WorkflowFacade.GetCurrentResearchTaskRun(project.ID, entry.Run.ResearchTaskID)
-	if latest.Run.ID != entry.Run.ID {
-		t.Fatal("greeting created planner")
+	if current, currentErr := app.WorkflowFacade.GetCurrentResearchTaskRun(project.ID, entry.ResearchTaskID); currentErr == nil || current.Run.ID != "" {
+		t.Fatal("greeting created planner", current.Run.ID, currentErr)
 	}
 	attachmentIDs = nil
-	start(entry.Run.ConversationID, "要可执行方案，先帮我规划")
-	latest, err = app.WorkflowFacade.GetCurrentResearchTaskRun(project.ID, entry.Run.ResearchTaskID)
+	planningRequest := "要可执行方案，先帮我规划"
+	if hostDiscussion {
+		planningRequest = "  要可执行方案，先帮我规划。\n保留刚谈的两天目标与控制条件；只准备候选，不采纳、不执行。  "
+	}
+	requestsBeforePrepare := discussionRequests.Load()
+	prepare := start(entry.ConversationID, planningRequest)
+	prepareHTTP := discussionRequests.Load() - requestsBeforePrepare
+	storedPlanningRequest := ""
+	if hostDiscussion {
+		snapshot, err := app.ChatFacade.GetRunSnapshot(prepare.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(snapshot.ToolCalls) != 1 || snapshot.ToolCalls[0].ToolName != workflow.ResearchPlanPrepareTool || snapshot.ToolCalls[0].Status != tool.CallCompleted {
+			t.Fatalf("empty-argument host handoff was rejected: %+v", snapshot.ToolCalls)
+		}
+		for _, message := range snapshot.Messages {
+			if message.ID != prepare.UserMessageID || message.Role != conversation.RoleUser {
+				continue
+			}
+			parts := []string{}
+			for _, part := range message.Parts {
+				if part.Type == "text" {
+					parts = append(parts, part.Text)
+				}
+			}
+			storedPlanningRequest = strings.Join(parts, "\n")
+		}
+		if storedPlanningRequest == "" {
+			t.Fatal("actual saved human source is missing")
+		}
+	}
+	latest, err := app.WorkflowFacade.GetCurrentResearchTaskRun(project.ID, entry.ResearchTaskID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if latest.Run.ID == entry.Run.ID || latest.Run.ResearchTaskID != entry.Run.ResearchTaskID {
+	if latest.Run.ID == "" || latest.Run.ResearchTaskID != entry.ResearchTaskID {
 		t.Fatal("not same task")
+	}
+	var frozen struct {
+		Starter workflow.ResearchStarterContext `json:"starter_context"`
+	}
+	if err := json.Unmarshal(latest.Run.Inputs, &frozen); err != nil {
+		t.Fatal(err)
+	}
+	expectedIdea := "研究手机与睡眠的关系；不要进行招募，先要可执行方案"
+	if hostDiscussion {
+		expectedIdea = storedPlanningRequest
+		requests := map[string]bool{}
+		for _, request := range frozen.Starter.UserRequests {
+			requests[request] = true
+		}
+		if prepareHTTP != 2 || prepare.ModelTurns != 2 || !requests[constraints] || !requests[storedPlanningRequest] {
+			t.Fatal("host handoff lost exact current/earlier requests or required a rewrite round", prepare.ModelTurns, frozen.Starter.UserRequests)
+		}
+		t.Logf("host handoff: front model HTTP=%d, prepare arguments={}, saved current user text copied exactly; earlier constraints retained", prepareHTTP)
+	}
+	if frozen.Starter.ResearchIdea != expectedIdea {
+		t.Fatalf("frozen idea was rewritten: got %q, want %q", frozen.Starter.ResearchIdea, expectedIdea)
 	}
 	planRun := waitForWorkflowState(t, app, project.ID, latest.Run.ID, workflow.RunCompleted, 20*time.Second)
 	if frozenDiscussionReads.Load() == 0 {
@@ -227,7 +294,7 @@ func TestResearchOpeningDiscussesThenPreparesWithoutExecuting(t *testing.T) {
 	previousProfile := profile
 	profile = small
 	if greeting := start(planRun.Run.ConversationID, "你好"); greeting.ModelTurns != 1 {
-		t.Fatal("large candidate disrupted ordinary reply")
+		t.Fatalf("large candidate disrupted ordinary reply: %+v", greeting)
 	}
 	profile = previousProfile
 	var formal int
@@ -253,11 +320,11 @@ func TestResearchOpeningDiscussesThenPreparesWithoutExecuting(t *testing.T) {
 	if err != nil || !strings.Contains(string(content), "Discussion-only file") {
 		t.Fatal("earlier private file unreadable", err, string(content))
 	}
-	other, err := app.WorkflowFacade.StartResearch(workflow.StartResearchCommand{ProjectID: project.ID, ResearchIdea: "另一个任务", ModelProfileID: profile.ID, ModelID: workflowAITestModelID, DiscussionOnly: true})
+	other, err := app.WorkflowFacade.StartResearchDiscussion(workflow.StartResearchDiscussionCommand{ProjectID: project.ID, ResearchIdea: "另一个任务", ModelProfileID: profile.ID, ModelID: workflowAITestModelID})
 	if err != nil {
 		t.Fatal(err)
 	}
-	foreign := start(other.Run.ConversationID, "你好")
+	foreign := start(other.ConversationID, "你好")
 	if _, err := app.workflow.ReadResearchTask(context.Background(), foreign.ID, workflow.ResearchTaskReadCommand{Section: "supplemental_content", AttachmentID: batch.Attachments[0].ID}); err == nil {
 		t.Fatal("cross-task private attachment access")
 	}
@@ -265,8 +332,9 @@ func TestResearchOpeningDiscussesThenPreparesWithoutExecuting(t *testing.T) {
 	repo := sqlite.NewWorkflowRuntimeRepository(app.store.DB())
 	var legacyConversations []string
 	for i := 0; i < 2; i++ {
-		run := entry.Run
+		run := planRun.Run
 		run.ID, _ = id.New()
+		run.CreationKey = ""
 		run.ResearchTaskID = ""
 		run.ConversationID, _ = id.New()
 		conv := conversation.Conversation{Title: "Legacy discussion", ReasoningLevel: "medium", ID: run.ConversationID, ProjectID: project.ID, PermissionMode: run.PermissionMode, ModelProfileID: profile.ID, ModelID: workflowAITestModelID, CreatedAt: run.CreatedAt, UpdatedAt: run.UpdatedAt}
@@ -292,7 +360,7 @@ func TestResearchOpeningDiscussesThenPreparesWithoutExecuting(t *testing.T) {
 		t.Fatal("greeting unnecessarily invalidated plan", err)
 	}
 	start(planRun.Run.ConversationID, "要可执行方案，保留不要进行招募的要求")
-	next, err := app.WorkflowFacade.GetCurrentResearchTaskRun(project.ID, entry.Run.ResearchTaskID)
+	next, err := app.WorkflowFacade.GetCurrentResearchTaskRun(project.ID, entry.ResearchTaskID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -331,6 +399,13 @@ func TestResearchOpeningDiscussesThenPreparesWithoutExecuting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if restoredDetail.ResearchDiscussion == nil || !restoredDetail.ResearchDiscussion.CanExplore || restoredDetail.ResearchDiscussion.PrimaryConversationID == entry.ConversationID {
+		t.Fatal("restored discussion capability or primary identity was not remapped", restoredDetail.ResearchDiscussion)
+	}
+	restoredOwner, ownerFound, err := sqlite.NewWorkflowRuntimeRepository(app.store.DB()).ResearchDiscussionForConversation(context.Background(), restoredDetail.ResearchDiscussion.PrimaryConversationID)
+	if err != nil || !ownerFound || restoredOwner.ProjectID != restored.Project.ID || restoredOwner.ResearchTaskID != restoredDetail.Run.ResearchTaskID {
+		t.Fatal("archive primary discussion borrowed another task/project", restoredOwner, err)
+	}
 	// Restart/archive restoration preserves the full creation-event record,
 	// with source identities remapped, without rerunning the planner.
 	var restoredHistory struct {
@@ -365,7 +440,7 @@ func TestResearchOpeningDiscussesThenPreparesWithoutExecuting(t *testing.T) {
 		t.Fatal("restored frozen discussion incomplete")
 	}
 	for _, m := range restoredHistory.History {
-		if m.ConversationID == entry.Run.ConversationID {
+		if m.ConversationID == entry.ConversationID {
 			t.Fatal("restored history borrows original conversation")
 		}
 		if m.Status != conversation.MessageComplete {
@@ -382,7 +457,7 @@ func TestResearchOpeningDiscussesThenPreparesWithoutExecuting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if adopted.Run == nil || adopted.Run.Run.ResearchTaskID != entry.Run.ResearchTaskID {
+	if adopted.Run == nil || adopted.Run.Run.ResearchTaskID != entry.ResearchTaskID {
 		t.Fatal("adoption split the task")
 	}
 	completed := waitForWorkflowState(t, app, project.ID, adopted.Run.Run.ID, workflow.RunCompleted, 20*time.Second)
@@ -390,7 +465,7 @@ func TestResearchOpeningDiscussesThenPreparesWithoutExecuting(t *testing.T) {
 	if record := readDiscussion(finalChat.ID); !strings.Contains(record, "不要进行招募") || !strings.Contains(record, "要可执行方案") {
 		t.Fatal("adoption lost frozen discussion")
 	}
-	page, err := app.WorkflowFacade.ResearchTimeline(workflow.ResearchTimelineQuery{ProjectID: project.ID, TaskID: entry.Run.ResearchTaskID, Limit: 100})
+	page, err := app.WorkflowFacade.ResearchTimeline(workflow.ResearchTimelineQuery{ProjectID: project.ID, TaskID: entry.ResearchTaskID, Limit: 100})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -161,6 +161,7 @@ type RunDetail struct {
 	ReviewRevisionTargets        []ResearchRevisionTarget        `json:"reviewRevisionTargets,omitempty"`
 	ReviewRevisionRecommendation *ResearchRevisionRecommendation `json:"reviewRevisionRecommendation,omitempty"`
 	DiscussionRevisionAvailable  bool                            `json:"discussionRevisionAvailable"`
+	ResearchDiscussion           *ResearchDiscussionContext      `json:"researchDiscussion,omitempty"`
 	EvidenceReselection          *ResearchEvidenceReselection    `json:"evidenceReselection,omitempty"`
 	Recovery                     *RecoveryAction                 `json:"recovery"`
 }
@@ -355,7 +356,6 @@ type ResearchGuidance struct {
 
 type StartCommand struct {
 	PlanningDiscussion []conversation.Message `json:"-"`
-	DiscussionOnly     bool                   `json:"-"`
 	ProjectID          string                 `json:"projectId"`
 	// ResearchTaskID binds this execution to a durable research task. It is
 	// supplied explicitly by every current research entry point.
@@ -700,15 +700,6 @@ func (s *RuntimeService) Start(ctx context.Context, command StartCommand) (RunDe
 	if err != nil {
 		return RunDetail{}, err
 	}
-	if command.DiscussionOnly {
-		if !isResearchDiscussion(run) || run.WorkflowPurpose != PurposeResearchStarter || len(steps) != 1 || steps[0].NodeKind != NodeHumanConfirmation {
-			return RunDetail{}, fmt.Errorf("invalid research discussion entry")
-		}
-		// No stage or model is executed. This completed entry is only the durable
-		// task/conversation owner; the UI presents it as discussion, not delivery.
-		run.Status, run.CompletedAt = RunCompleted, &now
-		steps[0].Status, steps[0].CompletedAt = StepCompleted, &now
-	}
 	if err := s.repository.CreateResearchRun(ctx, run, steps, event, researchConversation); err != nil {
 		if command.CreationKey != "" {
 			if existing, found, findErr := s.repository.GetRunByCreationKey(ctx, command.ProjectID, command.CreationKey); findErr == nil && found {
@@ -722,9 +713,7 @@ func (s *RuntimeService) Start(ctx context.Context, command StartCommand) (RunDe
 	}
 	result, err := s.repository.GetRun(ctx, command.ProjectID, runID)
 	if err == nil {
-		if !command.DiscussionOnly {
-			s.launch(runID)
-		}
+		s.launch(runID)
 		result = s.projectDetail(ctx, result)
 	}
 	return result, err
@@ -803,6 +792,12 @@ func (s *RuntimeService) GetRunByConversation(ctx context.Context, conversationI
 }
 
 func (s *RuntimeService) projectDetail(ctx context.Context, result RunDetail) RunDetail {
+	result.ResearchDiscussion = nil // A failed identity read must never reuse an old capability.
+	if reader, ok := s.repository.(researchDiscussionContextReader); ok {
+		if discussion, found, err := reader.ResearchDiscussionForConversation(ctx, result.Run.ConversationID); err == nil && found {
+			result.ResearchDiscussion = &discussion
+		}
+	}
 	if approvals, err := s.permissions.ListPendingForSubject(ctx, tool.SubjectWorkflowRun, result.Run.ID); err == nil {
 		result.PendingApprovals = permission.SafeApprovals(approvals)
 	} else {

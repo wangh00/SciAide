@@ -5,8 +5,10 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -236,7 +238,7 @@ func (s *Server) ServeHTTP(out http.ResponseWriter, r *http.Request) {
 			s.options.OnError(callErr)
 		}
 		out.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(out).Encode(map[string]any{"error": apperr.Public(callErr), "result": value})
+		_ = json.NewEncoder(out).Encode(map[string]any{"error": publicError(callErr), "result": value})
 		return
 	}
 	_ = json.NewEncoder(out).Encode(value)
@@ -262,6 +264,18 @@ func decode(r *http.Request, target any) error {
 // or arbitrary request contents; provider failures retain the normal redaction.
 func invalidRequest(message string) error {
 	return &apperr.Error{Code: "DEBUG_REQUEST_INVALID", UserMessage: message}
+}
+
+// Workflow and runtime handlers return plain errors whose text the production
+// Wails transport renders directly to users. The local debug client needs that
+// same concrete message instead of the generic internal-error mask, so only
+// typed apperr errors keep their public projection.
+func publicError(err error) apperr.PublicError {
+	var appErr *apperr.Error
+	if errors.As(err, &appErr) {
+		return apperr.Public(err)
+	}
+	return apperr.PublicError{Code: "DEBUG_OPERATION_FAILED", Message: err.Error()}
 }
 
 func (s *Server) dispatch(r *http.Request) (any, error) {
@@ -381,7 +395,7 @@ func (s *Server) createCase(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	entry, err := s.services.Workflow.StartResearch(workflow.StartResearchCommand{ProjectID: p.ID, ResearchIdea: cmd.Prompt, ModelProfileID: cmd.ModelProfileID, ModelID: cmd.ModelID, DiscussionOnly: true, PermissionMode: cmd.PermissionMode})
+	entry, err := s.services.Workflow.StartResearchDiscussion(workflow.StartResearchDiscussionCommand{ProjectID: p.ID, ResearchIdea: cmd.Prompt, ModelProfileID: cmd.ModelProfileID, ModelID: cmd.ModelID, PermissionMode: cmd.PermissionMode})
 	if err != nil {
 		return nil, err
 	}
@@ -389,7 +403,7 @@ func (s *Server) createCase(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	c := Case{RequestID: cmd.RequestID, RequestSHA256: fingerprint, ID: caseID, Name: cmd.Name, ProjectID: p.ID, TaskID: entry.Run.ResearchTaskID, ConversationID: entry.Run.ConversationID, StarterRunID: entry.Run.ID, ModelProfileID: cmd.ModelProfileID, ModelID: cmd.ModelID, InitialClientMessageID: clientID}
+	c := Case{RequestID: cmd.RequestID, RequestSHA256: fingerprint, ID: caseID, Name: cmd.Name, ProjectID: p.ID, TaskID: entry.ResearchTaskID, ConversationID: entry.ConversationID, ModelProfileID: cmd.ModelProfileID, ModelID: cmd.ModelID, InitialClientMessageID: clientID}
 	s.cases[c.ID] = c
 	data, _ := json.Marshal(s.cases)
 	if err = atomicJSON(filepath.Join(s.workspace.Root, "cases.json"), data); err != nil {
@@ -482,7 +496,17 @@ func discussionConversation(c Case, current workflow.RunDetail) string {
 func (s *Server) snapshot(c Case) (any, error) {
 	current, err := s.services.Workflow.GetCurrentResearchTaskRun(c.ProjectID, c.TaskID)
 	if err != nil {
-		return nil, err
+		// A direct research task owns its discussion before any candidate run
+		// exists. Synthesize a terminal placeholder carrying the case identity:
+		// it must not fabricate a planner plan, an executed route, or a run.
+		if !errors.Is(err, sql.ErrNoRows) {
+			return nil, err
+		}
+		owner, ownerErr := s.services.Conversations.GetConversation(c.ConversationID)
+		if ownerErr != nil {
+			return nil, ownerErr
+		}
+		current = workflow.RunDetail{Run: workflow.Run{ID: c.StarterRunID, ProjectID: c.ProjectID, ResearchTaskID: c.TaskID, ConversationID: c.ConversationID, WorkflowPurpose: workflow.PurposeResearchStarter, Status: workflow.RunCompleted, PermissionMode: owner.PermissionMode}}
 	}
 	discussionID := discussionConversation(c, current)
 	messages, err := s.services.Conversations.ListMessages(discussionID)
@@ -519,7 +543,7 @@ func (s *Server) snapshot(c Case) (any, error) {
 		}
 	}
 	var plan *workflow.ResearchStarterPlan
-	if current.Run.Status == workflow.RunCompleted && current.Run.WorkflowPurpose == workflow.PurposeResearchStarter {
+	if current.Run.ID != "" && current.Run.Status == workflow.RunCompleted && current.Run.WorkflowPurpose == workflow.PurposeResearchStarter {
 		if p, e := s.services.Workflow.GetResearchStarterPlan(c.ProjectID, current.Run.ID); e == nil {
 			plan = &p
 		}

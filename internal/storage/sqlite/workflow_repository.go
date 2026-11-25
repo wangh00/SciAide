@@ -16,6 +16,19 @@ type WorkflowRepository struct{ db *sql.DB }
 func NewWorkflowRepository(db *sql.DB) *WorkflowRepository { return &WorkflowRepository{db: db} }
 
 func (r *WorkflowRepository) SaveVersion(ctx context.Context, record workflow.SaveRecord) (workflow.SaveResult, error) {
+	return r.saveVersion(ctx, record, nil)
+}
+
+// The event must bind the actual saved version, which may reuse an existing
+// plan. The builder is pure and must not read from the database in this transaction.
+func (r *WorkflowRepository) SavePendingRouteVersion(ctx context.Context, record workflow.SaveRecord, eventFor func(workflow.SaveResult) (workflow.RuntimeEvent, error)) (workflow.SaveResult, error) {
+	if record.Workflow.Purpose != workflow.PurposeUserPlan || eventFor == nil {
+		return workflow.SaveResult{}, fmt.Errorf("invalid pending route adoption record")
+	}
+	return r.saveVersion(ctx, record, eventFor)
+}
+
+func (r *WorkflowRepository) saveVersion(ctx context.Context, record workflow.SaveRecord, pendingAdoption func(workflow.SaveResult) (workflow.RuntimeEvent, error)) (workflow.SaveResult, error) {
 	value, version := record.Workflow, record.Version
 	value.ID, value.ProjectID = strings.TrimSpace(value.ID), strings.TrimSpace(value.ProjectID)
 	if value.Purpose == "" {
@@ -43,6 +56,27 @@ func (r *WorkflowRepository) SaveVersion(ctx context.Context, record workflow.Sa
 		return workflow.SaveResult{}, fmt.Errorf("begin Workflow version: %w", err)
 	}
 	defer tx.Rollback()
+	finish := func(saved workflow.SaveResult) (workflow.SaveResult, error) {
+		if pendingAdoption != nil {
+			event, err := pendingAdoption(saved)
+			if err != nil {
+				return workflow.SaveResult{}, err
+			}
+			if event.Type != "research.route_adopted" || event.WorkflowRunID == "" {
+				return workflow.SaveResult{}, fmt.Errorf("invalid pending route adoption event")
+			}
+			if err := validateResearchDiscussionAdoption(ctx, tx, event.WorkflowRunID); err != nil {
+				return workflow.SaveResult{}, err
+			}
+			if err := appendWorkflowEvent(ctx, tx, &event); err != nil {
+				return workflow.SaveResult{}, fmt.Errorf("record adopted research route: %w", err)
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			return workflow.SaveResult{}, fmt.Errorf("commit Workflow version: %w", err)
+		}
+		return saved, nil
+	}
 
 	var persisted workflow.Workflow
 	var createdAt, updatedAt string
@@ -76,10 +110,7 @@ func (r *WorkflowRepository) SaveVersion(ctx context.Context, record workflow.Sa
 				return workflow.SaveResult{}, loadErr
 			}
 			if current.CompilationSHA256 == version.CompilationSHA256 {
-				if err := tx.Commit(); err != nil {
-					return workflow.SaveResult{}, err
-				}
-				return workflow.SaveResult{Workflow: existing, Version: current, Created: false}, nil
+				return finish(workflow.SaveResult{Workflow: existing, Version: current, Created: false})
 			}
 			persisted = existing
 			record.ExpectedCurrentVersionID = existing.CurrentVersionID
@@ -128,10 +159,7 @@ func (r *WorkflowRepository) SaveVersion(ctx context.Context, record workflow.Sa
 			if loadErr != nil {
 				return workflow.SaveResult{}, loadErr
 			}
-			if err := tx.Commit(); err != nil {
-				return workflow.SaveResult{}, err
-			}
-			return workflow.SaveResult{Workflow: persisted, Version: current, Created: false}, nil
+			return finish(workflow.SaveResult{Workflow: persisted, Version: current, Created: false})
 		}
 	}
 
@@ -172,10 +200,7 @@ func (r *WorkflowRepository) SaveVersion(ctx context.Context, record workflow.Sa
 	persisted.CurrentDefinitionSHA256 = version.DefinitionSHA256
 	persisted.Version = version.Version
 	persisted.UpdatedAt = value.UpdatedAt.UTC()
-	if err := tx.Commit(); err != nil {
-		return workflow.SaveResult{}, fmt.Errorf("commit Workflow version: %w", err)
-	}
-	return workflow.SaveResult{Workflow: persisted, Version: version, Created: created}, nil
+	return finish(workflow.SaveResult{Workflow: persisted, Version: version, Created: created})
 }
 
 func (r *WorkflowRepository) List(ctx context.Context, projectID string) ([]workflow.Workflow, error) {

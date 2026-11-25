@@ -177,14 +177,37 @@ func TestResearchStarterAdoptedDataRouteKeepsOneTaskIdentity(t *testing.T) {
 	if err != nil || plan.Clarification != nil && plan.Clarification.NeedsUserInput {
 		t.Fatalf("complete research intent must reach route selection without upload questions: %#v, %v", plan, err)
 	}
-	adopted, err := application.WorkflowFacade.AdoptResearchRoute(workflow.AdoptResearchRouteCommand{
+	command := workflow.AdoptResearchRouteCommand{
 		ProjectID: projectValue.ID, RunID: completed.Run.ID, RouteID: "tabular_analysis_when_ready",
-	})
+	}
+	// A failure after saving the plan must roll back both writes. In particular,
+	// the list must not publish an unbound plan that cannot reopen this data form.
+	if _, err := application.store.DB().Exec(`CREATE TRIGGER fixture_pending_adoption_failure BEFORE INSERT ON workflow_events
+		WHEN NEW.event_type='research.route_adopted' BEGIN SELECT RAISE(ABORT,'fixture adoption event write failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := application.WorkflowFacade.AdoptResearchRoute(command); err == nil || !strings.Contains(err.Error(), "fixture adoption event write failure") {
+		t.Fatalf("expected the adoption event write failure, got %v", err)
+	}
+	if pending, err := application.WorkflowFacade.GetPendingResearchAdoption(projectValue.ID, completed.Run.ID); err != nil || pending != nil {
+		t.Fatalf("failed adoption published a pending checkpoint: %+v %v", pending, err)
+	}
+	if plans, err := application.WorkflowFacade.List(projectValue.ID); err != nil || len(plans) != 0 {
+		t.Fatalf("failed adoption published %d unbound plans: %v", len(plans), err)
+	}
+	if _, err := application.store.DB().Exec(`DROP TRIGGER fixture_pending_adoption_failure`); err != nil {
+		t.Fatal(err)
+	}
+	adopted, err := application.WorkflowFacade.AdoptResearchRoute(command)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if adopted.AvailableNow || adopted.Run != nil || adopted.StarterRunID != completed.Run.ID || adopted.RouteID != "tabular_analysis_when_ready" {
 		t.Fatalf("data route adoption = %#v", adopted)
+	}
+	repeatedAdoption, err := application.WorkflowFacade.AdoptResearchRoute(command)
+	if err != nil || repeatedAdoption.Workflow.Workflow.ID != adopted.Workflow.Workflow.ID || repeatedAdoption.Workflow.Version.ID != adopted.Workflow.Version.ID {
+		t.Fatalf("retry must keep the adopted plan/version: %+v %v", repeatedAdoption, err)
 	}
 	for i := 0; i < 2; i++ {
 		recovered, err := application.WorkflowFacade.GetPendingResearchAdoption(projectValue.ID, completed.Run.ID)

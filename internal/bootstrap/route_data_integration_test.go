@@ -88,8 +88,17 @@ result`
 			}
 		}
 		if prepare == "" {
-			r.Body = io.NopCloser(bytes.NewReader(body))
-			stage.Config.Handler.ServeHTTP(w, r)
+			if _, schemaErr := workflowAITestSchema(workflowAITestPrompt(body)); schemaErr == nil {
+				// Only a frozen workflow stage prompt carries an output schema.
+				r.Body = io.NopCloser(bytes.NewReader(body))
+				stage.Config.Handler.ServeHTTP(w, r)
+				return
+			}
+			// Post-adoption ordinary chats (no planning tool, no stage schema)
+			// only need a bounded reply; they are not stage prompts.
+			w.Header().Set("Content-Type", "text/event-stream")
+			chunk, _ := json.Marshal(map[string]any{"choices": []any{map[string]any{"delta": map[string]any{"content": "已记录该材料供比较；不自动采用，不执行。"}, "finish_reason": "stop"}}})
+			fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", chunk)
 			return
 		}
 		last, index := "", 0
@@ -137,7 +146,7 @@ result`
 	if _, err := app.PythonFacade.BindProjectEnvironment(project.ID, filepath.Join(env, "Scripts", "python.exe")); err != nil {
 		t.Fatal(err)
 	}
-	entry, err := app.WorkflowFacade.StartResearch(workflow.StartResearchCommand{ProjectID: project.ID, ResearchIdea: "帮我看看这份数据", ModelProfileID: profile.ID, ModelID: workflowAITestModelID, DiscussionOnly: true})
+	entry, err := app.WorkflowFacade.StartResearchDiscussion(workflow.StartResearchDiscussionCommand{ProjectID: project.ID, ResearchIdea: "帮我看看这份数据", ModelProfileID: profile.ID, ModelID: workflowAITestModelID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +157,7 @@ result`
 			t.Fatal(err)
 		}
 	}
-	batch, err := app.AttachmentFacade.ImportConversationDocumentPaths(project.ID, entry.Run.ConversationID, []string{paths["wine.csv"], paths["notes.md"], paths["unsent.csv"]})
+	batch, err := app.AttachmentFacade.ImportConversationDocumentPaths(project.ID, entry.ConversationID, []string{paths["wine.csv"], paths["notes.md"], paths["unsent.csv"]})
 	if err != nil || len(batch.Attachments) != 3 {
 		t.Fatal(batch, err)
 	}
@@ -179,17 +188,17 @@ result`
 		t.Fatal("chat timeout")
 		return ""
 	}
-	chatTurn(entry.Run.ConversationID, "帮我看看葡萄酒数据", []string{ids["wine.csv"], ids["notes.md"]})
-	otherTask, err := app.WorkflowFacade.StartResearch(workflow.StartResearchCommand{ProjectID: project.ID, ResearchIdea: "无关研究", ModelProfileID: profile.ID, ModelID: workflowAITestModelID, DiscussionOnly: true})
+	chatTurn(entry.ConversationID, "帮我看看葡萄酒数据", []string{ids["wine.csv"], ids["notes.md"]})
+	otherTask, err := app.WorkflowFacade.StartResearchDiscussion(workflow.StartResearchDiscussionCommand{ProjectID: project.ID, ResearchIdea: "无关研究", ModelProfileID: profile.ID, ModelID: workflowAITestModelID})
 	if err != nil {
 		t.Fatal(err)
 	}
-	otherBatch, err := app.AttachmentFacade.ImportConversationDocumentPaths(project.ID, otherTask.Run.ConversationID, []string{paths["unsent.csv"]})
+	otherBatch, err := app.AttachmentFacade.ImportConversationDocumentPaths(project.ID, otherTask.ConversationID, []string{paths["unsent.csv"]})
 	if err != nil || len(otherBatch.Attachments) != 1 {
 		t.Fatal(otherBatch, err)
 	}
-	chatTurn(otherTask.Run.ConversationID, "这是另一课题的数据", []string{otherBatch.Attachments[0].ID})
-	chatTurn(entry.Run.ConversationID, "可以设计路线了", nil)
+	chatTurn(otherTask.ConversationID, "这是另一课题的数据", []string{otherBatch.Attachments[0].ID})
+	chatTurn(entry.ConversationID, "可以设计路线了", nil)
 	var plannerID string
 	if err := app.store.DB().QueryRow(`SELECT id FROM workflow_runs WHERE project_id=? AND creation_key LIKE 'research-discussion-plan:%' ORDER BY created_at DESC,id DESC LIMIT 1`, project.ID).Scan(&plannerID); err != nil {
 		t.Fatal(err)
@@ -199,7 +208,7 @@ result`
 		t.Fatal("offered draft before route adoption")
 	}
 	adopted, err := app.WorkflowFacade.AdoptResearchRoute(workflow.AdoptResearchRouteCommand{ProjectID: project.ID, RunID: planned.Run.ID, RouteID: "empirical_report"})
-	if err != nil || adopted.Run != nil || adopted.ResearchTaskID != entry.Run.ResearchTaskID {
+	if err != nil || adopted.Run != nil || adopted.ResearchTaskID != entry.ResearchTaskID {
 		t.Fatal("route auto executed/split task", adopted, err)
 	}
 	var inputsBefore map[string]any
@@ -262,7 +271,7 @@ result`
 	if beforeAttachments != afterAttachments || beforeRuns != afterRuns {
 		t.Fatal("draft staged extra attachments/runs")
 	}
-	contents, err := os.ReadFile(filepath.Join(project.WorkspacePath, ".sciaide", "tasks", entry.Run.ResearchTaskID, filepath.FromSlash(staged.RelativePath)))
+	contents, err := os.ReadFile(filepath.Join(project.WorkspacePath, ".sciaide", "tasks", entry.ResearchTaskID, filepath.FromSlash(staged.RelativePath)))
 	if err != nil || string(contents) != "x,y\n1,2\n3,4\n" {
 		t.Fatal("wrong data bytes", string(contents), err)
 	}
@@ -303,7 +312,7 @@ result`
 	}
 	inputsBefore["input_paths"] = []string{staged.RelativePath}
 	formal, err := app.WorkflowFacade.StartAdoptedResearchRoute(workflow.StartAdoptedResearchRouteCommand{ProjectID: project.ID, StarterRunID: plannerID, RouteID: adopted.RouteID, WorkflowID: adopted.Workflow.Workflow.ID, WorkflowVersionID: adopted.Workflow.Version.ID, Inputs: mustBootstrapJSON(t, inputsBefore), ModelProfileID: profile.ID, ModelID: workflowAITestModelID})
-	if err != nil || formal.Run.ResearchTaskID != entry.Run.ResearchTaskID {
+	if err != nil || formal.Run.ResearchTaskID != entry.ResearchTaskID {
 		t.Fatal("confirmed route start failed", formal, err)
 	}
 	if _, err := app.WorkflowFacade.StageResearchRouteData(command); err == nil {

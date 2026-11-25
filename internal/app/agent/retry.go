@@ -349,6 +349,11 @@ func (l *Loop) openModelStreamAttempt(ctx context.Context, run chat.Run, chatMod
 }
 
 func (l *Loop) runModelStream(ctx context.Context, run chat.Run, chatModel model.ChatModel, request model.ChatRequest, receive streamReceiver, activityPhase ...string) (streamAttempt, modelcap.ReasoningLevel, error) {
+	kind := "conversation"
+	if len(activityPhase) > 0 && activityPhase[0] == "compaction" {
+		kind = "compaction"
+	}
+	ctx = model.WithRequestTraceContext(ctx, model.RequestTraceContext{RunID: run.ID, TurnIndex: run.ModelTurns, Kind: kind, WindowTokens: run.ContextWindowTokens, EffectiveTokens: run.ContextBudgetTokens, AutoCompactTokens: run.AutoCompactTokenLimit, WindowSource: run.ContextWindowSource})
 	streamRetries := 0
 	reconnecting := false
 	retried := false

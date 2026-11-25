@@ -77,6 +77,8 @@ go run ./scripts/research-debug --root $root `
   - 响应头先按实际 key / 自定义请求头值及受支持的编码形式脱敏，再屏蔽 URL、常见认证 / 秘密标记、压平空白，最多 256 个 Unicode 字符；每个字段合并前的值总计若超过 1024 字节则整字段省略并标记，避免先截断凭据而失配。多值以逗号合并，记录是规范化、脱敏的诊断元数据，**不是原始响应头字节**。不收集 Cookie / Set-Cookie、Authorization、Location 或其他非允许字段；Retry-After 保留有界脱敏文本，不按宿主重试等待上限改写，不意味着已实施新的冷却 / 重试策略。
   - 请求 ID、Server / Via 等仍可能带有私有信息，无法保证过滤未知或变形秘密；须在已确认限制访问的隔离根使用，按敏感资料保管、不提交 / 分享，也不放入公开快照 / 错误。捕获器不设置 Windows ACL，`0600` 不是 Windows 私有保证或 OS 沙箱。同步写盘可能增加延迟；不改代理、超时、请求格式、错误分类或恢复预算。观察器在创建共享客户端前配置，覆盖原初始讨论、回答恢复和 Workflow；正常 EXE 默认不开启，也不开放新的监听接口。
 - `--capture-stream-faults` 是另一个默认关闭的**敏感故障取证**开关，仅在 Responses 事件 JSON 解码失败时记录该事件与同一响应的原始 SSE 尾段，用来区分服务原始字节与客户端分帧。每份最多 32 KiB、文件 `stream-fault-capture.jsonl` 总共最多 1 MiB；开启时每个响应暂存有界 128 KiB 尾窗，成功流不落盘。已知凭据先尽力脱敏再截取，未命中字节不规范化，保留原始摘要与脱敏/截断标记，Base64 仅为字节保真而非加密。**尾段可能包含正常科研输出或服务回显的私密内容**，不提交、不分享、不放入公开错误/快照；不保证过滤部分或未知变形。必须使用已确认限制访问的独立目录：捕获器不设置 Windows ACL，也不收紧已有文件权限；`0600` 仅是新建文件的 POSIX mode，不构成操作系统级私有保证或沙箱。该开关不改变解析、重试预算或科学校验；生产 EXE 不配置观察器。
+- `--capture-request-snapshots` 默认关闭，与以上三个捕获开关独立；覆盖内置 Chat / Responses / Anthropic 的最终请求结构，契约见[架构](ARCHITECTURE.md#最终请求安全结构观察)。仅在原传输返回后检查可重放副本，写独立 `http-request-snapshots.jsonl`，追加总上限 1 MiB；每个请求副本最多 4 MiB，输入和工具清单各最多128项，保留总数/省略数，最多64个比较基线。重开追加旧文件但生成新 session/HMAC 密钥，不恢复旧比较基线，不追录历史请求。
+  - 不保存正文或密钥仍须按私有证据保管：字节数、指纹及本地 Run ID 也可能暴露关联；使用预先限制访问的独立根，不提交/分享。捕获器不设置 Windows ACL 或收紧旧文件，`0600` 不是 Windows 私有保证。同步检查/写盘有开销，不承诺零延迟；未返回、进程崩溃、超出捕获上限或写入故障可能缺行，文件行数/sequence **不能代替持久 Gate、费用或 token 账本**。不能靠结构快照独自判定科研语义、服务为何超时或真实喂料是否合理。
 - 源配置的变更在下一次读取/模型解析时反映；一个正在执行的多轮 Run 可能继续用已解析的客户端。需要立即停止调试外发时使用 stop/Ctrl-C，不把禁用源 profile 当成即时中断。
 
 ### 输入案例与读取状态
@@ -177,6 +179,30 @@ python scripts/research-debug-client.py --root $root limits `
 
 报告分别列出代码完成、受控回归、真实模型、原生 UI/导出与科学验收，未执行的项明确标注。既有任务是否能用新行为取决于冻结契约；不得为测试便利静默升级、迁移或重建正式任务。
 
+### 契约驱动的代表性验收
+
+以下为2026-11-16修订后的分层验收安排。**V0已新增并执行受控应用夹具，V1–V6按本轮涉及范围选用，不代表全部已执行**；本说明不构成启动服务、恢复任务或真实模型调用授权。按[目标架构](ARCHITECTURE.md#目标架构草案科研任务主导agent驱动)和[开发依赖](RESEARCH_DEVELOPMENT.md#五后续开发顺序)检验[K1–K4](ARCHITECTURE.md#四项稳定契约)，不把旧接口/状态机/阶段顺序的全部夹具通过当作新架构准入条件。原测试只有仍表达目标契约时才采用；改写结构断言前须明确对应的目标行为与替代验证，不能顺带删除权限/来源/生命周期负例。
+
+| 场景 | 用户可观察的通过与反例 | 已有入口 / 还需覆盖 |
+| --- | --- | --- |
+| V0：目标架构最小竖切 | 同一研究任务不先生成Workflow即可读取两份合成摘要、记录有依据的观察，因反证调整下一行动并输出有限对照；没有必跑阶段或兼容规划运行。取消/预算停止不丢原记录 | 已新增`research_task_vertical_slice_test.go`并覆盖直接创建、两份反证摘要、依据回读、取消和重开；预算停止与其他协议另列。脚本化模型不证明科研判断正确 |
+| V1：不完整想法与候选在途 | 可直接解释、按需探索；候选准备/失败不夺走原讨论。反例：简单问答强制规划、并行重复规划或未采用即执行 | 原助手/讨论身份夹具，另以`research_direct_planning_integration_test.go`覆盖无旧Run首候选、未知材料拒绝后继续规划及主会话回读；真实适时提问/选工具另验 |
+| V2：保存→导航→有界读取 | 沿任务读取原记录/版本，标明省略及实际返回范围；长题名/摘要、中文转义、稀疏继承和窄窗先单变量再组合。反例：拿目录当全文、将历史视图当新来源回执、跨任务回读或超窗仍发送 | 原`research_task_discovery_integration_test.go`、`research_working_basis_integration_test.go`、`tool_history_integration_test.go`及容量矩阵只作边界参考，不要求新结构沿用原reader |
+| V3：来源缺失、未读与相反证据 | 缺原快照、无法访问、尚未读取和原文不支持分别说明；模型可缩小结论或停止。反例：从私有结果猜补可见快照、按相似文字补关系、将条目复核当整项科学通过 | 原来源/工作记录/预算负例及`BibliographyService`核对；新增跨对象场景先受控。模型是否正确理解反证须真实与科学验收，不由fake结论证明 |
+| V4：计划内应变与重大变更 | 授权内读取/查询及局部工作计划调整不增加审批表单；超出目标/方法/材料/交付授权走明确变更与确认。反例：旧确认套用新方案、上传自动采纳、篡改已执行输入 | 原`research_discussion_integration_test.go`、`revision_materials_integration_test.go`、`discussion_revision_ownership_integration_test.go`作边界参考；新目标能力须按新控制接口验证，不能只跑旧返修证明应变 |
+| V5：仅改一处与正确否决 | 保留原稿、未改字段/数据/代码和无关上游身份，明确实际失效范围；再次审查仍能否决不受支持的新稿 | `report_revision_efficiency_integration_test.go`、`revision_write_isolation_test.go`及原审查闭环；窄正文/字符选择等真实覆盖仍须单列 |
+| V6：取消、迟到与重开 | 待答/读取/规划等选定边界能停止；晚到结果不发布，重开无自动HTTP/副作用。反例：取消当坏JSON、恢复退还已用限额、终态复活 | `recovery_control_integration_test.go`、原问题/预算/关闭回归及前端迟到测试；不是所有并发、多进程和原生连点已验收 |
+
+上表已有Go文件分别位于`internal/bootstrap/`，`revision_write_isolation_test.go`位于`internal/app/workflow/`；它们不是新架构已具备的完整测试套件。V0已有目标行为入口，但仍须按变更补反例；V1–V6按涉及责任选择行为与负例，不能只适配旧夹具而遗漏目标。新能力可直接用目标行为证明缺失，不要求先制造旧系统Bug，也不因此推定所有旧代码都需重写。
+
+执行与停止顺序：
+
+1. **限定基线与反例**：保留当前源码/输入/原记录，预期包括成功与正确拒绝。受控数据只用合成材料、临时SQLite及本机HTTP，不继承正式资料或真实连接。
+2. **共同边界组合**：在相同有效预算下变化一个因素，再做必要组合；三协议验证归一化/原生配对、最终请求和生命周期，不盲跑全笛卡尔积。原[容量矩阵](#科研容量矩阵)只作规模参考；合法大输入、完整真人回答、已执行/已承诺输入身份及缺原快照的保护性停止须按目标机制验证，不强求新结构产生相同旧阶段状态。
+3. **界面分别取证**：特点/活动/对象状态用实际目标组件和完整App浏览器夹具验证，页面刷新/展开不能触发模型；原生桌面、导出版式和长时资源各自专项，浏览器绿灯不替代它们。
+4. **真实与科学另验**：仅在当前有效授权内使用隔离案例；记录模型HTTP、读取/重复读取、各环节耗时及实际返回usage，缺usage不捏造。比较须控制目标、材料和有效预算，正确拒绝与技术失败分开；不以fake科学意见、单次通过或更宽窗口证明科研正确性/总费用改善。
+5. **有界替换而非兼容优先**：一轮限定一条完整竖切、责任和替换范围；既可补共同机制，也可按目标替换不合适的旧控制器/对象。重复技术阻塞先停回最早不确定处；旧窗口不复活，不加次数/重试或长提示兜底。新设计/未实现能力与已定位Bug分开，不用新夹具通过宣称旧事件已修复。
+
 ## 检查与测试
 
 常规完整检查入口：
@@ -214,15 +240,129 @@ go test ./... -timeout 20m
 | --- | --- |
 | 文献来源 | `internal/bootstrap/literature_sources_integration_test.go` 覆盖实际 ERIC 适配器→受控 HTTP→临时 SQLite→索引及重开保全。`SCIAIDE_LITERATURE_SOURCE_LIVE=1` 才启用 `TestERICLivePublicSourceToIndexedPDF` 和 `TestCORELiveAnonymousMetadataContract`：访问公开 API/PDF、新临时根，0 模型请求；默认 skip，不等于科研审查或原生界面验收 |
 | 科研交接与返修 | `internal/bootstrap/research_handoff_integration_test.go`、`source_sharing_integration_test.go`；受控 HTTP、临时 SQLite，不证明模型科学质量 |
+| 科研助手探索与工作记录 | `internal/bootstrap/research_assistant_integration_test.go`、`research_state_question_batch_integration_test.go`、`research_working_state_budget_test.go`；原 Application 的本机模型/来源 HTTP 与临时 SQLite，覆盖不建路线的探索、问题续答提议绑定、稀疏更新、分页读取、小窗口及重开保全。`go test ./internal/bootstrap -run '^(TestResearchAssistant|TestResearchStateQuestionBatchNeverUsesFutureAnswer|TestResearchOpeningDiscussesThenPreparesWithoutExecuting)' -count=1 -timeout 3m`；非真实模型或科学验收 |
+| 工作记录字段来源 | `go test -p 1 ./internal/bootstrap -run '^TestResearchWorkingFieldSourcesReadAfterSparsePatchAndRestart$' -count=1 -timeout 3m -v`；32k原 Application/Chat/Executor、本机模型HTTP与临时SQLite，稀疏补丁后关闭重开，按原state reader完整分页核对来源JSON/不改记录/不建路线，包含实际checkpoint而非真实模型。`go test -p 1 ./internal/storage/sqlite -run '^TestResearchWorkingStateFieldSources' -count=1 -v` 覆盖129版本、显式同值/清空、未发布/失败、缺失/非法/重复参数、跨任务、归档重映射和重开；workflow定向来源测试验证原权限、Unicode分页和歧义参数拒绝。前端`researchWorkingSources.test.mjs`与下述浏览器入口验按需加载、换版/任务隔离及读取失败。来源只证明最后显式提交，不证明证据支持或用户批准 |
+| 任务文献发现闭环 | `go test ./internal/bootstrap -run '^TestResearchTaskDiscoveryPersistsPagesWithoutRoute$' -count=1 -timeout 2m -v`；原 Chat/Executor/Discovery/SQLite，受控模型和 ERIC HTTP，核对真实32k配置、保存/分页/重开/目录回读、无重复来源请求、普通聊天和原路线隔离。`internal/tools/builtin/research_discovery_test.go`、`internal/storage/sqlite/research_task_discovery_test.go` 验证页面预算、所有权与缺失/旧快照拒绝；`internal/app/agent/latest_tool_context_test.go` 验证新结果与旧省略标记、软阈值/有效窗口组合。默认不读真实模型配置或正式材料 |
+| 保存题名/摘要字段 | `go test ./internal/bootstrap -run '^TestResearchDiscoveryReadsOriginalFieldAfterRestart$' -count=1 -timeout 2m -v`；受控 ERIC 先后返回同一记录的不同摘要，关闭重开后由真实 Chat/Executor 读取旧查询原摘要，核对完整内容/哈希/偏移及无新增取源。`internal/app/research/task_discovery_field_test.go` 覆盖空值、单字符、400和50000字符、Unicode/转义/字节上限；复用上述工具与 SQLite 测试验证逻辑模式、重复键及查询/候选归属。只证明规范化快照的机械保全，非真实模型、论文全文或科学验收 |
+| 讨论身份与规划解耦 | `go test ./internal/bootstrap -run '^TestResearchDiscussionContinuesDuringPlannerAndAfterFailure$' -count=1 -timeout 2m -v`；在本机 HTTP 栅栏保持真实规划在途，人类切换实际32k窗口后读已存目录/写记录，核对规划模型冻结、重复规划拒绝、失败/重开后续谈及重新准备、当前候选回读和采纳关闭。`go test ./internal/storage/sqlite -run '^TestResearchDiscussion' -count=1` 覆盖真人时序、完成栅栏、旧105迁移、来源缺失与阶段关闭；workflow 的 `TestResearchDiscussionCurrentInputsAreReadOnDemandNotPinned` 验证需求/资料元数据不常驻系统且按页原样重组；前端 `researchDiscussion.test.mjs` 验证宿主能力及首选会话。临时根/受控模型，无真实模型或正式任务 |
+| 候选规划直接交接 | `go test ./internal/bootstrap -run '^(TestResearchOpeningPreparesFromHostDiscussionWithoutModelRewrite|TestResearchDiscussionHostHandoffKeepsPlanningGuards)$' -count=1 -timeout 2m -v`；原 Facade/Chat/Executor、本机 HTTP 和临时 SQLite，让模型实际调用 `research_plan_prepare({})`，核对当前已存用户文本逐字复制、旧约束通过冻结讨论回读、仅候选无正式执行，以及32k在途讨论、重复规划拒绝、失败/重开后再准备和采纳关闭。`internal/app/workflow/research_plan_idea_test.go` 与 `internal/tools/builtin/research_opening_test.go` 验证身份/角色/终态/空值/Unicode上限、显式旧入口及模型不得指定宿主身份。只证明受控直接交接可行，不证明真实模型会选此路径或调用/耗时已下降；契约仅见[架构](ARCHITECTURE.md#科研讨论身份与可选规划) |
 | 继承模型与同例返修 | `internal/bootstrap/inherited_debug_workflow_integration_test.go`、`internal/bootstrap/testdata/inherited-debug-numeric.json`；只继承临时合成来源库，覆盖先准备 / 漏准备后同例 Retry、重开不自动执行与计数保留、过期审查哈希拒绝、当前原生数值选段及局部返修 / 原门禁。已列入 `scripts/test-research-foundation.ps1`，不读取真实模型配置或任务，不构成真实模型验收 |
 | 自然语言选源交接 | `internal/bootstrap/research_source_scope_handoff_integration_test.go`；从原研究请求、候选路线采纳、v6 结构化 `sourceIds` 到原文献工具 / 连接器的本机 HTTP 与临时 SQLite 回归，固定 ERIC / OpenAlex / Crossref 三源并拒绝越界来源。由 `scripts/test-research-source-scope.ps1` 独立运行；脚本模型是受控夹具，不构成真实模型语义理解或科研质量验收 |
 | 独立审查提交 | `internal/bootstrap/review_local_repair_integration_test.go`；三协议、局部/完整修正、错误哈希与伪摘录、预算耗尽、重启及显式 Retry；完整科学拒绝仍保留。`SCIAIDE_REVIEW_BASIS_REPLAY` 可指向含冻结输入/Schema/三轮提交的只读本地捕获目录，启用 workflow/agent 可选事故回放；没有捕获时 skip 不算通过 |
+| 审查共享视图与共同预算 | `internal/app/workflow/stage_input_shared_pages_test.go` 经原授权 reader 逐页还原 JSON，核对旧页、当前引用、Unicode/数字及坏引用拒绝。`SCIAIDE_REVIEW_JOINT_REPLAY` 可显式指向含 `captured-review-contract.json`、`citation-decision.json` 的只读捕获目录，然后运行 `go test -p 1 ./internal/app/agent -run '^TestCapturedSharedReviewAdmitsCompleteJointInterface$' -count=1 -v`；先校验原输入/提示哈希，以真实材料和明确合成的固定开销联合装配完整目录/提交接口，验证隐藏来源仍需实际可见页；无模型、无 Application 或数据库写入，不恢复旧执行。默认 skip 不算已回放。`go test -p 1 ./internal/bootstrap -run '^(TestSharedInventoryHTTPPagingPreservesFrozenSourceAcrossRestart|TestWideReviewNavigationHTTPRestartRepairAndGateAcrossProtocols)$' -count=1 -timeout 5m -v` 另验三协议本机 HTTP/临时 SQLite、原读取、重启/显式重试与门禁；不代表真实模型或专家科学验收 |
 | 上下文与长报告 | `internal/app/agent/*budget_test.go`、`context_*test.go`；部分捕获回放需显式提供本地材料，不能把 skip 计作通过 |
 | 前端行为 | `frontend/src/*.test.mjs`；`npm test` 不涵盖全部浏览器/原生交互 |
 | 浏览器交互 | `scripts/test-*.cjs`；`test-user-input.cjs` 覆盖完整 App 问答/科研时间线和终态旧快照，`test-question-stop.cjs` 覆盖延迟取消/回答、跨会话及终态清卡。按脚本声明准备 Playwright/浏览器及生产 CSS；均为受控 Facade，不等于原生或真实后端 |
+| 科研助手浏览器 | `node scripts/test-research-assistant.cjs`；完整 App / 受控 Facade / 本机 Edge，覆盖 1280–760px 面板、已保存发现、规划中/失败后的原人类输入框、候选/正式执行标签、任务归属、迟到响应、错误、普通聊天隔离和活动任务取消；工作记录来源另验展开才读取、同版复用、换版关闭旧详情、来源错误及明确重试。需已有 `esbuild`、Playwright 和 Edge；`SCIAIDE_PLAYWRIGHT_PATH` 可指向本机已安装的 Playwright Node 包，可先用 Codex workspace dependencies 工具定位预装包，不盲目新增依赖。`SCIAIDE_UI_FIXTURE_OUTPUT` 可指定独立诊断输出目录，默认在忽略的 `.tmp/diagnostics/20261112-research-assistant-first-slice/ui/`；零模型、非原生桌面验收。脚本存在或前轮通过不代表本轮已执行，环境缺失须单独记录 |
+| 科研助手原生夹具 | `internal/bootstrap/research_native_interaction_fixture_test.go`；显式空隔离根、本机受控 HTTP，默认 skip；准备和停止步骤见下节，不以 seed/server 测试通过代替 EXE 交互验收 |
 | 原生故障恢复 | `scripts/test-native-ui-recovery.ps1`；包含故障注入，只能用于隔离实例，不能对正式任务随手运行 |
 | 原生退出诊断 | `scripts/test-native-lifecycle.ps1`；无控制台重定向的隔离启动、正常关闭、受控结束宿主及重开，不配置模型；不能据此宣称真实闪退已复现 |
 | 真实科研验收 | `examples/research-cases/README.md`；真实模型、真实桌面与独立结果核对分别记录 |
+
+### 共同预算诊断与首轮准入
+
+```powershell
+go test -p 1 ./internal/app/agent ./internal/tools/builtin -run '^(TestContextBudget|TestBuiltin|TestMCPDiscovery|TestOptionalBuiltinSearch)' -count=1 -v
+go test -p 1 ./internal/bootstrap -run '^TestColdAdmission' -count=1 -timeout 3m -v
+```
+
+以上均为原宿主路径的受控验证，不读真实模型或正式资料。先保留24k无usage短答拒绝及无分项的红例，再核对同窗1次HTTP可开口、辅助定义→原目录→按原路径精确只读的5次HTTP闭环、超长输入仍0次HTTP拒绝。Agent夹具另验同批猜调用、失败/伪造/过期回执、当前范围、原审批与恢复；原MCP、协议完整性、真人回答、冻结提交和下述25组矩阵须组合验证，不把某工具搜索成功当权限或科学批准。
+
+错误的`budget`部分记录`phase`、`estimation_source`、原有效预算/剩余、定义与输入字符足迹及回放/usage预留，仅计量不保存正文。`component_unit`明确：字符足迹不能与已上报usage预留直接相加；`current_input_isolated=false`表示未单独定位当前输入，最终请求只标用户消息合计。此处的本地定义候选构建不发HTTP，不是模型重试；真正需要辅助能力时的发现轮次另计，不能隐去该成本。机制只见[架构](ARCHITECTURE.md#4-上下文是有界投影不是数据库删减)，结果只见[开发进度](PROGRESS.md#共同预算诊断与首轮准入2026-11-15)。
+
+### 恢复审计来源身份
+
+```powershell
+go test -p 1 ./internal/app/agent -run '^TestRecoveryDiagnostics' -count=1 -v
+go test -p 1 ./internal/bootstrap -run '^TestRecoveryControlAuditPersistsAcrossCancelShutdownAndRestart$' -count=2 -timeout 3m -v
+```
+
+只用原三协议客户端/Chat/Application、本机HTTP和新临时SQLite，不读正式资料或调用真实模型。先复现主动关闭落成`INTERNAL_ERROR / invalid_syntax`的红例，再验取消与宿主deadline来源、包装错误、主类型错误优先、缺载荷不解析`Error()`及同样文本来自真实坏SSE时仍拒绝。三协议分别验显式取消/宿主关闭→连接断开→原终态和审计持久保存→重开不重发，每组仅一次模型HTTP、零工具执行，不把fixture成功算作真实模型或原生UI验收。契约只见[恢复分层](ARCHITECTURE.md#3-三种模型协议与恢复分层)，已执行结果见[开发进度](PROGRESS.md#恢复审计的宿主控制身份修复2026-11-16)。
+
+### 最终请求结构回归
+
+```powershell
+go test -p 1 ./internal/model ./internal/modelutil ./internal/model/gateway ./scripts/research-debug -run '^TestRequestSnapshot' -count=2 -timeout 2m -v
+go test -p 1 ./internal/bootstrap -run '^Test(RequestSnapshotsFollowOriginalToolLoopAndSQLiteRestart|RecoveryControlAuditPersistsAcrossCancelShutdownAndRestart)$' -count=2 -timeout 3m -v
+```
+
+仅本机受控 HTTP/临时 SQLite：三协议分别比较开关前后的完整接收字节、原流和请求数，核对真实工具循环、usage关联与重开；另验参数协商/重定向、Gate拒绝、超限/坏副本、隐私标记、自定义取消原因和响应头超时。运行器默认关闭及显式开启都不授权模型外发；测试中不继承真实配置。与原容量/恢复组合验证，不把夹具绿例、字节增长或收到响应头当真实模型/科学验收；结果只见[开发进度](PROGRESS.md#最终请求安全结构快照2026-11-16)。
+
+### 完成工具历史窗口与回读
+
+```powershell
+go test -p 1 ./internal/app/contextmemory ./internal/tools/builtin ./internal/app/agent ./internal/app/permission -run '^Test(ToolLedger|ToolHistory|PlanToolHistory)' -count=2 -timeout 2m -v
+go test -p 1 ./internal/bootstrap -run '^TestToolHistoryOriginalApplicationWindowAndRereadRestart$' -count=2 -timeout 3m -v
+```
+
+这是正常原执行链的受限候选，不需调试开关或新数据库；触发/排除规则只见[架构](ARCHITECTURE.md#当前run完成工具历史的有界回读)。仅通过候选后开放 `builtin.context.tool_history`；复制宿主引用的 `throughCallId` 与 `ledgerSha256`，`view=index` 每页最多4条，`view=arguments/model_context` 对目录中的 `callId` 每页最多1000个Unicode字符，按 `nextOffset` 至-1，不把字符数当token。只读当前Run已存视图，不能传入其他Run/项目或任意文件路径；旧缺失/不支持的快照不猜补，也不提供私有完整Result。页在签发续页前核对原模型结果封装完整性，转义超限明确拒绝，不用截断头尾冒充完整页。
+
+测试只用本机HTTP/临时SQLite，无真实模型或外部MCP。三协议分别验近期窗口→旧目录→已存参数两页精确回读，以及窗口启用后的取消/关闭/重开；Chat Completions用两批各32次已完成配置查询触发较早的归一化预算入口，两原生协议保留原32次夹具。较小Chat样本旧代码本已能走完成证据入口，不能把它当新增修复收益。单元验归一化/原生32/96次调用、最低返回预留、完整真人回答、缺快照、前缀/范围变化、Unicode/转义、Plan边界及混合原生历史的顺序/配对反例。未设置 `SCIAIDE_TOOL_LEDGER_BASELINE` 时始终测当前实现；该变量只供配合保全原文件的Go overlay复现旧应用基线，不是产品开关、恢复案例或真实模型授权。与原准入、容量、独立审查和权限回归组合；真实回读选择、总成本及科学效果须另验，结果只见[开发进度](PROGRESS.md#归一化工具协议预算入口统一2026-11-16)。
+
+### 科研容量矩阵
+
+仅测试原 Application/Chat/Executor 和临时 SQLite，以本机假模型/ERIC HTTP探测窗口、材料与连续调用的组合边界；不读取真实模型配置或正式材料，不恢复旧例，不构成真实模型调用授权：
+
+```powershell
+$env:GOPROXY='off'; $env:GOTOOLCHAIN='local'; $env:GOMAXPROCS='2'
+$env:SCIAIDE_CAPACITY_OUTPUT=Join-Path $PWD ('.tmp/diagnostics/capacity-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+go test -p 1 ./internal/bootstrap -run '^TestResearchCapacity(RepresentativeScaleAndNarrowWindows|OrdinaryConversationControls|SyntheticUsageControls)$' -count=1 -timeout 8m -v
+```
+
+- 18个科研样本覆盖16k–36k最短讨论、3/12/48候选、128/1600/6400字符连续摘要、50000字符来源的规范化首尾抽读、28k/30k/32k显式关联和长当前输入；3个普通对话控制使用同窗口、同输入、同Full Access，区分共同入口与科研绑定。每组独立临时根，不扩大原窗口；固定本机HTTP上限96、checkpoint上限4，单组等待终态最多45秒。它是确定性模型响应夹具，不是第二执行器或模型语义/科学评判。
+- `outcome=selected_work_completed`只表示选定夹具动作完成；`capacity_stopped`是已保留材料的容量停止，不能写成科研通过。32k短答/小索引/短摘要/关联为最低操作控制，较大样本是容量调查，不预先假定都能完成；夹具异常或最新结果被误当可见会使测试失败。
+- 主矩阵不返回usage；另外4组仅改变此变量，在本机响应上报`max(1,完整HTTP的Unicode字符数/4)`合成prompt usage，覆盖原计量锚点路径及首轮尚无回执的边界。合成比例不是tokenizer、真实usage或收费证据，不得移入生产估算；这4组与21个无usage样本分开记账，已准入的合成正控须完成同一所选工作，不能以仍然停止冒充正控通过。
+- JSON记录实际本机HTTP/取源/checkpoint、请求字节及角色/定义字符数、`phaseAtStop`、已存索引/字段结果与模型实际已见数量、provider上报input tokens（Run累计，非单次请求窗口）和预算，`case.syntheticUsage`明确标识合成锚点。无回执时宿主走保守字符估算；HTTP字节、Unicode字符、估算单位、合成或真实token不能混算。来源规范化上限与上下文分页另列，不把大来源首尾两页当完整核读。
+- 重放时核对原用户文本、查询快照、任务冻结输入/编译、无重复页/取源、无额外材料/路线/执行，特别保留“工具结果已保存但尚未递交模型”的停止边界。`SCIAIDE_CAPACITY_OUTPUT`只输出这些合成材料的计量JSON，不保存完整HTTP正文或聊天；每次选独立目录以保留原测量。需要临时诊断时先备份并核对哈希，完成后立即原样撤回，不留观测性生产改动。
+
+当前结果及未修边界只见[开发进度](PROGRESS.md#科研材料规模与窄窗容量2026-11-15)。新增测试或目录不需要重新编译EXE；只有生产代码改变时才按[唯一构建入口](#唯一生产构建入口)重新核验，不能把旧EXE当新机制已交付。
+
+### 工作记录显式摘要关联
+
+受控验证仍走原 Application / Chat / Executor / SQLite，不新建科研执行器，不读正式材料或真实模型配置：
+
+```powershell
+go test -p 1 ./internal/app/workflow ./internal/storage/sqlite -run '^(TestResearchWorkingBasis|TestResearchWorkingAbstract|TestResearchWorkingStateExplicitBasis)' -count=2 -v
+go test -p 1 ./internal/bootstrap -run '^TestResearchWorkingBasisLinksActualReadReceiptsAndReopensAfterRestart$' -count=1 -timeout 2m -v
+```
+
+前者以独立临时库重复核对关联上下限、失败/跨任务/晚到/截断/快照与实际回执不匹配的拒绝、稀疏继承/显式重交、原页回看和归档身份定点映射；后者在原32k配置实际读两页→关联→只改下一步→关闭重开→只读回看，记录本机假模型请求数与完整请求字节，不能作为真实模型效率或科学通过。还须组合上表的规划在途/直接交接、小窗口和来源回读回归，不能只验新增功能。前端 `researchWorkingBasis.test.mjs` 与下述完整App离线浏览器入口覆盖按需读取、同版复用、换版/任务隔离、纯文本及错误重试；不是Wails原生后端或真实科研验收。机械契约只见[架构](ARCHITECTURE.md#科研讨论的工作记录)，实际结果只见[开发进度](PROGRESS.md#工作记录显式摘要关联2026-11-15)。
+
+### 科研助手原生交互夹具
+
+只用于已授权的隔离交互验证，不继承正式模型/材料，不调用真实模型。`SCIAIDE_NATIVE_INTERACTION_FIXTURE` 必须为本仓库 `.tmp` 下的新目录，不能复用已有 `home`。在一个终端设置其绝对路径后运行：
+
+```powershell
+go test ./internal/bootstrap -run '^TestResearchNativeInteractionFixture$' -count=1 -timeout 25m -v
+```
+
+夹具通过原 Facade 建合成项目、任务和普通聊天，**关闭 Application 后**才写 `ready.json`；另一个终端核对其中隔离 `home`，仅为该 EXE 进程设置 `SCIAIDE_HOME`，启动当前 `build/bin/SciAide.exe`。夹具余下进程只提供 loopback 假模型及固定控制，不执行科研；第24次本机请求或20分钟触发停止，也可显式 `/fixture/finish` 提前结束。此阈值不是并发在途请求的严格物理 HTTP 预算，不用于真实模型。不要对正式实例注入此模型或使用其控制地址。
+
+若验收停止，在隔离科研讨论发送“验收：停止当前模型回复”，看到合成回复开头后使用原生窗口的“停止生成”。核对不出现“不应出现的迟到正文”、不会自动重发，并可继续发送新消息；关闭重开后仍是原终态。夹具 `/fixture/status` 的 `stopRequests` / `stoppedReplies` 分别指请求进入持有分支和本机 HTTP 断连；它们不能证明客户端已收到迟到帧。已解码帧在取消后返回的竞态由 Agent 定向流测试验证。
+
+应由真实 EXE 发送“更新工作记录”“准备候选”，在规划等待期间继续原人类讨论；用 `/fixture/release-planner` 释放受控失败后，再发送含“失败后”的记录更新，核对版本及普通聊天隔离。假模型仅按上述固定输入返回预置响应，不是通用科研助手；此夹具不创建正式执行路线，正式执行锁定另由浏览器/后端组合覆盖。未经过的动作不补记通过。结束时先关闭且完整路径确认测试实例，再调用 `/fixture/finish`，保存 `model-summary.json`，确认无遗留进程/监听。Go 测试的 pass 只代表 seed/server 生命周期；默认 skip、原生启动或自动化截图/输入通道失败均不代表原生交互通过。
+
+### 直接科研讨论停止浏览器回归
+
+从项目根运行；须有最新的生产前端 `frontend/dist`（可在 `frontend` 下执行 `npm run build`，或由唯一发布脚本生成）。接受可解析的 `playwright`，也可通过 `SCIAIDE_PLAYWRIGHT_PATH` 指向单独准备的 Playwright / Playwright Core；默认使用已安装的 Edge，可通过 `SCIAIDE_BROWSER_EXE` 指向已安装的 Chromium 浏览器。不要求向项目依赖清单添加浏览器驱动。
+
+```powershell
+node scripts/test-research-direct-stop.cjs
+```
+
+夹具只加载生产前端资源，内存替代 Wails Facade，不使用 SQLite、正式会话或模型。创建直接任务后发送、停止；在暂缓返回终态快照时送达更晚的文本和完成事件，确认不会改写已停止的回复。重开原任务不自动发消息，显式续问仍属于同一任务且不创建 Workflow。此夹具不替代上节原生点击、真实模型或科学验收；实测结果见[开发进度](PROGRESS.md#直接科研停止后的前端事件保护2026-11-22)。
+
+#### 问题卡与候选切换
+
+沿用上节生产前端与浏览器配置，从项目根运行：
+
+```powershell
+node scripts/test-research-direct-handoff.cjs
+```
+
+注入采纳状态与候选方案读取失败，核对待答和提交仍归原讨论；候选已保存但读取失败时重开，验证原问题卡和失败提示，恢复读后才显示未采纳候选。分别阻塞左侧历史、右侧任务列表和会话归属查询，在同项目切到另一任务才释放旧响应，核对当前会话和面板都不会切回；归属读取失败不同于确认无科研绑定。各场景检查没有额外发送、采纳或启动，不替代原生或真实模型验收。
+
+待补数据采纳的故障回归见 `internal/bootstrap/research_starter_integration_test.go` 的 `TestResearchStarterAdoptedDataRouteKeepsOneTaskIdentity`。在临时 SQLite 阻断采纳事件写入，核对方案列表与待数据入口都未新增；解除故障后重新采纳、读取和启动仍绑定原任务和同一冻结版本。仅本机受控 HTTP。结果见[开发进度](PROGRESS.md#科研任务切换与采纳一致性2026-11-24)。
 
 ### 同请求上限文献对照
 

@@ -208,6 +208,12 @@ func (e *Engine) evaluate(ctx context.Context, request EvaluationRequest, fullAc
 		return Evaluation{Decision: DecisionAllow, Reason: "用户已为该任务启用 Full Access。", Missing: []tool.PermissionRequirement{}, GrantIDs: []string{}}, nil
 	}
 	if approveWholeCall {
+		// This builtin can only reread an integrity-bound prefix of previously
+		// exposed tool history in the SAME chat run; it cannot execute the source
+		// tool, fetch a resource, expose private Result fields or read another run.
+		if request.SubjectKind == tool.SubjectChatRun && request.Call.ToolName == "builtin.context.tool_history" && request.Call.Risk == tool.RiskLow && request.Call.Idempotent && len(request.Call.Permissions) == 0 {
+			return Evaluation{Decision: DecisionAllow, Reason: "只读回看当前对话Run已保存的模型可见工具历史，不重新执行原操作。", Missing: []tool.PermissionRequirement{}, GrantIDs: []string{}}, nil
+		}
 		// Host-owned, credential-free metadata reads do not execute MCP tools.
 		if (request.Call.ToolName == "builtin.mcp.list" || request.Call.ToolName == "builtin.tools.search") && request.Call.Risk == tool.RiskLow && request.Call.Idempotent && len(request.Call.Permissions) == 0 {
 			return Evaluation{Decision: DecisionAllow, Reason: "只读查询 MCP 状态或发现工具，不执行 MCP 操作。", Missing: []tool.PermissionRequirement{}, GrantIDs: []string{}}, nil

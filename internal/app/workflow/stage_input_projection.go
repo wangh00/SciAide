@@ -27,6 +27,23 @@ type stagePageCandidate struct {
 // prove the prompt/input identity and existing task-read permission. Offsets
 // and hashes ALWAYS address the original saved input, never a prior projection.
 func ProjectResearchStagePrompt(prompt string, input json.RawMessage, maxCharacters int, executionProtocol ...string) (string, bool) {
+	view, changed := projectResearchStagePrompt(prompt, input, maxCharacters, executionProtocol...)
+	if maxCharacters <= 0 || utf8.RuneCountInString(view) <= maxCharacters {
+		return view, changed
+	}
+	// Retire ALL sharing aliases atomically, never page a still-live target.
+	// Keep the best strictly smaller valid view, as the ordinary projector
+	// does. The caller still checks the COMPLETE final request against budget.
+	if alternative, ok := unshareResearchSourceForPaging(prompt, input); ok {
+		alternative, _ = projectResearchStagePrompt(alternative, input, maxCharacters, executionProtocol...)
+		if len(alternative) < len(view) && utf8.RuneCountInString(alternative) < utf8.RuneCountInString(view) {
+			return alternative, true
+		}
+	}
+	return view, changed
+}
+
+func projectResearchStagePrompt(prompt string, input json.RawMessage, maxCharacters int, executionProtocol ...string) (string, bool) {
 	start := strings.LastIndex(prompt, "<stage_input>\n")
 	end := strings.LastIndex(prompt, "\n</stage_input>")
 	if start < 0 || end < start || maxCharacters <= 0 || !json.Valid(input) {
@@ -50,14 +67,8 @@ func ProjectResearchStagePrompt(prompt string, input json.RawMessage, maxCharact
 	}
 	prefix = stripStageEncoding(prefix, "stage_input_pages")
 	suffix := prompt[end:]
-	pagesInstruction := stageInputPagesInstruction
+	pagesInstruction := researchStagePagesInstruction(executionProtocol...)
 	reportOnlyRevision := strings.Contains(prompt, reportOnlyRevisionProjectionMarker)
-	if len(executionProtocol) == 1 && IsReviewSourceProtocol(executionProtocol[0]) {
-		pagesInstruction = reviewSourceHostInstruction(pagesInstruction)
-	}
-	if len(executionProtocol) == 1 && IsCitationSourceProtocol(executionProtocol[0]) {
-		pagesInstruction = strings.Replace(pagesInstruction, "Use original pointers and literal original quotes for review basis, NEVER the navigation as scientific evidence.", "Use the current citation quoteSelection contract for completion, NEVER the navigation as scientific evidence; the host copies only your explicitly selected original source range.", 1)
-	}
 	budget := maxCharacters - utf8.RuneCountInString(prefix+suffix+pagesInstruction+"<stage_input>\n")
 	if budget < 1024 {
 		return prompt, false
@@ -152,17 +163,7 @@ func ProjectResearchStagePrompt(prompt string, input json.RawMessage, maxCharact
 		if !ok || input[a] != c.value[0] {
 			continue
 		}
-		pointer := ""
-		for _, key := range c.path {
-			pointer += "/" + strings.ReplaceAll(strings.ReplaceAll(key, "~", "~0"), "/", "~1")
-		}
-		link := map[string]any{"$read": map[string]any{"section": "stage_input", "offset": utf8.RuneCount(input[:a]), "endOffset": utf8.RuneCount(input[:b]), "pointer": pointer, "sha256": fullHash}, "characters": utf8.RuneCount(input[a:b])}
-		if c.value[0] == '[' {
-			var rows []json.RawMessage
-			_ = json.Unmarshal(input[a:b], &rows)
-			link["items"] = len(rows)
-		}
-		encoded := mustJSON(link)
+		encoded := stageInputPageLink(input, c.path, a, b, fullHash)
 		if len(encoded)+128 >= len(current) {
 			continue
 		}
@@ -181,6 +182,31 @@ func ProjectResearchStagePrompt(prompt string, input json.RawMessage, maxCharact
 		return prompt, false
 	}
 	return result, true
+}
+
+func researchStagePagesInstruction(executionProtocol ...string) string {
+	instruction := stageInputPagesInstruction
+	if len(executionProtocol) == 1 && IsReviewSourceProtocol(executionProtocol[0]) {
+		instruction = reviewSourceHostInstruction(instruction)
+	}
+	if len(executionProtocol) == 1 && IsCitationSourceProtocol(executionProtocol[0]) {
+		instruction = strings.Replace(instruction, "Use original pointers and literal original quotes for review basis, NEVER the navigation as scientific evidence.", "Use the current citation quoteSelection contract for completion, NEVER the navigation as scientific evidence; the host copies only your explicitly selected original source range.", 1)
+	}
+	return instruction
+}
+
+func stageInputPageLink(input json.RawMessage, path []string, a, b int, fullHash string) json.RawMessage {
+	pointer := ""
+	for _, key := range path {
+		pointer += "/" + strings.ReplaceAll(strings.ReplaceAll(key, "~", "~0"), "/", "~1")
+	}
+	link := map[string]any{"$read": map[string]any{"section": "stage_input", "offset": utf8.RuneCount(input[:a]), "endOffset": utf8.RuneCount(input[:b]), "pointer": pointer, "sha256": fullHash}, "characters": utf8.RuneCount(input[a:b])}
+	if input[a] == '[' {
+		var rows []json.RawMessage
+		_ = json.Unmarshal(input[a:b], &rows)
+		link["items"] = len(rows)
+	}
+	return mustJSON(link)
 }
 
 // Preserve the literal targets promised by the existing one-hop sharing

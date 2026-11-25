@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/wangh00/SciAide/internal/app/workflow"
@@ -24,6 +25,17 @@ func (r *WorkflowRuntimeRepository) ResolveResearchDiscussion(ctx context.Contex
 		JOIN workflow_runs wr ON wr.id=wc.workflow_run_id
 		WHERE cr.id=? AND NOT EXISTS(SELECT 1 FROM workflow_ai_chat_runs WHERE chat_run_id=cr.id)`, chatRunID).
 		Scan(&binding.ProjectID, &binding.WorkflowRunID, &binding.UserMessageID)
+	if errors.Is(err, sql.ErrNoRows) {
+		// A direct task's primary conversation has no workflow_conversations row.
+		// Once a real candidate exists, bind reads to its latest immutable Run;
+		// before that point no task.read capability is offered.
+		err = r.db.QueryRowContext(ctx, `SELECT wr.project_id,wr.id,(SELECT id FROM messages WHERE conversation_id=cr.conversation_id AND role='user' ORDER BY rowid DESC LIMIT 1)
+			FROM runs cr JOIN research_exploration_context d ON d.conversation_id=cr.conversation_id AND d.source_workflow_run_id=''
+			JOIN workflow_runs wr ON wr.project_id=d.project_id AND wr.research_task_id=d.research_task_id AND wr.workflow_purpose='research_starter'
+			WHERE cr.id=? AND NOT EXISTS(SELECT 1 FROM workflow_ai_chat_runs WHERE chat_run_id=cr.id)
+			ORDER BY wr.created_at DESC,wr.id DESC LIMIT 1`, chatRunID).
+			Scan(&binding.ProjectID, &binding.WorkflowRunID, &binding.UserMessageID)
+	}
 	if err != nil {
 		return binding, fmt.Errorf("该工具仅用于当前科研任务的用户对话")
 	}

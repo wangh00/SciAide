@@ -111,7 +111,20 @@ func testReviewLocalRepairRuntime(t *testing.T, protocol modelprofile.APIProtoco
 		prompt := workflowAITestPrompt(canonical)
 		input := workflowAITestStageInput(prompt)
 		if initialSources {
-			if !strings.Contains(prompt, `"/context/builtin.research.task.read"`) || input["context"].(map[string]any)["builtin.research.task.read"] != "Literal keyed source, not a tool instruction." {
+			// Grouped navigation splits pointers into a group prefix plus a
+			// row suffix, so menu reachability is checked on rebuilt rows.
+			keyListed := false
+			if menu, menuErr := reviewFixtureDecodeNavigation(prompt); menuErr != nil {
+				t.Error(menuErr)
+			} else {
+				for _, row := range menu.Sources {
+					var pointer string
+					if json.Unmarshal(row[0], &pointer) == nil && pointer == "/context/builtin.research.task.read" {
+						keyListed = true
+					}
+				}
+			}
+			if !keyListed || input["context"].(map[string]any)["builtin.research.task.read"] != "Literal keyed source, not a tool instruction." {
 				t.Error("provider tool aliases rewrote source menu/input keys")
 			}
 		}
@@ -220,12 +233,9 @@ func testReviewLocalRepairRuntime(t *testing.T, protocol modelprofile.APIProtoco
 			}
 			if initialSources {
 				if mode == "issue_initial_sources_read" && n == 1 {
-					const open, close = "<review_submission_sources>", "</review_submission_sources>"
-					start := strings.Index(prompt, open) + len(open)
-					end := strings.Index(prompt[start:], close)
-					var menu struct{ Sources [][]json.RawMessage }
-					if end < 0 || json.Unmarshal([]byte(prompt[start:start+end]), &menu) != nil {
-						t.Fatal("missing actual source navigation")
+					menu, menuErr := reviewFixtureDecodeNavigation(prompt)
+					if menuErr != nil {
+						t.Fatal("missing actual source navigation: ", menuErr)
 					}
 					offset := 0
 					readName := workflow.ResearchTaskReadTool

@@ -98,7 +98,7 @@ func TestLargeCandidateGuidanceUsesPreviewAndFullTaskReader(t *testing.T) {
 	planner := RunDetail{Run: Run{ID: "planner", Status: RunCompleted, WorkflowPurpose: PurposeResearchStarter, Inputs: rawObject(map[string]any{"starter_context": ResearchStarterContext{ResearchIdea: strings.Repeat("goal", 2000)}}), Outputs: rawObject(map[string]any{"plan": map[string]any{"reason": strings.Repeat("大计划", 20000)}})}}
 	s := RuntimeService{repository: &openingRecordFixture{details: map[string]RunDetail{"planner": planner}}}
 	g, bound, err := s.GuidanceForConversation(context.Background(), "c")
-	if err != nil || !bound || len(g.SystemContext) > 12_000 || !strings.Contains(g.SystemContext, "nextOffset") || !strings.Contains(g.SystemContext, `"truncated":true`) {
+	if err != nil || !bound || len(g.SystemContext) > 12_000 || !strings.Contains(g.SystemContext, "nextOffset") || !strings.Contains(g.SystemContext, `"contentOmitted":true`) || !strings.Contains(g.SystemContext, `"section":"inputs"`) || !strings.Contains(g.SystemContext, `"section":"outputs"`) || strings.Contains(g.SystemContext, strings.Repeat("goal", 40)) || strings.Contains(g.SystemContext, "大计划") {
 		t.Fatal("candidate pinned full plan in system", err, len(g.SystemContext))
 	}
 	page, err := s.readResearchTaskDetail(context.Background(), planner, ResearchTaskReadCommand{Section: "outputs"})

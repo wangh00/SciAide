@@ -1,6 +1,8 @@
 package debugapi
 
 import (
+	"database/sql"
+	"errors"
 	"net/http"
 
 	"github.com/wangh00/SciAide/internal/app/chat"
@@ -62,7 +64,12 @@ func (s *Server) action(c Case, name string, r *http.Request) (any, error) {
 		}
 		current, err := s.services.Workflow.GetCurrentResearchTaskRun(c.ProjectID, c.TaskID)
 		if err != nil {
-			return nil, err
+			if !errors.Is(err, sql.ErrNoRows) {
+				return nil, err
+			}
+			// A direct task owns its human discussion before any candidate
+			// Run exists; explicit messages must still be deliverable.
+			current = workflow.RunDetail{Run: workflow.Run{ID: c.StarterRunID, ProjectID: c.ProjectID, ResearchTaskID: c.TaskID, ConversationID: c.ConversationID, WorkflowPurpose: workflow.PurposeResearchStarter, Status: workflow.RunCompleted}}
 		}
 		return s.services.Chat.StartChat(chat.StartCommand{ConversationID: discussionConversation(c, current), ModelProfileID: c.ModelProfileID, ModelID: c.ModelID, Text: cmd.Text, ClientMessageID: cmd.ClientMessageID, WebSearchEnabled: cmd.WebSearchEnabled})
 	case "answer":

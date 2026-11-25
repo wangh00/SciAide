@@ -45,8 +45,9 @@ func (f *ChatFacade) CancelRun(runID string) error {
 func (f *ChatFacade) RespondToUserInput(response userinput.Response) (RunSnapshot, error) {
 	run, err := f.service.RespondToUserInput(f.lifecycle.Context(), response)
 	if err != nil {
-		// Wails renders Error(), while the debug API projects apperr.Public.
-		// Keep both the safe desktop explanation and the typed conflict code.
+		// Wails renders Error(), while the debug API projects typed public
+		// errors. Keep both the safe desktop explanation and the typed conflict
+		// code.
 		var stateErr *apperr.Error
 		if errors.As(err, &stateErr) && stateErr.Code == "USER_INPUT_EXPIRED" {
 			return RunSnapshot{}, fmt.Errorf("%s: %w", stateErr.UserMessage, err)

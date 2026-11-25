@@ -10,52 +10,65 @@ import (
 	"github.com/wangh00/SciAide/internal/app/workflow"
 )
 
-// Scripted model ONLY: explicitly select the exact intended evidence from the
-// real offered catalog. Production never searches for a quote to fill a review.
-func reviewFixtureSourceSelections(t *testing.T, prompt string, expected map[string]any, actualRequest ...[]byte) json.RawMessage {
-	t.Helper()
+// Decoded <review_submission_sources> navigation. prefix-groups-v1 rows are
+// rebuilt into the same full-pointer rows as the flat layout; grouping is
+// lossless, so row order and coordinates never change.
+type reviewFixtureNavigation struct {
+	Version            string
+	InputSHA256        string
+	SegmentIdPrefix    string
+	Sources            [][]json.RawMessage
+	NavigationEncoding string
+	SourceGroups       [][]json.RawMessage
+	CitationAliases    map[string]string
+}
+
+func reviewFixtureDecodeNavigation(prompt string) (*reviewFixtureNavigation, error) {
 	const open, close = "<review_submission_sources>", "</review_submission_sources>"
 	start := strings.Index(prompt, open)
 	if start < 0 {
-		t.Fatal("initial review did not receive its actual source catalog")
+		return nil, fmt.Errorf("initial review did not receive its actual source catalog")
 	}
 	start += len(open)
 	end := strings.Index(prompt[start:], close)
 	if end < 0 {
-		t.Fatal("unterminated source catalog")
+		return nil, fmt.Errorf("unterminated source catalog")
 	}
-	var menu struct {
-		Version            string
-		InputSHA256        string
-		SegmentIdPrefix    string
-		Sources            [][]json.RawMessage
-		NavigationEncoding string
-		SourceGroups       [][]json.RawMessage
-		CitationAliases    map[string]string
-	}
-	if json.Unmarshal([]byte(prompt[start:start+end]), &menu) != nil || menu.Version != workflow.ReviewSourceProtocolVersion && menu.Version != "review-source-v1" {
-		t.Fatal("invalid source catalog")
+	menu := &reviewFixtureNavigation{}
+	if json.Unmarshal([]byte(prompt[start:start+end]), menu) != nil || menu.Version != workflow.ReviewSourceProtocolVersion && menu.Version != "review-source-v1" {
+		return nil, fmt.Errorf("invalid source catalog")
 	}
 	if menu.NavigationEncoding != "" {
 		if menu.NavigationEncoding != "prefix-groups-v1" || len(menu.Sources) != 0 {
-			t.Fatal("ambiguous source catalog layout")
+			return nil, fmt.Errorf("ambiguous source catalog layout")
 		}
 		for _, group := range menu.SourceGroups {
 			var prefix string
 			var rows [][]json.RawMessage
 			if len(group) != 2 || json.Unmarshal(group[0], &prefix) != nil || json.Unmarshal(group[1], &rows) != nil {
-				t.Fatal("invalid source group")
+				return nil, fmt.Errorf("invalid source group")
 			}
 			for _, row := range rows {
 				var suffix string
 				if len(row) != 6 || json.Unmarshal(row[0], &suffix) != nil {
-					t.Fatal("invalid grouped source row")
+					return nil, fmt.Errorf("invalid grouped source row")
 				}
-				copy := append([]json.RawMessage(nil), row...)
-				copy[0] = mustBootstrapJSON(t, prefix+suffix)
-				menu.Sources = append(menu.Sources, copy)
+				rebuilt := append([]json.RawMessage(nil), row...)
+				rebuilt[0], _ = json.Marshal(prefix + suffix)
+				menu.Sources = append(menu.Sources, rebuilt)
 			}
 		}
+	}
+	return menu, nil
+}
+
+// Scripted model ONLY: explicitly select the exact intended evidence from the
+// real offered catalog. Production never searches for a quote to fill a review.
+func reviewFixtureSourceSelections(t *testing.T, prompt string, expected map[string]any, actualRequest ...[]byte) json.RawMessage {
+	t.Helper()
+	menu, menuErr := reviewFixtureDecodeNavigation(prompt)
+	if menuErr != nil {
+		t.Fatal(menuErr)
 	}
 	var wire map[string]any
 	_ = json.Unmarshal(mustBootstrapJSON(t, expected), &wire)

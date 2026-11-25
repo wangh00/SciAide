@@ -34,11 +34,23 @@ func NewWorkflowRuntimeRepository(db *sql.DB) *WorkflowRuntimeRepository {
 
 // Creation order identifies descendants even if an older attempt receives a
 // later audit/status update. UI updated_at ordering is not a mutation guard.
-func (r *WorkflowRuntimeRepository) GetLatestTaskRun(ctx context.Context, projectID, taskID string) (workflow.Run, error) {
+func (r *WorkflowRuntimeRepository) FindLatestTaskRun(ctx context.Context, projectID, taskID string) (workflow.Run, bool, error) {
 	if strings.TrimSpace(taskID) == "" {
-		return workflow.Run{}, fmt.Errorf("research task id is required")
+		return workflow.Run{}, false, fmt.Errorf("research task id is required")
 	}
-	return scanWorkflowRun(r.db.QueryRowContext(ctx, workflowRunSelect+` WHERE wr.project_id=? AND wr.research_task_id=? ORDER BY wr.created_at DESC,wr.id DESC LIMIT 1`, strings.TrimSpace(projectID), strings.TrimSpace(taskID)))
+	value, err := scanWorkflowRun(r.db.QueryRowContext(ctx, workflowRunSelect+` WHERE wr.project_id=? AND wr.research_task_id=? ORDER BY wr.created_at DESC,wr.id DESC LIMIT 1`, strings.TrimSpace(projectID), strings.TrimSpace(taskID)))
+	if errors.Is(err, sql.ErrNoRows) {
+		return workflow.Run{}, false, nil
+	}
+	return value, err == nil, err
+}
+
+func (r *WorkflowRuntimeRepository) GetLatestTaskRun(ctx context.Context, projectID, taskID string) (workflow.Run, error) {
+	value, found, err := r.FindLatestTaskRun(ctx, projectID, taskID)
+	if err == nil && !found {
+		err = sql.ErrNoRows
+	}
+	return value, err
 }
 
 func (r *WorkflowRuntimeRepository) CreateResearchRun(ctx context.Context, run workflow.Run, steps []workflow.Step, event workflow.RuntimeEvent, researchConversation conversation.Conversation) error {
@@ -51,6 +63,22 @@ func (r *WorkflowRuntimeRepository) CreateResearchRun(ctx context.Context, run w
 		return err
 	}
 	defer tx.Rollback()
+	if strings.HasPrefix(run.CreationKey, "research-discussion-plan:") {
+		var source struct {
+			Starter workflow.ResearchStarterContext `json:"starter_context"`
+		}
+		if err := json.Unmarshal(run.Inputs, &source); err != nil {
+			return err
+		}
+		callID := strings.TrimPrefix(run.CreationKey, "research-discussion-plan:")
+		var chatRunID string
+		if err := tx.QueryRowContext(ctx, `SELECT run_id FROM tool_calls WHERE id=?`, callID).Scan(&chatRunID); err != nil {
+			return fmt.Errorf("科研规划缺少真实工具调用来源: %w", err)
+		}
+		if err := validateResearchPlanPreparation(ctx, tx, run.ProjectID, run.ResearchTaskID, chatRunID, callID, source.Starter.DiscussionUserMessageID, source.Starter.PriorStarterRunID); err != nil {
+			return err
+		}
+	}
 	if strings.HasPrefix(run.CreationKey, "research-route:") {
 		parts := strings.SplitN(strings.TrimPrefix(run.CreationKey, "research-route:"), ":", 2)
 		if len(parts) == 2 {
@@ -918,8 +946,25 @@ func (r *WorkflowRuntimeRepository) ResearchTaskIDForSubject(ctx context.Context
 
 func (r *WorkflowRuntimeRepository) chatResearchScope(ctx context.Context, chatRunID string) (string, string, error) {
 	var workspacePath, taskID string
+	// Human discussion ownership survives optional planner lifecycle changes.
+	// Workflow AI is deliberately excluded and keeps the execution-first path.
+	err := r.db.QueryRowContext(ctx, `SELECT p.workspace_path,d.research_task_id
+ FROM runs cr JOIN research_discussion_conversations d ON d.conversation_id=cr.conversation_id
+ JOIN conversations c ON c.id=d.conversation_id AND c.project_id=d.project_id
+ JOIN research_tasks t ON t.id=d.research_task_id AND t.project_id=d.project_id
+ JOIN projects p ON p.id=d.project_id WHERE cr.id=?
+ AND NOT EXISTS(SELECT 1 FROM workflow_ai_chat_runs b WHERE b.chat_run_id=cr.id)`, strings.TrimSpace(chatRunID)).Scan(&workspacePath, &taskID)
+	if err == nil {
+		if strings.TrimSpace(workspacePath) == "" {
+			return "", "", fmt.Errorf("research chat task binding is invalid")
+		}
+		return workspacePath, taskID, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return "", "", fmt.Errorf("resolve research discussion scope: %w", err)
+	}
 	var valid bool
-	err := r.db.QueryRowContext(ctx, `WITH binding AS (
+	err = r.db.QueryRowContext(ctx, `WITH binding AS (
 		SELECT c.project_id, COALESCE(
 			(SELECT e.workflow_run_id FROM workflow_ai_chat_runs b JOIN workflow_ai_executions e ON e.id=b.execution_id WHERE b.chat_run_id=cr.id),
 			(SELECT wc.workflow_run_id FROM workflow_conversations wc WHERE wc.conversation_id=cr.conversation_id)

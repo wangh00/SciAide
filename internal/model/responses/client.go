@@ -50,6 +50,10 @@ func (c *Client) SetRequestGate(gate func(context.Context) error) {
 	c.http = modelutil.WithRequestGate(c.http, gate)
 }
 
+func (c *Client) SetDebugRequestSnapshotObserver(observe *modelutil.RequestSnapshotObserver) {
+	c.http = modelutil.WithRequestSnapshots(c.http, modelcap.ProtocolOpenAIResponses, observe)
+}
+
 func (c *Client) Capabilities(context.Context) (model.Capabilities, error) {
 	return model.Capabilities{Streaming: true, ToolCalling: true, Reasoning: true, MaxContextTokens: c.profile.ContextBudget(c.profile.ModelID).WindowTokens}, nil
 }

@@ -453,6 +453,15 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 	if err != nil {
 		return OutcomeFailed, err
 	}
+	var ledgerDefinition tool.Definition
+	ledgerReaderAvailable := false
+	for _, d := range baseDefinitions {
+		if d.QualifiedName == contextmemory.ToolLedgerReadName {
+			ledgerDefinition, ledgerReaderAvailable = d, true
+		}
+	}
+	// It is neither a first-turn tool nor a frozen-stage/Skill capability.
+	baseDefinitions = withoutToolLedgerDefinition(baseDefinitions)
 	if l.browserReady != nil && !l.browserReady(ctx, projectID) {
 		filtered := make([]tool.Definition, 0, len(baseDefinitions))
 		for _, d := range baseDefinitions {
@@ -468,6 +477,14 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 	var researchAllowed map[string]struct{}
 	var workflowContractAllowed map[string]struct{}
 	researchBound := false
+	loadResearchGuidance := func() (workflow.ResearchGuidance, bool, error) {
+		if reader, ok := l.research.(interface {
+			GuidanceForChat(context.Context, string, string) (workflow.ResearchGuidance, bool, error)
+		}); ok {
+			return reader.GuidanceForChat(ctx, run.ID, run.ConversationID)
+		}
+		return l.research.GuidanceForConversation(ctx, run.ConversationID)
+	}
 	if workflowContractFound {
 		var allowed []string
 		if err := json.Unmarshal(workflowContract.AllowedTools, &allowed); err != nil {
@@ -486,7 +503,7 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 		definitions, researchAllowed = filterResearchTools(baseDefinitions, contractGuidance)
 	}
 	if l.research != nil {
-		researchGuidance, researchBound, err = l.research.GuidanceForConversation(ctx, run.ConversationID)
+		researchGuidance, researchBound, err = loadResearchGuidance()
 		if err != nil {
 			return OutcomeFailed, &apperr.Error{Code: "RESEARCH_CONTEXT_FAILED", UserMessage: "无法加载科研任务当前阶段。", Cause: err}
 		}
@@ -504,7 +521,7 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 	if !researchBound && !workflowContractFound {
 		filtered := make([]tool.Definition, 0, len(definitions))
 		for _, definition := range definitions {
-			if definition.QualifiedName != workflow.ResearchTaskReadTool && definition.QualifiedName != workflow.ResearchRevisionProposeTool && definition.QualifiedName != workflow.ResearchPlanPrepareTool {
+			if definition.QualifiedName != workflow.ResearchTaskReadTool && definition.QualifiedName != workflow.ResearchRevisionProposeTool && definition.QualifiedName != workflow.ResearchPlanPrepareTool && definition.QualifiedName != workflow.ResearchStateUpdateTool && definition.QualifiedName != workflow.ResearchStateReadTool && definition.QualifiedName != workflow.ResearchDiscoverySearchTool && definition.QualifiedName != workflow.ResearchDiscoveryReadTool {
 				filtered = append(filtered, definition)
 			}
 		}
@@ -534,7 +551,7 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 		if l.research == nil {
 			return nil
 		}
-		latest, bound, guidanceErr := l.research.GuidanceForConversation(ctx, run.ConversationID)
+		latest, bound, guidanceErr := loadResearchGuidance()
 		if guidanceErr != nil {
 			return &apperr.Error{Code: "RESEARCH_CONTEXT_FAILED", UserMessage: "无法刷新科研任务当前阶段。", Cause: guidanceErr}
 		}
@@ -815,8 +832,9 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 		optionalStageSubmission := false
 		var stageSourceIDs []string
 		discoveryEnabled := false
+		builtinDiscoveryEnabled := false
 		fallbackNote := ""
-		modelDefinitions := withoutResourceInterfaceTools(definitions)
+		modelDefinitions := withoutToolLedgerDefinition(withoutResourceInterfaceTools(definitions))
 		// An already complete checkpoint needs local audit and the unchanged
 		// scientific validator, not admission to a model's context window.
 		if !assembledImplementation {
@@ -930,16 +948,58 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 				}
 				contextMessages = stageContextMessages
 			}
-			request, contextInfo, err = l.builder.buildWithResearchState(ctx, contextMessages, run.AssistantMessageID, run.UserMessageID, modelDefinitions, calls, runSkillContext, dynamicSkillRouting, systemContext, dynamicState, ContextLimits{EffectiveTokens: run.ContextBudgetTokens, AutoCompactTokens: run.AutoCompactTokenLimit, AllowProtocolRollover: (!workflowAIRun || resourceMode) && !submissionPhase && questionContinuation == "", UsageObservation: contextUsage, CurrentUserHostToolReferences: workflowAIRun}, contextCheckpoint, contextTurns...)
+			buildContext := func(defs []tool.Definition, system string) (model.ChatRequest, ContextBuildInfo, error) {
+				return l.builder.buildWithResearchState(ctx, contextMessages, run.AssistantMessageID, run.UserMessageID, defs, calls, runSkillContext, dynamicSkillRouting, system, dynamicState, ContextLimits{EffectiveTokens: run.ContextBudgetTokens, AutoCompactTokens: run.AutoCompactTokenLimit, AllowProtocolRollover: (!workflowAIRun || resourceMode) && !submissionPhase && questionContinuation == "", UsageObservation: contextUsage, CurrentUserHostToolReferences: workflowAIRun}, contextCheckpoint, contextTurns...)
+			}
+			request, contextInfo, err = buildContext(modelDefinitions, systemContext)
+			var cold *contextBudgetError
+			// One local presentation alternative, NOT an HTTP/tool retry. Never
+			// trade evidence, human answers or a frozen stage schema for controls.
+			if !workflowAIRun && !workflowContractFound && !resourceMode && questionContinuation == "" && errors.As(err, &cold) && cold.Budget.Phase == "fixed_input" && cold.Budget.Source == "character_fallback" && cold.Budget.Reserved == 0 {
+				minimal, guide, count := deferredBuiltinDefinitions(modelDefinitions, calls)
+				if count > 0 {
+					modelDefinitions = minimal
+					builtinDiscoveryEnabled = true
+					request, contextInfo, err = buildContext(minimal, systemContext+"\n"+guide)
+					var e *contextBudgetError
+					if errors.As(err, &e) {
+						copy := *e
+						copy.Budget.DeferredDefinitions = count
+						err = &copy
+					}
+				}
+			}
+			// Do not make the normal fixed input larger or widen frozen stages.
+			// Only an existing completed-tool history reservation failure may try the
+			// same-run ledger candidate. Missing snapshots/readers keep the original
+			// protective rejection; no original Result is reconstructed or deleted.
+			if toolLedgerFallbackEligible(err, ledgerReaderAvailable, workflowAIRun, workflowContractFound, resourceMode, questionContinuation) {
+				ledgerDefs := append(append([]tool.Definition(nil), modelDefinitions...), ledgerDefinition)
+				candidate, candidateInfo, candidateErr := l.builder.buildWithToolLedger(ctx, contextMessages, run.AssistantMessageID, run.UserMessageID, ledgerDefs, calls, runSkillContext, dynamicSkillRouting, systemContext, dynamicState, ContextLimits{EffectiveTokens: run.ContextBudgetTokens, AutoCompactTokens: run.AutoCompactTokenLimit, AllowProtocolRollover: true, CurrentUserHostToolReferences: false}, contextCheckpoint, contextTurns)
+				if errors.Is(candidateErr, contextmemory.ErrToolLedgerSnapshotUnavailable) {
+					return OutcomeFailed, toolLedgerSnapshotFailure(err)
+				}
+				if candidateErr == nil {
+					request, contextInfo, err, modelDefinitions = candidate, candidateInfo, nil, ledgerDefs
+					if researchAllowed != nil {
+						researchAllowed[contextmemory.ToolLedgerReadName] = struct{}{}
+					}
+				}
+			}
 			if questionContinuation != "" && ctx.Err() == nil && (err != nil || contextInfo.CompactedThroughMessageID != "") {
 				// Repair is optional. Keep the completed explanation rather than
 				// overflow, discard native state or run another compaction request.
 				return l.complete(run, withQuestionContinuationBody(questionBody, questionContinuationFallback), "stop")
 			}
 			if err != nil {
+				message := "无法构建本次模型上下文。已完成的工具结果仍已保存。原因：" + tool.SafeActivityText(err.Error(), 400)
+				var diagnostic *contextBudgetError
+				if errors.As(err, &diagnostic) {
+					message = diagnostic.userMessage()
+				}
 				return OutcomeFailed, &apperr.Error{
 					Code:        "CONTEXT_BUILD_FAILED",
-					UserMessage: "无法构建本次模型上下文。已完成的工具结果仍已保存。原因：" + tool.SafeActivityText(err.Error(), 400),
+					UserMessage: message,
 					Details:     err.Error(),
 					Cause:       err,
 				}
@@ -1983,8 +2043,17 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 				proposed = append(proposed, call)
 				continue
 			}
-			if discoveryEnabled && strings.HasPrefix(providerCall.Name, "mcp.") && !definitionVisible(modelDefinitions, providerCall.Name) {
-				call, rejectErr := l.tools.RejectProviderCall(ctx, tool.NewRegistry(), providerCall.Name, command, "此 MCP 工具尚未加载或已不可用。请先调用 builtin.tools.search，并在下一轮收到工具定义后再调用；搜索不授予执行权限。")
+			if providerCall.Name == contextmemory.ToolLedgerReadName && (!definitionVisible(modelDefinitions, providerCall.Name) || workflowAIRun || workflowContractFound || questionContinuation != "") {
+				call, rejectErr := l.tools.RejectProviderCall(ctx, tool.NewRegistry(), providerCall.Name, command, "当前请求没有开放同Run工具历史读取；不能猜调用、跨冻结阶段或绕过补问范围。")
+				if rejectErr != nil {
+					return OutcomeFailed, rejectErr
+				}
+				proposed = append(proposed, call)
+				continue
+			}
+			deferredCall := providerCall.Name == contextmemory.ToolLedgerReadName || discoveryEnabled && strings.HasPrefix(providerCall.Name, "mcp.") || builtinDiscoveryEnabled && tool.OptionalBuiltinDefinition(providerCall.Name)
+			if deferredCall && !definitionVisible(modelDefinitions, providerCall.Name) {
+				call, rejectErr := l.tools.RejectProviderCall(ctx, tool.NewRegistry(), providerCall.Name, command, "此工具尚未加载或已不可用。请先调用 builtin.tools.search，并在下一轮收到工具定义后再调用；搜索不授予执行权限。")
 				if rejectErr != nil {
 					return OutcomeFailed, rejectErr
 				}
@@ -2015,7 +2084,7 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 				proposed = append(proposed, call)
 				continue
 			}
-			if discoveryEnabled && strings.HasPrefix(providerCall.Name, "mcp.") {
+			if deferredCall {
 				live, liveErr := l.registry.Definition(ctx, providerCall.Name)
 				matching := false
 				for _, d := range modelDefinitions {
@@ -2024,7 +2093,7 @@ func (l *Loop) execute(ctx context.Context, run *chat.Run) (Outcome, error) {
 					}
 				}
 				if !matching {
-					call, rejectErr := l.tools.RejectProviderCall(ctx, l.registry, providerCall.Name, command, "MCP 连接或工具定义已变化，请重新使用 builtin.tools.search 获取当前定义。")
+					call, rejectErr := l.tools.RejectProviderCall(ctx, l.registry, providerCall.Name, command, "工具定义已变化，请重新使用 builtin.tools.search 获取当前定义。")
 					if rejectErr != nil {
 						return OutcomeFailed, rejectErr
 					}
@@ -2673,14 +2742,22 @@ func (l *Loop) receiveTurn(ctx context.Context, run chat.Run, journalActive, wor
 		lastFlush, pendingRunes = l.now(), 0
 		return nil
 	}
+	interrupted := func(err error) (modelTurn, error) {
+		syncText()
+		_ = flushDraft(true)
+		return turn, err
+	}
 	_ = flushDraft(true)
 	for {
 		if err := ctx.Err(); err != nil {
-			syncText()
-			_ = flushDraft(true)
-			return turn, err
+			return interrupted(err)
 		}
 		event, recvErr := stream.Recv()
+		// Recv can return an already decoded frame after the host stopped the
+		// run. Do not append it to the draft, publish it, or accept completion.
+		if err := ctx.Err(); err != nil {
+			return interrupted(err)
+		}
 		if turn.firstResponseAt.IsZero() && ((event.Type == model.EventTextDelta && event.Text != "") || event.Type == model.EventToolCall || event.Type == model.EventProviderItem) {
 			turn.firstResponseAt = l.now()
 			l.publishRuntimeActivity(run, "model_processing")

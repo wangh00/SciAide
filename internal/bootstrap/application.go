@@ -38,6 +38,7 @@ import (
 	mcpadapter "github.com/wangh00/SciAide/internal/mcp"
 	"github.com/wangh00/SciAide/internal/model/gateway"
 	"github.com/wangh00/SciAide/internal/model/responses"
+	"github.com/wangh00/SciAide/internal/modelutil"
 	"github.com/wangh00/SciAide/internal/network"
 	"github.com/wangh00/SciAide/internal/observability"
 	"github.com/wangh00/SciAide/internal/opensciskill"
@@ -68,6 +69,7 @@ type Options struct {
 	DebugResponseErrorObserver       func(responses.DebugProviderError)
 	DebugResponseStreamFaultObserver func(responses.DebugStreamFault)
 	DebugResponseHTTPObserver        func(responses.DebugHTTPResponse)
+	DebugRequestSnapshotObserver     *modelutil.RequestSnapshotObserver
 	ModelProfileOverlay              func(modelprofile.Repository) modelprofile.Repository
 	DisableAuxiliaryModels           bool
 }
@@ -302,6 +304,7 @@ func New(options Options) (*Application, error) {
 		return fail(fmt.Errorf("configure research Workflow coordination: %w", err))
 	}
 	for _, builtinTool := range []tool.Tool{
+		builtin.NewToolHistory(toolService),
 		builtin.NewWebSearch(webSearchService), builtin.NewWebOpen(webSearchService), builtin.NewBrowserOpen(browserService),
 		builtin.NewListWorkspace(projectService), builtin.NewReadText(projectService),
 		builtin.NewShellExecute(projectService, localProcessRunner), builtin.NewPythonExecute(projectService, localProcessRunner),
@@ -410,6 +413,20 @@ func New(options Options) (*Application, error) {
 			return fail(fmt.Errorf("register research discussion tool: %w", err))
 		}
 	}
+	if err := toolRegistry.Register(context.Background(), builtin.NewResearchWorkingStateUpdate(workflowRuntime)); err != nil {
+		_ = store.Close()
+		return fail(fmt.Errorf("register research working state tool: %w", err))
+	}
+	if err := toolRegistry.Register(context.Background(), builtin.NewResearchWorkingStateRead(workflowRuntime)); err != nil {
+		_ = store.Close()
+		return fail(fmt.Errorf("register research working state reader: %w", err))
+	}
+	for _, value := range builtin.NewResearchDiscoveryTools(researchDiscovery, workflowRuntime) {
+		if err := toolRegistry.Register(context.Background(), value); err != nil {
+			_ = store.Close()
+			return fail(fmt.Errorf("register task discovery tool: %w", err))
+		}
+	}
 	if err := workflowRuntime.SetSkillLoader(dynamicSkills); err != nil {
 		_ = store.Close()
 		return fail(fmt.Errorf("bind Workflow Skill snapshots: %w", err))
@@ -470,6 +487,10 @@ func New(options Options) (*Application, error) {
 		_ = store.Close()
 		return fail(fmt.Errorf("configure developer HTTP observation: %w", err))
 	}
+	if err := modelResolver.SetDebugRequestSnapshotObserver(options.DebugRequestSnapshotObserver); err != nil {
+		_ = store.Close()
+		return fail(fmt.Errorf("configure developer request snapshots: %w", err))
+	}
 	discoveryScope := func(ctx context.Context, runID string) (map[string]bool, error) {
 		run, err := runRepository.Get(ctx, runID)
 		if err != nil {
@@ -486,7 +507,7 @@ func New(options Options) (*Application, error) {
 		if workflowAI && !frozen {
 			return nil, fmt.Errorf("MCP discovery requires the frozen workflow tool scope")
 		}
-		guidance, bound, err := workflowRuntime.GuidanceForConversation(ctx, run.ConversationID)
+		guidance, bound, err := workflowRuntime.GuidanceForChat(ctx, run.ID, run.ConversationID)
 		if err != nil {
 			return nil, err
 		}

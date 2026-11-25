@@ -205,7 +205,9 @@ func TestStageInputProjectionPreservesSharedLiteralTargets(t *testing.T) {
 	}
 	// The existing independent decoder rejects nonliteral targets and chains.
 	expandSharingForTest(t, projectedStageInputForTest(t, view), instruction)
-	if smaller, changed := ProjectResearchStagePrompt(view, input, 4_000); changed || smaller != view {
+	// A source inventory can now be atomically unshared and paged at 4k;
+	// 1k cannot hold even the mandatory page protocol and remains impossible.
+	if smaller, changed := ProjectResearchStagePrompt(view, input, 1_000); changed || smaller != view {
 		t.Fatal("an impossible budget changed shared targets or existing pages")
 	}
 	if string(input) != original {

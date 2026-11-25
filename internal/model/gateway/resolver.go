@@ -14,6 +14,7 @@ import (
 	"github.com/wangh00/SciAide/internal/model/openai"
 	"github.com/wangh00/SciAide/internal/model/responses"
 	"github.com/wangh00/SciAide/internal/modelcap"
+	"github.com/wangh00/SciAide/internal/modelutil"
 )
 
 type ProfileLoader interface {
@@ -21,14 +22,15 @@ type ProfileLoader interface {
 }
 
 type Resolver struct {
-	profiles            ProfileLoader
-	recorder            modelcap.ReasoningRecorder
-	mu                  sync.Mutex
-	clients             map[string]cachedProtocolClient
-	requestGate         func(context.Context) error
-	debugObserver       func(responses.DebugProviderError)
-	debugStreamObserver func(responses.DebugStreamFault)
-	debugHTTPObserver   func(responses.DebugHTTPResponse)
+	profiles              ProfileLoader
+	recorder              modelcap.ReasoningRecorder
+	mu                    sync.Mutex
+	clients               map[string]cachedProtocolClient
+	requestGate           func(context.Context) error
+	debugObserver         func(responses.DebugProviderError)
+	debugStreamObserver   func(responses.DebugStreamFault)
+	debugHTTPObserver     func(responses.DebugHTTPResponse)
+	debugRequestSnapshots *modelutil.RequestSnapshotObserver
 }
 
 type cachedProtocolClient struct {
@@ -77,6 +79,16 @@ func (r *Resolver) SetDebugHTTPResponseObserver(observe func(responses.DebugHTTP
 		return fmt.Errorf("HTTP observer must be configured before model resolution")
 	}
 	r.debugHTTPObserver = observe
+	return nil
+}
+
+func (r *Resolver) SetDebugRequestSnapshotObserver(observe *modelutil.RequestSnapshotObserver) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.clients) != 0 {
+		return fmt.Errorf("request snapshot observer must be configured before model resolution")
+	}
+	r.debugRequestSnapshots = observe
 	return nil
 }
 
@@ -166,6 +178,11 @@ func (r *Resolver) clientFor(profile modelprofile.Profile, secret []byte, protoc
 		client = anthropic.New(profile, secret, r.recorder)
 	default:
 		return nil, fmt.Errorf("unsupported protocol %q", protocol)
+	}
+	if observed, ok := client.(interface {
+		SetDebugRequestSnapshotObserver(*modelutil.RequestSnapshotObserver)
+	}); ok {
+		observed.SetDebugRequestSnapshotObserver(r.debugRequestSnapshots)
 	}
 	if gated, ok := client.(interface {
 		SetRequestGate(func(context.Context) error)

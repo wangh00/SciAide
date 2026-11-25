@@ -218,8 +218,6 @@ type StartResearchCommand struct {
 	ModelProfileID         string                      `json:"modelProfileId"`
 	ModelID                string                      `json:"modelId"`
 	ReasoningLevel         modelcap.ReasoningLevel     `json:"reasoningLevel,omitempty"`
-	// DiscussionOnly creates a durable conversation, not a model/planner run.
-	DiscussionOnly bool `json:"discussionOnly,omitempty"`
 }
 
 type AnswerResearchClarificationCommand struct {
@@ -315,9 +313,6 @@ func (s *StarterService) Start(ctx context.Context, command StartResearchCommand
 		}
 	}
 	starter := ResearchStarterTemplate()
-	if command.DiscussionOnly {
-		starter = researchDiscussionTemplate()
-	}
 	saved, err := s.workflows.save(ctx, SaveCommand{ProjectID: command.ProjectID, Definition: starter.Definition}, PurposeResearchStarter)
 	if err != nil {
 		return RunDetail{}, fmt.Errorf("prepare research starter: %w", err)
@@ -329,9 +324,6 @@ func (s *StarterService) Start(ctx context.Context, command StartResearchCommand
 		Capabilities:      researchCapabilities(),
 		StageCatalog:      dynamicResearchStageCatalog(), PlannerVersion: dynamicResearchPlannerVersion,
 	}}
-	if command.DiscussionOnly {
-		values["discussion_only"] = true
-	}
 	inputs, err := json.Marshal(values)
 	if err != nil {
 		return RunDetail{}, err
@@ -344,7 +336,6 @@ func (s *StarterService) Start(ctx context.Context, command StartResearchCommand
 		ProjectID: command.ProjectID, ResearchTaskID: NewResearchTaskID, WorkflowID: saved.Workflow.ID, WorkflowVersionID: saved.Version.ID,
 		Inputs: inputs, PermissionMode: permissionMode,
 		ModelProfileID: command.ModelProfileID, ModelID: command.ModelID, ReasoningLevel: command.ReasoningLevel,
-		DiscussionOnly: command.DiscussionOnly,
 	})
 }
 
@@ -616,15 +607,20 @@ func (s *StarterService) Adopt(ctx context.Context, command AdoptResearchRouteCo
 	if err := s.checkDiscussionPlanCurrent(ctx, detail, starterContext); err != nil {
 		return AdoptResearchRouteResult{}, err
 	}
-	saved, err := s.workflows.Save(ctx, SaveCommand{ProjectID: command.ProjectID, Definition: template.Definition})
+	save := SaveCommand{ProjectID: command.ProjectID, Definition: template.Definition}
+	var saved SaveResult
+	if availableNow {
+		saved, err = s.workflows.Save(ctx, save)
+	} else {
+		saved, err = s.workflows.savePendingResearchRoute(ctx, save, func(saved SaveResult) (RuntimeEvent, error) {
+			return s.adoptionEvent(detail.Run.ID, command.RouteID, template.ID, saved.Workflow.ID, saved.Version.ID, "", command.RouteID == plan.RecommendedRouteID, false)
+		})
+	}
 	if err != nil {
 		return AdoptResearchRouteResult{}, err
 	}
 	result := AdoptResearchRouteResult{Workflow: saved, TemplateID: template.ID, InitialInputs: initialInputs, ResearchIdea: starterContext.ResearchIdea, AvailableNow: availableNow, StarterRunID: command.RunID, ResearchTaskID: researchTaskID, RouteID: command.RouteID}
 	if !availableNow {
-		if err := s.recordAdoptionEvent(ctx, detail, command.RouteID, template.ID, saved.Workflow.ID, saved.Version.ID, "", command.RouteID == plan.RecommendedRouteID, false); err != nil {
-			return AdoptResearchRouteResult{}, err
-		}
 		return result, nil
 	}
 	execution := starterAIExecution(detail)
@@ -919,14 +915,7 @@ func (s *StarterService) recordAdoptionEvent(ctx context.Context, starter RunDet
 	if found && latest.WorkflowID == strings.TrimSpace(workflowID) && latest.WorkflowVersionID == strings.TrimSpace(workflowVersionID) && latest.FormalRunID == strings.TrimSpace(formalRunID) {
 		return nil
 	}
-	payload := map[string]any{
-		"routeId": routeID, "templateId": templateID, "workflowId": workflowID, "workflowVersionId": workflowVersionID,
-		"availableNow": availableNow, "recommended": recommended,
-	}
-	if formalRunID != "" {
-		payload["formalRunId"] = formalRunID
-	}
-	event, err := s.runtime.event(starter.Run.ID, "research.route_adopted", payload, s.runtime.now())
+	event, err := s.adoptionEvent(starter.Run.ID, routeID, templateID, workflowID, workflowVersionID, formalRunID, recommended, availableNow)
 	if err != nil {
 		return err
 	}
@@ -934,6 +923,17 @@ func (s *StarterService) recordAdoptionEvent(ctx context.Context, starter RunDet
 		return fmt.Errorf("record adopted research route: %w", err)
 	}
 	return nil
+}
+
+func (s *StarterService) adoptionEvent(starterRunID, routeID, templateID, workflowID, workflowVersionID, formalRunID string, recommended, availableNow bool) (RuntimeEvent, error) {
+	payload := map[string]any{
+		"routeId": routeID, "templateId": templateID, "workflowId": workflowID, "workflowVersionId": workflowVersionID,
+		"availableNow": availableNow, "recommended": recommended,
+	}
+	if formalRunID != "" {
+		payload["formalRunId"] = formalRunID
+	}
+	return s.runtime.event(starterRunID, "research.route_adopted", payload, s.runtime.now())
 }
 
 func (s *StarterService) snapshot(ctx context.Context, projectID string) (ResourceSnapshot, error) {

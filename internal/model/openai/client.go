@@ -56,6 +56,10 @@ func (c *Client) SetRequestGate(gate func(context.Context) error) {
 	c.http = modelutil.WithRequestGate(c.http, gate)
 }
 
+func (c *Client) SetDebugRequestSnapshotObserver(observe *modelutil.RequestSnapshotObserver) {
+	c.http = modelutil.WithRequestSnapshots(c.http, modelcap.ProtocolOpenAIChat, observe)
+}
+
 func NewWithHTTPClient(profile modelprofile.Profile, secret []byte, client *http.Client) *Client {
 	value := New(profile, secret)
 	value.http = client

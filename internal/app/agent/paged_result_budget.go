@@ -7,11 +7,14 @@ import (
 
 // Keep a task page valid even when a later request has less preview space.
 // nextOffset describes only the visible prefix, never an omitted middle.
+// Both frozen stage-input pages and saved discovery field pages are the same
+// paged-content contract: the latest complete page must stay readable.
 func fitTaskPagePreview(text string, limit int) (string, bool) {
 	var envelope map[string]json.RawMessage
 	if json.Unmarshal([]byte(text), &envelope) != nil {
 		return "", false
 	}
+	raw := envelope["structured"]
 	var page struct {
 		Section string `json:"section"`
 		Offset  int    `json:"offset"`
@@ -19,14 +22,23 @@ func fitTaskPagePreview(text string, limit int) (string, bool) {
 		Content string `json:"content"`
 		SHA     string `json:"sha256"`
 		Mode    string `json:"addressMode"`
+		Status  string `json:"status"`
+		Field   string `json:"field"`
+		Total   int    `json:"totalRunes"`
 	}
-	raw := envelope["structured"]
-	if json.Unmarshal(raw, &page) != nil || page.Section != "stage_input" || len(page.SHA) != 64 || page.Next <= page.Offset || utf8.RuneCountInString(page.Content) != page.Next-page.Offset {
+	if json.Unmarshal(raw, &page) != nil {
+		return "", false
+	}
+	runes := []rune(page.Content)
+	stageInput := page.Section == "stage_input" && len(page.SHA) == 64 && page.Next > page.Offset && len(runes) == page.Next-page.Offset
+	// A discovery field page ends with nextOffset -1; a cut preview must
+	// resume inside the original total, never past it.
+	discoveryField := page.Status == "unverified_discovery_field" && page.Field == "abstract" && len(page.SHA) == 64 && page.Offset >= 0 && page.Total >= page.Offset+len(runes) && len(runes) >= 1 && (page.Next == -1 && page.Offset+len(runes) == page.Total || page.Next > page.Offset && len(runes) == page.Next-page.Offset)
+	if !stageInput && !discoveryField {
 		return "", false
 	}
 	var original map[string]json.RawMessage
 	_ = json.Unmarshal(raw, &original)
-	runes := []rune(page.Content)
 	encode := func(n int) string {
 		next := make(map[string]json.RawMessage, len(original))
 		for k, v := range original {
@@ -53,6 +65,14 @@ func fitTaskPagePreview(text string, limit int) (string, bool) {
 		hidden := map[string]json.RawMessage{}
 		for key, value := range map[string]any{"contentNotShown": true, "section": page.Section, "retryOffset": page.Offset, "sha256": page.SHA} {
 			hidden[key], _ = json.Marshal(value)
+		}
+		if discoveryField {
+			for _, key := range []string{"status", "field", "queryId", "candidateId"} {
+				if value, ok := original[key]; ok {
+					hidden[key] = value
+				}
+			}
+			delete(hidden, "section")
 		}
 		if page.Mode == "json_pointer" {
 			for _, key := range []string{"addressMode", "pointer", "encoding", "valueSha256"} {

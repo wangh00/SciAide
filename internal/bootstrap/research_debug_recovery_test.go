@@ -151,7 +151,7 @@ func TestResearchDebugSourceDirectCreateAndInterruptedInitializationReplay(t *te
 	if e != nil {
 		t.Fatal(e)
 	}
-	entry, e := f.app.WorkflowFacade.StartResearch(workflow.StartResearchCommand{ProjectID: project.ID, ResearchIdea: body["prompt"].(string), ModelProfileID: profile.ID, ModelID: f.modelID, DiscussionOnly: true, PermissionMode: conversation.PermissionPlan})
+	entry, e := f.app.WorkflowFacade.StartResearchDiscussion(workflow.StartResearchDiscussionCommand{ProjectID: project.ID, ResearchIdea: body["prompt"].(string), ModelProfileID: profile.ID, ModelID: f.modelID, PermissionMode: conversation.PermissionPlan})
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -168,7 +168,7 @@ func TestResearchDebugSourceDirectCreateAndInterruptedInitializationReplay(t *te
 	}{pendingBody["name"].(string), pendingBody["prompt"].(string), profile.ID, f.modelID, pendingRID, conversation.PermissionPlan})
 	caseID, _ := id.New()
 	clientID, _ := id.New()
-	pending := debugapi.Case{RequestID: pendingRID, RequestSHA256: fmt.Sprintf("%x", sha256.Sum256(encoded)), ID: caseID, Name: pendingBody["name"].(string), ProjectID: project.ID, TaskID: entry.Run.ResearchTaskID, ConversationID: entry.Run.ConversationID, StarterRunID: entry.Run.ID, ModelProfileID: profile.ID, ModelID: f.modelID, InitialClientMessageID: clientID}
+	pending := debugapi.Case{RequestID: pendingRID, RequestSHA256: fmt.Sprintf("%x", sha256.Sum256(encoded)), ID: caseID, Name: pendingBody["name"].(string), ProjectID: project.ID, TaskID: entry.ResearchTaskID, ConversationID: entry.ConversationID, ModelProfileID: profile.ID, ModelID: f.modelID, InitialClientMessageID: clientID}
 	_ = f.server.Close()
 	c.InitialRunID = "" // Emulate crash after app transaction but before index save.
 	saved, _ := json.Marshal(map[string]debugapi.Case{c.ID: c, pending.ID: pending})

@@ -166,7 +166,7 @@ func TestQuestionHandoffReachesRealCardAcrossProtocols(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			entry, err := app.WorkflowFacade.StartResearch(workflow.StartResearchCommand{ProjectID: project.ID, ResearchIdea: "大学生睡眠与学习状态", ModelProfileID: profile.ID, ModelID: workflowAITestModelID, DiscussionOnly: true})
+			entry, err := app.WorkflowFacade.StartResearchDiscussion(workflow.StartResearchDiscussionCommand{ProjectID: project.ID, ResearchIdea: "大学生睡眠与学习状态", ModelProfileID: profile.ID, ModelID: workflowAITestModelID})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -190,7 +190,7 @@ func TestQuestionHandoffReachesRealCardAcrossProtocols(t *testing.T) {
 				return wailstransport.RunSnapshot{}
 			}
 			clientID, _ := id.New()
-			run, err := app.ChatFacade.StartChat(chat.StartCommand{ConversationID: entry.Run.ConversationID, Text: "我想研究大学生睡眠和学习状态的关系，但还没想好怎么做，你帮我看看。", ClientMessageID: clientID, ModelProfileID: profile.ID, ModelID: workflowAITestModelID})
+			run, err := app.ChatFacade.StartChat(chat.StartCommand{ConversationID: entry.ConversationID, Text: "我想研究大学生睡眠和学习状态的关系，但还没想好怎么做，你帮我看看。", ClientMessageID: clientID, ModelProfileID: profile.ID, ModelID: workflowAITestModelID})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -243,9 +243,9 @@ func TestQuestionHandoffReachesRealCardAcrossProtocols(t *testing.T) {
 			if _, err = app.ChatFacade.RespondToUserInput(response); err != nil {
 				t.Fatal("idempotent retry", err)
 			}
-			current, err := app.WorkflowFacade.GetCurrentResearchTaskRun(project.ID, entry.Run.ResearchTaskID)
-			if err != nil || current.Run.ID != entry.Run.ID {
-				t.Fatal("answer executed/planned research", err, current)
+			current, err := app.WorkflowFacade.GetCurrentResearchTaskRun(project.ID, entry.ResearchTaskID)
+			if err == nil || current.Run.ID != "" {
+				t.Fatal("answer executed/planned research", current.Run.ID, err)
 			}
 			greetingID, _ := id.New()
 			greeting, err := app.ChatFacade.StartChat(chat.StartCommand{ConversationID: run.ConversationID, Text: "你好", ClientMessageID: greetingID, ModelProfileID: profile.ID, ModelID: workflowAITestModelID})

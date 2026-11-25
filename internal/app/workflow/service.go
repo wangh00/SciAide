@@ -63,6 +63,22 @@ func (s *Service) Save(ctx context.Context, command SaveCommand) (SaveResult, er
 }
 
 func (s *Service) save(ctx context.Context, command SaveCommand, purpose Purpose) (SaveResult, error) {
+	return s.saveUsing(ctx, command, purpose, s.repository.SaveVersion)
+}
+
+func (s *Service) savePendingResearchRoute(ctx context.Context, command SaveCommand, eventFor func(SaveResult) (RuntimeEvent, error)) (SaveResult, error) {
+	repository, ok := s.repository.(interface {
+		SavePendingRouteVersion(context.Context, SaveRecord, func(SaveResult) (RuntimeEvent, error)) (SaveResult, error)
+	})
+	if !ok {
+		return SaveResult{}, fmt.Errorf("atomic pending route adoption storage is not configured")
+	}
+	return s.saveUsing(ctx, command, PurposeUserPlan, func(ctx context.Context, record SaveRecord) (SaveResult, error) {
+		return repository.SavePendingRouteVersion(ctx, record, eventFor)
+	})
+}
+
+func (s *Service) saveUsing(ctx context.Context, command SaveCommand, purpose Purpose, persist func(context.Context, SaveRecord) (SaveResult, error)) (SaveResult, error) {
 	s.saveMu.Lock()
 	defer s.saveMu.Unlock()
 
@@ -111,7 +127,7 @@ func (s *Service) save(ctx context.Context, command SaveCommand, purpose Purpose
 		CompilationSHA256: compiled.CompilationSHA256,
 		CreatedAt:         now,
 	}
-	return s.repository.SaveVersion(ctx, SaveRecord{
+	return persist(ctx, SaveRecord{
 		Workflow:                 value,
 		Version:                  version,
 		ExpectedCurrentVersionID: command.ExpectedCurrentVersionID,

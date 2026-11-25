@@ -99,7 +99,7 @@ test("research start removes template entry and opens past plans only on demand"
   assert.match(source, /const \[historyPlansOpen, setHistoryPlansOpen\] = useState\(false\)/);
   assert.match(source, /historyPlansOpen && <ResearchPlanHistory/);
   assert.match(source, /plans=\{visibleWorkflows\}/);
-  assert.match(source, /openPlan=\{selectWorkflow\} deletePlan=\{deleteWorkflow\} deleteSelected=\{deleteSelectedPlans\}/);
+  assert.match(source, /openPlan=\{async plan => \{ await selectWorkflow\(plan\); \}\} deletePlan=\{deleteWorkflow\} deleteSelected=\{deleteSelectedPlans\}/);
   assert.doesNotMatch(source, /WorkflowTemplateDialog|selectedTemplateDefinition|selectedTemplateId|newFromTemplate|"WorkflowFacade", "Templates"/);
   assert.doesNotMatch(source, /if \(!editorTouched\.current && !selectedId && loaded\[0\]\)/);
   assert.match(css, /\.research-plan-history-body\s*\{[^}]*overflow-y:\s*auto/s);
@@ -367,9 +367,9 @@ test("research tasks are first-class entries separate from reusable plans", asyn
   assert.match(source, /className="workflow-project-tasks"/);
   assert.match(source, /<h2>科研任务<\/h2>/);
   assert.match(source, /点击即可查看当前进度、协作对话和结果/);
-  assert.match(source, /async function openProjectRun\(run: WorkflowRun\)/);
+  assert.match(source, /onClick=\{\(\) => void openProjectRun\(run, conversationNavigation\(true\)\)\}/);
   assert.match(source, /className="workflow-side-tabs"/);
-  assert.match(source, /科研任务<small>\{sideView === "loading" \? "正在读取…" : `\$\{projectRuns\.length\} 条运行记录`\}<\/small>/);
+  assert.match(source, /科研任务<small>\{sideView === "loading" \? "正在读取…" : `\$\{projectRuns\.length \+ standaloneTasks\.length\} 项任务`\}<\/small>/);
   assert.match(source, /研究方案<small>提出问题，开始研究<\/small>/);
   assert.doesNotMatch(source, /<h3>方案模板<\/h3>|<h3>我的方案<\/h3>/);
   assert.match(source, /aria-label="历史方案"/);
@@ -391,15 +391,15 @@ test("research tasks are first-class entries separate from reusable plans", asyn
 test("research starter records are not presented as completed formal tasks", async () => {
   const source = await readFile(new URL("./App.tsx", import.meta.url), "utf8");
   assert.match(source, /function workflowRunStatusLabel\(run: WorkflowRun\)/);
-  assert.match(source, /run\.workflowPurpose === "research_starter" && run\.status === "completed"/);
-  assert.match(source, /return "路线规划已完成"/);
+  assert.match(source, /run\.workflowPurpose === "research_starter"\) return researchPlannerRunLabels\[run\.status\]/);
+  assert.match(source, /completed: "路线规划已完成"/);
   assert.match(source, /eyebrow="候选执行计划已准备"/);
   assert.doesNotMatch(source, /AI 研究启动已完成/);
   assert.match(source, /researchTaskId\?: string/);
   assert.match(source, /researchStarterRunId\?: string/);
   assert.match(source, /AI 路线规划与后续执行会作为同一任务连续推进/);
   assert.match(source, /const activeProjectRuns = useMemo/);
-  assert.match(source, /\{projectRuns\.length\}<\/b><small>全部任务/);
+  assert.match(source, /\{projectRuns\.length \+ standaloneTasks\.length\}<\/b><small>全部任务/);
   assert.match(source, /<ResearchRoute detail=\{runDetail\}/);
   const routeSource = await readFile(new URL('./ResearchRoute.tsx', import.meta.url), 'utf8');
   assert.match(routeSource, /<b><span>AI 路线规划<\/span><\/b>/);
@@ -414,8 +414,8 @@ test("research mode chooses the useful first screen after task discovery", async
   assert.match(source, /const sideViewTouchedRef = useRef\(false\)/);
   assert.match(source, /const chooseSideView = useCallback/);
   assert.match(source, /researchSideViewSession\.set\(project\.id, value\)/);
-  assert.match(source, /remembered === "tasks" && loaded\.length > 0/);
-  assert.match(source, /loaded\.length > 0 \? "tasks" : "plans"/);
+  assert.match(source, /remembered === "tasks" && hasTasks/);
+  assert.match(source, /hasTasks \? "tasks" : "plans"/);
   assert.match(source, /if \(!sideViewResolvedRef\.current && !sideViewTouchedRef\.current\)/);
   assert.match(source, /正在准备科研模式/);
   assert.match(css, /@keyframes workflow-entry-spin/);
@@ -441,7 +441,10 @@ test("one-sentence research ideas use a persisted AI starter and host-validated 
   const css = await readFile(new URL("./styles.css", import.meta.url), "utf8");
   assert.match(source, /className="research-start-welcome"/);
   assert.match(source, /researchEntry \? "开始讨论" : "发送"/);
-  assert.match(source, /WorkflowFacade", "StartResearch"/);
+  assert.match(source, /WorkflowFacade", "StartResearchDiscussion"/);
+  assert.match(source, /WorkflowFacade", "GetResearchTaskSession"/);
+  assert.match(source, /async function openStandaloneTask\(task: ResearchTask\)/);
+  assert.doesNotMatch(source, /referenceAttachmentIds,modelProfileId,modelId,reasoningLevel,discussionOnly:true/);
   assert.match(source, /请先在顶部选择协作模型/);
   assert.match(source, /function researchStarterPlan\(detail: WorkflowRunDetail\)/);
   assert.match(source, /const visibleMessageText = \(message: Message\)/);

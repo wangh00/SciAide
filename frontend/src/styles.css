@@ -2474,3 +2474,47 @@ details.research-route-planning-notes > ul > li { margin: 0; padding: 0; }
 .ui-recovery h2 { margin: 0 0 12px; font-size: 18px; }
 .ui-recovery p { line-height: 1.65; color: #63746a; }
 .ui-recovery button { margin: 8px 10px 0 0; padding: 8px 14px; border: 1px solid #bdcfc4; border-radius: 6px; background: #fff; color: #366c51; cursor: pointer; }
+
+/* The discussion keeps a task-scoped, unverified working note alongside chat. */
+.research-route-panel > header { grid-row: 1; }
+.research-route-panel > .research-task-question { grid-row: 2; }
+.research-route-panel > .research-route-status { grid-row: 3; }
+.research-route-panel > :is(.research-working-state,.research-route-discussion,.research-route-steps) { grid-row: 4; }
+.research-route-panel > footer { grid-row: 5; }
+.research-working-state { min-height: 0; overflow-y: auto; padding: 10px; border: 1px solid #dce5e1; border-radius: 8px; background: #fff; scrollbar-width: thin; }
+.research-working-state > header { display: flex; align-items: start; justify-content: space-between; }
+.research-working-state h3 { margin: 0; color: #263a34; font-size: 13px; }
+.research-working-state header small,.research-working-meta { color: #697a74; font-size: 10.5px; }
+.research-working-state .research-working-disclaimer { margin: 6px 0 10px; color: #60726c; font-size: 11px; line-height: 1.5; }
+.research-working-feedback { padding: 9px; border-radius: 6px; color: #52645d; background: #f1f6f3; font-size: 11.5px; line-height: 1.5; }
+.research-working-feedback button { margin-left: 6px; border: 0; color: #176f69; background: transparent; text-decoration: underline; }
+.research-working-meta { padding-bottom: 6px; border-bottom: 1px solid #e6edeb; }
+.research-working-field { padding: 8px 0; border-bottom: 1px solid #edf1ef; }
+.research-working-field b,.research-working-tools > b { color: #38584e; font-size: 11px; }
+.research-working-field p,.research-working-field ul { margin: 4px 0 0; color: #3f4b47; font-size: 11.5px; line-height: 1.55; overflow-wrap: anywhere; white-space: pre-wrap; }
+.research-working-field ul { padding-left: 18px; }
+.research-working-source { margin-top: 8px; color: #65756f; font-size: 10.5px; overflow-wrap: anywhere; }
+.research-working-source summary { cursor: pointer; }
+.research-working-source p { margin: 4px 0; }
+.research-working-tools { display: grid; gap: 6px; margin-top: 12px; padding-top: 10px; border-top: 1px solid #dce5e1; }
+.research-working-tools button { min-height: 34px; padding: 6px 9px; border: 1px solid #acd0c2; border-radius: 6px; color: #176f69; background: #eef8f3; font-size: 11.5px; font-weight: 700; }
+.research-working-tools small { color: #667872; font-size: 10.5px; line-height: 1.5; }
+.research-search-scope { display: block; margin-top: 2px; color: #486a5f; font-size: 10.5px; line-height: 1.3; }
+.research-mobile-toggle,.research-route-panel .research-mobile-close { display: none; }
+.research-route-panel > header > .research-route-header-actions { display: flex; gap: 5px; }
+@media (max-width: 880px) {
+  .workspace-content:has(.research-route-panel) > .research-mobile-toggle { position: absolute; z-index: 4; top: 71px; left: 12px; display: flex; align-items: center; min-height: 32px; padding: 5px 10px; border: 1px solid #a6cabd; border-radius: 7px; color: #176f69; background: #f2faf6; font-size: 11.5px; font-weight: 700; }
+  .workspace-content:has(.research-route-panel) > .chat { padding-top: 42px; }
+  .workspace-content:has(.research-route-panel) > .research-route-panel.is-mobile-open { position: absolute; z-index: 5; top: 64px; bottom: 0; left: 0; display: grid; grid-template-rows: auto auto auto minmax(0,1fr) auto; width: min(340px,calc(100% - 20px)); overflow-y: auto; box-shadow: 8px 0 24px rgba(36,60,49,.18); }
+  .research-route-panel .research-mobile-close { display: grid; }
+}
+
+/* Keep the desktop minimum for chat, but allow the research surface to fit a
+   narrower browser viewport. Native window minimum remains managed by Wails. */
+@media (max-width: 960px) {
+  body:has(.app-shell.mode-research) { min-width: 0; }
+  .mode-research .topbar { min-width: 0; }
+  .mode-research .top-actions { min-width: 0; gap: 5px; }
+  .mode-research .model-picker { min-width: 0; max-width: 155px; }
+  .mode-research .model-picker select { min-width: 0; width: 100%; }
+}

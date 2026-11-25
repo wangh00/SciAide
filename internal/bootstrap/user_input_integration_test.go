@@ -268,19 +268,19 @@ func TestUserInputWaitResumeRestartAndPlanning(t *testing.T) {
 	}
 	// Opening research: answer persists as genuine human context, then the same
 	// model turn can invoke the existing planner, without bypassing ownership.
-	entry, err := app.WorkflowFacade.StartResearch(workflow.StartResearchCommand{ProjectID: project.ID, ResearchIdea: "研究想法", ModelProfileID: profile.ID, ModelID: workflowAITestModelID, DiscussionOnly: true})
+	entry, err := app.WorkflowFacade.StartResearchDiscussion(workflow.StartResearchDiscussionCommand{ProjectID: project.ID, ResearchIdea: "研究想法", ModelProfileID: profile.ID, ModelID: workflowAITestModelID})
 	if err != nil {
 		t.Fatal(err)
 	}
-	research := start(entry.Run.ConversationID, "prepare-after-answer")
+	research := start(entry.ConversationID, "prepare-after-answer")
 	pending = wait(research.ID, chat.RunWaitingUserInput)
 	_, err = app.ChatFacade.RespondToUserInput(userinput.Response{ConversationID: research.ConversationID, RunID: research.ID, CallID: pending.UserInput.CallID, Answers: userinput.Answers{"goal": {Text: "自己的方向"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	wait(research.ID, chat.RunCompleted)
-	latest, e := app.WorkflowFacade.GetCurrentResearchTaskRun(project.ID, entry.Run.ResearchTaskID)
-	if e != nil || latest.Run.ID == entry.Run.ID {
+	latest, e := app.WorkflowFacade.GetCurrentResearchTaskRun(project.ID, entry.ResearchTaskID)
+	if e != nil || latest.Run.ID == "" || latest.Run.ID == entry.ResearchTaskID {
 		t.Fatal("answer could not prepare plan", e)
 	}
 	waitForWorkflowState(t, app, project.ID, latest.Run.ID, workflow.RunCompleted, 25*time.Second)
@@ -305,7 +305,7 @@ func TestUserInputWaitResumeRestartAndPlanning(t *testing.T) {
 		t.Fatal(err)
 	}
 	wait(post.ID, chat.RunCompleted)
-	current, _ := app.WorkflowFacade.GetCurrentResearchTaskRun(project.ID, entry.Run.ResearchTaskID)
+	current, _ := app.WorkflowFacade.GetCurrentResearchTaskRun(project.ID, entry.ResearchTaskID)
 	if current.Run.ID != delivered.Run.ID {
 		t.Fatal("answer automatically revised task")
 	}
@@ -321,7 +321,7 @@ func TestUserInputWaitResumeRestartAndPlanning(t *testing.T) {
 	if err != nil || len(proposals) != 1 || !proposals[0].CanConfirm {
 		t.Fatalf("question reply cannot propose revision: %+v %v", proposals, err)
 	}
-	timeline, err := app.WorkflowFacade.ResearchTimeline(workflow.ResearchTimelineQuery{ProjectID: project.ID, TaskID: entry.Run.ResearchTaskID, Limit: 100})
+	timeline, err := app.WorkflowFacade.ResearchTimeline(workflow.ResearchTimelineQuery{ProjectID: project.ID, TaskID: entry.ResearchTaskID, Limit: 100})
 	if err != nil {
 		t.Fatal(err)
 	}

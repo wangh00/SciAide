@@ -77,7 +77,7 @@ func TestContextUsageRealProtocolsContinueAndRestoreQuestion(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			entry, err := app.WorkflowFacade.StartResearch(workflow.StartResearchCommand{ProjectID: project.ID, ResearchIdea: "大学生睡眠与学习状态", ModelProfileID: profile.ID, ModelID: workflowAITestModelID, DiscussionOnly: true})
+			entry, err := app.WorkflowFacade.StartResearchDiscussion(workflow.StartResearchDiscussionCommand{ProjectID: project.ID, ResearchIdea: "大学生睡眠与学习状态", ModelProfileID: profile.ID, ModelID: workflowAITestModelID})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -101,7 +101,7 @@ func TestContextUsageRealProtocolsContinueAndRestoreQuestion(t *testing.T) {
 				return wailstransport.RunSnapshot{}
 			}
 			clientID, _ := id.New()
-			run, err := app.ChatFacade.StartChat(chat.StartCommand{ConversationID: entry.Run.ConversationID, Text: "帮我讨论研究方法，需要时问我。", ClientMessageID: clientID, ModelProfileID: profile.ID, ModelID: workflowAITestModelID})
+			run, err := app.ChatFacade.StartChat(chat.StartCommand{ConversationID: entry.ConversationID, Text: "帮我讨论研究方法，需要时问我。", ClientMessageID: clientID, ModelProfileID: profile.ID, ModelID: workflowAITestModelID})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -188,7 +188,7 @@ func TestOrdinaryProtocolBudgetRecoveryUsesRealSQLiteQuestionAndRestart(t *testi
 			if err != nil {
 				t.Fatal(err)
 			}
-			entry, err := app.WorkflowFacade.StartResearch(workflow.StartResearchCommand{ProjectID: project.ID, ResearchIdea: "研究设计讨论", ModelProfileID: profile.ID, ModelID: workflowAITestModelID, DiscussionOnly: true})
+			entry, err := app.WorkflowFacade.StartResearchDiscussion(workflow.StartResearchDiscussionCommand{ProjectID: project.ID, ResearchIdea: "研究设计讨论", ModelProfileID: profile.ID, ModelID: workflowAITestModelID})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -212,7 +212,7 @@ func TestOrdinaryProtocolBudgetRecoveryUsesRealSQLiteQuestionAndRestart(t *testi
 				return wailstransport.RunSnapshot{}
 			}
 			client, _ := id.New()
-			run, err := app.ChatFacade.StartChat(chat.StartCommand{ConversationID: entry.Run.ConversationID, Text: "查资料但先不要启动返修。", ClientMessageID: client, ModelProfileID: profile.ID, ModelID: workflowAITestModelID})
+			run, err := app.ChatFacade.StartChat(chat.StartCommand{ConversationID: entry.ConversationID, Text: "查资料但先不要启动返修。", ClientMessageID: client, ModelProfileID: profile.ID, ModelID: workflowAITestModelID})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -248,9 +248,9 @@ func TestOrdinaryProtocolBudgetRecoveryUsesRealSQLiteQuestionAndRestart(t *testi
 			if err := app.store.DB().QueryRow(`SELECT payload_json FROM provider_turn_items WHERE run_id=? AND turn_index=1 AND item_ordinal=0`, run.ID).Scan(&after); err != nil || after != before {
 				t.Fatal("recovery changed immutable protocol", err)
 			}
-			current, err := app.WorkflowFacade.GetCurrentResearchTaskRun(project.ID, entry.Run.ResearchTaskID)
-			if err != nil || current.Run.ID != entry.Run.ID {
-				t.Fatal("discussion started revision", err)
+			current, err := app.WorkflowFacade.GetCurrentResearchTaskRun(project.ID, entry.ResearchTaskID)
+			if err == nil || current.Run.ID != "" {
+				t.Fatal("discussion started revision", current.Run.ID, err)
 			}
 		})
 	}

@@ -3,12 +3,16 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import test from 'node:test';
 import ts from 'typescript';
+import {loadTsx} from './testTsxLoader.mjs';
+const {researchDiscussionAvailable, researchDiscussionConversation} = loadTsx(new URL('./researchDiscussion.ts', import.meta.url));
 const source=fs.readFileSync(new URL('./App.tsx',import.meta.url),'utf8');
 const start=source.indexOf('  const loadRun = useCallback(async (runId: string');const end=source.indexOf('\n  useEffect(',start);assert.ok(start>=0&&end>start);
 function fixture(){
+ let navigation=0;
  const pending=[],details=[],busy=[],feedback=[];const context={useCallback:f=>f,activeRunIdRef:{current:'run'},activeWorkflowIdRef:{current:'workflow'},runRequestRef:{current:0},runLoadsInFlightRef:{current:new Set()},mutationRef:{current:''},project:{id:'project'},selectConversation:async()=>{},backend:()=>new Promise((resolve,reject)=>pending.push({resolve,reject})),normalizeWorkflowRunDetail:v=>v,setBusy:v=>busy.push(v),setRunDetail:v=>details.push(v),setProjectRuns:()=>{},setFeedback:v=>feedback.push(v),errorText:String};
+ Object.assign(context,{researchDiscussionAvailable,researchDiscussionConversation,conversationNavigation:()=>{const ticket=navigation;return ()=>ticket===navigation;}});
  vm.createContext(context);vm.runInContext(ts.transpileModule(source.slice(start,end)+'\nglobalThis.loadRun=loadRun;',{}).outputText,context);
- return {context,pending,details,busy,feedback};
+ return {context,pending,details,busy,feedback,beginNavigation:()=>++navigation};
 }
 const snapshot={run:{id:'run',workflowId:'workflow'}};
 test('polling cannot supersede manual refresh or strand load-run busy state',async()=>{
@@ -28,4 +32,8 @@ test('run switching discards former workflow response',async()=>{
 });
 test('mutating workflow defers background polls',async()=>{
  const f=fixture();f.context.mutationRef.current='retry:step';await f.context.loadRun('run',true);assert.equal(f.pending.length,0);
+});
+test('new task navigation drops a delayed workflow read and releases the loading state',async()=>{
+ const f=fixture();const old=f.context.loadRun('run');f.beginNavigation();f.pending[0].resolve(snapshot);await old;
+ assert.equal(f.details.length,0);assert.equal(f.context.runLoadsInFlightRef.current.size,0);assert.deepEqual(f.busy,['load-run','']);
 });

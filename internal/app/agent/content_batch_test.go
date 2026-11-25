@@ -86,3 +86,56 @@ func TestIncrementalTextPreservesJournalAndPartialFailure(t *testing.T) {
 		stream.Close()
 	}
 }
+
+// Model adapters can have a frame already decoded while the host stops the run.
+// Cancel after the adapter has read it, before handing it back to the loop.
+type stopDuringReceiveStream struct {
+	model.Stream
+	stop  context.CancelFunc
+	reads int
+}
+
+func (s *stopDuringReceiveStream) Recv() (model.Event, error) {
+	event, err := s.Stream.Recv()
+	s.reads++
+	if s.reads == 2 {
+		s.stop()
+	}
+	return event, err
+}
+
+func TestReceiveTurnDiscardsLateFramesAfterStop(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		event model.Event
+	}{
+		{"text", model.Event{Type: model.EventTextDelta, Text: "不应出现的迟到正文"}},
+		{"tool call", model.Event{Type: model.EventToolCall, ToolCall: &model.ToolCall{ID: "late", Name: "builtin.research.state.update"}}},
+		{"usage", model.Event{Type: model.EventUsage, Usage: &model.Usage{OutputTokens: 1}}},
+		{"completion", model.Event{Type: model.EventDone, FinishReason: "stop"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, stop := context.WithCancel(context.Background())
+			defer stop()
+			loop, state, _ := newLoopFixture(t, nil)
+			state.journalDrafts = map[int]string{}
+			observer := &batchedDeltaObserver{}
+			loop.observer = observer
+			const accepted = "停止前已收到的文本"
+			stream, err := fake.New([]fake.Step{
+				{Event: model.Event{Type: model.EventTextDelta, Text: accepted}},
+				{Event: tc.event},
+			}).Stream(ctx, model.ChatRequest{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer stream.Close()
+			turn, err := loop.receiveTurn(ctx, chat.Run{ModelTurns: 1}, true, false, &stopDuringReceiveStream{Stream: stream, stop: stop})
+			if !errors.Is(err, context.Canceled) || turn.text != accepted || strings.Join(observer.chunks, "") != accepted || state.journalDrafts[1] != accepted ||
+				len(turn.toolCalls) != 0 || len(turn.usages) != 0 || turn.finishReason != "" {
+				t.Fatalf("late frame affected stopped turn: err=%v text=%q visible=%q draft=%q calls=%d usages=%d finish=%q",
+					err, turn.text, observer.chunks, state.journalDrafts[1], len(turn.toolCalls), len(turn.usages), turn.finishReason)
+			}
+		})
+	}
+}

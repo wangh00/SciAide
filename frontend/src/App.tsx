@@ -27,6 +27,9 @@ import { ResearchCitationRepair, ResearchCitationRepairActions, ResearchCitation
 import { citationRepairModel } from "./citationRepairPresentation.js";
 import { reviewTrackingModel, ReviewIssues } from "./researchReviewPresentation.js";
 import { ResearchTaskTimeline } from "./ResearchTaskTimeline";
+import { ResearchStatePanel, researchStateRefreshIdentity } from "./ResearchStatePanel";
+import { DirectResearchTaskView } from "./DirectResearchTaskView";
+import { ResearchDiscussionContext, ResearchDiscussionEntry, normalizeResearchDiscussionEntry, researchDiscussionAvailable, researchDiscussionConversation, researchDiscussionEntryAvailable } from "./researchDiscussion";
 import { compareRunCreatedAt, workflowStepCanRetry, workflowReviewGateRejected } from "./researchTimelineState.js";
 import { conditionalViews, shareSnapshot, singleFlight } from "./snapshotState.js";
 import {UserInputCard, questionAnswered, type UserInputQuestion, type UserInputAnswers, type UserInputRequest} from "./UserInputCard";
@@ -215,8 +218,11 @@ type ResearchOpeningHandler = (idea: string) => Promise<{conversationId: string;
 const readResearchTimeline = (query: {projectId: string; taskId: string; before?: string; after?: string; limit: number}) => backend<ResearchTimelinePage>("WorkflowFacade", "ResearchTimeline", query);
 type ResearchDeliveryAssessment = { status: "pending" | "blocked" | "revision_required" | "reviewed" | "unverified"; kind: string; label: string; summary: string; checks?: Array<{ criterionId: string; status: "met" | "not_met"; basis: string }>; limitations?: string[]; report?: ReportAssessment };
 type WorkflowRecoveryAction = {stepId: string; attempt: number; kind: string; failureKind?: string; label: string; summary: string; requiresConfirmation: boolean; callsModel: boolean};
-type WorkflowRunDetail = { recovery?: WorkflowRecoveryAction | null; run: WorkflowRun; steps: WorkflowStep[]; events: WorkflowRuntimeEvent[]; pendingApprovals: Approval[]; aiExecutions: WorkflowAIExecution[]; aiActivities?: AIStageActivity[]; toolActivities?: WorkflowToolActivity[]; artifactCount: number; registeredDeliverables?: string[]; deliveryAssessment?: ResearchDeliveryAssessment; revisionProposals?: ResearchRevisionProposal[]; discussionRevisionAvailable?: boolean; evidenceReselection?: EvidenceReselection; reviewRevisionRecommendation?: RevisionRecommendation; reviewRevisionTargets?: Array<{ nodeId: string; label: string; repeatsSideEffects: boolean }> };
+type WorkflowRunDetail = { recovery?: WorkflowRecoveryAction | null; run: WorkflowRun; steps: WorkflowStep[]; events: WorkflowRuntimeEvent[]; pendingApprovals: Approval[]; aiExecutions: WorkflowAIExecution[]; aiActivities?: AIStageActivity[]; toolActivities?: WorkflowToolActivity[]; artifactCount: number; registeredDeliverables?: string[]; deliveryAssessment?: ResearchDeliveryAssessment; revisionProposals?: ResearchRevisionProposal[]; discussionRevisionAvailable?: boolean; researchDiscussion?: ResearchDiscussionContext; evidenceReselection?: EvidenceReselection; reviewRevisionRecommendation?: RevisionRecommendation; reviewRevisionTargets?: Array<{ nodeId: string; label: string; repeatsSideEffects: boolean }> };
 type WorkflowConversationLookup = { found: boolean; run?: WorkflowRunDetail };
+type ResearchTaskSession = { entry: ResearchDiscussionEntry; currentRun?: WorkflowRunDetail; currentRunUnavailable?: boolean };
+type ConversationNavigationGuard = () => boolean;
+const researchRunReadNotice = "暂时无法读取候选运行，原讨论已保留。";
 type ResearchStageTask = { chatRunId: string; nodeName: string; nodeKind: "ai_analysis" | "agent_stage"; promptVersion: string; status: WorkflowAIExecution["status"]; skillRouting: boolean; reviewPolicy: "human" | "auto"; workflowStatus?: WorkflowRunStatus };
 type ResearchRouteStage = { stageId: string; objective: string; methods: string[]; skillNames: string[]; inputs: string[]; outputs: string[]; humanCheckpoint: boolean };
 type ResearchRouteLayer = { layerId: string; title: string; objective: string; stages: ResearchRouteStage[] };
@@ -934,10 +940,11 @@ export default function App() {
   const [knowledgeOpen, setKnowledgeOpen] = useState(false);
   const [artifactsOpen, setArtifactsOpen] = useState(false);
   const [resourceTaskId, setResourceTaskId] = useState("");
-  const [researchOpen, setResearchOpen] = useState(false);
+  const [researchOpen, setResearchOpen] = useState<{projectId: string; taskId: string} | null>(null);
   const [pythonOpen, setPythonOpen] = useState(false);
   const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>(restoredView?.mode ?? "chat");
   const [researchWorkspaceReset, setResearchWorkspaceReset] = useState(0);
+  const researchWorkspaceEpochRef = useRef(0);
   const [archiveBusy, setArchiveBusy] = useState<"" | "export" | "restore">("");
   const [archiveReport, setArchiveReport] = useState<ProjectArchiveRestoreReport | null>(null);
   const [mcpServers, setMcpServers] = useState<MCPServer[] | null>(null);
@@ -1160,6 +1167,13 @@ export default function App() {
   useEffect(() => { conversationOpenRequestRef.current++; setResearchConversationId(""); setResearchConversation(null); setResearchComposerLocked(false); setResearchRevisionConversationId(""); setResearchStageTasks({}); setResearchActivities({}); }, [projectId]);
   useEffect(() => { setPendingAttachments([]); }, [projectId, workspaceMode]);
   useEffect(() => {
+    setResearchOpen(current => {
+      if (!current || current.projectId !== projectId) return null;
+      if (current.taskId && (workspaceMode !== "research" || researchTaskTimeline?.projectId !== projectId || researchTaskTimeline.taskId !== current.taskId)) return null;
+      return current;
+    });
+  }, [projectId, workspaceMode, researchTaskTimeline?.projectId, researchTaskTimeline?.taskId]);
+  useEffect(() => {
     appliedSnapshotRef.current = null;
     discardContentDeltas(); completedContentIdsRef.current.clear(); if (workspaceMode !== "research") autoFollowRef.current = true; runSequenceRef.current.clear(); snapshotRunRef.current = null;
     setActiveRun(null); setRuntimeActivity(null); setUserInputRequest(null); setActiveRunIsWorkflowAI(false); setRetryStatus(null); setToolCalls([]); setRunSteps([]); setPendingApprovals([]); setPendingAttachments([]); setRevisionLibraryOpen(false); setBusy(false);
@@ -1191,6 +1205,14 @@ export default function App() {
       const run = activeRunRef.current;
       if (!run || event.aggregateId !== run.id || run.conversationId !== conversationIdRef.current) {
         return;
+      }
+      if (event.type === "content.delta" || event.type === "content.completed") {
+        // An already buffered batch may arrive after the host's terminal
+        // notification with a higher sequence. The ref is updated before React
+        // renders the stop, so even events in the same batch respect it.
+        const observed = snapshotRunRef.current;
+        const status = observed?.id === run.id ? observed.status : run.status;
+        if (status === "cancelled" || status === "interrupted") return;
       }
       // Retry lifecycle has its own atomically persisted revision. A snapshot
       // can include newer unrelated events, but cannot swallow this update.
@@ -1542,58 +1564,83 @@ export default function App() {
 
   const selectedProject = projects.find((item) => item.id === projectId);
   const selectedConversation = conversationId === researchConversationId ? researchConversation ?? undefined : conversations.find((item) => item.id === conversationId);
-  const selectResearchConversation = useCallback(async (nextConversationId: string) => {
+  const resetResearchWorkspace = useCallback(() => {
+    ++researchSelectionRef.current;
+    setResearchWorkspaceReset(++researchWorkspaceEpochRef.current);
+  }, []);
+  // History and the task list share click order, not the order their reads finish.
+  const conversationNavigation = useCallback((begin = false): ConversationNavigationGuard => {
+    if (begin) {
+      ++conversationOpenRequestRef.current;
+      restoringView.current = false;
+      setViewRestored(true);
+      setRestoreDraft(null);
+    }
+    const request = conversationOpenRequestRef.current;
+    return () => request === conversationOpenRequestRef.current && selectedProjectIdRef.current === projectId;
+  }, [projectId]);
+  const selectResearchConversation = useCallback(async (nextConversationId: string, navigationCurrent = conversationNavigation()) => {
+    // A read already started in the previous studio must not select its
+    // conversation again after the user opens another history entry.
+    if (!projectId || !navigationCurrent() || researchWorkspaceReset !== researchWorkspaceEpochRef.current) return false;
     const request = ++researchSelectionRef.current;
+    const current = () => request === researchSelectionRef.current && navigationCurrent()
+      && researchWorkspaceReset === researchWorkspaceEpochRef.current;
     nextConversationId = nextConversationId.trim();
-    if (!projectId) return;
     const values = await backend<Conversation[]>("ConversationFacade", "ListConversations", projectId);
-    if (request !== researchSelectionRef.current || selectedProjectIdRef.current !== projectId) return;
-    setConversations(values);
+    if (!current()) return false;
     if (!nextConversationId) {
+      setConversations(values);
       setResearchConversationId("");
       setResearchConversation(null);
       setResearchStageTasks({});
       setResearchActivities({});
       conversationIdRef.current = ""; setConversationId("");
-      return;
+      return true;
     }
     const loaded = await backend<Conversation>("ConversationFacade", "GetConversation", nextConversationId);
-    if (request !== researchSelectionRef.current || selectedProjectIdRef.current !== projectId) return;
-    if (loaded.projectId !== projectId) {
-      setResearchConversationId("");
-      setResearchConversation(null);
-      setResearchStageTasks({});
-      setResearchActivities({});
+    if (!current()) return false;
+    if (loaded.projectId !== projectId || loaded.id !== nextConversationId) {
       throw new Error("科研任务绑定的协作会话不存在。");
     }
+    setConversations(values);
     setResearchConversation(loaded);
     setResearchConversationId(nextConversationId);
     conversationIdRef.current = nextConversationId;
     setConversationId(nextConversationId);
-  }, [projectId]);
+    return true;
+  }, [conversationNavigation, projectId, researchWorkspaceReset]);
   const enterChatMode = useCallback(() => {
+    conversationNavigation(true);
+    resetResearchWorkspace();
     setWorkspaceMode("chat");
     if (conversationIdRef.current === researchConversationIdRef.current) setConversationId(first(conversations)?.id ?? "");
-  }, [conversations]);
+  }, [conversationNavigation, conversations, resetResearchWorkspace]);
+  const enterResearchMode = useCallback(() => {
+    if (workspaceMode === "research") return;
+    conversationNavigation(true);
+    setWorkspaceMode("research");
+  }, [conversationNavigation, workspaceMode]);
 
   // History rows can represent either ordinary chat or a Workflow-bound
   // research conversation. Resolve the durable binding before choosing the UI
   // mode so reopening an old research Run restores its per-turn activity
   // records instead of silently rendering an empty/free-chat view.
   const openConversation = useCallback(async (conversation: Conversation, recovering = false) => {
-    if (!recovering) {
-      // Explicit user navigation always wins over delayed page recovery.
-      restoringView.current = false;
-      setViewRestored(true);
-      setRestoreDraft(null);
-    }
-    const request = ++conversationOpenRequestRef.current;
-    const current = () => request === conversationOpenRequestRef.current && selectedProjectIdRef.current === projectId && conversation.projectId === projectId;
+    const navigationCurrent = conversationNavigation(!recovering);
+    const current = () => navigationCurrent() && conversation.projectId === projectId;
+    if (!current()) return false;
     try {
       const lookup = await backend<WorkflowConversationLookup>("WorkflowFacade", "GetRunByConversation", conversation.id);
       if (!current()) return false;
       const boundRun = lookup?.found ? lookup.run : undefined;
-      if (boundRun?.run?.projectId === projectId) {
+      if (lookup?.found && boundRun?.run.projectId !== projectId) throw new Error("科研运行归属不匹配。");
+      const direct = boundRun ? null : await backend<ResearchTaskSession | null>("WorkflowFacade", "GetResearchTaskSessionByConversation", conversation.id);
+      if (!current()) return false;
+      if (direct && (direct.entry.projectId !== projectId || direct.entry.conversationId !== conversation.id)) throw new Error("科研讨论归属不匹配。");
+      if (boundRun || direct) {
+        if (researchConversationIdRef.current !== conversation.id) resetResearchWorkspace();
+        setNotice("");
         setWorkspaceMode("research");
         setResearchConversation(conversation);
         setResearchConversationId(conversation.id);
@@ -1601,19 +1648,20 @@ export default function App() {
         return true;
       }
     } catch {
-      // A lookup failure must not make an ordinary conversation unusable. The
-      // research workspace will still surface a concrete error when opened via
-      // its task list, while this history action falls back to chat.
+      if (current()) setNotice("暂时无法确认该会话的科研归属，已保留当前视图。请重试。");
+      return false;
     }
     if (!current()) return false;
+    resetResearchWorkspace();
     setResearchConversationId("");
     setResearchConversation(null);
     setResearchStageTasks({});
     setResearchActivities({});
+    setNotice("");
     setWorkspaceMode("chat");
     setConversationId(conversation.id);
     return true;
-  }, [projectId]);
+  }, [conversationNavigation, projectId, resetResearchWorkspace]);
   useEffect(() => {
     if (!restoringView.current || !projects.length) return;
     let disposed = false;
@@ -1893,6 +1941,12 @@ export default function App() {
     window.requestAnimationFrame(() => composerInputRef.current?.focus());
   }, []);
   const openArtifactsForTask = useCallback((taskId = "") => { setResourceTaskId(taskId.trim()); setArtifactsOpen(true); }, []);
+  const openDiscoveryForTask = useCallback((taskId: string) => {
+    const id = taskId.trim();
+    if (!id || workspaceMode !== "research" || selectedProjectIdRef.current !== projectId || researchTaskTimeline?.projectId !== projectId || researchTaskTimeline.taskId !== id) return;
+    setResearchOpen({projectId, taskId: id});
+  }, [projectId, workspaceMode, researchTaskTimeline?.projectId, researchTaskTimeline?.taskId]);
+  const researchWorkingRefreshKey = workspaceMode === "research" ? researchStateRefreshIdentity(researchConversationId, activeRun, toolCalls) : "";
 
   const renderMessage = (message: Message) => {
     const messageRun = message.role === "assistant" && activeRun?.id === message.runId ? activeRun : undefined;
@@ -1968,9 +2022,9 @@ export default function App() {
     </aside>
 
 	<main className="workspace">
-	  <header className="topbar"><div className="mode-context"><nav className="workspace-mode-switch" aria-label="工作模式"><button type="button" className={workspaceMode === "chat" ? "selected" : ""} onClick={enterChatMode}><Icon name="chat" size={15}/>自由对话</button><button type="button" className={workspaceMode === "research" ? "selected" : ""} disabled={!selectedProject} title={selectedProject ? "进入项目科研模式" : "请先选择项目"} onClick={() => setWorkspaceMode("research")}><Icon name="history" size={15}/>科研模式</button></nav><div className="breadcrumbs"><span>{selectedProject?.name ?? "Workspace"}</span><i>/</i><strong>{workspaceMode === "research" ? researchConversationId ? selectedConversation?.title ?? "科研协作会话" : "研究任务工作台" : selectedConversation?.title ?? "新研究"}</strong></div></div><div className="top-actions"><button type="button" className="research-open" aria-label="打开文献发现" title={selectedProject ? `检索并筛选 ${selectedProject.name} 的研究文献` : "请先选择项目"} disabled={!selectedProject} onClick={() => setResearchOpen(true)}><Icon name="search" size={15}/><span>文献发现</span></button><button type="button" className="python-open" aria-label="打开项目 Python 环境" title={selectedProject ? `管理 ${selectedProject.name} 的 Python 环境` : "请先选择项目"} disabled={!selectedProject} onClick={() => setPythonOpen(true)}><Icon name="tool" size={15}/><span>Python 环境</span></button><button type="button" className="artifact-open" aria-label="打开科研产物" title={selectedProject ? `查看 ${selectedProject.name} 的科研产物` : "请先选择项目"} disabled={!selectedProject} onClick={() => setArtifactsOpen(true)}><Icon name="archive" size={15}/><span>科研产物</span></button><button type="button" className="knowledge-open" aria-label="打开项目研究资料库" title={selectedProject ? `管理 ${selectedProject.name} 的研究资料` : "请先选择项目"} disabled={!selectedProject} onClick={() => setKnowledgeOpen(true)}><Icon name="library" size={15}/><span>研究资料库</span></button>{workspaceMode === "chat" && <div className="permission-picker" title={busy ? "运行期间不能切换权限模式" : "当前 Workspace 内只读免确认；外部读取、写入和其他工具需确认"}><Icon name="shield" size={13}/><select aria-label="工具权限模式" value={selectedConversation?.permissionMode ?? "plan"} disabled={!selectedConversation || busy} onChange={(event) => void changePermissionMode(event.target.value as PermissionMode)}><option value="plan">Plan · 写入/工具确认</option><option value="full_access">Full Access</option></select></div>}<div className="model-picker"><span className={selectedProfile?.secretConfigured ? "status-dot ready" : "status-dot"}/><select aria-label="选择模型" value={selectedModelKey} onChange={(event) => { const [nextProfile, nextModel] = splitModelKey(event.target.value); setProfileId(nextProfile); setModelId(nextModel); }}><option value="">选择模型</option>{selectableModels.map(({ profile, model }) => <option key={modelKey(profile.id, model.id)} value={modelKey(profile.id, model.id)}>{profile.name} · {model.id}</option>)}</select></div></div></header>
+	  <header className="topbar"><div className="mode-context"><nav className="workspace-mode-switch" aria-label="工作模式"><button type="button" className={workspaceMode === "chat" ? "selected" : ""} onClick={enterChatMode}><Icon name="chat" size={15}/>自由对话</button><button type="button" className={workspaceMode === "research" ? "selected" : ""} disabled={!selectedProject} title={selectedProject ? "进入项目科研模式" : "请先选择项目"} onClick={enterResearchMode}><Icon name="history" size={15}/>科研模式</button></nav><div className="breadcrumbs"><span>{selectedProject?.name ?? "Workspace"}</span><i>/</i><strong>{workspaceMode === "research" ? researchConversationId ? selectedConversation?.title ?? "科研协作会话" : "研究任务工作台" : selectedConversation?.title ?? "新研究"}</strong></div></div><div className="top-actions"><button type="button" className="research-open" aria-label="打开文献发现" title={selectedProject ? `检索并筛选 ${selectedProject.name} 的研究文献` : "请先选择项目"} disabled={!selectedProject} onClick={() => setResearchOpen({projectId, taskId: ""})}><Icon name="search" size={15}/><span>文献发现</span></button><button type="button" className="python-open" aria-label="打开项目 Python 环境" title={selectedProject ? `管理 ${selectedProject.name} 的 Python 环境` : "请先选择项目"} disabled={!selectedProject} onClick={() => setPythonOpen(true)}><Icon name="tool" size={15}/><span>Python 环境</span></button><button type="button" className="artifact-open" aria-label="打开科研产物" title={selectedProject ? `查看 ${selectedProject.name} 的科研产物` : "请先选择项目"} disabled={!selectedProject} onClick={() => setArtifactsOpen(true)}><Icon name="archive" size={15}/><span>科研产物</span></button><button type="button" className="knowledge-open" aria-label="打开项目研究资料库" title={selectedProject ? `管理 ${selectedProject.name} 的研究资料` : "请先选择项目"} disabled={!selectedProject} onClick={() => setKnowledgeOpen(true)}><Icon name="library" size={15}/><span>研究资料库</span></button>{workspaceMode === "chat" && <div className="permission-picker" title={busy ? "运行期间不能切换权限模式" : "当前 Workspace 内只读免确认；外部读取、写入和其他工具需确认"}><Icon name="shield" size={13}/><select aria-label="工具权限模式" value={selectedConversation?.permissionMode ?? "plan"} disabled={!selectedConversation || busy} onChange={(event) => void changePermissionMode(event.target.value as PermissionMode)}><option value="plan">Plan · 写入/工具确认</option><option value="full_access">Full Access</option></select></div>}<div className="model-picker"><span className={selectedProfile?.secretConfigured ? "status-dot ready" : "status-dot"}/><select aria-label="选择模型" value={selectedModelKey} onChange={(event) => { const [nextProfile, nextModel] = splitModelKey(event.target.value); setProfileId(nextProfile); setModelId(nextModel); }}><option value="">选择模型</option>{selectableModels.map(({ profile, model }) => <option key={modelKey(profile.id, model.id)} value={modelKey(profile.id, model.id)}>{profile.name} · {model.id}</option>)}</select></div></div></header>
       <div className="workspace-content">
-      {workspaceMode === "research" && selectedProject && <WorkflowStudioBoundary resetKey={`${selectedProject.id}:${researchConversationId}:${researchWorkspaceReset}`} onRetry={() => setResearchWorkspaceReset((value) => value + 1)}>
+      {workspaceMode === "research" && selectedProject && <WorkflowStudioBoundary resetKey={`${selectedProject.id}:${researchConversationId}:${researchWorkspaceReset}`} onRetry={resetResearchWorkspace}>
         <Fragment key={researchWorkspaceReset}>
         <WorkflowStudio
           key={selectedProject.id}
@@ -1982,7 +2036,10 @@ export default function App() {
           pythonDialogOpen={pythonOpen}
           openPython={() => setPythonOpen(true)}
           openArtifacts={openArtifactsForTask}
+          openTaskDiscovery={openDiscoveryForTask}
+          workingStateRefreshKey={researchWorkingRefreshKey}
           selectConversation={selectResearchConversation}
+          conversationNavigation={conversationNavigation}
           publishStageTasks={setResearchStageTasks}
           publishResearchActivities={setResearchActivities}
           publishTaskTimeline={setResearchTaskTimeline}
@@ -2029,10 +2086,12 @@ export default function App() {
     {knowledgeOpen && selectedProject && <ResearchMaterialsLibrary key={`${selectedProject.id}:${resourceTaskId}`} service={backend} project={selectedProject} taskId={resourceTaskId} close={() => { setKnowledgeOpen(false); setResourceTaskId(""); }}/>}
     {pythonOpen && selectedProject && <PythonEnvironmentSettings project={selectedProject} close={() => setPythonOpen(false)} feedback={setNotice}/>}
     {artifactsOpen && selectedProject && <ArtifactLibrary project={selectedProject} taskId={resourceTaskId} close={() => { setArtifactsOpen(false); setResourceTaskId(""); }}/>}
-    {researchOpen && selectedProject && <ResearchDiscovery
+    {researchOpen && selectedProject && researchOpen.projectId === selectedProject.id && (!researchOpen.taskId || workspaceMode === "research" && researchTaskTimeline?.projectId === selectedProject.id && researchTaskTimeline.taskId === researchOpen.taskId) && <ResearchDiscovery
+      key={`${researchOpen.projectId}:${researchOpen.taskId}`}
       project={selectedProject}
-      close={() => setResearchOpen(false)}
-      openKnowledge={() => { setResearchOpen(false); setKnowledgeOpen(true); }}
+      taskId={researchOpen.taskId}
+      close={() => setResearchOpen(null)}
+      openKnowledge={() => { setResearchOpen(null); setKnowledgeOpen(true); }}
     />}
     {archiveReport && (
       <ProjectArchiveReport
@@ -2874,6 +2933,13 @@ function ResearchDiscovery({ project, taskId = "", close, openKnowledge }: { pro
   const [feedback, setFeedback] = useState("");
   const [evidenceCandidateId, setEvidenceCandidateId] = useState("");
   const candidateRequests = useRef(createLatestRequestGate());
+  const discoveryScope = `${project.id}:${taskId.trim()}`;
+  const discoveryScopeRef = useRef(discoveryScope); discoveryScopeRef.current = discoveryScope;
+  const discoveryActiveRef = useRef(false);
+  useEffect(() => {
+    discoveryActiveRef.current = true;
+    return () => { discoveryActiveRef.current = false; candidateRequests.current.invalidate(); };
+  }, []);
   const visibleQueries = queries.filter((q) => originFilter === "all" || (originFilter === "manual" ? !q.researchTaskId : q.researchTaskId === originFilter));
   const discoveryBusy = loading || searching || Boolean(busyAction);
   function selectOrigin(id: string) {
@@ -2945,10 +3011,16 @@ function ResearchDiscovery({ project, taskId = "", close, openKnowledge }: { pro
   async function runSearch(event: FormEvent) {
     event.preventDefault();
     if (!queryText.trim() || selectedSources.length === 0 || discoveryBusy) return;
+    // Search ownership comes from the entry point, never the browsed history filter.
+    const targetProject = project.id, targetTask = taskId.trim(), targetScope = discoveryScope;
+    const current = () => discoveryActiveRef.current && discoveryScopeRef.current === targetScope;
     setSearching(true); setFeedback("");
     try {
-      const result = await backend<ResearchSearchResult>("ResearchFacade", "Search", { projectId: project.id, query: queryText.trim(), sourceIds: selectedSources, limit: 20 });
-      setOriginFilter("manual");
+      const result = await backend<ResearchSearchResult>("ResearchFacade", "Search", { projectId: targetProject, query: queryText.trim(), sourceIds: selectedSources, limit: 20, ...(targetTask ? {researchTaskId: targetTask} : {}) });
+      if (!current()) return;
+      if (!result?.query || result.query.projectId !== targetProject || (result.query.researchTaskId || "") !== targetTask) throw new Error("检索结果归属与请求不一致。");
+      if (!Array.isArray(result.query.sources) || !Array.isArray(result.page?.items)) throw new Error("检索结果不完整，请刷新记录后查看。");
+      setOriginFilter(targetTask || "manual");
       setHistoryOffset(0);setHistoryRevision((value) => value + 1);
       setEvidenceCandidateId("");
       candidateRequests.current.invalidate();
@@ -2956,8 +3028,8 @@ function ResearchDiscovery({ project, taskId = "", close, openKnowledge }: { pro
       setQueryId(result.query.id); setPage(result.page); setCandidateId(first(result.page.items)?.id ?? "");
       const failures = result.query.sources.filter((item) => item.status === "failed");
       setFeedback(failures.length ? `检索已保存，${failures.length} 个来源失败，其余结果仍可筛选。` : `已保存 ${result.query.resultCount} 条来源记录。`);
-    } catch (error) { setFeedback(errorText(error)); }
-    finally { setSearching(false); }
+    } catch (error) { if (current()) setFeedback(errorText(error)); }
+    finally { if (current()) setSearching(false); }
   }
 
   async function updateReview(status: ResearchReviewStatus) {
@@ -3011,8 +3083,8 @@ function ResearchDiscovery({ project, taskId = "", close, openKnowledge }: { pro
   }
 
   return <ModalBackdrop className="modal-backdrop research-discovery-backdrop" close={close} busy={Boolean(busyAction)}><section className="research-modal" role="dialog" aria-modal="true" aria-label="文献发现">
-    <header><div><span className="dialog-icon research"><Icon name="search" size={19}/></span><div><p>LITERATURE DISCOVERY</p><h2>{project.name} · 文献发现</h2></div></div><button type="button" className="close" aria-label="关闭文献发现" data-dialog-dismiss onClick={close}><Icon name="close"/></button></header>
-    <form className="research-searchbar" onSubmit={runSearch}><div><Icon name="search" size={16}/><input value={queryText} onChange={(event) => setQueryText(event.target.value)} placeholder="输入题名、作者、DOI、主题词或布尔检索式" maxLength={500}/></div><button type="submit" disabled={discoveryBusy || !queryText.trim() || selectedSources.length === 0}><Icon name={searching ? "refresh" : "search"} size={15}/>{searching ? "正在检索" : "检索并保存"}</button></form>
+    <header><div><span className="dialog-icon research"><Icon name="search" size={19}/></span><div><p>LITERATURE DISCOVERY</p><h2>{project.name} · 文献发现</h2>{taskId.trim() && <small className="research-search-scope">新检索保存到本任务；切换历史来源不会改变归属。</small>}</div></div><button type="button" className="close" aria-label="关闭文献发现" data-dialog-dismiss onClick={close}><Icon name="close"/></button></header>
+    <form className="research-searchbar" onSubmit={runSearch}><div><Icon name="search" size={16}/><input value={queryText} onChange={(event) => setQueryText(event.target.value)} placeholder="输入题名、作者、DOI、主题词或布尔检索式" maxLength={500}/></div><button type="submit" disabled={discoveryBusy || !queryText.trim() || selectedSources.length === 0}><Icon name={searching ? "refresh" : "search"} size={15}/>{searching ? "正在检索" : taskId.trim() ? "检索并保存到本任务" : "检索并保存"}</button></form>
     <div className="research-source-picker">{sources.map((source) => <button type="button" className={selectedSources.includes(source.id) ? "selected" : ""} onClick={() => toggleSource(source.id)} key={source.id} title={source.description}><span className="research-source-check">{selectedSources.includes(source.id) && <Icon name="check" size={11}/>}</span><b>{source.name}</b>{source.capabilities?.explicitSelection && <small>需主动选择</small>}<small>{source.fullText ? "开放全文" : "元数据"}</small></button>)}</div>
     {scopedTaskId && <div className="discovery-material-toolbar"><span>检索与筛选留在本任务，主动加入的资料才会出现在资料库。</span><button type="button" onClick={()=>setMaterialView({taskId:scopedTaskId,attachmentId:""})}>管理本任务材料</button></div>}
     {materialView && createPortal(<ResearchMaterialsLibrary key={`${project.id}:${materialView.taskId}:${materialView.attachmentId}`} project={project} taskId={materialView.taskId} taskMaterials initialAttachmentId={materialView.attachmentId} service={backend} close={()=>{setMaterialView(null);setMaterialRefresh(value=>value+1);}}/>, document.body)}
@@ -5732,9 +5804,14 @@ const workflowRunLabels: Record<WorkflowRunStatus, string> = {
   paused: "已暂停", completed: "已完成", failed: "失败", cancelled: "已取消", interrupted: "已中断",
 };
 
+const researchPlannerRunLabels: Record<WorkflowRunStatus, string> = {
+  queued: "候选规划排队中", running: "候选规划中", waiting_approval: "候选规划等待授权", waiting_human_confirmation: "候选规划等待确认",
+  paused: "候选规划已暂停", completed: "路线规划已完成", failed: "候选规划失败", cancelled: "候选规划已取消", interrupted: "候选规划已中断",
+};
+
 function workflowRunStatusLabel(run: WorkflowRun) {
-  if (run.workflowPurpose === "research_starter" && run.inputs.discussion_only === true) return "需求讨论";
-	if (run.workflowPurpose === "research_starter" && run.status === "completed") return "路线规划已完成";
+  if (run.workflowPurpose === "research_starter" && run.inputs.discussion_only === true) return "科研探索";
+	if (run.workflowPurpose === "research_starter") return researchPlannerRunLabels[run.status];
 	if (run.status === "completed" && run.outputs?.research_design && typeof run.outputs.research_design === "object" && !Array.isArray(run.outputs.research_design) && (run.outputs.research_design as Record<string, unknown>).status === "research_design_not_empirical_result") return "研究设计已完成";
 	return workflowRunLabels[run.status];
 }
@@ -6720,8 +6797,9 @@ function WorkflowInputFields({ definition, values, disabled, compact = false, fr
   })}</>;
 }
 
-function WorkflowStudio({ project, initialConversationId, modelProfileId, modelId, reasoningLevel, pythonDialogOpen, openPython, openArtifacts, selectConversation, publishStageTasks, publishResearchActivities, publishTaskTimeline, publishComposerLocked, publishRevisionConversationId, onDraft, publishOpening, entrySlotRef, conversationBusy, discussionBusy }: { project: Project; initialConversationId: string; modelProfileId: string; modelId: string; reasoningLevel: ReasoningLevel; pythonDialogOpen: boolean; openPython: () => void; openArtifacts: (taskId?: string) => void; selectConversation: (conversationId: string) => Promise<void>; publishStageTasks: (tasks: Record<string, ResearchStageTask>) => void; publishResearchActivities: (activities: Record<string, WorkflowMessageActivity>) => void; publishTaskTimeline: (value: ResearchTimelineView | null) => void; publishComposerLocked: (locked: boolean) => void; publishRevisionConversationId: (conversationId: string) => void; onDraft: (prompt: string) => void; publishOpening: (handler: ResearchOpeningHandler | null) => void; entrySlotRef: (element: HTMLDivElement | null) => void; conversationBusy: boolean; discussionBusy: boolean }) {
+function WorkflowStudio({ project, initialConversationId, modelProfileId, modelId, reasoningLevel, pythonDialogOpen, openPython, openArtifacts, openTaskDiscovery, workingStateRefreshKey, selectConversation, conversationNavigation, publishStageTasks, publishResearchActivities, publishTaskTimeline, publishComposerLocked, publishRevisionConversationId, onDraft, publishOpening, entrySlotRef, conversationBusy, discussionBusy }: { project: Project; initialConversationId: string; modelProfileId: string; modelId: string; reasoningLevel: ReasoningLevel; pythonDialogOpen: boolean; openPython: () => void; openArtifacts: (taskId?: string) => void; openTaskDiscovery: (taskId: string) => void; workingStateRefreshKey: string; selectConversation: (conversationId: string, isCurrent?: ConversationNavigationGuard) => Promise<boolean>; conversationNavigation: (begin?: boolean) => ConversationNavigationGuard; publishStageTasks: (tasks: Record<string, ResearchStageTask>) => void; publishResearchActivities: (activities: Record<string, WorkflowMessageActivity>) => void; publishTaskTimeline: (value: ResearchTimelineView | null) => void; publishComposerLocked: (locked: boolean) => void; publishRevisionConversationId: (conversationId: string) => void; onDraft: (prompt: string) => void; publishOpening: (handler: ResearchOpeningHandler | null) => void; entrySlotRef: (element: HTMLDivElement | null) => void; conversationBusy: boolean; discussionBusy: boolean }) {
   const [historyPlansOpen, setHistoryPlansOpen] = useState(false);
+  const [mobilePanelOpen, setMobilePanelOpen] = useState(false);
   const [workflows, setWorkflows] = useState<ResearchWorkflow[]>([]);
   const [planSelection, setPlanSelection] = useState<string[]>([]);
   const [selectingPlans, setSelectingPlans] = useState(false);
@@ -6739,6 +6817,9 @@ function WorkflowStudio({ project, initialConversationId, modelProfileId, modelI
   const [projectRuns, setProjectRuns] = useState<WorkflowRun[]>([]);
   const [projectRunsLoading, setProjectRunsLoading] = useState(true);
   const [runDetail, setRunDetail] = useState<WorkflowRunDetail | null>(null);
+  const [directEntry, setDirectEntry] = useState<ResearchDiscussionEntry | null>(null);
+  const [standaloneTasks, setStandaloneTasks] = useState<ResearchTask[]>([]);
+  useEffect(() => { setMobilePanelOpen(false); }, [runDetail?.run.researchTaskId]);
   const [runInputs, setRunInputs] = useState<Record<string, string>>({});
 	const [pendingAdoptedRoute, setPendingAdoptedRoute] = useState<PendingAdoptedRoute | null>(null);
 	const [routeUploadedData, setRouteUploadedData] = useState<RouteDataCandidate[]>([]);
@@ -6833,8 +6914,9 @@ function WorkflowStudio({ project, initialConversationId, modelProfileId, modelI
 
   useEffect(() => {
     const reviewConversation = runDetail?.run.status === "waiting_human_confirmation" && pendingDecisionStep?.nodeKind === "agent_stage";
-    publishComposerLocked(Boolean(pendingAdoptedRoute || runDetail && !workflowTerminal(runDetail.run.status) && !reviewConversation));
-  }, [pendingDecisionStep?.nodeKind, pendingAdoptedRoute, publishComposerLocked, runDetail]);
+    const closedStarter = runDetail?.run.workflowPurpose === "research_starter" && workflowTerminal(runDetail.run.status) && !researchDiscussionAvailable(runDetail);
+    publishComposerLocked(Boolean(directEntry && !researchDiscussionEntryAvailable(directEntry) || pendingAdoptedRoute || closedStarter || runDetail && !workflowTerminal(runDetail.run.status) && !reviewConversation && !researchDiscussionAvailable(runDetail)));
+  }, [directEntry, pendingDecisionStep?.nodeKind, pendingAdoptedRoute, publishComposerLocked, runDetail]);
 
   useEffect(() => () => publishComposerLocked(false), [publishComposerLocked]);
 
@@ -6964,13 +7046,19 @@ function WorkflowStudio({ project, initialConversationId, modelProfileId, modelI
 	const request = ++projectRunsRequestRef.current;
 	setProjectRunsLoading(true);
 	try {
-	  const values = normalizeWorkflowRunList(await backend<WorkflowRun[]>("WorkflowFacade", "ListProjectRuns", project.id, 200));
+	  const [runValues, taskValues] = await Promise.all([
+		backend<WorkflowRun[]>("WorkflowFacade", "ListProjectRuns", project.id, 200),
+		backend<ResearchTask[]>("WorkflowFacade", "ListResearchTasks", project.id, 500),
+	  ]);
 	  if (request !== projectRunsRequestRef.current) return;
-	  const loaded = values;
+	  const loaded = normalizeWorkflowRunList(runValues);
+	  const standalone = (taskValues ?? []).filter(task => task.projectId === project.id && !task.latestRunId);
 	  setProjectRuns(loaded);
+	  setStandaloneTasks(standalone);
+	  const hasTasks = loaded.length + standalone.length > 0;
 	  if (!sideViewResolvedRef.current && !sideViewTouchedRef.current) {
 		const remembered = researchSideViewSession.get(project.id);
-		const target = remembered === "plans" || remembered === "tasks" && loaded.length > 0 ? remembered : loaded.length > 0 ? "tasks" : "plans";
+		const target = remembered === "plans" || remembered === "tasks" && hasTasks ? remembered : hasTasks ? "tasks" : "plans";
 		setSideView(target);
 		sideViewResolvedRef.current = true;
 	  }
@@ -7008,8 +7096,8 @@ function WorkflowStudio({ project, initialConversationId, modelProfileId, modelI
 
   useEffect(() => { void refreshPythonPreflight(); }, [refreshPythonPreflight, detail?.workflow.currentVersionId, pythonDialogOpen]);
 
-  const loadRun = useCallback(async (runId: string, quiet = false) => {
-	if (!runId) return;
+  const loadRun = useCallback(async (runId: string, quiet = false, navigationCurrent = conversationNavigation()) => {
+	if (!runId || !navigationCurrent()) return;
 	if (quiet && activeRunIdRef.current !== runId) return;
 	// A background poll must never supersede a manual refresh or another poll.
 	if (quiet && (runLoadsInFlightRef.current.size > 0 || Boolean(mutationRef.current))) return;
@@ -7020,17 +7108,17 @@ function WorkflowStudio({ project, initialConversationId, modelProfileId, modelI
 	if (!quiet) setBusy("load-run");
 	try {
 	  const loaded = normalizeWorkflowRunDetail(await backend<WorkflowRunDetail>("WorkflowFacade", "GetRun", project.id, runId));
-	  if (request !== runRequestRef.current || quiet && mutationRef.current || !workflowId || activeWorkflowIdRef.current !== workflowId || loaded.run.workflowId !== workflowId) return;
+	  if (!navigationCurrent() || request !== runRequestRef.current || quiet && mutationRef.current || !workflowId || activeWorkflowIdRef.current !== workflowId || loaded.run.workflowId !== workflowId) return;
 	  setRunDetail(current => shareSnapshot(current, loaded));
 	  setProjectRuns((current) => shareSnapshot(current, current.map((value) => value.id === loaded.run.id ? loaded.run : value)));
-      if (!quiet && loaded.run.conversationId) await selectConversation(loaded.run.conversationId);
+      if (!quiet && researchDiscussionConversation(loaded)) await selectConversation(researchDiscussionConversation(loaded), navigationCurrent);
     } catch (error) {
-	  if (!quiet && request === runRequestRef.current && activeWorkflowIdRef.current === workflowId) setFeedback(errorText(error));
+	  if (!quiet && navigationCurrent() && request === runRequestRef.current && activeWorkflowIdRef.current === workflowId) setFeedback(errorText(error));
     } finally {
 	  runLoadsInFlightRef.current.delete(request);
 	  if (!quiet && request === runRequestRef.current && activeWorkflowIdRef.current === workflowId) setBusy("");
     }
-  }, [project.id, selectConversation]);
+  }, [conversationNavigation, project.id, selectConversation]);
 
   useEffect(() => {
     if (!runDetail || workflowTerminal(runDetail.run.status) || runDetail.run.status === "paused") return;
@@ -7041,7 +7129,7 @@ function WorkflowStudio({ project, initialConversationId, modelProfileId, modelI
   // A normal chat may prepare the next immutable planner. Follow this same
   // task in the original feed; do not create a new user-facing chat or prompt.
   useEffect(() => {
-    if (!runDetail || runDetail.run.workflowPurpose !== "research_starter" || runDetail.run.status !== "completed" || !runDetail.run.researchTaskId) return;
+    if (!runDetail || runDetail.run.workflowPurpose !== "research_starter" || !researchDiscussionAvailable(runDetail) && runDetail.run.status !== "completed" || !runDetail.run.researchTaskId) return;
     const taskId = runDetail.run.researchTaskId, runId = runDetail.run.id;
     let disposed = false, inFlight = false;
     const refresh = async () => {
@@ -7053,15 +7141,17 @@ function WorkflowStudio({ project, initialConversationId, modelProfileId, modelI
         if (next.run.id !== runId) {
           // React busy may briefly reset while loading a conversation. The
           // durable chat snapshot decides when it is safe to switch owners.
-          const chat = await backend<RunSnapshot | null>("ChatFacade", "GetLatestRunSnapshot", runDetail.run.conversationId);
+          const chat = await backend<RunSnapshot | null>("ChatFacade", "GetLatestRunSnapshot", researchDiscussionConversation(runDetail));
           if (chat && !["completed", "failed", "cancelled", "interrupted"].includes(chat.run.status)) return;
           const owner = normalizeWorkflowDetail(await backend<WorkflowDetail>("WorkflowFacade", "Get", project.id, next.run.workflowId));
           if (disposed || mutationRef.current || activeRunIdRef.current !== runId) return;
           activeWorkflowIdRef.current = next.run.workflowId; activeRunIdRef.current = next.run.id; ++runRequestRef.current;
           setDetail(owner); setRunDetail(next); setStarterPlan(null);
-          if (next.run.conversationId) await selectConversation(next.run.conversationId);
+          if (researchDiscussionConversation(next)) await selectConversation(researchDiscussionConversation(next));
           await loadProjectRuns();
-        } else if (next.run.inputs.discussion_only !== true) {
+        } else {
+          setRunDetail(current => current?.run.id === next.run.id ? shareSnapshot(current, next) : current);
+          if (next.run.status !== "completed" || next.run.inputs.discussion_only === true) return;
           const plan = await backend<ResearchStarterPlan>("WorkflowFacade", "GetResearchStarterPlan", project.id, runId);
           if (!disposed && !mutationRef.current && activeRunIdRef.current === runId) setStarterPlan(current => shareSnapshot(current, plan));
         }
@@ -7069,7 +7159,7 @@ function WorkflowStudio({ project, initialConversationId, modelProfileId, modelI
       finally { inFlight = false; }
     };
     const sent = (event: Event) => {
-      if ((event as CustomEvent<string>).detail !== runDetail.run.conversationId) return;
+      if ((event as CustomEvent<string>).detail !== researchDiscussionConversation(runDetail)) return;
       setPlanningDiscussionVersion(v => v + 1);
       setStarterPlan(current => current ? {...current, routes:current.routes.map(route => ({...route,validation:"checking",validationError:"正在完成需求讨论。"}))} : null);
       void refresh();
@@ -7077,7 +7167,7 @@ function WorkflowStudio({ project, initialConversationId, modelProfileId, modelI
     window.addEventListener("research-discussion-sent", sent);
     const timer = window.setInterval(() => {if (!document.hidden) void refresh();}, 1500);
     return () => {disposed = true; window.clearInterval(timer); window.removeEventListener("research-discussion-sent", sent);};
-  }, [project.id, runDetail?.run.id, runDetail?.run.status, runDetail?.run.workflowPurpose, selectConversation, conversationBusy]);
+  }, [project.id, runDetail?.run.id, runDetail?.run.status, runDetail?.run.workflowPurpose, runDetail?.researchDiscussion?.canExplore, selectConversation, conversationBusy]);
 
   useEffect(() => {
     if (!runDetail || !(runDetail.run.status === "completed" || runDetail.run.status === "failed" && runDetail.discussionRevisionAvailable) || runDetail.run.workflowPurpose === "research_starter") return;
@@ -7096,20 +7186,22 @@ function WorkflowStudio({ project, initialConversationId, modelProfileId, modelI
     return () => { disposed = true; window.clearInterval(timer); };
   }, [project.id, runDetail?.run.id, runDetail?.run.status, runDetail?.run.workflowPurpose, runDetail?.discussionRevisionAvailable]);
 
-  async function selectWorkflow(value: ResearchWorkflow) {
-	if (busy || mutationRef.current) return;
+  async function selectWorkflow(value: ResearchWorkflow, navigationCurrent?: ConversationNavigationGuard) {
+	if (busy || mutationRef.current || navigationCurrent && !navigationCurrent()) return false;
+	const isCurrent = navigationCurrent ?? conversationNavigation(true);
 	const request = ++workflowRequestRef.current;
 	activeWorkflowIdRef.current = value.id;
 	++runRequestRef.current;
 	activeRunIdRef.current = "";
     
     setRunDetail(null);
+    setDirectEntry(null);
     setPreview(null);
     setFeedback("");
     setView("guide");
 	try {
 	  const loaded = normalizeWorkflowDetail(await backend<WorkflowDetail>("WorkflowFacade", "Get", project.id, value.id));
-	  if (request !== workflowRequestRef.current || activeWorkflowIdRef.current !== value.id) return;
+	  if (!isCurrent() || request !== workflowRequestRef.current || activeWorkflowIdRef.current !== value.id) return false;
 	  setDetail(loaded);
       setHistoryPlansOpen(false);
       const current = loaded.versions.find((version) => version.id === loaded.workflow.currentVersionId) ?? loaded.versions[0];
@@ -7118,87 +7210,211 @@ function WorkflowStudio({ project, initialConversationId, modelProfileId, modelI
 		setEditor(JSON.stringify(current.definition, null, 2));
 		setRunInputs(workflowInputDraft(current.definition));
 	  }
+	  return true;
 	} catch (error) {
-	  if (request === workflowRequestRef.current && activeWorkflowIdRef.current === value.id) setFeedback(errorText(error));
+	  if (isCurrent() && request === workflowRequestRef.current && activeWorkflowIdRef.current === value.id) setFeedback(errorText(error));
+	  return false;
     }
   }
 
-  async function openProjectRun(run: WorkflowRun) {
+  async function openResearchTaskSession(session: ResearchTaskSession, isCurrent: ConversationNavigationGuard) {
+	if (!isCurrent()) return;
+	const entry = normalizeResearchDiscussionEntry(session.entry);
+	if (entry.projectId !== project.id) throw new Error("科研任务不属于当前项目。");
+	if (session.currentRun) {
+	  const current = normalizeWorkflowRunDetail(session.currentRun);
+	  if (current.run.projectId !== entry.projectId || current.run.researchTaskId !== entry.researchTaskId) throw new Error("候选运行与科研任务不匹配。");
+	  if (!entry.canExplore || current.run.workflowPurpose !== "research_starter") {
+	    await openProjectRun(current.run, isCurrent);
+	    return;
+	  }
+	  // Restore the primary discussion first. The existing candidate handoff
+	  // can open the saved candidate once the host confirms the chat is idle.
+	}
+	if (initialConversationId !== entry.conversationId && !await selectConversation(entry.conversationId, isCurrent)) return;
+	if (!isCurrent()) return;
+	restoreConversationRef.current = entry.conversationId;
+	++workflowRequestRef.current; ++runRequestRef.current;
+	activeWorkflowIdRef.current = ""; activeRunIdRef.current = `task:${entry.researchTaskId}`;
+	setDetail(null); setRunDetail(null); setDirectEntry(entry); setPendingAdoptedRoute(null); setStarterPlan(null);
+	setFeedback(session.currentRunUnavailable ? researchRunReadNotice : "");
+	chooseSideView("tasks"); setView("guide");
+  }
+
+  async function openStandaloneTask(task: ResearchTask) {
 	if (busy || mutationRef.current) return;
-	chooseSideView("tasks");
+	const navigationCurrent = conversationNavigation(true);
+	const isCurrent = () => navigationCurrent() && !mutationRef.current;
+	try {
+	  const session = await backend<ResearchTaskSession>("WorkflowFacade", "GetResearchTaskSession", project.id, task.id);
+	  if (!isCurrent()) return;
+	  if (session.entry.researchTaskId !== task.id) throw new Error("科研任务会话归属不匹配。");
+	  await openResearchTaskSession(session, isCurrent);
+	} catch (error) { if (isCurrent()) setFeedback(errorText(error)); }
+  }
+
+  async function openProjectRun(run: WorkflowRun, navigationCurrent: ConversationNavigationGuard, handoff?: { snapshot: WorkflowRunDetail; conversationId: string }) {
+	if (busy || mutationRef.current || !navigationCurrent()) return;
+	if (!handoff) {
+	  setDirectEntry(null);
+	  chooseSideView("tasks");
+	}
+	const handoffRequest = handoff ? ++workflowRequestRef.current : 0;
+	const currentHandoff = () => navigationCurrent() && !mutationRef.current && (!handoff || handoffRequest === workflowRequestRef.current);
+	const canSwitchDiscussion = async () => {
+	  if (!handoff || !currentHandoff()) return false;
+	  const chat = await backend<RunSnapshot | null>("ChatFacade", "GetLatestRunSnapshot", handoff.conversationId);
+	  return currentHandoff() && (!chat || chat.run.conversationId === handoff.conversationId
+	    && ["completed", "failed", "cancelled", "interrupted"].includes(chat.run.status));
+	};
 	try {
 	if (run.workflowPurpose === "research_starter" && run.status === "completed") {
-	  const request = ++workflowRequestRef.current;
+	  const request = handoff ? handoffRequest : ++workflowRequestRef.current;
 	  const adopted = await backend<AdoptResearchRouteResult | null>("WorkflowFacade", "GetPendingResearchAdoption", project.id, run.id);
-	  if (request !== workflowRequestRef.current) return;
+	  if (request !== workflowRequestRef.current || !currentHandoff()) return;
 	  if (adopted) {
 	    const loaded = normalizeWorkflowDetail(await backend<WorkflowDetail>("WorkflowFacade", "Get", project.id, adopted.workflow.workflow.id));
-	    if (request !== workflowRequestRef.current) return;
+	    if (request !== workflowRequestRef.current || !currentHandoff()) return;
+	    if (handoff) {
+	      if (adopted.researchTaskId !== run.researchTaskId || loaded.workflow.id !== adopted.workflow.workflow.id || loaded.workflow.projectId !== project.id) throw new Error("已采纳路线不属于当前科研任务。");
+	      if (!await canSwitchDiscussion() || !currentHandoff()) return;
+	      setDirectEntry(null); chooseSideView("tasks"); setFeedback("");
+	    }
 	    activeWorkflowIdRef.current = loaded.workflow.id; activeRunIdRef.current = ""; ++runRequestRef.current;
 	    setDetail(loaded); setRunDetail(null); 
 	    setPendingAdoptedRoute({starterRunId: run.id, researchTaskId: adopted.researchTaskId, researchGoal: adopted.researchIdea, routeId: adopted.routeId, workflowId: loaded.workflow.id, workflowVersionId: adopted.workflow.version.id});
 	    setRunInputs(workflowInputDraft(adopted.workflow.version.definition, adopted.initialInputs)); setView("guide");
-	    if (run.conversationId) await selectConversation(run.conversationId);
-	    return;
+	    if (run.conversationId) await selectConversation(run.conversationId, currentHandoff);
+	    return true;
 	  }
+	}
+	if (handoff) {
+	  // The session already contains the candidate snapshot. Load its owner
+	  // before releasing the original view, then recheck the discussion after
+	  // those reads. A rejected read has not changed the active task identity.
+	  const loaded = normalizeWorkflowDetail(await backend<WorkflowDetail>("WorkflowFacade", "Get", project.id, run.workflowId));
+	  const version = loaded.versions.find(value => value.id === run.workflowVersionId && value.workflowId === run.workflowId);
+	  if (loaded.workflow.id !== run.workflowId || loaded.workflow.projectId !== project.id || !version) throw new Error("候选路线的方案或版本身份不匹配。");
+	  if (!await canSwitchDiscussion() || !currentHandoff()) return;
+	  activeWorkflowIdRef.current = loaded.workflow.id; activeRunIdRef.current = run.id; ++runRequestRef.current;
+	  setDetail(loaded); setRunDetail(handoff.snapshot); setPendingAdoptedRoute(null); setDirectEntry(null);
+	  setSelectedVersionId(version.id); setEditor(JSON.stringify(version.definition, null, 2)); setRunInputs(workflowInputDraft(version.definition));
+	  chooseSideView("tasks"); setFeedback("");
+	  return true;
 	}
 	setPendingAdoptedRoute(null);
 	const owner = workflows.find((value) => value.id === run.workflowId);
-	if (owner && (activeWorkflowIdRef.current !== owner.id || !detail || detail.workflow.id !== owner.id)) await selectWorkflow(owner);
+	if (owner && (activeWorkflowIdRef.current !== owner.id || !detail || detail.workflow.id !== owner.id) && !await selectWorkflow(owner, currentHandoff)) return;
 	if (!owner) {
 		const request = ++workflowRequestRef.current;
 		activeWorkflowIdRef.current = run.workflowId;
 		++runRequestRef.current;
 		try {
 			const loaded = normalizeWorkflowDetail(await backend<WorkflowDetail>("WorkflowFacade", "Get", project.id, run.workflowId));
-			if (request !== workflowRequestRef.current || activeWorkflowIdRef.current !== run.workflowId) return;
+			if (!currentHandoff() || request !== workflowRequestRef.current || activeWorkflowIdRef.current !== run.workflowId) return;
 			setDetail(loaded); 
 			const current = loaded.versions.find((value) => value.id === run.workflowVersionId) ?? loaded.versions[0];
 			if (current) { setSelectedVersionId(current.id); setEditor(JSON.stringify(current.definition, null, 2)); setRunInputs(workflowInputDraft(current.definition)); }
-		} catch (error) { setFeedback(errorText(error)); return; }
+		} catch (error) { if (currentHandoff() && request === workflowRequestRef.current) setFeedback(errorText(error)); return; }
 	}
-	await loadRun(run.id);
-	} catch (error) { setFeedback(errorText(error)); }
+	await loadRun(run.id, false, currentHandoff);
+	} catch (error) {
+	  if (currentHandoff()) setFeedback(handoff ? "暂时无法打开候选路线，原讨论已保留。" : errorText(error));
+	}
   }
 
   useEffect(() => {
-    if (!initialConversationId || loading || runDetail || pendingAdoptedRoute || restoreConversationRef.current === initialConversationId) return;
+    if (!directEntry) return;
+    const taskId = directEntry.researchTaskId, conversationId = directEntry.conversationId;
+    const owner = `task:${taskId}`;
+    let disposed = false, inFlight = false;
+    const refresh = async () => {
+      if (disposed || inFlight || mutationRef.current || conversationBusy) return;
+      const navigationCurrent = conversationNavigation();
+      const isCurrent = () => navigationCurrent() && !disposed && !mutationRef.current && activeRunIdRef.current === owner;
+      inFlight = true;
+      try {
+        const session = await backend<ResearchTaskSession>("WorkflowFacade", "GetResearchTaskSession", project.id, taskId);
+        const entry = normalizeResearchDiscussionEntry(session.entry);
+        if (entry.researchTaskId !== taskId || entry.conversationId !== conversationId || entry.projectId !== project.id) throw new Error("科研任务会话身份已改变。");
+        if (!isCurrent()) return;
+        if (!session.currentRun) {
+          setDirectEntry(current => current?.researchTaskId === taskId ? entry : current);
+          setFeedback(current => session.currentRunUnavailable ? current || researchRunReadNotice : current === researchRunReadNotice ? "" : current);
+          return;
+        }
+        const next = normalizeWorkflowRunDetail(session.currentRun);
+        if (next.run.projectId !== project.id || next.run.researchTaskId !== taskId) throw new Error("候选运行与直接任务不匹配。");
+        if (next.run.workflowPurpose === "research_starter" && entry.canExplore) {
+          if (!researchDiscussionAvailable(next) || researchDiscussionConversation(next) !== conversationId) throw new Error("候选路线未绑定当前研究讨论。");
+          if (await openProjectRun(next.run, isCurrent, { snapshot: next, conversationId })) await loadProjectRuns();
+          return;
+        }
+        const chat = await backend<RunSnapshot | null>("ChatFacade", "GetLatestRunSnapshot", conversationId);
+        if (chat && !["completed", "failed", "cancelled", "interrupted"].includes(chat.run.status)) return;
+        if (!isCurrent()) return;
+        await openProjectRun(next.run, navigationCurrent);
+        await loadProjectRuns();
+      } catch { /* Keep the durable task view; the next explicit refresh can retry. */ }
+      finally { inFlight = false; }
+    };
+    const sent = (event: Event) => {
+      if ((event as CustomEvent<string>).detail !== conversationId) return;
+      setPlanningDiscussionVersion(value => value + 1);
+      void refresh();
+    };
+    window.addEventListener("research-discussion-sent", sent);
+    const timer = window.setInterval(() => { if (!document.hidden) void refresh(); }, 1500);
+    return () => { disposed = true; window.clearInterval(timer); window.removeEventListener("research-discussion-sent", sent); };
+  }, [conversationNavigation, project.id, directEntry?.researchTaskId, directEntry?.conversationId, conversationBusy, loadProjectRuns]);
+
+  useEffect(() => {
+    if (!initialConversationId || loading || runDetail || directEntry || pendingAdoptedRoute || restoreConversationRef.current === initialConversationId) return;
     restoreConversationRef.current = initialConversationId;
     let active = true;
+    const navigationCurrent = conversationNavigation();
+    const isCurrent = () => active && navigationCurrent() && !mutationRef.current;
     void (async () => {
 	  const lookup = await backend<WorkflowConversationLookup>("WorkflowFacade", "GetRunByConversation", initialConversationId);
 	  const matched = lookup.found && lookup.run?.run.projectId === project.id ? lookup.run.run : undefined;
-	  if (!matched || !active) return;
-	  if (active) await openProjectRun(matched);
-    })().catch((error: unknown) => { if (active) setFeedback(`无法恢复科研任务：${errorText(error)}`); });
+	  if (!isCurrent()) return;
+	  if (matched) {
+		await openProjectRun(matched, navigationCurrent);
+		return;
+	  }
+	  if (lookup.found) throw new Error("科研运行归属不匹配。");
+	  const session = await backend<ResearchTaskSession | null>("WorkflowFacade", "GetResearchTaskSessionByConversation", initialConversationId);
+	  if (!isCurrent() || !session) return;
+	  if (session.entry.conversationId !== initialConversationId) throw new Error("科研讨论归属不匹配。");
+	  await openResearchTaskSession(session, isCurrent);
+    })().catch((error: unknown) => { if (isCurrent()) { restoreConversationRef.current = ""; setFeedback(`无法恢复科研任务：${errorText(error)}`); } });
     return () => { active = false; };
-  }, [initialConversationId, loading, project.id, runDetail, workflows]);
+  }, [conversationNavigation, initialConversationId, loading, project.id, runDetail, directEntry, workflows]);
 
   const startResearchDiscussion = useCallback(async (idea: string) => {
     if (mutationRef.current || referenceBusy) throw new Error("正在准备材料或任务，请稍候。");
     if (!modelProfileId || !modelId) throw new Error("请先在顶部选择协作模型。");
+    const isCurrent = conversationNavigation(true);
     mutationRef.current = "start-research"; setBusy("start-research"); setFeedback("");
     try {
-      const started = normalizeWorkflowRunDetail(await backend<WorkflowRunDetail>("WorkflowFacade", "StartResearch", {projectId:project.id,researchIdea:idea,referenceAttachmentIds,modelProfileId,modelId,reasoningLevel,discussionOnly:true}));
-      if (!started.run.conversationId || !started.run.researchTaskId) throw new Error("需求对话未返回任务绑定，请刷新任务列表。");
-      activeWorkflowIdRef.current = started.run.workflowId; activeRunIdRef.current = started.run.id;
+      const started = normalizeResearchDiscussionEntry(await backend<ResearchDiscussionEntry>("WorkflowFacade", "StartResearchDiscussion", {projectId:project.id,researchIdea:idea,referenceAttachmentIds,modelProfileId,modelId,reasoningLevel}));
+      if (!isCurrent()) return {conversationId:started.conversationId,taskId:started.researchTaskId};
+      ++workflowRequestRef.current; ++runRequestRef.current;
+      activeWorkflowIdRef.current = ""; activeRunIdRef.current = `task:${started.researchTaskId}`;
       // Preserve the created owner even if a later UI refresh fails. Retrying
       // the message must not create another task or resend accepted content.
-      setRunDetail(started); setDetail(null); setHistoryPlansOpen(false); chooseSideView("tasks"); setView("guide");
+      setDirectEntry(started); setRunDetail(null); setDetail(null); setPendingAdoptedRoute(null); setStarterPlan(null); setHistoryPlansOpen(false); chooseSideView("tasks"); setView("guide");
       setReferenceAttachmentIds([]);
-      await selectConversation(started.run.conversationId);
-      void backend<WorkflowDetail>("WorkflowFacade", "Get", project.id, started.run.workflowId).then(owner => {
-        if (activeRunIdRef.current === started.run.id) setDetail(normalizeWorkflowDetail(owner));
-      }).catch(() => undefined);
+      await selectConversation(started.conversationId, isCurrent);
       void loadProjectRuns().catch(() => undefined);
-      return {conversationId:started.run.conversationId,taskId:started.run.researchTaskId};
+      return {conversationId:started.conversationId,taskId:started.researchTaskId};
     } finally { if (mutationRef.current === "start-research") mutationRef.current = ""; setBusy(""); }
-  }, [project.id, modelProfileId, modelId, reasoningLevel, referenceAttachmentIds, referenceBusy, chooseSideView, selectConversation, loadProjectRuns]);
+  }, [conversationNavigation, project.id, modelProfileId, modelId, reasoningLevel, referenceAttachmentIds, referenceBusy, chooseSideView, selectConversation, loadProjectRuns]);
 
   useEffect(() => {
-    publishOpening(!loading && !runDetail && !detail ? startResearchDiscussion : null);
+    publishOpening(!loading && !runDetail && !directEntry && !detail ? startResearchDiscussion : null);
     return () => publishOpening(null);
-  }, [loading, runDetail?.run.id, detail?.workflow.id, startResearchDiscussion, publishOpening]);
+  }, [loading, runDetail?.run.id, directEntry?.researchTaskId, detail?.workflow.id, startResearchDiscussion, publishOpening]);
 
 	async function adoptResearchRoute(route: ResearchStarterRoute) {
 		if (!runDetail || busy || mutationRef.current) return;
@@ -7248,7 +7464,7 @@ function WorkflowStudio({ project, initialConversationId, modelProfileId, modelI
 			const started = normalizeWorkflowRunDetail(await backend<WorkflowRunDetail>("WorkflowFacade", "AnswerResearchClarification", { projectId: project.id, starterRunId: runDetail.run.id, answers, freeTextAnswers }));
 			activeWorkflowIdRef.current = started.run.workflowId; activeRunIdRef.current = started.run.id;
 			setStarterPlan(null); setStarterPlanChecking(false); setStarterPlanError(""); setRunDetail(started); chooseSideView("tasks"); setView("guide");
-			if (started.run.conversationId) await selectConversation(started.run.conversationId);
+			if (researchDiscussionConversation(started)) await selectConversation(researchDiscussionConversation(started));
 			await loadProjectRuns();
 			setFeedback("已记录你的选择，AI 正在为同一科研任务重新生成路线。");
 		} catch (error) { setFeedback(errorText(error)); throw error; }
@@ -7263,7 +7479,7 @@ function WorkflowStudio({ project, initialConversationId, modelProfileId, modelI
       const started = normalizeWorkflowRunDetail(await backend<WorkflowRunDetail>("WorkflowFacade", "ReplanResearchStarter", { projectId: project.id, starterRunId: runDetail.run.id }));
       activeWorkflowIdRef.current = started.run.workflowId; activeRunIdRef.current = started.run.id;
       setStarterPlan(null); setStarterPlanChecking(false); setStarterPlanError(""); setRunDetail(started); chooseSideView("tasks"); setView("guide");
-      if (started.run.conversationId) await selectConversation(started.run.conversationId);
+      if (researchDiscussionConversation(started)) await selectConversation(researchDiscussionConversation(started));
       await loadProjectRuns();
       setFeedback("已重新读取当前任务资料，AI 正在重新规划；旧记录已保留。");
     } catch (error) { setFeedback(errorText(error)); }
@@ -7272,6 +7488,7 @@ function WorkflowStudio({ project, initialConversationId, modelProfileId, modelI
 
   function openPlanHome() {
 	if (busy || mutationRef.current) return;
+	const isCurrent = conversationNavigation(true);
 	chooseSideView("plans");
 	++workflowRequestRef.current;
 	++runRequestRef.current;
@@ -7281,11 +7498,23 @@ function WorkflowStudio({ project, initialConversationId, modelProfileId, modelI
 	setHistoryPlansOpen(false);
 	setDetail(null);
 	setRunDetail(null);
+	setDirectEntry(null);
 	setPendingAdoptedRoute(null);
 	setPreview(null);
 	setFeedback("");
 	setView("guide");
-    void selectConversation("");
+    void selectConversation("", isCurrent);
+  }
+
+  function returnToResearchTasks() {
+    if (busy || mutationRef.current) return;
+    const isCurrent = conversationNavigation(true);
+    restoreConversationRef.current = initialConversationId;
+    ++workflowRequestRef.current; ++runRequestRef.current;
+    activeRunIdRef.current = "";
+    setDirectEntry(null); setRunDetail(null); setFeedback("");
+    chooseSideView("tasks"); setView("guide");
+    void selectConversation("", isCurrent);
   }
 
   async function validate(): Promise<WorkflowPreview | null> {
@@ -7789,16 +8018,23 @@ function WorkflowStudio({ project, initialConversationId, modelProfileId, modelI
     if (entry.active && entry.eventType === "research.route_adopted" && pendingAdoptedRoute?.starterRunId === entry.runId && entry.snapshot.event?.routeId === pendingAdoptedRoute.routeId) return startPanel;
     return <ResearchTimelineHistory entry={entry}/>;
   };
-  const timelineTaskId = runDetail?.run.researchTaskId || pendingAdoptedRoute?.researchTaskId || "";
+  const timelineTaskId = runDetail?.run.researchTaskId || directEntry?.researchTaskId || pendingAdoptedRoute?.researchTaskId || "";
   useEffect(() => {
     publishTaskTimeline(timelineTaskId ? {projectId: project.id, taskId: timelineTaskId, render: entry => renderTimelineRef.current(entry)} : null);
-  }, [timelineTaskId, runDetail, pendingAdoptedRoute, busy, starterPlan, starterPlanChecking, starterPlanError, decisionNote, decisionContext, selectedCandidateIds, selectedAttachmentIds, selectedCitationKeys, acceptLimitedEvidence, confirmRetry, runInputs, runPermissionMode, pythonPreflight, routeUploadedData, routeUploadedFiles, routeDataLoading, routeDataNotice, publishTaskTimeline]);
+  }, [timelineTaskId, runDetail, directEntry, pendingAdoptedRoute, busy, starterPlan, starterPlanChecking, starterPlanError, decisionNote, decisionContext, selectedCandidateIds, selectedAttachmentIds, selectedCitationKeys, acceptLimitedEvidence, confirmRetry, runInputs, runPermissionMode, pythonPreflight, routeUploadedData, routeUploadedFiles, routeDataLoading, routeDataNotice, publishTaskTimeline]);
   useEffect(() => () => publishTaskTimeline(null), [publishTaskTimeline]);
 
   if (pendingAdoptedRoute && !runDetail) return <aside className="research-route-panel">
     <header><div><p>RESEARCH TASK</p><h2>{detail?.workflow.name ?? "已采纳研究路线"}</h2><small>等待确认数据</small></div><button type="button" aria-label="返回研究方案" onClick={openPlanHome}><Icon name="back" size={15}/></button></header>
     {feedback && <p className="research-guide-feedback">{feedback}</p>}
   </aside>;
+
+  if (directEntry && !runDetail) return <DirectResearchTaskView
+    entry={directEntry} notice={feedback} refreshKey={`${workingStateRefreshKey}:${planningDiscussionVersion}`} service={backend}
+    onBack={returnToResearchTasks}
+    onOpenDiscovery={() => openTaskDiscovery(directEntry.researchTaskId)}
+    onOpenArtifacts={() => openArtifacts(directEntry.researchTaskId)}
+  />;
 
   if (runDetail) {
 	const routeView = researchRouteView(runDetail);
@@ -7808,17 +8044,18 @@ function WorkflowStudio({ project, initialConversationId, modelProfileId, modelI
 	const researchStarter = runDetail.run.workflowPurpose === "research_starter";
     const discussionOnly = researchStarter && runDetail.run.inputs.discussion_only === true;
     return <>
-      <aside className="research-route-panel" aria-label="科研任务路线">
-        <header><div><p>RESEARCH TASK</p><h2 title={workflowTaskQuestion(runDetail.run)?.text}>{workflowTaskTitle(runDetail.run)}</h2><small>{researchStarter ? "尚未确认执行计划" : `${completedSteps}/${totalSteps} 阶段完成`}</small></div><button type="button" title="返回科研任务列表" aria-label="返回科研任务列表" onClick={() => { restoreConversationRef.current = initialConversationId; setRunDetail(null); chooseSideView("tasks"); setView("guide"); void selectConversation(""); }}><Icon name="back" size={15}/></button></header>
+      <button type="button" className="research-mobile-toggle" aria-expanded={mobilePanelOpen} aria-controls="research-mobile-panel" onClick={() => setMobilePanelOpen(value => !value)}>{researchStarter ? "研究状态与工具" : "研究路线与控制"}</button>
+      <aside id="research-mobile-panel" className={`research-route-panel${mobilePanelOpen ? " is-mobile-open" : ""}`} aria-label={researchStarter ? "研究状态与工具" : "科研任务路线"}>
+        <header><div><p>RESEARCH TASK</p><h2 title={workflowTaskQuestion(runDetail.run)?.text}>{workflowTaskTitle(runDetail.run)}</h2><small>{researchStarter ? !researchDiscussionAvailable(runDetail) && workflowTerminal(runDetail.run.status) ? "历史只读" : discussionOnly ? "研究讨论" : "候选路线" : `${completedSteps}/${totalSteps} 阶段完成`}</small></div><div className="research-route-header-actions"><button type="button" title="返回科研任务列表" aria-label="返回科研任务列表" onClick={returnToResearchTasks}><Icon name="back" size={15}/></button><button type="button" className="research-mobile-close" aria-label="收起研究面板" onClick={() => setMobilePanelOpen(false)}><Icon name="close" size={15}/></button></div></header>
         {taskQuestion && <section className="research-task-question"><header><span>{taskQuestion.label}</span><Icon name="search" size={13}/></header><p title={taskQuestion.text}>{taskQuestion.text}</p><button type="button" onClick={() => void appAlert({ title: taskQuestion.label, message: taskQuestion.text, confirmLabel: "关闭" })}>查看完整输入</button></section>}
-        <div className="research-route-status"><span className={`workflow-status ${runDetail.run.status}`}>{workflowRunStatusLabel(runDetail.run)}</span><b>任务 {runDetail.run.id.slice(0, 8)}</b><small>{runDetail.run.permissionMode === "full_access" ? "Full Access" : "Plan"} · {new Date(runDetail.run.updatedAt).toLocaleString()}</small></div>
-        {researchStarter ? <section className="research-route-discussion"><h3>{discussionOnly ? "先聊清楚，再开始研究" : "待确认的执行计划"}</h3><p>{discussionOnly ? "可以问问题、分析文件，或逐步补充研究目标和想要的产物。AI 按需准备本轮路线；采用前不会执行研究。" : "继续讨论或在聊天中的路线卡选择本轮计划；采用前，下列阶段均未执行。"}</p>{!discussionOnly && starterPlan && <ol>{starterPlan.routes.find(route => route.routeId === starterPlan.recommendedRouteId)?.stageIds.map(id => <li key={id}>{researchStageLabels[id] || id}</li>)}</ol>}</section> : <ResearchRoute detail={runDetail} statusLabels={workflowStepLabels}/>}
+        <div className="research-route-status"><span className={`workflow-status ${runDetail.run.status}`}>{researchStarter && !researchDiscussionAvailable(runDetail) && workflowTerminal(runDetail.run.status) ? "历史只读" : workflowRunStatusLabel(runDetail.run)}</span><b>{researchStarter ? discussionOnly ? "讨论记录" : "候选路线" : "执行记录"} {runDetail.run.id.slice(0, 8)}</b><small>{runDetail.run.permissionMode === "full_access" ? "Full Access" : "Plan"} · {new Date(runDetail.run.updatedAt).toLocaleString()}</small></div>
+        {researchStarter ? runDetail.run.researchTaskId ? <ResearchStatePanel key={`${project.id}:${runDetail.run.researchTaskId}`} projectId={project.id} taskId={runDetail.run.researchTaskId} service={backend} refreshKey={workingStateRefreshKey} mode={discussionOnly ? "discussion" : "candidate"} onOpenDiscovery={() => openTaskDiscovery(runDetail.run.researchTaskId!)}/> : <section className="research-route-discussion"><h3>研究状态不可用</h3><p>这条历史记录没有任务身份，无法读取研究工作记录。</p></section> : <ResearchRoute detail={runDetail} statusLabels={workflowStepLabels}/>}
         <footer>{runDetail.run.status === "paused" && <button type="button" onClick={() => void runAction("Resume")} disabled={Boolean(busy)}><Icon name="play" size={13}/>继续任务</button>}{["queued", "waiting_approval", "waiting_human_confirmation"].includes(runDetail.run.status) && <button type="button" onClick={() => void runAction("Pause")} disabled={Boolean(busy)}><Icon name="pause" size={13}/>暂停</button>}{!workflowTerminal(runDetail.run.status) && <button type="button" className="danger" onClick={() => void runAction("Cancel")} disabled={Boolean(busy)}><Icon name="stop" size={12}/>取消</button>}</footer>
       </aside>
       <aside className="research-evidence-panel" aria-label="科研任务核验与成果">
         <header><div><p>VERIFIABLE RESULTS</p><h2>核验与成果</h2></div><button type="button" aria-label="刷新当前任务" title="刷新" onClick={() => void loadRun(runDetail.run.id)}><Icon name="refresh" size={14}/></button></header>
-        {runDetail.run.status === "completed" && (researchStarter ? <section className="workflow-run-output starter"><header><div><h3>{discussionOnly ? "正在讨论研究需求" : "候选路线已准备"}</h3><small>{discussionOnly ? "继续在中间对话中提问或补充；不需要一次写全要求。" : "可以继续讨论；采用路线后才执行本轮工作。"}</small></div></header></section> : runDetail.deliveryAssessment?.status === "unverified" ? <section className="workflow-run-output"><header><div><h3>流程结束，交付尚未验证</h3><small>{runDetail.deliveryAssessment.summary}</small></div></header></section> : workflowResearchReport(runDetail) ? <section className="workflow-run-output deliverable"><header><div><h3>{runDetail.deliveryAssessment?.report?.limitedDraft ? "范围受限初稿已保存" : "本轮报告已保存"}</h3><small>AI 审查已通过；查看正文、证据边界及未核验内容，审查通过不代表可发表。</small></div>{workflowDeliverableRegistered(runDetail, "report_draft") ? <button type="button" onClick={() => openArtifacts(runDetail.run.researchTaskId)}><Icon name="check" size={13}/>已登记 · 查看科研产物</button> : runDetail.artifactCount > 0 && <button type="button" onClick={() => openArtifacts(runDetail.run.researchTaskId)}><Icon name="archive" size={13}/>查看科研产物</button>}</header></section> : workflowResearchDesign(runDetail) ? <section className="workflow-run-output deliverable"><header><div><h3>研究设计已完成</h3><small>已通过独立审查；这是研究方案，尚不是实证结论。</small></div>{workflowDeliverableRegistered(runDetail, "research_design") ? <button type="button" onClick={() => openArtifacts(runDetail.run.researchTaskId)}><Icon name="check" size={13}/>已登记 · 查看科研产物</button> : <button type="button" disabled={Boolean(busy)} onClick={() => void saveWorkflowDeliverable("research_design")}>{busy === "save-deliverable" ? "正在登记…" : "登记科研产物"}</button>}</header></section> : <section className="workflow-run-output"><header><div><h3>科研流程已完成</h3><small>{runDetail.artifactCount > 0 ? `已登记 ${runDetail.artifactCount} 个科研产物。` : "结果已保存，本次流程未生成文件型科研产物。"}</small></div>{runDetail.artifactCount > 0 && <button type="button" onClick={() => openArtifacts(runDetail.run.researchTaskId)}><Icon name="archive" size={13}/>查看科研产物</button>}</header></section>)}
-        <div className="research-task-connection"><i className={workflowTerminal(runDetail.run.status) ? "terminal" : "active"}/><span><b>{discussionOnly ? "对话可继续" : workflowTerminal(runDetail.run.status) ? "任务已结束" : "结果随任务实时更新"}</b><small>所有决定请在中间协作区完成；右侧只展示交付状态、来源与成果</small></span></div>
+        {runDetail.run.status === "completed" && (researchStarter ? <section className="workflow-run-output starter"><header><div><h3>{discussionOnly ? "围绕研究问题持续探索" : "候选路线已准备"}</h3><small>{discussionOnly ? "按证据调整关注与下一步；需要正式路线时再规划，不必先走完整流程。" : "可以继续讨论；采用路线后才执行本轮工作。"}</small></div></header></section> : runDetail.deliveryAssessment?.status === "unverified" ? <section className="workflow-run-output"><header><div><h3>流程结束，交付尚未验证</h3><small>{runDetail.deliveryAssessment.summary}</small></div></header></section> : workflowResearchReport(runDetail) ? <section className="workflow-run-output deliverable"><header><div><h3>{runDetail.deliveryAssessment?.report?.limitedDraft ? "范围受限初稿已保存" : "本轮报告已保存"}</h3><small>AI 审查已通过；查看正文、证据边界及未核验内容，审查通过不代表可发表。</small></div>{workflowDeliverableRegistered(runDetail, "report_draft") ? <button type="button" onClick={() => openArtifacts(runDetail.run.researchTaskId)}><Icon name="check" size={13}/>已登记 · 查看科研产物</button> : runDetail.artifactCount > 0 && <button type="button" onClick={() => openArtifacts(runDetail.run.researchTaskId)}><Icon name="archive" size={13}/>查看科研产物</button>}</header></section> : workflowResearchDesign(runDetail) ? <section className="workflow-run-output deliverable"><header><div><h3>研究设计已完成</h3><small>已通过独立审查；这是研究方案，尚不是实证结论。</small></div>{workflowDeliverableRegistered(runDetail, "research_design") ? <button type="button" onClick={() => openArtifacts(runDetail.run.researchTaskId)}><Icon name="check" size={13}/>已登记 · 查看科研产物</button> : <button type="button" disabled={Boolean(busy)} onClick={() => void saveWorkflowDeliverable("research_design")}>{busy === "save-deliverable" ? "正在登记…" : "登记科研产物"}</button>}</header></section> : <section className="workflow-run-output"><header><div><h3>科研流程已完成</h3><small>{runDetail.artifactCount > 0 ? `已登记 ${runDetail.artifactCount} 个科研产物。` : "结果已保存，本次流程未生成文件型科研产物。"}</small></div>{runDetail.artifactCount > 0 && <button type="button" onClick={() => openArtifacts(runDetail.run.researchTaskId)}><Icon name="archive" size={13}/>查看科研产物</button>}</header></section>)}
+        <div className="research-task-connection"><i className={researchDiscussionAvailable(runDetail) ? "active" : workflowTerminal(runDetail.run.status) ? "terminal" : "active"}/><span><b>{researchDiscussionAvailable(runDetail) ? "研究讨论可继续" : workflowTerminal(runDetail.run.status) ? researchStarter ? "历史任务只读" : "本轮执行已结束" : "结果随任务实时更新"}</b><small>{researchDiscussionAvailable(runDetail) ? "候选规划不接管讨论；可继续读资料和更新工作记录。采用路线后才执行。" : "所有决定请在中间协作区完成；右侧只展示交付状态、来源与成果"}</small></span></div>
         {feedback && <div className="research-guide-feedback"><Icon name="shield" size={13}/><span>{feedback}</span></div>}
         {runDetail.run.errorMessage && <div className="workflow-run-error"><Icon name="stop" size={14}/><span><b>{runDetail.run.status === "cancelled" ? "任务已取消" : runDetail.run.status === "interrupted" ? "任务已中断" : "任务执行失败"}</b><small>{runDetail.steps.some((step) => workflowReviewGateRejected(runDetail.run, step)) ? "报告还需要修改，暂未交付。请在中间查看修改说明。" : runDetail.run.errorMessage}</small></span></div>}
         {!researchStarter && <WorkflowRunEvidence detail={runDetail} openArtifacts={(taskId) => openArtifacts(taskId)}/>}
@@ -7830,7 +8067,7 @@ function WorkflowStudio({ project, initialConversationId, modelProfileId, modelI
     {historyPlansOpen && <ResearchPlanHistory
       plans={visibleWorkflows} loading={loading} busy={Boolean(busy)} feedback={feedback}
       selecting={selectingPlans} selection={planSelection} setSelecting={setSelectingPlans} setSelection={setPlanSelection}
-      refresh={() => void loadList()} openPlan={selectWorkflow} deletePlan={deleteWorkflow} deleteSelected={deleteSelectedPlans}
+      refresh={() => void loadList()} openPlan={async plan => { await selectWorkflow(plan); }} deletePlan={deleteWorkflow} deleteSelected={deleteSelectedPlans}
       close={() => setHistoryPlansOpen(false)}
     />}
     {sceneTransition && <div className="research-scene-curtain" aria-hidden="true"><span><i/><i/><i/></span></div>}
@@ -7840,15 +8077,15 @@ function WorkflowStudio({ project, initialConversationId, modelProfileId, modelI
     </header>
     <div className="workflow-layout">
       <aside className={`workflow-side ${sideView}`}>
-        <nav className="workflow-side-tabs" aria-label="科研模式导航"><button type="button" className={sideView === "tasks" ? "selected" : ""} aria-pressed={sideView === "tasks"} onClick={() => chooseSideView("tasks")}><Icon name="history" size={14}/><span>科研任务<small>{sideView === "loading" ? "正在读取…" : `${projectRuns.length} 条运行记录`}</small></span></button><button type="button" className={sideView === "plans" ? "selected" : ""} aria-pressed={sideView === "plans"} onClick={openPlanHome}><Icon name="library" size={14}/><span>研究方案<small>提出问题，开始研究</small></span></button></nav>
-		{sideView === "loading" ? <div className="workflow-entry-loading"><Icon name="refresh" size={18}/><b>正在准备科研模式</b><span>检查当前项目是否已有科研任务…</span></div> : sideView === "tasks" ? <section className="workflow-project-tasks"><header><div><p>RESEARCH TASKS</p><h2>科研任务</h2></div><button type="button" title="刷新科研任务" aria-label="刷新科研任务" disabled={Boolean(busy) || projectRunsLoading} onClick={() => void loadProjectRuns()}><Icon name="refresh" size={14}/></button></header><small>每一项对应一个研究问题。AI 路线规划与后续执行会作为同一任务连续推进。</small><div>{projectRunsLoading ? <p>正在读取科研任务…</p> : projectRuns.length ? projectRuns.map((run) => <article key={run.id}><button type="button" disabled={Boolean(busy)} onClick={() => void openProjectRun(run)}><span><b title={workflowTaskQuestion(run)?.text}>{workflowTaskTitle(run)}</b><small>{run.workflowName || "研究方案"} · {new Date(run.createdAt).toLocaleString()}</small></span><em className={run.status}>{workflowRunStatusLabel(run)}</em></button>{workflowTerminal(run.status) && <button type="button" className="research-run-delete" disabled={Boolean(busy)} aria-label={`删除科研任务 ${run.id.slice(0, 8)}`} title="删除任务及科研会话" onClick={() => void deleteRun(run)}><Icon name={busy === `delete-run:${run.id}` ? "refresh" : "trash"} size={12}/></button>}</article>) : <div className="workflow-task-empty"><Icon name="history" size={20}/><b>还没有科研任务</b><span>先在聊天框说说研究想法，AI 会与你一起明确需求。</span><button type="button" onClick={openPlanHome}>开始研究</button></div>}</div></section> : detail ? <section className="workflow-plan-side-guide workflow-setup-side-guide"><header><small>SET UP THIS TASK</small><h2>补充任务输入</h2></header><p>正在查看已有方案，尚未启动新任务。请在中间设置区选择本课题的数据文件；外部文件会复制到当前项目并生成可复现快照。</p><nav aria-label="任务设置导航"><button type="button" onClick={() => window.requestAnimationFrame(() => startPanelRef.current?.scrollIntoView({ behavior: "smooth", block: "center" }))}><i>01</i><span><b>选择数据文件</b><small>绑定 CSV、TSV 或 XLSX</small></span></button><button type="button" onClick={openPlanHome}><i>02</i><span><b>返回研究方案</b><small>创建其他科研任务</small></span></button></nav></section> : <section className="research-start-side-guide" aria-label="研究如何开始">
+        <nav className="workflow-side-tabs" aria-label="科研模式导航"><button type="button" className={sideView === "tasks" ? "selected" : ""} aria-pressed={sideView === "tasks"} onClick={() => chooseSideView("tasks")}><Icon name="history" size={14}/><span>科研任务<small>{sideView === "loading" ? "正在读取…" : `${projectRuns.length + standaloneTasks.length} 项任务`}</small></span></button><button type="button" className={sideView === "plans" ? "selected" : ""} aria-pressed={sideView === "plans"} onClick={openPlanHome}><Icon name="library" size={14}/><span>研究方案<small>提出问题，开始研究</small></span></button></nav>
+		{sideView === "loading" ? <div className="workflow-entry-loading"><Icon name="refresh" size={18}/><b>正在准备科研模式</b><span>检查当前项目是否已有科研任务…</span></div> : sideView === "tasks" ? <section className="workflow-project-tasks"><header><div><p>RESEARCH TASKS</p><h2>科研任务</h2></div><button type="button" title="刷新科研任务" aria-label="刷新科研任务" disabled={Boolean(busy) || projectRunsLoading} onClick={() => void loadProjectRuns()}><Icon name="refresh" size={14}/></button></header><small>每一项对应一个研究问题。AI 路线规划与后续执行会作为同一任务连续推进。</small><div>{projectRunsLoading ? <p>正在读取科研任务…</p> : projectRuns.length + standaloneTasks.length ? <>{standaloneTasks.map((task) => <article key={`task:${task.id}`}><button type="button" disabled={Boolean(busy)} onClick={() => void openStandaloneTask(task)}><span><b title={task.researchQuestion}>{task.title}</b><small>研究讨论 · {new Date(task.createdAt).toLocaleString()}</small></span><em className={task.status === "active" ? "running" : task.status}>{task.status === "active" ? "研究讨论" : "历史只读"}</em></button></article>)} {projectRuns.map((run) => <article key={run.id}><button type="button" disabled={Boolean(busy)} onClick={() => void openProjectRun(run, conversationNavigation(true))}><span><b title={workflowTaskQuestion(run)?.text}>{workflowTaskTitle(run)}</b><small>{run.workflowName || "研究方案"} · {new Date(run.createdAt).toLocaleString()}</small></span><em className={run.status}>{workflowRunStatusLabel(run)}</em></button>{workflowTerminal(run.status) && <button type="button" className="research-run-delete" disabled={Boolean(busy)} aria-label={`删除科研任务 ${run.id.slice(0, 8)}`} title="删除任务及科研会话" onClick={() => void deleteRun(run)}><Icon name={busy === `delete-run:${run.id}` ? "refresh" : "trash"} size={12}/></button>}</article>)}</> : <div className="workflow-task-empty"><Icon name="history" size={20}/><b>还没有科研任务</b><span>先在聊天框说说研究想法，AI 会与你一起明确需求。</span><button type="button" onClick={openPlanHome}>开始研究</button></div>}</div></section> : detail ? <section className="workflow-plan-side-guide workflow-setup-side-guide"><header><small>SET UP THIS TASK</small><h2>补充任务输入</h2></header><p>正在查看已有方案，尚未启动新任务。请在中间设置区选择本课题的数据文件；外部文件会复制到当前项目并生成可复现快照。</p><nav aria-label="任务设置导航"><button type="button" onClick={() => window.requestAnimationFrame(() => startPanelRef.current?.scrollIntoView({ behavior: "smooth", block: "center" }))}><i>01</i><span><b>选择数据文件</b><small>绑定 CSV、TSV 或 XLSX</small></span></button><button type="button" onClick={openPlanHome}><i>02</i><span><b>返回研究方案</b><small>创建其他科研任务</small></span></button></nav></section> : <section className="research-start-side-guide" aria-label="研究如何开始">
           <p>从对话到研究</p><h2>不必一次想清楚</h2><span>先说你已知的部分，需求和产物可以边聊边确定。</span>
           <ol><li><i>1</i><div><b>先聊问题或材料</b><small>一句想法、一份文件，都可以开始。</small></div></li><li><i>2</i><div><b>一起明确执行计划</b><small>AI 按需补问、设计路线，你来确认。</small></div></li><li><i>3</i><div><b>执行后继续讨论</b><small>看结果、问依据，或讨论下一轮修改。</small></div></li></ol>
           <small className="research-start-side-note">对话不会自动启动整套研究；确认采用路线后才执行。</small>
         </section>}
       </aside>
       {sideView === "loading" ? <main className="workflow-task-home loading"><section><div className="workflow-task-home-icon"><Icon name="refresh" size={25}/></div><p>RESEARCH MODE</p><h2>正在准备研究工作台</h2><span>正在读取当前项目的科研任务与研究方案。</span></section></main> : sideView === "tasks" ? <main className="workflow-task-home">
-        <section><div className="workflow-task-home-icon"><Icon name="history" size={25}/></div><p>RESEARCH TASKS</p><h2>从左侧继续一项科研任务</h2><span>任务从路线规划到研究交付连续推进，点击即可查看当前进度、协作对话和结果。</span><div className="workflow-task-summary"><article><b>{projectRuns.length}</b><small>全部任务</small></article><article><b>{activeProjectRuns.length}</b><small>进行中</small></article><article><b>{projectRuns.filter((run) => run.status === "completed").length}</b><small>已完成</small></article></div><button type="button" onClick={openPlanHome}><Icon name="plus" size={15}/>创建新的科研任务</button></section>
+        <section><div className="workflow-task-home-icon"><Icon name="history" size={25}/></div><p>RESEARCH TASKS</p><h2>从左侧继续一项科研任务</h2><span>任务从路线规划到研究交付连续推进，点击即可查看当前进度、协作对话和结果。</span><div className="workflow-task-summary"><article><b>{projectRuns.length + standaloneTasks.length}</b><small>全部任务</small></article><article><b>{activeProjectRuns.length + standaloneTasks.filter(task => task.status === "active").length}</b><small>进行中</small></article><article><b>{projectRuns.filter((run) => run.status === "completed").length}</b><small>已完成</small></article></div><button type="button" onClick={openPlanHome}><Icon name="plus" size={15}/>创建新的科研任务</button></section>
       </main> : !detail ? <main className="workflow-plan-home research-start-home">
         <header className="research-start-home-header"><p>新建研究</p><button type="button" className="research-plan-history-open" aria-haspopup="dialog" aria-label="历史方案" disabled={Boolean(busy)} onClick={() => {setHistoryPlansOpen(true);setSelectingPlans(false);setPlanSelection([]);}}><Icon name="history" size={15}/>历史方案<span>{visibleWorkflows.length}</span></button></header>
         <div className="research-start-center">

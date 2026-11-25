@@ -211,18 +211,12 @@ func longUnicodeReviewReaderFixture(t *testing.T, base *httptest.Server, reads *
 			return
 		}
 		prompt := workflowAITestPrompt(body)
-		start := strings.LastIndex(prompt, "<review_submission_sources>")
-		if start >= 0 {
+		if strings.Contains(prompt, "<review_submission_sources>") {
 			mu.Lock()
 			defer mu.Unlock()
-			raw := prompt[start+len("<review_submission_sources>"):]
-			end := strings.Index(raw, "</review_submission_sources>")
-			var menu struct {
-				InputSHA256 string
-				Sources     [][]json.RawMessage
-			}
-			if end < 0 || json.Unmarshal([]byte(raw[:end]), &menu) != nil {
-				t.Error("invalid review source navigation")
+			menu, menuErr := reviewFixtureDecodeNavigation(prompt)
+			if menuErr != nil {
+				t.Error("invalid review source navigation: ", menuErr)
 				http.Error(w, "invalid source menu", 400)
 				return
 			}

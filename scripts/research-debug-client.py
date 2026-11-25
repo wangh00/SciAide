@@ -51,18 +51,18 @@ def compact(value):
     workflow = value["workflow"]
     run = workflow["run"]
     chats = []
-    for chat in value.get("chats", []):
+    for chat in (value.get("chats") or []):
         r = chat["run"]
         chats.append({"id": r["id"], "status": r["status"], "errorCode": r.get("errorCode"),
                       "errorMessage": r.get("errorMessage"), "userInput": chat.get("userInput"),
-                      "pendingApprovals": chat.get("pendingApprovals", [])})
+                      "pendingApprovals": chat.get("pendingApprovals") or []})
     return {"case": value["case"], "activeConversationId": value.get("activeConversationId"), "state": value["state"], "workflowState": value.get("workflowState"), "discussionState": value.get("discussionState"), "modelCalls": value["modelCalls"],
             "session": value.get("session"),
             "workflow": {k: run.get(k) for k in ["id", "status", "workflowPurpose", "currentStep", "errorCode", "errorMessage"]},
-            "steps": [{k: s.get(k) for k in ["id", "nodeId", "status", "attempt", "errorCode", "errorMessage"]} for s in workflow.get("steps", [])],
+            "steps": [{k: s.get(k) for k in ["id", "nodeId", "status", "attempt", "errorCode", "errorMessage"]} for s in (workflow.get("steps") or [])],
             "humanCheckpoints": [{k: s.get(k) for k in ["id", "nodeId", "nodeKind", "input", "inputSha256"]}
-                                 for s in workflow.get("steps", []) if s.get("status") == "waiting_human_confirmation"],
-            "pendingApprovals": workflow.get("pendingApprovals", []), "revisionProposals": workflow.get("revisionProposals", []), "chats": chats, "plan": value.get("plan")}
+                                 for s in (workflow.get("steps") or []) if s.get("status") == "waiting_human_confirmation"],
+            "pendingApprovals": workflow.get("pendingApprovals") or [], "revisionProposals": workflow.get("revisionProposals") or [], "chats": chats, "plan": value.get("plan")}
 
 
 def wait_exit(state):

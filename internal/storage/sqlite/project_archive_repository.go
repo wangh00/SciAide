@@ -326,6 +326,27 @@ func (r *ProjectArchiveRepository) MergeSnapshot(ctx context.Context, filePath s
 			}
 			continue
 		}
+		if table == "research_discussion_conversations" {
+			// Workflow bindings may have captured these owners during merge.
+			// Restore the archive's immutable ownership/provenance, including
+			// discussions whose optional source run is already absent.
+			if _, err := tx.ExecContext(ctx, `DELETE FROM main.research_discussion_conversations WHERE conversation_id IN (SELECT id FROM archive.conversations)`); err != nil {
+				return result, err
+			}
+		}
+		if table == "research_working_state_proposals" {
+			// Inserting imported tool_calls can fire the current database's
+			// proposal-capture trigger against a later archived user message. Drop
+			// only bindings for those imported state calls, then restore the
+			// original immutable proposal-time identities from the archive.
+			if _, err := tx.ExecContext(ctx, `DELETE FROM main.research_working_state_proposals WHERE source_call_id IN (SELECT id FROM archive.tool_calls WHERE tool_name='builtin.research.state.update')`); err != nil {
+				return result, err
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO main.research_working_state_proposals(`+quoted+`) SELECT `+quoted+` FROM archive.research_working_state_proposals`); err != nil {
+				return result, err
+			}
+			continue
+		}
 		if table == "research_tasks" {
 			parts := make([]string, len(columns))
 			for index, column := range columns {
@@ -981,7 +1002,7 @@ func (m *archiveIDMaps) get(table, old string) string {
 
 var idTables = []string{
 	"workbench_tasks", "workbench_attempts", "workbench_jobs",
-	"research_revision_proposals",
+	"research_revision_proposals", "research_working_states",
 	"model_profiles", "conversations", "messages", "message_parts", "runs", "tool_calls", "approvals", "permission_grants",
 	"conversation_context_checkpoints", "attachments", "knowledge_index_versions", "knowledge_documents", "knowledge_import_jobs",
 	"model_request_usage", "artifact_blobs", "artifacts", "artifact_versions", "artifact_lineage", "artifact_citations", "artifact_exports",
@@ -1152,6 +1173,10 @@ func rewriteProjectSnapshot(ctx context.Context, db *sql.DB, oldProjectID string
 		{"workflow_runs", "workflow_version_id", "workflow_versions"},
 		{"workflow_conversations", "workflow_run_id", "workflow_runs"},
 		{"workflow_conversations", "conversation_id", "conversations"},
+		{"research_tasks", "discussion_conversation_id", "conversations"},
+		{"research_discussion_conversations", "conversation_id", "conversations"},
+		{"research_discussion_conversations", "research_task_id", "research_tasks"},
+		{"research_discussion_conversations", "source_workflow_run_id", "workflow_runs"},
 		{"workflow_ai_executions", "id", "workflow_ai_executions"},
 		{"workflow_ai_executions", "workflow_run_id", "workflow_runs"},
 		{"workflow_ai_executions", "workflow_step_id", "workflow_steps"},
@@ -1173,6 +1198,13 @@ func rewriteProjectSnapshot(ctx context.Context, db *sql.DB, oldProjectID string
 		{"research_revision_proposals", "chat_run_id", "runs"},
 		{"research_revision_proposals", "user_message_id", "messages"},
 		{"research_revision_proposals", "source_call_id", "tool_calls"},
+		{"research_working_state_proposals", "source_call_id", "tool_calls"},
+		{"research_working_state_proposals", "source_user_message_id", "messages"},
+		{"research_working_states", "research_task_id", "research_tasks"},
+		{"research_working_states", "workflow_run_id", "workflow_runs"},
+		{"research_working_states", "source_chat_run_id", "runs"},
+		{"research_working_states", "source_user_message_id", "messages"},
+		{"research_working_states", "source_call_id", "tool_calls"},
 		{"research_timeline", "research_task_id", "research_tasks"},
 		{"research_timeline", "workflow_run_id", "workflow_runs"},
 		{"research_queries", "id", "research_queries"},
@@ -1307,6 +1339,8 @@ func updateMappedColumn(ctx context.Context, tx *sql.Tx, table, column string, v
 
 var projectScopedTables = []string{
 	"workbench_tasks",
+	"research_discussion_conversations",
+	"research_working_states",
 	"conversations", "attachments", "knowledge_index_versions", "knowledge_documents", "knowledge_import_jobs",
 	"artifact_blobs", "artifacts", "artifact_exports", "research_queries", "research_source_records", "research_candidates",
 	"research_candidate_aliases", "research_candidate_task_imports", "research_candidate_reviews", "research_bibliographies", "research_bibliography_materials", "research_evidence_entries", "message_citations",
@@ -1515,6 +1549,9 @@ func rewriteWorkflowRunSnapshots(ctx context.Context, tx *sql.Tx, maps *archiveI
 			return err
 		}
 	}
+	if err := rewriteWorkingBasisIdentities(ctx, tx, maps); err != nil {
+		return err
+	}
 	for _, target := range []struct {
 		query  string
 		update string
@@ -1530,6 +1567,13 @@ func rewriteWorkflowRunSnapshots(ctx context.Context, tx *sql.Tx, maps *archiveI
 		if err := rewriteWorkflowJSONColumn(ctx, tx, target.query, target.update, target.label, maps, oldProjectID, projectID); err != nil {
 			return err
 		}
+	}
+	// The state-update receipt also exists in the bounded model context. Keep
+	// its remapped call/state identities consistent with the restored rows.
+	if err := rewriteWorkflowJSONColumn(ctx, tx,
+		`SELECT tr.tool_call_id,tr.model_context_text FROM tool_results tr JOIN tool_calls tc ON tc.id=tr.tool_call_id WHERE tc.tool_name='builtin.research.state.update' AND tr.model_context_version>0 ORDER BY tr.tool_call_id`,
+		`UPDATE tool_results SET model_context_text=? WHERE tool_call_id=?`, "Research working state model context", maps, oldProjectID, projectID); err != nil {
+		return err
 	}
 	// Restored projects need fresh user consent. Historical delivery snapshots
 	// retain their original identities as audit evidence, not executable state.
@@ -1648,6 +1692,12 @@ func rewriteWorkflowPayload(raw []byte, maps *archiveIDMaps, oldProjectID, proje
 		switch typed := current.(type) {
 		case map[string]any:
 			for childKey, child := range typed {
+				if childKey == "id" && typed["writeStatus"] == "pending_tool_completion" {
+					if original, ok := child.(string); ok {
+						typed[childKey] = maps.get("research_working_states", original)
+						continue
+					}
+				}
 				if childKey == "id" && typed["sourceSha256Version"] == workflow.LiteratureCandidateDigestVersion {
 					if original, ok := child.(string); ok {
 						typed[childKey] = maps.get("research_candidates", original)
@@ -2211,12 +2261,12 @@ var archiveMergeOrder = []string{
 	"projects", "model_profiles", "model_profile_models", "conversations", "messages", "message_parts", "runs", "run_events", "run_event_sequences",
 	"workbench_tasks", "workbench_contracts", "workbench_attempts", "workbench_objects", "workbench_execution_results", "workbench_jobs",
 	"research_tasks",
-	"workflows", "workflow_versions", "workflow_runs", "workflow_conversations",
+	"workflows", "workflow_versions", "workflow_runs", "workflow_conversations", "research_discussion_conversations",
 	"tool_calls", "tool_results", "process_execution_audits", "provider_turn_items", "run_steps", "model_turn_journal", "model_request_usage", "run_skill_contexts", "run_skills", "run_dynamic_skills", "run_skill_routing", "run_skill_routing_audits", "run_skill_routing_candidates",
 	"conversation_context_checkpoints", "attachments", "material_library", "knowledge_index_versions", "knowledge_documents", "knowledge_import_jobs", "message_citations",
 	"artifact_blobs", "artifacts", "artifact_versions", "artifact_lineage", "artifact_citations", "artifact_exports",
 	"workflow_steps", "workflow_human_decisions", "workflow_events", "workflow_ai_executions", "workflow_ai_chat_runs", "workflow_revision_write_snapshots",
-	"research_revision_proposals", "research_timeline",
+	"research_revision_proposals", "research_working_state_proposals", "research_working_states", "research_timeline",
 	"research_queries", "research_source_records", "research_candidates", "research_candidate_records", "research_candidate_aliases", "research_candidate_task_imports", "research_query_records",
 	"research_query_origins", "research_query_candidates", "research_candidate_reviews",
 	"research_bibliographies", "research_bibliography_field_sources", "research_bibliography_revisions", "research_bibliography_materials", "research_evidence_entries",

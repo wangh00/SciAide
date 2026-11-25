@@ -87,14 +87,14 @@ func (b *ContextBuilder) buildWithProtocolEvidence(ctx context.Context, messages
 	}
 	reserved += minimum
 	if reserved >= limits.EffectiveTokens {
-		return model.ChatRequest{}, ContextBuildInfo{}, fmt.Errorf("completed evidence metadata and human answers exceed context budget; original records retained")
+		return model.ChatRequest{}, ContextBuildInfo{}, completedBudgetReservationError("completed evidence metadata and human answers exceed context budget; original records retained", limits, len(calls), reserved)
 	}
 	baseLimits := limits
 	baseLimits.AutoCompactTokens = max(1, limits.AutoCompactTokens-reserved)
 	baseLimits.EffectiveTokens -= reserved
 	request, info, err := b.buildWithRuntimeContext(ctx, messages, excludedID, currentID, definitions, nil, skills, routing, system, dynamic, baseLimits, checkpoint)
 	if err != nil {
-		return model.ChatRequest{}, ContextBuildInfo{}, err
+		return model.ChatRequest{}, ContextBuildInfo{}, withCompletedBudgetReservation(err, limits, len(calls), reserved)
 	}
 	selectionLimit := limits.AutoCompactTokens
 	if info.EstimatedTokens+reserved > selectionLimit {

@@ -1,4 +1,4 @@
-import {readFileSync} from 'node:fs';
+import {existsSync, readFileSync} from 'node:fs';
 import {createRequire} from 'node:module';
 import vm from 'node:vm';
 import ts from 'typescript';
@@ -15,7 +15,15 @@ export function loadTsx(file) {
     const code = ts.transpileModule(source, {compilerOptions: {
       module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022,
     }}).outputText;
-    vm.runInNewContext(code, {exports, require: name => name.startsWith('.') ? load(new URL(`${name}.tsx`,url)) : require(name)});
+    const local = name => {
+      const base = name.endsWith('.js') ? name.slice(0,-3) : name;
+      for (const suffix of ['.tsx','.ts','']) {
+        const candidate = new URL(`${base}${suffix}`,url);
+        if (existsSync(candidate)) return load(candidate);
+      }
+      throw new Error(`Cannot resolve ${name} from ${url.href}`);
+    };
+    vm.runInNewContext(code, {exports, require: name => name.startsWith('.') ? local(name) : require(name)});
     return exports;
   }
   return load(file);

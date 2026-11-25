@@ -125,6 +125,24 @@ func restoreQuestionCollisionHistory(t *testing.T, db *sql.DB) {
 	// This fixture rolls migration history back to 99. Remove the later
 	// migration's schema objects as well; leaving them behind is not a real
 	// historical database and falsely reports duplicate-index upgrade failures.
+	for _, table := range []string{"research_working_states", "research_working_state_proposals", "research_discussion_conversations"} {
+		var count int
+		if err := db.QueryRow(`SELECT count(*) FROM ` + table).Scan(&count); err != nil || count != 0 {
+			t.Fatal("historical fixture must have no working-state records", table, count, err)
+		}
+	}
+	if _, err := db.Exec(`DROP TRIGGER research_working_state_finish_guard;
+ DROP VIEW research_exploration_chats; DROP VIEW research_exploration_context; DROP VIEW research_discussion_latest_human; DROP VIEW research_task_conversations;
+ DROP TRIGGER research_discussion_phase_no_reopen; DROP TRIGGER research_discussion_primary_guard; DROP TRIGGER research_discussion_workflow_binding_guard;
+ DROP TRIGGER research_discussion_after_workflow_binding; DROP TRIGGER research_discussion_after_formal_run;
+ DROP TRIGGER research_discussion_after_adoption; DROP TRIGGER research_discussion_after_formal_run_update; DROP TRIGGER research_discussion_after_task_insert;
+ DROP TABLE research_discussion_conversations;
+ ALTER TABLE research_tasks DROP COLUMN discussion_phase; ALTER TABLE research_tasks DROP COLUMN discussion_conversation_id; ALTER TABLE research_tasks DROP COLUMN exploration_reference_ids_json`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`DROP TRIGGER research_working_state_proposal_capture; DROP TABLE research_working_states; DROP TABLE research_working_state_proposals`); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := db.Exec(`ALTER TABLE model_turn_journal DROP COLUMN submission_commentary`); err != nil {
 		t.Fatal(err)
 	}
@@ -180,6 +198,14 @@ func TestWorkflowReasoningMaxUpgradePreservesHistoryAndBindings(t *testing.T) {
 		after := databaseRows(t, db, table)
 		if table == "schema_migrations" {
 			after = after[:len(rows)]
+		}
+		if table == "research_tasks" {
+			// 106 adds host discussion phase/primary identity. Compare every
+			// historical column, not SELECT * rows of two different schemas;
+			// the new fields have their own migration/backfill assertions.
+			for index := range after {
+				after[index] = after[index][:len(rows[index])]
+			}
 		}
 		if !reflect.DeepEqual(rows, after) {
 			t.Fatalf("old %s rows changed", table)
